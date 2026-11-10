@@ -82,10 +82,13 @@ type run struct {
 	errText   string
 	nativeRef string
 
-	confirmed bool  // receipt observed — admission proven (protocol: receipts)
-	terminal  bool  // first terminal event consumed (first-terminal-wins; protocol: events)
-	uncertain bool  // the terminal event is `uncertain`: the extension has no native outcome
-	acked     bool  // endpoint acknowledged the retained result
+	confirmed bool // receipt observed — admission proven (protocol: receipts)
+	terminal  bool // first terminal event consumed (first-terminal-wins; protocol: events)
+	uncertain bool // the terminal event is `uncertain`: the extension has no native outcome
+	acked     bool // endpoint acknowledged the retained result
+	// noReceipt: a read after the refusal found no receipt. A refusal writes
+	// none and the extension never examines the ref again, so none comes.
+	noReceipt bool
 	notFound  error // last seam error that blocks evidence (never guessed around)
 	// eventsRefused is a protocol-string refusal of the event stream (foreign protocol).
 	// Unlike an unreadable log it is surfaced by Lookup: a refused stream
@@ -512,6 +515,9 @@ type seamObservation struct {
 	events   []event
 	evErr    error // unreadable/foreign-protocol event stream (unreadable vs protocol-string refusal)
 	readEvts bool  // events were read (skip when terminal already known)
+	// refused: the run was already refused when the reads started, so an
+	// absent receipt here is final.
+	refused bool
 }
 
 // consume refreshes every retained run from the durable seam WITHOUT the
@@ -521,9 +527,10 @@ type seamObservation struct {
 func (a *Attachment) consume() {
 	a.mu.Lock()
 	type pending struct {
-		r      *run
-		readEv bool
-		readRc bool
+		r       *run
+		readEv  bool
+		readRc  bool
+		refused bool
 	}
 	var queue []pending
 	for _, k := range a.order {
@@ -531,7 +538,7 @@ func (a *Attachment) consume() {
 		if !ok || r.acked {
 			continue
 		}
-		readRc := !r.confirmed
+		readRc := !r.confirmed && !r.noReceipt
 		// A run whose stream was REFUSED (foreign protocol) must keep
 		// re-reading the events file even after
 		// the run went terminal — otherwise an operator rewriting the seam
@@ -542,7 +549,7 @@ func (a *Attachment) consume() {
 		// then a terminal run with eventsRefused stays in the read set.
 		readEv := !r.terminal || r.eventsRefused != nil
 		if readRc || readEv {
-			queue = append(queue, pending{r: r, readRc: readRc, readEv: readEv})
+			queue = append(queue, pending{r: r, readRc: readRc, readEv: readEv, refused: r.refused != ""})
 		}
 	}
 	a.mu.Unlock()
@@ -552,7 +559,7 @@ func (a *Attachment) consume() {
 	}
 	obs := make(map[string]*seamObservation, len(queue))
 	for _, p := range queue {
-		o := &seamObservation{ref: p.r.ref}
+		o := &seamObservation{ref: p.r.ref, refused: p.refused}
 		if p.readRc {
 			rc, err := a.dir.readReceipt(p.r.ref)
 			o.receipt, o.rcErr, o.readRc = rc, err, true
@@ -606,6 +613,7 @@ func (a *Attachment) applyObservationLocked(r *run, o *seamObservation) {
 		// error no longer blocks the evidence (a receiptless refusal has no
 		// receipt to clear it).
 		r.notFound = nil
+		r.noReceipt = o.refused
 	}
 	if o.readEvts {
 		switch {
