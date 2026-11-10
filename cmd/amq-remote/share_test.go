@@ -224,6 +224,19 @@ func TestShareBundleRefusesIncomplete(t *testing.T) {
 	}
 }
 
+// A bundle dry-run refuses an incomplete bundle like the real run and
+// enrolls nothing (audit 2026-11-10).
+func TestShareBundleDryRunRefusesIncomplete(t *testing.T) {
+	root, dir, tags := review878Setup(t)
+	if _, _, code := runShareLoose("--root", root, "--session", "s1", "--bundle", review878Bundle(t, tags[:1]), "--dry-run"); code != 6 {
+		t.Fatalf("incomplete bundle dry-run exit = %d, want 6", code)
+	}
+	st, err := loadShareState(dir)
+	if err != nil || st.Enrolled.Gen != nil {
+		t.Fatalf("dry-run enrolled state: %v", err)
+	}
+}
+
 // Codex review 2026-09-23T13-50-18.940Z_pid1568_df2e5f1e finding 1: a full
 // bundle publishes only its own tags, not the previously staged owner.
 func TestShareBundlePublishesOneGeneration(t *testing.T) {

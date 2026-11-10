@@ -215,12 +215,19 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 		if *bundle == "" && *tagFile == "" && *target != "" {
 			return previewRelayShare(*root, *session, bind, st, stdout)
 		}
-		if loadErr != nil {
-			if errors.Is(loadErr, os.ErrNotExist) {
-				say(stdout, "dry-run: no body key at %s — a real run would mint one", keyPath)
-				return 0, nil
-			}
+		if loadErr != nil && !errors.Is(loadErr, os.ErrNotExist) {
+			// A body.key that is not a body key is refused by the real run
+			// too: mint never overwrites an existing file.
 			return protocol.ExitActionRequired, fmt.Errorf("body key at %s: %w", keyPath, loadErr)
+		}
+		if *bundle != "" || *tagFile != "" {
+			// A missing key leaves k nil: the key a real run mints matches
+			// no owner tag.
+			return previewEnrollment(*root, *session, bind, keyDir, *bundle, *tagFile, k, st, stdout)
+		}
+		if loadErr != nil {
+			say(stdout, "dry-run: no body key at %s — a real run would mint one", keyPath)
+			return 0, nil
 		}
 		// Owners sign ONLY preimages printed from a PERSISTED pending window.
 		// A renewal
@@ -235,15 +242,19 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 		if err != nil {
 			return protocol.ExitActionRequired, err
 		}
-		outcome, code, err := shareDisposition(*session, st, *renew, enable)
+		st2, err := st.afterReconcile(*session)
+		if err != nil {
+			return protocol.ExitActionRequired, err
+		}
+		outcome, code, err := shareDisposition(*session, st2, *renew, enable)
 		if err != nil {
 			return code, err
 		}
 		switch outcome {
 		case shareReprintOutstanding:
-			printShareOutstanding(stdout, *session, k, outstandingPending(st.Pending.Tags, st.Staged.Tags, st.Enrolled.Gen), st.Staged.Tags, st.Pending.Tags, st.Enrolled.Gen)
+			printShareOutstanding(stdout, *session, k, outstandingPending(st2.Pending.Tags, st2.Staged.Tags, st2.Enrolled.Gen), st2.Staged.Tags, st2.Pending.Tags, st2.Enrolled.Gen)
 		case shareShowEnrolled:
-			printShareEnrolled(stdout, *session, k, st.Enrolled.Gen.Tags)
+			printShareEnrolled(stdout, *session, k, st2.Enrolled.Gen.Tags)
 		default:
 			if *renew {
 				printSharePending(stdout, *session, k, preview.tags, preview.notAfter)
@@ -288,7 +299,7 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 
 	if *bundle != "" {
-		tags, pending, code, err := loadBundle(*session, keyDir, *bundle, k, st)
+		tags, pending, code, err := loadBundle(*session, keyDir, *bundle, k, st, false)
 		if code != 0 || err != nil {
 			return code, err
 		}
@@ -301,10 +312,46 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 		return 0, nil
 	}
 	if *tagFile != "" {
-		return enrollTag(*session, keyDir, *tagFile, k, st)
+		return enrollTag(*session, keyDir, *tagFile, k, st, false)
 	}
 
 	return mintOrRenewShare(*root, *session, keyDir, k, st, *days, daysSet, *renew, enable, stdout, stderr)
+}
+
+// previewEnrollment is the --dry-run of --bundle and --tag-file: the same
+// validation as the real run, with no write.
+func previewEnrollment(root, session string, bind relayBinding, keyDir, bundle, tagFile string, k *bodykey.BodyKey, st *shareState, stdout io.Writer) (int, error) {
+	if bundle == "" {
+		if code, err := enrollTag(session, keyDir, tagFile, k, st, true); code != 0 || err != nil {
+			return code, err
+		}
+		say(stdout, "dry-run: the tag in %s would be enrolled", tagFile)
+		return 0, nil
+	}
+	tags, pending, code, err := loadBundle(session, keyDir, bundle, k, st, true)
+	if code != 0 || err != nil {
+		return code, err
+	}
+	if bind.target != "" {
+		if err := bind.requireGrants(session, tags); err != nil {
+			return protocol.ExitActionRequired, err
+		}
+		if !lock.AdvisoryLockAvailable() {
+			return protocol.ExitActionRequired, errNoManifestLock
+		}
+		if _, code, err := prepareManifest(manifest.DefaultPath(filepath.Join(root, stateDirName)), session, bind, tags[0].OwnerPubKey); err != nil {
+			return code, err
+		}
+	}
+	st2, err := st.afterReconcile(session)
+	if err != nil {
+		return protocol.ExitActionRequired, err
+	}
+	if _, err := checkBundleCoverage(st2, tags, pending); err != nil {
+		return protocol.ExitActionRequired, err
+	}
+	say(stdout, "dry-run: the bundle in %s would be enrolled", bundle)
+	return 0, nil
 }
 
 // mintOrRenewShare persists one pending window per kind and prints its
@@ -529,7 +576,7 @@ func (e *stateLeafError) Error() string {
 // and the pending window for its kind, then persists it. An invalid tag
 // leaves any existing good enrollment untouched: validation runs on the real
 // enrollment path and is never skipped.
-func enrollTag(session, keyDir, tagPath string, k *bodykey.BodyKey, st *shareState) (int, error) {
+func enrollTag(session, keyDir, tagPath string, k *bodykey.BodyKey, st *shareState, dry bool) (int, error) {
 	// State-leaf confinement already ran in share() via refuseIfConfined.
 	raw, err := os.ReadFile(tagPath)
 	if err != nil {
@@ -539,12 +586,15 @@ func enrollTag(session, keyDir, tagPath string, k *bodykey.BodyKey, st *shareSta
 	if err := json.Unmarshal(raw, &tf); err != nil {
 		return protocol.ExitUsage, fmt.Errorf("--tag-file: %w", err)
 	}
-	pending, code, err := enrollablePending(session, keyDir, st)
+	pending, code, err := enrollablePending(session, keyDir, st, dry)
 	if code != 0 || err != nil {
 		return code, err
 	}
 	if code, err = matchShareTag(&tf, pending, k); code != 0 || err != nil {
 		return code, err
+	}
+	if dry {
+		return 0, nil
 	}
 	if err := writeShareTag(session, keyDir, &tf); err != nil {
 		return protocol.ExitActionRequired, err
@@ -554,7 +604,7 @@ func enrollTag(session, keyDir, tagPath string, k *bodykey.BodyKey, st *shareSta
 
 // loadBundle reads and validates one owner-signed tag file. It does not
 // write. An incomplete set or any rejected tag is refused here.
-func loadBundle(session, keyDir, bundlePath string, k *bodykey.BodyKey, st *shareState) ([]shareTagFile, []shareTagFile, int, error) {
+func loadBundle(session, keyDir, bundlePath string, k *bodykey.BodyKey, st *shareState, dry bool) ([]shareTagFile, []shareTagFile, int, error) {
 	raw, err := os.ReadFile(bundlePath)
 	if err != nil {
 		return nil, nil, protocol.ExitUsage, fmt.Errorf("--bundle: %w", err)
@@ -566,7 +616,7 @@ func loadBundle(session, keyDir, bundlePath string, k *bodykey.BodyKey, st *shar
 	if len(tags) == 0 {
 		return nil, nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--bundle is empty")
 	}
-	pending, code, err := enrollablePending(session, keyDir, st)
+	pending, code, err := enrollablePending(session, keyDir, st, dry)
 	if code != 0 || err != nil {
 		return nil, nil, code, err
 	}
@@ -623,17 +673,9 @@ func bindBundle(root, session string, bind relayBinding, keyDir string, tags, pe
 	return code, err
 }
 
-// publishBundle writes the bundle as the enrolled generation. It refuses,
-// before any write, unless the bundle covers the pending window, the base
-// kinds, and every kind already enrolled.
-func publishBundle(session, keyDir string, tags, pending []shareTagFile) error {
-	st, err := loadShareState(keyDir)
-	if err != nil {
-		return err
-	}
-	if err := st.refuseIfConfined(); err != nil {
-		return err
-	}
+// checkBundleCoverage refuses a bundle that misses a pending, base, or
+// already enrolled kind, and returns the bundle indexed by kind.
+func checkBundleCoverage(st *shareState, tags, pending []shareTagFile) (map[uint16]shareTagFile, error) {
 	required := map[uint16]bool{}
 	for _, kind := range bodykey.ShareKinds {
 		required[kind] = true
@@ -657,7 +699,25 @@ func publishBundle(session, keyDir string, tags, pending []shareTagFile) error {
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("--bundle is missing kind(s) %v; it must cover every kind in the pending window", missing)
+		return nil, fmt.Errorf("--bundle is missing kind(s) %v; it must cover every kind in the pending window", missing)
+	}
+	return have, nil
+}
+
+// publishBundle writes the bundle as the enrolled generation. It refuses,
+// before any write, unless the bundle covers the pending window, the base
+// kinds, and every kind already enrolled.
+func publishBundle(session, keyDir string, tags, pending []shareTagFile) error {
+	st, err := loadShareState(keyDir)
+	if err != nil {
+		return err
+	}
+	if err := st.refuseIfConfined(); err != nil {
+		return err
+	}
+	have, err := checkBundleCoverage(st, tags, pending)
+	if err != nil {
+		return err
 	}
 	ordered := make([]shareTagFile, 0, len(pending))
 	for _, p := range pending {
@@ -683,7 +743,7 @@ func publishBundle(session, keyDir string, tags, pending []shareTagFile) error {
 
 // enrollablePending is the pending window a tag or bundle may sign. It
 // heals crash leftovers first, and refuses a missing or unreadable window.
-func enrollablePending(session, keyDir string, st *shareState) ([]shareTagFile, int, error) {
+func enrollablePending(session, keyDir string, st *shareState, dry bool) ([]shareTagFile, int, error) {
 	if st.Pending.State == leafAbsent {
 		if st.Enrolled.Gen != nil && len(st.Enrolled.Gen.Tags) > 0 {
 			return nil, protocol.ExitActionRequired, fmt.Errorf("no pending window: the enrolled grants are current; to change the binding, run share --target --relay without --bundle")
@@ -693,10 +753,15 @@ func enrollablePending(session, keyDir string, st *shareState) ([]shareTagFile, 
 	if st.Pending.Err != nil {
 		return nil, protocol.ExitActionRequired, st.Pending.Err
 	}
-	if rerr := reconcileStagedState(session, keyDir, st); rerr != nil {
-		return nil, protocol.ExitActionRequired, rerr
+	var st2 *shareState
+	var err error
+	if dry {
+		st2, err = st.afterReconcile(session)
+	} else {
+		if err = reconcileStagedState(session, keyDir, st); err == nil {
+			st2, err = loadShareState(keyDir)
+		}
 	}
-	st2, err := loadShareState(keyDir)
 	if err != nil {
 		return nil, protocol.ExitActionRequired, err
 	}
@@ -730,6 +795,9 @@ func matchShareTag(tf *shareTagFile, pending []shareTagFile, k *bodykey.BodyKey)
 	tag := bodykey.AuthTag{OwnerPubKey: tf.OwnerPubKey, Conditions: tf.Conditions}
 	if err := tag.SetSigHex(tf.Sig); err != nil {
 		return protocol.ExitUsage, err
+	}
+	if k == nil {
+		return protocol.ExitActionRequired, fmt.Errorf("owner tag rejected: there is no body key, and the new one a real run mints matches no existing owner tag")
 	}
 	if err := tag.Verify(k.PublicKeyHex()); err != nil {
 		return protocol.ExitActionRequired, fmt.Errorf("owner tag rejected: %w", err)
@@ -1408,40 +1476,65 @@ func genCoversPendingWindow(gen *enrolledGeneration, pending []shareTagFile) boo
 //
 // Doctor uses reportStagedState: same detection, zero mutation.
 func reconcileStagedState(session, keyDir string, st *shareState) error {
+	plan, err := planStagedState(session, st)
+	if err != nil {
+		return err
+	}
+	if plan.dropPending {
+		p, _ := sharePaths(keyDir)
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			// The publication already happened: this is the committed
+			// state, so cleanup failures propagate and never roll back.
+			return fmt.Errorf("cleanup after publication: removing %s: %w (published generation is committed)", p, err)
+		}
+	}
+	if plan.dropStaged {
+		stagedPath := filepath.Join(keyDir, stagedName)
+		if err := os.Remove(stagedPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("cleanup after publication: removing %s: %w (published generation is committed)", stagedPath, err)
+		}
+	}
+	if plan.rewriteStaged {
+		return writeShareStaged(keyDir, byKind(plan.keptStaged))
+	}
+	return nil
+}
+
+// stagedPlan is what reconcileStagedState would change, computed without
+// touching disk.
+type stagedPlan struct {
+	dropPending, dropStaged, rewriteStaged bool
+	keptStaged                             []shareTagFile
+}
+
+// planStagedState decides the reconcile effects for a loaded snapshot, or
+// the refusal reconcile would return.
+func planStagedState(session string, st *shareState) (stagedPlan, error) {
+	var plan stagedPlan
 	if st.Pending.Err != nil {
-		return st.Pending.Err // malformed pending: refuse everywhere
+		return plan, st.Pending.Err // malformed pending: refuse everywhere
 	}
 	var pending []shareTagFile
 	if st.Pending.readable() {
 		pending = st.Pending.Tags
 	}
-	gen := st.Enrolled.Gen
-	genCoversPending := st.Pending.readable() && genCoversPendingWindow(gen, pending)
-	stagedPath := filepath.Join(keyDir, stagedName)
+	genCoversPending := st.Pending.readable() && genCoversPendingWindow(st.Enrolled.Gen, pending)
 	if st.Staged.Err != nil {
-		return stagedCorruptRefusal(session, st.Staged.leafRead)
+		return plan, stagedCorruptRefusal(session, st.Staged.leafRead)
 	}
 	if st.Staged.State == leafOK {
-		tags := stagedTags(st)
 		if genCoversPending {
 			// Crash leftovers after publication: pending and staged are
-			// both stale; the published generation is the authority. The
-			// publication already happened, so this is the committed
-			// state: cleanup failures are propagated but never rolled back.
-			p, _ := sharePaths(keyDir)
-			if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("cleanup after publication: removing %s: %w (published generation is committed)", p, err)
-			}
-			if err := os.Remove(stagedPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("cleanup after publication: removing %s: %w (published generation is committed)", stagedPath, err)
-			}
-			return nil
+			// both stale; the published generation is the authority.
+			plan.dropPending, plan.dropStaged = true, true
+			return plan, nil
 		}
 		// Drop staged entries superseded by the current pending window.
 		conds := map[uint16]string{}
 		for _, p := range pending {
 			conds[p.Kind] = p.Conditions
 		}
+		tags := stagedTags(st)
 		kept := make([]shareTagFile, 0, len(tags))
 		for _, t := range tags {
 			if conds[t.Kind] == t.Conditions {
@@ -1449,19 +1542,36 @@ func reconcileStagedState(session, keyDir string, st *shareState) error {
 			}
 		}
 		if len(kept) != len(tags) {
-			return writeShareStaged(keyDir, byKind(kept))
+			plan.rewriteStaged, plan.keptStaged = true, kept
+			return plan, nil
 		}
 	}
-	if genCoversPending {
-		// Staged absent but pending remains after publication (crash
-		// between the two removes): pending is stale too. Committed state;
-		// cleanup failures propagate.
-		p, _ := sharePaths(keyDir)
-		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("cleanup after publication: removing %s: %w (published generation is committed)", p, err)
-		}
+	// Staged absent but pending remains after publication (crash between
+	// the two removes): pending is stale too.
+	plan.dropPending = genCoversPending
+	return plan, nil
+}
+
+// afterReconcile is the snapshot a real run reloads once reconcile has
+// written its plan, built without writing.
+func (st *shareState) afterReconcile(session string) (*shareState, error) {
+	plan, err := planStagedState(session, st)
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	c := *st
+	if plan.dropPending {
+		c.Pending.leafRead = leafRead{State: leafAbsent, Path: st.Pending.Path}
+		c.Pending.Tags, c.Pending.NotAfter = nil, time.Time{}
+	}
+	if plan.dropStaged {
+		c.Staged.leafRead = leafRead{State: leafAbsent, Path: st.Staged.Path}
+		c.Staged.Tags = nil
+	}
+	if plan.rewriteStaged {
+		c.Staged.Tags = byKind(plan.keptStaged)
+	}
+	return &c, nil
 }
 
 // byKind converts a tag slice to the staged map shape.
