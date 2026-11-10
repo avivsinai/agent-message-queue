@@ -236,7 +236,7 @@ func acquireBoard(ctx context.Context, env board.Env, cfg board.FileConfig, opt 
 	}
 	sources := []board.Source{source.AMQ{MaxAge: cfg.ObligationMaxAge}}
 	if cfg.SourceBeads {
-		beads := source.Beads{Humans: cfg.BeadsAssignees, IncludeClosed: true}
+		beads := source.Beads{Humans: cfg.BeadsAssignees}
 		// A bead's external_ref gh-<n> names a PR only when exactly one
 		// GitHub repository is in scope.
 		if repos := gh.RepoSet(ctx, env); len(repos) == 1 {

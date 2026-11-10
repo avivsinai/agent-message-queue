@@ -33,10 +33,11 @@ const beadLookupPR = "bd --readonly --sandbox list --all --id pr-11,pr-12,pr-13,
 
 func githubOutputs() map[string]string {
 	return map[string]string{
-		"git remote get-url origin":        "origin-url.txt",
-		"gh config get user -h github.com": "gh-user.txt",
-		"gh api graphql":                   "github-graphql.json",
-		"bd --readonly --sandbox list --json --status open,in_progress,blocked,deferred --limit 0": "bd-list-github.json",
+		"git remote get-url origin":                           "origin-url.txt",
+		"gh config get user -h github.com":                    "gh-user.txt",
+		"gh api graphql":                                      "github-graphql.json",
+		"bd --readonly --sandbox info --json":                 "bd-info.json",
+		"bd --readonly --sandbox list --json --all --limit 0": "bd-list-github.json",
 		beadLookupPR: "bd-lookup-empty.json",
 	}
 }

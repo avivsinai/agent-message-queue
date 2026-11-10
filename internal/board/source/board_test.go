@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -59,6 +60,9 @@ func (f fakeRunner) Run(_ context.Context, _ string, argv []string) ([]byte, err
 	if err := f.fail[key]; err != nil {
 		return nil, err
 	}
+	if key == "bd --readonly --sandbox info --json" {
+		return fmt.Appendf(nil, `{"database_path":%q}`, f.beadsBackend()), nil
+	}
 	name, ok := f.outputs[key]
 	if !ok {
 		f.t.Errorf("unexpected command: %s", key)
@@ -71,15 +75,34 @@ func (f fakeRunner) Run(_ context.Context, _ string, argv []string) ([]byte, err
 	return data, err
 }
 
+var (
+	backendMu   sync.Mutex
+	backendDirs = map[string]string{}
+)
+
+// beadsBackend is the one existing directory bd reports as its database for
+// the whole test, so the namespace stays stable across reads.
+func (f fakeRunner) beadsBackend() string {
+	backendMu.Lock()
+	defer backendMu.Unlock()
+	dir, ok := backendDirs[f.t.Name()]
+	if !ok {
+		dir = f.t.TempDir()
+		backendDirs[f.t.Name()] = dir
+	}
+	return dir
+}
+
 func outputs(threadOpen string) map[string]string {
 	return map[string]string{
 		"amq env --json":          "env.json",
 		"amq session list --json": "session-list.json",
 		"amq who --json":          "who.json",
-		"amq doctor --ops --json --root /fixture/.agent-mail/s1":                                   "doctor-s1.json",
-		"amq doctor --ops --json --root /fixture/.agent-mail/s2":                                   "doctor-s2.json",
-		"amq thread open --all-sessions --json":                                                    threadOpen,
-		"bd --readonly --sandbox list --json --status open,in_progress,blocked,deferred --limit 0": "bd-list.json",
+		"amq doctor --ops --json --root /fixture/.agent-mail/s1": "doctor-s1.json",
+		"amq doctor --ops --json --root /fixture/.agent-mail/s2": "doctor-s2.json",
+		"amq thread open --all-sessions --json":                  threadOpen,
+		"bd --readonly --sandbox info --json":                    "bd-info.json",
+		"bd --readonly --sandbox list --json --all --limit 0":    "bd-list.json",
 	}
 }
 
