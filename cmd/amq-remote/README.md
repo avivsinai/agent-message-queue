@@ -444,7 +444,10 @@ Protocol: [`amq.remote.link/1`](../../docs/remote-link-protocol.md).
    it runs in a terminal, or created later by `amq-remote link local-key NAME`
    while the endpoint runs. The endpoint serves both pages on one loopback
    port it records for the root, and the passkey is bound to that address: a
-   look-alike page on another port cannot confirm. A held
+   look-alike page on another port cannot confirm. When that record is lost,
+   the endpoint records a new port, and `link local-key NAME` creates the
+   passkey again for the new address; a record it cannot read stops local
+   confirmation until it can. A held
    task is dropped at its deadline (10 minutes) or on restart, never resent.
 7. `amq-remote link status` shows each link's socket, generation, owed
    revisions, conflicts and retired sinks, and for each share whether the
