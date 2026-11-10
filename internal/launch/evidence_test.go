@@ -221,3 +221,27 @@ func TestProviderCaptureLookupScansAnIndexlessSession(t *testing.T) {
 		t.Fatalf("old-layout lookup = %q found=%v err=%v, want %q", id, found, err, ref)
 	}
 }
+
+// Evidence an older build wrote stays findable after a new write creates the
+// handle index (audit 2026-11-10).
+func TestProviderCaptureLookupSurvivesFirstIndexedWriteInOldSession(t *testing.T) {
+	fixture := newExecutionFixture(t)
+	nonce := "73737373-7373-4373-8373-737373737373"
+	lease, err := AcquireLease(fixture.root, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.LockHandles("cursor", "other"); err != nil {
+		t.Fatal(err)
+	}
+	refY := persistCursorEvidenceForTest(t, fixture, lease, "cursor", nonce, "019c8a2f-2b13-7000-8000-00000000000d")
+	// Make the session look like an older build wrote it: no index at all.
+	if err := os.RemoveAll(filepath.Join(fixture.session, evidenceHandleIndex)); err != nil {
+		t.Fatal(err)
+	}
+	persistCursorEvidenceForTest(t, fixture, lease, "other", nonce, "019c8a2f-2b13-7000-8000-00000000000e")
+	_, id, found, err := findProviderCaptureEvidence(fixture.root, CursorProvider, "cursor", nonce, cursorCaptureVersion)
+	if err != nil || !found || id != refY {
+		t.Fatalf("lookup after first indexed write = %q found=%v err=%v, want %q", id, found, err, refY)
+	}
+}
