@@ -192,7 +192,7 @@ func TestRunCodexFacts(t *testing.T) {
 				req.Codex.Homes = []string{link}
 			}
 			home := req.Codex.Homes[0]
-			got, _ := collect.Run(context.Background(), req, collect.Memory{}, fx)
+			got := collect.Run(context.Background(), req, fx)
 			if len(got.Failures) != 0 {
 				t.Fatalf("failures: %+v", got.Failures)
 			}
@@ -229,11 +229,11 @@ func TestRunTwoCallersOneChild(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			collect.Run(context.Background(), req, collect.Memory{}, fx)
+			collect.Run(context.Background(), req, fx)
 		}()
 	}
 	wg.Wait()
-	got, _ := collect.Run(context.Background(), req, collect.Memory{}, fx)
+	got := collect.Run(context.Background(), req, fx)
 	if f.runs != 1 {
 		t.Fatalf("app-server ran %d times, want 1", f.runs)
 	}
@@ -248,7 +248,7 @@ func TestRunTwoCallersOneChild(t *testing.T) {
 // longer refuses; the reply's shape still decides.
 func TestRunReadsANewCodexRelease(t *testing.T) {
 	f, fx, req, _ := setup(t, "app-server-windows.jsonl", "0.165.0")
-	got, _ := collect.Run(context.Background(), req, collect.Memory{}, fx)
+	got := collect.Run(context.Background(), req, fx)
 	if f.runs != 1 {
 		t.Fatalf("app-server ran %d times, want 1", f.runs)
 	}
@@ -263,7 +263,7 @@ func TestRunReadsANewCodexRelease(t *testing.T) {
 func TestRunDoesNotDispatchPastTheReservedDeadline(t *testing.T) {
 	f, fx, req, _ := setup(t, "app-server-windows.jsonl", "0.163.0")
 	f.versionTakes = req.Deadline + time.Second
-	got, _ := collect.Run(context.Background(), req, collect.Memory{}, fx)
+	got := collect.Run(context.Background(), req, fx)
 	if f.runs != 0 {
 		t.Fatalf("app-server started %d times after the pass deadline", f.runs)
 	}
@@ -385,7 +385,7 @@ func TestRunHonorsTheJournal(t *testing.T) {
 			if tc.cleanup {
 				fx.Store = journalCleanupFailure{Persistence: fx.Store}
 			}
-			got, _ := collect.Run(context.Background(), req, collect.Memory{}, fx)
+			got := collect.Run(context.Background(), req, fx)
 			if f.runs != tc.runs {
 				t.Fatalf("app-server ran %d times against the journal, want %d", f.runs, tc.runs)
 			}
@@ -407,7 +407,7 @@ func TestRunHonorsTheJournal(t *testing.T) {
 					t.Fatalf("kept files = %v, want 1", m)
 				}
 				f.clock = f.clock.Add(req.Interval + time.Second)
-				if again, _ := collect.Run(context.Background(), req, collect.Memory{}, fx); len(again.Failures) != 0 {
+				if again := collect.Run(context.Background(), req, fx); len(again.Failures) != 0 {
 					t.Fatalf("next pass failures = %+v", again.Failures)
 				}
 			}
@@ -433,7 +433,7 @@ func TestRunKeepsOneIdentityPerHome(t *testing.T) {
 	lines := bytes.SplitAfter(f.stdout, []byte("\n"))
 	f.stdout = append(bytes.Join(lines[:2], nil), []byte(`{"id":3,"error":{"code":-32000}}`+"\n")...)
 	for range 2 {
-		collect.Run(context.Background(), req, collect.Memory{}, fx)
+		collect.Run(context.Background(), req, fx)
 		f.clock = f.clock.Add(10 * time.Minute)
 	}
 	if f.runs != 2 {
@@ -454,7 +454,7 @@ func (failingSnapshot) SaveFacts(usage.Result) error { return errors.New("disk f
 func TestRunRecordsAFailedSnapshotWrite(t *testing.T) {
 	_, fx, req, _ := setup(t, "app-server-windows.jsonl", "0.163.0")
 	fx.Store = failingSnapshot{fx.Store}
-	collect.Run(context.Background(), req, collect.Memory{}, fx)
+	collect.Run(context.Background(), req, fx)
 	j, err := fx.Store.LoadJournal()
 	if err != nil {
 		t.Fatal(err)
@@ -485,7 +485,7 @@ func (s clockStepStore) TryLock() (func(), bool, error) {
 func TestRunKeepsTheJournalReadableAcrossAClockStep(t *testing.T) {
 	f, fx, req, _ := setup(t, "app-server-windows.jsonl", "0.163.0")
 	fx.Store = clockStepStore{Persistence: fx.Store, f: f, step: 10 * time.Second}
-	collect.Run(context.Background(), req, collect.Memory{}, fx)
+	collect.Run(context.Background(), req, fx)
 	j, err := fx.Store.LoadJournal()
 	if err != nil || len(j.Attempts) != 1 {
 		t.Fatalf("journal = %+v, err = %v", j, err)
@@ -523,7 +523,7 @@ func TestRunPacesPerHome(t *testing.T) {
 			}
 			f.perHome = !tc.sameRemote
 			for range tc.homes + 1 {
-				collect.Run(context.Background(), req, collect.Memory{}, fx)
+				collect.Run(context.Background(), req, fx)
 				f.clock = f.clock.Add(time.Second)
 			}
 			if f.runs != tc.homes {
@@ -540,7 +540,7 @@ func TestRunKeepsRateLimitsWhenAccountReadFails(t *testing.T) {
 	lines := bytes.SplitAfter(f.stdout, []byte("\n"))
 	lines[1] = []byte(`{"id":2,"error":{"code":-32000}}` + "\n")
 	f.stdout = bytes.Join(lines, nil)
-	got, _ := collect.Run(context.Background(), req, collect.Memory{}, fx)
+	got := collect.Run(context.Background(), req, fx)
 	if len(got.Windows) != 2 || len(got.Failures) != 1 || got.Failures[0].Value.Code != usage.FailRPC ||
 		!strings.Contains(got.Failures[0].Value.Detail, "account/read") {
 		t.Fatalf("windows %d, failures %+v", len(got.Windows), got.Failures)
@@ -559,7 +559,7 @@ func TestRunPartialReadKeepsTheInterval(t *testing.T) {
 	lines[1] = []byte(`{"id":2,"error":{"code":-32000}}` + "\n")
 	f.stdout = bytes.Join(lines, nil)
 	for range 6 {
-		collect.Run(context.Background(), req, collect.Memory{}, fx)
+		collect.Run(context.Background(), req, fx)
 		f.clock = f.clock.Add(req.Interval + time.Second)
 	}
 	if f.runs != 6 {
