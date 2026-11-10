@@ -157,7 +157,7 @@ func TestLaunchNonInteractiveUntrustedIsExit6AndNoRuntimeWrites(t *testing.T) {
 	if json.Unmarshal([]byte(stdout), &result) != nil || result.AggregateCode != ExitActionRequired || result.Reason != "launch plan requires local trust confirmation" {
 		t.Fatalf("result=%s", stdout)
 	}
-	if _, err := os.Stat(launch.ConversationPath(root, "claude")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(root, "meta", "launch", "conversations", "claude.json")); !os.IsNotExist(err) {
 		t.Fatalf("untrusted launch wrote conversation state: %v", err)
 	}
 }

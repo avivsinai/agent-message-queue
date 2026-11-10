@@ -211,10 +211,6 @@ func digestBytes(data []byte) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-func EvidencePath(sessionRoot, id string) string {
-	return filepath.Join(sessionRoot, evidenceDirectory, evidenceFilename(id))
-}
-
 func persistProviderCaptureEvidenceWithContext(root *fsq.DeliveryRoot, lease *Lease, handle string, callerContext map[string]string, evidence []CaptureEvidence) ([]string, error) {
 	refs := make([]string, 0, len(evidence))
 	for _, item := range evidence {

@@ -128,7 +128,3 @@ func LoadBinding(root *fsq.DeliveryRoot) (BindingRecord, error) {
 	return record, nil
 }
 
-// BindingPath is for diagnostics and tests only. I/O must use a pinned root.
-func BindingPath(sessionRoot string) string {
-	return filepath.Join(sessionRoot, bindingDirectory, bindingFilename)
-}

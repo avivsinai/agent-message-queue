@@ -33,3 +33,15 @@ func inspectLease(root *fsq.DeliveryRoot) (LeaseInspection, error) {
 func leasePath(sessionRoot string) string {
 	return filepath.Join(sessionRoot, bindingDirectory, leaseFilename)
 }
+
+func BindingPath(sessionRoot string) string {
+	return filepath.Join(sessionRoot, bindingDirectory, bindingFilename)
+}
+
+func ConversationPath(sessionRoot, handle string) string {
+	return filepath.Join(sessionRoot, conversationDir, handle+".json")
+}
+
+func EvidencePath(sessionRoot, id string) string {
+	return filepath.Join(sessionRoot, evidenceDirectory, evidenceFilename(id))
+}
