@@ -127,4 +127,3 @@ func LoadBinding(root *fsq.DeliveryRoot) (BindingRecord, error) {
 	}
 	return record, nil
 }
-
