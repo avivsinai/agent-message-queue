@@ -945,3 +945,38 @@ func TestRemoveEmptyWakeDialogEntriesClearsStaleTempFile(t *testing.T) {
 		t.Fatalf(".wake.dialog survived a stale temp file: %v", err)
 	}
 }
+
+// An installer that died between its mkdir and its rename must not leave .wake.dialog.dir.tmp.* behind on the next install (audit 2026-11-10).
+func TestWakeDialogEntryInstallRemovesStaleTempDir(t *testing.T) {
+	agent := filepath.Join(t.TempDir(), "agents", "codex")
+	if err := os.MkdirAll(agent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	temp, err := wakeDialogTempName("dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(agent, temp)
+	if err := os.Mkdir(stale, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, "entry"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := openWakeDirectory(agent, "wake agent directory")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dir.Close() }()
+	if err := dir.withFD(func(dirfd int) error {
+		return writeWakeDialogEntryAt(dirfd, dir, "entry", []byte("{}\n"))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale temp directory survived an install: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(agent, wakeDialogFileName, "entry")); err != nil {
+		t.Fatalf("entry not installed: %v", err)
+	}
+}
