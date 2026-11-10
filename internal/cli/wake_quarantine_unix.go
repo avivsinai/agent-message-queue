@@ -423,7 +423,7 @@ func moveWakeQuarantineAt(
 	if err != nil {
 		return "", err
 	}
-	if err := renameWakeNoReplaceAt(dirfd, source, dirfd, quarantine); err != nil {
+	if err := wakeRenameNoReplaceAt(dirfd, source, dirfd, quarantine); err != nil {
 		return "", fmt.Errorf("quarantine exact %s as %s: %w", label, quarantine, err)
 	}
 	if err := syncWakeOwnerDirFD(dirfd); err != nil {
