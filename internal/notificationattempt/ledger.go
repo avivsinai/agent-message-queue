@@ -861,18 +861,20 @@ func compactRecords(records []Record, agent string, maxBytes int64) ([]byte, err
 	// Mandatory attempts are kept newest first while they fit under the cap;
 	// older ones are dropped so rotation always produces a bounded file.
 	sortCompactedNewestFirst(mandatory)
+	// marshalRecords is a plain concatenation of per-record lines, so sizes add.
 	var archive []Record
+	var size int64
 	kept := 0
 	for _, attempt := range mandatory {
-		candidate := append(append([]Record{}, archive...), attempt.records...)
-		candidateData, err := marshalRecords(candidate)
+		attemptData, err := marshalRecords(attempt.records)
 		if err != nil {
 			return nil, err
 		}
-		if int64(len(candidateData)) > maxBytes {
+		if size+int64(len(attemptData)) > maxBytes {
 			break
 		}
-		archive = candidate
+		size += int64(len(attemptData))
+		archive = append(archive, attempt.records...)
 		kept++
 	}
 	if kept == 0 && len(mandatory) > 0 {
@@ -884,15 +886,15 @@ func compactRecords(records []Record, agent string, maxBytes int64) ([]byte, err
 
 	sortCompactedNewestFirst(optional)
 	for _, attempt := range optional {
-		candidate := append(append([]Record{}, archive...), attempt.records...)
-		candidateData, err := marshalRecords(candidate)
+		attemptData, err := marshalRecords(attempt.records)
 		if err != nil {
 			return nil, err
 		}
-		if int64(len(candidateData)) > maxBytes {
+		if size+int64(len(attemptData)) > maxBytes {
 			continue
 		}
-		archive = candidate
+		size += int64(len(attemptData))
+		archive = append(archive, attempt.records...)
 	}
 
 	if err := validateCompactedRecords(archive, groups, agent); err != nil {
