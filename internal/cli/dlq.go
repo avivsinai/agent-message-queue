@@ -444,11 +444,13 @@ func runDLQRetry(args []string) error {
 	}
 
 	retryErr := fsq.RetryFromDLQ(deliveryRoot, me, filename, *forceFlag)
-	if os.IsNotExist(retryErr) {
-		return NotFoundError("DLQ message not found: %s", *idFlag)
-	}
 	alreadyDelivered := errors.Is(retryErr, fsq.ErrDLQRetryDelivered)
 	if retryErr != nil && !alreadyDelivered && !committedDLQRetry(deliveryRoot, me, retryErr) {
+		// Only the lookup returns the bare sentinel; a missing path during
+		// the retry itself keeps its own error.
+		if retryErr == os.ErrNotExist {
+			return NotFoundError("DLQ message not found: %s", *idFlag)
+		}
 		return retryErr
 	}
 
