@@ -67,7 +67,7 @@ func cleanupImageStagesPlatform(locator string) error {
 		if stageInfo.Mode()&os.ModeSymlink != 0 || !stageInfo.Mode().IsRegular() || stageInfo.Mode().Perm()&0o111 == 0 {
 			return fmt.Errorf("self-upgrade stage image %q is not executable", stagePath)
 		}
-		if err := validateImagePathOwnership("self-upgrade stage image", stagePath, stageInfo); err != nil {
+		if err := ValidatePathOwnership("self-upgrade stage image", stagePath, stageInfo); err != nil {
 			return err
 		}
 		if err := os.Remove(stagePath); err != nil {

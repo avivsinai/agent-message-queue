@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -98,9 +99,9 @@ func TestRunUpgradeDirectInstallReplacesBinary(t *testing.T) {
 	oldExecutablePath := executablePathForUpgrade
 	executablePathForUpgrade = func() (string, string, error) { return bin, bin, nil }
 	t.Cleanup(func() { executablePathForUpgrade = oldExecutablePath })
-	oldDetect := detectHomebrewPrefixForUpgrade
-	detectHomebrewPrefixForUpgrade = func() string { return "" }
-	t.Cleanup(func() { detectHomebrewPrefixForUpgrade = oldDetect })
+	oldDetect := detectHomebrewInstallationsForUpgrade
+	detectHomebrewInstallationsForUpgrade = func() []homebrewInstallation { return nil }
+	t.Cleanup(func() { detectHomebrewInstallationsForUpgrade = oldDetect })
 	oldFetch := fetchLatestTagForUpgrade
 	fetchLatestTagForUpgrade = func(context.Context, *http.Client) (string, error) { return "v0.0.0-test", nil }
 	t.Cleanup(func() { fetchLatestTagForUpgrade = oldFetch })
@@ -153,9 +154,6 @@ func TestRunUpgradeHomebrewDelegatesWithYes(t *testing.T) {
 	}
 	t.Cleanup(func() { homebrewBrewExistsForUpgrade = oldBrewExists })
 	stubHomebrewPrefixProbe(t, prefix)
-	oldDetect := detectHomebrewPrefixForUpgrade
-	detectHomebrewPrefixForUpgrade = func() string { return "" }
-	t.Cleanup(func() { detectHomebrewPrefixForUpgrade = oldDetect })
 	var delegateRan []string
 	oldDelegate := runDelegateForUpgrade
 	runDelegateForUpgrade = func(argv []string) error { delegateRan = append(delegateRan, strings.Join(argv, " ")); return nil }
@@ -219,9 +217,9 @@ func TestRunUpgradeAllReplacesPresentCompanionsSkipsMissing(t *testing.T) {
 	oldExecutablePath := executablePathForUpgrade
 	executablePathForUpgrade = func() (string, string, error) { return amqBin, amqBin, nil }
 	t.Cleanup(func() { executablePathForUpgrade = oldExecutablePath })
-	oldDetect := detectHomebrewPrefixForUpgrade
-	detectHomebrewPrefixForUpgrade = func() string { return "" }
-	t.Cleanup(func() { detectHomebrewPrefixForUpgrade = oldDetect })
+	oldDetect := detectHomebrewInstallationsForUpgrade
+	detectHomebrewInstallationsForUpgrade = func() []homebrewInstallation { return nil }
+	t.Cleanup(func() { detectHomebrewInstallationsForUpgrade = oldDetect })
 	// Isolate companion search from the operator's real ~/.local/bin.
 	fakeHome := t.TempDir()
 	oldHome := homeDirForUpgrade
@@ -289,5 +287,27 @@ func TestRunUpgradeAllReplacesPresentCompanionsSkipsMissing(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "amq-keepalive: a running supervisor picks up a strictly newer image") {
 		t.Fatalf("output missing keepalive self-upgrade remedy:\n%s", stdout)
+	}
+}
+
+// A session whose agents directory is a symlink is not scanned for stale
+// wakes, as in every other session scan (audit 2026-11-10).
+func TestUpgradeDiagnosticRootsSkipsASessionWithASymlinkedAgentsDir(t *testing.T) {
+	tmp := t.TempDir()
+	base, elsewhere := filepath.Join(tmp, ".agent-mail"), filepath.Join(tmp, "elsewhere")
+	for _, dir := range []string{filepath.Join(base, "agents"), filepath.Join(base, "real", "agents"), filepath.Join(base, "linked"), elsewhere} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(base, "linked", "agents")); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, root := range upgradeDiagnosticRoots(base) {
+		got = append(got, filepath.Base(root))
+	}
+	if !slices.Contains(got, "real") || slices.Contains(got, "linked") {
+		t.Fatalf("roots = %v", got)
 	}
 }

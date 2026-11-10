@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -87,15 +86,12 @@ func upgradeDiagnosticRoots(root string) []string {
 	}
 
 	add(base)
-	entries, err := os.ReadDir(base)
-	if err == nil {
+	// A legacy-named session can hold a live wake too; only a child that is
+	// not a real session directory is skipped.
+	if entries, err := os.ReadDir(base); err == nil {
 		for _, entry := range entries {
-			if !entry.IsDir() || validateSessionName(entry.Name()) != nil {
-				continue
-			}
-			candidate := filepath.Join(base, entry.Name())
-			if dirExists(filepath.Join(candidate, "agents")) {
-				add(candidate)
+			if session, _, skip := classifySessionChild(base, entry.Name()); !skip {
+				add(session.Path)
 			}
 		}
 	}

@@ -4,12 +4,9 @@ package cli
 
 import (
 	"bytes"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 
 	"golang.org/x/sys/unix"
@@ -268,46 +265,9 @@ func writeWakeOwnerTempAt(scope *wakeMutationScope, label string, data []byte, m
 	if err != nil {
 		return "", err
 	}
-	var nonce [12]byte
-	if _, err := rand.Read(nonce[:]); err != nil {
-		return "", fmt.Errorf("generate %s temp name: %w", label, err)
-	}
-	name := fmt.Sprintf(".%s.tmp.%d.%s", label, os.Getpid(), hex.EncodeToString(nonce[:]))
-	fd, err := unix.Openat(
-		dirfd,
-		name,
-		unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC,
-		uint32(mode.Perm()),
-	)
-	if err != nil {
-		return "", fmt.Errorf("create %s temp: %w", label, err)
-	}
-	file := os.NewFile(uintptr(fd), name)
-	keep := false
-	defer func(scope *wakeMutationScope) {
-		_ = file.Close()
-		if !keep {
-			_ = scope.unlinkAt(name, 0)
-		}
-	}(scope)
-	if err := file.Chmod(mode); err != nil {
-		return "", fmt.Errorf("chmod %s temp: %w", label, err)
-	}
-	n, err := file.Write(data)
-	if err != nil {
-		return "", fmt.Errorf("write %s temp: %w", label, err)
-	}
-	if n != len(data) {
-		return "", fmt.Errorf("write %s temp: %w", label, io.ErrShortWrite)
-	}
-	if err := file.Sync(); err != nil {
-		return "", fmt.Errorf("sync %s temp: %w", label, err)
-	}
-	if err := file.Close(); err != nil {
-		return "", fmt.Errorf("close %s temp: %w", label, err)
-	}
-	keep = true
-	return name, nil
+	return writeWakeTempAt(dirfd, label, data, mode, func(name string) {
+		_ = scope.unlinkAt(name, 0)
+	})
 }
 
 var syncWakeOwnerDirFD = unix.Fsync

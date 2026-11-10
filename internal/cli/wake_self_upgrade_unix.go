@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/selfupgrade"
-	"github.com/avivsinai/agent-message-queue/internal/wakelock"
 	"golang.org/x/sys/unix"
 )
 
@@ -864,6 +863,6 @@ func removeWakeSelfUpgradeDiagnosticAt(dirfd int) error {
 // selfUpgradeCurrentUID and selfUpgradeFileOwnerUID are the uid reads the
 // launch-locator check uses; a test replaces them.
 var (
-	selfUpgradeCurrentUID   = wakelock.CurrentUID
-	selfUpgradeFileOwnerUID = wakelock.FileOwnerUID
+	selfUpgradeCurrentUID   = selfupgrade.CurrentUID
+	selfUpgradeFileOwnerUID = selfupgrade.FileOwnerUID
 )

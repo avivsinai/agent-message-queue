@@ -35,7 +35,14 @@ type wakeQuarantineEntry struct {
 type wakeQuarantineCleanupCandidate struct {
 	wakeQuarantineEntry
 	Snapshot wakeQuarantineSnapshot
+	// ReloadSocket marks a unix socket a former wake build left for its
+	// reload transport; Snapshot.FileInfo is its identity and Raw is empty.
+	ReloadSocket bool
 }
+
+// wakeReloadSocketPrefix names the sockets (and their staging names) that
+// former wake builds created in the agent directory for the reload transport.
+const wakeReloadSocketPrefix = ".wr."
 
 var beforeWakeQuarantineCleanupRevalidation = func(wakeQuarantineCleanupCandidate) {}
 
@@ -55,6 +62,28 @@ func parseWakeQuarantineName(name string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
+// readWakeQuarantineAgentEntries lists one agent directory through a
+// validated directory capability.
+func readWakeQuarantineAgentEntries(path string) ([]os.DirEntry, error) {
+	agentDir, err := openWakeDirectory(path, "wake quarantine agent directory")
+	if err != nil {
+		return nil, err
+	}
+	var entries []os.DirEntry
+	readErr := agentDir.withFD(func(dirfd int) error {
+		duplicate, err := unix.Dup(dirfd)
+		if err != nil {
+			return err
+		}
+		dir := os.NewFile(uintptr(duplicate), path)
+		defer func() { _ = dir.Close() }()
+		entries, err = dir.ReadDir(-1)
+		return err
+	})
+	_ = agentDir.Close()
+	return entries, readErr
+}
+
 func scanWakeQuarantine(root string) ([]wakeQuarantineEntry, error) {
 	agentsDir := filepath.Join(root, "agents")
 	agents, err := os.ReadDir(agentsDir)
@@ -70,24 +99,9 @@ func scanWakeQuarantine(root string) ([]wakeQuarantineEntry, error) {
 			continue
 		}
 		path := filepath.Join(agentsDir, agent.Name())
-		agentDir, err := openWakeDirectory(path, "wake quarantine agent directory")
+		entries, err := readWakeQuarantineAgentEntries(path)
 		if err != nil {
 			return nil, fmt.Errorf("scan wake quarantine for agent %s: %w", agent.Name(), err)
-		}
-		var entries []os.DirEntry
-		readErr := agentDir.withFD(func(dirfd int) error {
-			duplicate, err := unix.Dup(dirfd)
-			if err != nil {
-				return err
-			}
-			dir := os.NewFile(uintptr(duplicate), path)
-			defer func() { _ = dir.Close() }()
-			entries, err = dir.ReadDir(-1)
-			return err
-		})
-		_ = agentDir.Close()
-		if readErr != nil {
-			return nil, fmt.Errorf("scan wake quarantine for agent %s: %w", agent.Name(), readErr)
 		}
 		for _, entry := range entries {
 			when, ok := parseWakeQuarantineName(entry.Name())
@@ -168,25 +182,146 @@ func findWakeQuarantineOlderThan(root string, cutoff time.Time) ([]wakeQuarantin
 			Snapshot:            snapshot,
 		})
 	}
+	sockets, err := findWakeReloadSocketsOlderThan(root, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	candidates = append(candidates, sockets...)
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Path < candidates[j].Path })
 	return candidates, nil
 }
 
-func removeWakeQuarantineCandidate(root string, candidate wakeQuarantineCleanupCandidate) error {
+// findWakeReloadSocketsOlderThan lists the reload sockets of stopped wakes
+// whose last change is before cutoff. It never follows a symlink and takes
+// only socket-type files named with the exact prefix.
+func findWakeReloadSocketsOlderThan(root string, cutoff time.Time) ([]wakeQuarantineCleanupCandidate, error) {
+	agentsDir := filepath.Join(root, "agents")
+	agents, err := os.ReadDir(agentsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("scan wake reload sockets agents directory: %w", err)
+	}
+	var candidates []wakeQuarantineCleanupCandidate
+	for _, agent := range agents {
+		if !agent.IsDir() {
+			continue
+		}
+		path := filepath.Join(agentsDir, agent.Name())
+		if lock := inspectWakeLock(root, agent.Name()); lock.Exists && lock.Status != wakeLockStale {
+			continue
+		}
+		entries, err := readWakeQuarantineAgentEntries(path)
+		if err != nil {
+			return nil, fmt.Errorf("scan wake reload sockets for agent %s: %w", agent.Name(), err)
+		}
+		for _, entry := range entries {
+			if !strings.HasPrefix(entry.Name(), wakeReloadSocketPrefix) || entry.Type()&os.ModeSocket == 0 {
+				continue
+			}
+			socketPath := filepath.Join(path, entry.Name())
+			info, err := os.Lstat(socketPath)
+			if err != nil {
+				if os.IsNotExist(err) {
+					continue
+				}
+				return nil, fmt.Errorf("stat wake reload socket: %w", err)
+			}
+			if info.Mode()&os.ModeSocket == 0 || !info.ModTime().Before(cutoff) {
+				continue
+			}
+			candidates = append(candidates, wakeQuarantineCleanupCandidate{
+				wakeQuarantineEntry: wakeQuarantineEntry{
+					Agent:       agent.Name(),
+					Name:        entry.Name(),
+					Path:        socketPath,
+					Quarantined: info.ModTime(),
+				},
+				Snapshot:     wakeQuarantineSnapshot{FileInfo: info},
+				ReloadSocket: true,
+			})
+		}
+	}
+	return candidates, nil
+}
+
+// removeWakeReloadSocketAt unlinks the candidate socket under the agent's
+// lifecycle guard only while it is the same socket and no live or uncertain
+// wake owns the directory.
+func removeWakeReloadSocketAt(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	root string,
+	candidate wakeQuarantineCleanupCandidate,
+) (bool, error) {
+	if candidate.Snapshot.FileInfo == nil || !strings.HasPrefix(candidate.Name, wakeReloadSocketPrefix) ||
+		strings.ContainsRune(candidate.Name, '/') {
+		return false, fmt.Errorf("wake reload socket cleanup candidate is invalid")
+	}
+	if lock := inspectWakeLockAt(dirfd, agentDir, root, candidate.Agent); lock.Exists && lock.Status != wakeLockStale {
+		return false, nil
+	}
+	current, err := os.Lstat(filepath.Join(agentDir.path, candidate.Name))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat wake reload socket: %w", err)
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstatat(dirfd, candidate.Name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return false, fmt.Errorf("stat wake reload socket: %w", err)
+	}
+	if current.Mode()&os.ModeSocket == 0 || stat.Mode&unix.S_IFMT != unix.S_IFSOCK ||
+		!sameWakeFileIdentity(candidate.Snapshot.FileInfo, current) {
+		return false, newWakeSnapshotReadChangedError(
+			fmt.Errorf("wake reload socket changed before cleanup; preserving it"),
+		)
+	}
+	if err := wakeUnlinkAt(dirfd, candidate.Name, 0); err != nil {
+		return false, fmt.Errorf("remove exact wake reload socket: %w", err)
+	}
+	if err := syncWakeOwnerDirFD(dirfd); err != nil {
+		return true, fmt.Errorf("sync wake reload socket cleanup: %w", err)
+	}
+	return true, nil
+}
+
+// removeWakeQuarantineCandidate reports whether it removed the candidate; a
+// reload socket kept because its wake may be live or it is gone is not an error.
+func removeWakeQuarantineCandidate(root string, candidate wakeQuarantineCleanupCandidate) (bool, error) {
+	if candidate.ReloadSocket {
+		agentDir, err := openWakeDirectory(
+			filepath.Join(root, "agents", candidate.Agent),
+			"wake quarantine agent directory",
+		)
+		if err != nil {
+			return false, err
+		}
+		defer func() { _ = agentDir.Close() }()
+		removed := false
+		err = withWakeLifecycleGuardInDir(agentDir, wakeGuardWait, func(dirfd int) error {
+			var err error
+			removed, err = removeWakeReloadSocketAt(dirfd, agentDir, root, candidate)
+			return err
+		})
+		return removed && err == nil, err
+	}
 	if err := assertNotWakeLockName(candidate.Name); err != nil {
-		return err
+		return false, err
 	}
 	when, exact := parseWakeQuarantineName(candidate.Name)
 	if !exact || !when.Equal(candidate.Quarantined) {
-		return fmt.Errorf("wake quarantine cleanup candidate name changed")
+		return false, fmt.Errorf("wake quarantine cleanup candidate name changed")
 	}
 	agentPath := filepath.Join(root, "agents", candidate.Agent)
 	agentDir, err := openWakeDirectory(agentPath, "wake quarantine agent directory")
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer func() { _ = agentDir.Close() }()
-	return withWakeLifecycleGuardInDir(agentDir, wakeGuardWait, func(dirfd int) error {
+	err = withWakeLifecycleGuardInDir(agentDir, wakeGuardWait, func(dirfd int) error {
 		beforeWakeQuarantineCleanupRevalidation(candidate)
 		current, exists, err := readWakeQuarantineSnapshotAt(
 			dirfd,
@@ -212,6 +347,7 @@ func removeWakeQuarantineCandidate(root string, candidate wakeQuarantineCleanupC
 		}
 		return nil
 	})
+	return err == nil, err
 }
 
 func wakeLockEligibleForQuarantine(inspection wakeLockInspection, now time.Time) bool {
@@ -423,7 +559,7 @@ func moveWakeQuarantineAt(
 	if err != nil {
 		return "", err
 	}
-	if err := renameWakeNoReplaceAt(dirfd, source, dirfd, quarantine); err != nil {
+	if err := wakeRenameNoReplaceAt(dirfd, source, dirfd, quarantine); err != nil {
 		return "", fmt.Errorf("quarantine exact %s as %s: %w", label, quarantine, err)
 	}
 	if err := syncWakeOwnerDirFD(dirfd); err != nil {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/selfupgrade"
 	"github.com/avivsinai/agent-message-queue/internal/wakelock"
 )
 
@@ -33,7 +34,7 @@ func validateAuthoritativeWakeOwner(owner wakeOwner) error {
 }
 
 func validateWakeTargetPathOwnership(label, path string, info os.FileInfo) error {
-	return wakelock.ValidatePathOwnership(label, path, info)
+	return selfupgrade.ValidatePathOwnership(label, path, info)
 }
 
 type wakeTarget struct {

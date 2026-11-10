@@ -236,34 +236,27 @@ func (b *TmuxBackend) anyOwnedPaneExists(ctx context.Context, panes []string) (b
 	return false, nil
 }
 
-func tmuxInventoryIssues(resources []ResourceIdentity, plan Plan) []string {
-	return tmuxAgentInventoryIssues(resources, plan, 1)
-}
-
-func tmuxPaneSetDiff(live map[string]bool, expected []string) (missing, extra []string) {
+func tmuxPaneSetExtra(live map[string]bool, expected []string) (extra []string) {
 	want := make(map[string]bool, len(expected))
 	for _, id := range expected {
 		if id == "" {
 			continue
 		}
 		want[id] = true
-		if !live[id] {
-			missing = append(missing, id)
-		}
 	}
 	for id := range live {
 		if !want[id] {
 			extra = append(extra, id)
 		}
 	}
-	return missing, extra
+	return extra
 }
 
 func tmuxWindowInventoryStatus(live map[string]bool, owned, extras []string) (InspectStatus, string) {
 	expected := make([]string, 0, len(owned)+len(extras))
 	expected = append(expected, owned...)
 	expected = append(expected, extras...)
-	_, extra := tmuxPaneSetDiff(live, expected)
+	extra := tmuxPaneSetExtra(live, expected)
 	if len(extra) > 0 {
 		return InspectUnknown, "unowned pane is in the owned window"
 	}

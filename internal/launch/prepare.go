@@ -208,6 +208,10 @@ func ExecuteLegacyTrustMove(move LegacyTrustMove) error {
 const preparePlaceholderUUID = "00000000-0000-4000-8000-000000000000"
 const MaxInitialInputBytes = 256 * 1024
 
+// ClaudeNativeVersion is the one Claude Code release the claude-native
+// injector is built and proven against.
+const ClaudeNativeVersion = "2.1.311"
+
 const (
 	PrepareOutcomeReady          = "ready"
 	PrepareOutcomeActionRequired = "action_required"
@@ -735,11 +739,12 @@ func prepareAtTarget(ctx context.Context, request PrepareRequest, dependencies P
 		}
 	}
 
+	inputUnsupported := firstInitialInputUnsupported(result.Observations)
 	switch {
 	case placementUnsupported:
 		result.Outcome, result.Reason = PrepareOutcomeUnsupported, PlacementUnsupportedReason
-	case firstInitialInputUnsupported(result.Observations) != "":
-		result.Outcome, result.Reason = PrepareOutcomeUnsupported, firstInitialInputUnsupported(result.Observations)
+	case inputUnsupported != "":
+		result.Outcome, result.Reason = PrepareOutcomeUnsupported, inputUnsupported
 	case len(result.RequiredActions) > 0:
 		result.Outcome, result.Reason = PrepareOutcomeActionRequired, result.RequiredActions[0].ReasonCode
 	case !detect.Available:
@@ -1231,8 +1236,8 @@ func prepareOneParticipant(ctx context.Context, participant PrepareParticipant, 
 		if err := ValidateAdapterCapabilities(adapter, capabilities); err != nil {
 			return prepared, observation, nil, nil, err
 		}
-		if !capabilities.Available || !capabilities.Fresh || capabilities.ProviderVersion != "2.1.311" {
-			return prepared, observation, nil, nil, fmt.Errorf("claude-native requires Claude Code 2.1.311")
+		if !capabilities.Available || !capabilities.Fresh || capabilities.ProviderVersion != ClaudeNativeVersion {
+			return prepared, observation, nil, nil, fmt.Errorf("claude-native requires Claude Code %s", ClaudeNativeVersion)
 		}
 	}
 	if useResume {

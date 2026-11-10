@@ -82,3 +82,14 @@ func TestWakeSettingsSeedRetryKeepsArgvSettings(t *testing.T) {
 		t.Fatalf("stored settings = %q, %v; want seed %q", raw, err, plan.write)
 	}
 }
+
+// The resume preflight is inspect-only: a handle with no mailbox is refused and no directory appears (audit 2026-11-10).
+func TestWakeResumePreflightDoesNotCreateMailbox(t *testing.T) {
+	root := t.TempDir()
+	if err := checkWakeSettingsForResume(root, "ghost"); err == nil {
+		t.Fatal("preflight for a missing mailbox succeeded")
+	}
+	if _, err := os.Lstat(filepath.Join(root, "agents", "ghost")); !os.IsNotExist(err) {
+		t.Fatalf("preflight created the mailbox directory: %v", err)
+	}
+}

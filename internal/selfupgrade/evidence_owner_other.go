@@ -4,6 +4,9 @@ package selfupgrade
 
 import "os"
 
-func imageFileOwnerUID(os.FileInfo) (int, bool) { return 0, false }
+// FileOwnerUID reports the owner uid of info; false means the platform cannot
+// tell.
+func FileOwnerUID(os.FileInfo) (int, bool) { return 0, false }
 
-func imageCurrentUID() (int, bool) { return 0, false }
+// CurrentUID reports the effective uid; false means the platform cannot tell.
+func CurrentUID() (int, bool) { return 0, false }

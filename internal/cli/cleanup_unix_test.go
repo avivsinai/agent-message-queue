@@ -4,6 +4,7 @@ package cli
 
 import (
 	"bytes"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -130,5 +131,83 @@ func TestCleanupWakeQuarantinePreservesReplacementAfterCandidateScan(t *testing.
 	}
 	if !bytes.Equal(got, replacement) {
 		t.Fatalf("replacement changed: got %q want %q", got, replacement)
+	}
+}
+
+// A wake build that crashed left agents/<me>/.wr.* reload sockets that nothing listed or removed (audit 2026-11-10).
+func TestCleanupWakeQuarantineRemovesOldReloadSockets(t *testing.T) {
+	root := secureTempDirForTest(t)
+	agentDir := filepath.Join(root, "agents", "codex")
+	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	// A unix socket path is limited to about 104 bytes, so bind in a short
+	// directory and rename the socket into the agent directory.
+	short, err := os.MkdirTemp("", "w")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(short) })
+	socketIn := func(agentDir, name string, mtime time.Time) string {
+		bound := filepath.Join(short, "s")
+		listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: bound, Net: "unix"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		listener.SetUnlinkOnClose(false)
+		_ = listener.Close()
+		path := filepath.Join(agentDir, name)
+		if err := os.Rename(bound, path); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, mtime, mtime); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	socket := func(name string, mtime time.Time) string { return socketIn(agentDir, name, mtime) }
+	oldSocket := socket(".wr.old", old)
+	oldStage := socket(".wr.stage.old", old)
+	recentSocket := socket(".wr.recent", time.Now())
+	// A wake with a live lock keeps its socket, and cleanup does not count it.
+	liveDir := filepath.Join(root, "agents", "live")
+	if err := os.MkdirAll(liveDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeWakeLockForTest(t, root, "live", wakeLock{PID: 4242, TTY: "/dev/ttys005", Started: "2026-11-07T00:00:00Z",
+		ProcessStart: "12345", BootID: "11111111-1111-1111-1111-111111111111", Executable: "amq",
+		WakeMode: wakeInjectModeRaw, Generation: "live-generation"})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{PID: pid, Running: true, StartToken: "12345",
+			BootID: "11111111-1111-1111-1111-111111111111", Executable: "amq"}
+	})
+	liveSocket := socketIn(liveDir, ".wr.live", old)
+	oldFile := filepath.Join(agentDir, ".wr.file")
+	if err := os.WriteFile(oldFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(oldFile, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := captureEnvStdout(t, func() error {
+		return runCleanup([]string{"--root", root, "--wake-quarantine-older-than", "1h", "--yes", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if !strings.Contains(output, `"removed": 2`) {
+		t.Fatalf("cleanup output = %s, want exactly the 2 stopped-wake sockets removed", output)
+	}
+	for _, path := range []string{oldSocket, oldStage} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("old reload socket %s was not removed: %v", path, err)
+		}
+	}
+	for _, path := range []string{recentSocket, oldFile, liveSocket} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("%s was removed: %v", path, err)
+		}
 	}
 }
