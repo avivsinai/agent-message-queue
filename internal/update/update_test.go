@@ -602,3 +602,42 @@ func TestDownloadReleaseAssetRejectsUnsafeAssetBeforeNetwork(t *testing.T) {
 		t.Fatal("DownloadReleaseAsset accepted a traversal release tag")
 	}
 }
+
+// A short command waits for the started refresh, so the cache is written
+// before the process exits; a stuck fetch costs only the budget
+// (audit 2026-11-10).
+func TestNotifierWaitLetsRefreshLandWithinBudget(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "update.json")
+	var stderr bytes.Buffer
+	n := Notifier{
+		CurrentVersion: "v0.70.0",
+		CachePath:      cachePath,
+		Stderr:         &stderr,
+		FetchLatest: func(context.Context, *http.Client) (string, error) {
+			time.Sleep(20 * time.Millisecond)
+			return "v0.73.0", nil
+		},
+	}
+	n.Start(context.Background())(time.Second)
+	cache, err := LoadCache(cachePath)
+	if err != nil || cache == nil || cache.LatestVersion != "v0.73.0" {
+		t.Fatalf("cache after wait = %#v, %v; want v0.73.0", cache, err)
+	}
+
+	release := make(chan struct{})
+	defer close(release)
+	stuck := Notifier{
+		CurrentVersion: "v0.70.0",
+		CachePath:      filepath.Join(t.TempDir(), "update.json"),
+		Stderr:         &stderr,
+		FetchLatest: func(ctx context.Context, _ *http.Client) (string, error) {
+			<-release
+			return "", ctx.Err()
+		},
+	}
+	started := time.Now()
+	stuck.Start(context.Background())(30 * time.Millisecond)
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("wait took %v, want about the 30ms budget", elapsed)
+	}
+}

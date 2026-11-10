@@ -88,13 +88,15 @@ func (cursorNamedStoreReader) locate(cwd string, execStart time.Time) (coopNamed
 		if !info.Mode().IsRegular() {
 			return nil
 		}
+		// A chat whose metadata cannot be read or parsed cannot be matched to
+		// this cwd; skip it. The next poll sees it again once it is whole.
 		data, readErr := os.ReadFile(path)
 		if readErr != nil {
-			return readErr
+			return nil
 		}
 		var meta cursorChatMeta
 		if err := json.Unmarshal(data, &meta); err != nil {
-			return fmt.Errorf("decode Cursor metadata %q: %w", path, err)
+			return nil
 		}
 		if meta.CWD != cwd {
 			return nil

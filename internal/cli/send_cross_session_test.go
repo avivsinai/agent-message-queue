@@ -152,7 +152,7 @@ func TestSendCrossSessionWaitForUsesDeliveryRoot(t *testing.T) {
 			if err == nil && len(entries) == 1 {
 				msgID := entries[0].Name()[:len(entries[0].Name())-3]
 				r := receipt.New(msgID, "", "claude", "codex", receipt.StageDrained, "")
-				_ = receipt.Emit(targetRoot, r)
+				_ = emitReceiptForCLITest(targetRoot, r)
 				return
 			}
 			time.Sleep(25 * time.Millisecond)

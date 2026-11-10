@@ -46,7 +46,7 @@ func TestCaptureImageEvidenceRejectsHashTimeMutation(t *testing.T) {
 	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	_, err := CaptureImageEvidenceWithMutator(path, "1.2.3", func() {
+	_, err := captureImageEvidence(path, "1.2.3", func() {
 		if writeErr := os.WriteFile(path, []byte("#!/bin/sh\nexit 1\n"), 0o700); writeErr != nil {
 			t.Errorf("mutate image: %v", writeErr)
 		}

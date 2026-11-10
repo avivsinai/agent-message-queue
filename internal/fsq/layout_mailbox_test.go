@@ -14,7 +14,7 @@ func TestMailboxLayoutRepairReportsExactPartialProgress(t *testing.T) {
 	}
 	for _, path := range []string{
 		AgentInboxCur(rootPath, "legacy"),
-		AgentDLQCur(rootPath, "legacy"),
+		AgentMailboxPath(rootPath, "legacy", MailboxDLQCur),
 	} {
 		if err := os.Remove(path); err != nil {
 			t.Fatal(err)
@@ -23,7 +23,7 @@ func TestMailboxLayoutRepairReportsExactPartialProgress(t *testing.T) {
 	root := openMailboxLayoutTestRoot(t, rootPath)
 	injected := errors.New("injected mkdir failure")
 
-	result := repairMailboxLayout(root, mailboxRepairHooks{
+	result := repairLegacyForTest(t, root, mailboxRepairHooks{
 		fail: func(stage, path string) error {
 			if stage == "mkdir" && filepath.ToSlash(path) == "agents/legacy/dlq/cur" {
 				return injected
@@ -47,7 +47,7 @@ func TestMailboxLayoutRepairReportsExactPartialProgress(t *testing.T) {
 	if info, err := os.Stat(AgentInboxCur(rootPath, "legacy")); err != nil || !info.IsDir() {
 		t.Fatalf("created directory missing: info=%v err=%v", info, err)
 	}
-	if _, err := os.Stat(AgentDLQCur(rootPath, "legacy")); !os.IsNotExist(err) {
+	if _, err := os.Stat(AgentMailboxPath(rootPath, "legacy", MailboxDLQCur)); !os.IsNotExist(err) {
 		t.Fatalf("failed directory unexpectedly exists: %v", err)
 	}
 }
@@ -57,7 +57,7 @@ func TestMailboxLayoutRepairRefusesConfigReplacementBeforeFirstMkdir(t *testing.
 	if err := EnsureAgentDirs(rootPath, "legacy"); err != nil {
 		t.Fatal(err)
 	}
-	missing := AgentDLQCur(rootPath, "legacy")
+	missing := AgentMailboxPath(rootPath, "legacy", MailboxDLQCur)
 	if err := os.Remove(missing); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestMailboxLayoutRepairRefusesConfigReplacementBeforeFirstMkdir(t *testing.
 	configPath := filepath.Join(rootPath, "meta", "config.json")
 	originalPath := configPath + ".original"
 
-	result := repairMailboxLayout(root, mailboxRepairHooks{
+	result := repairLegacyForTest(t, root, mailboxRepairHooks{
 		afterPreflight: func() {
 			if err := os.Rename(configPath, originalPath); err != nil {
 				t.Fatalf("rename config: %v", err)
@@ -84,6 +84,18 @@ func TestMailboxLayoutRepairRefusesConfigReplacementBeforeFirstMkdir(t *testing.
 	if _, err := os.Lstat(missing); !os.IsNotExist(err) {
 		t.Fatalf("repair created path after config replacement: %v", err)
 	}
+}
+
+// repairLegacyForTest repairs the legacy mailbox with fault hooks through the
+// authorized repair function the production entries call.
+func repairLegacyForTest(t *testing.T, root *DeliveryRoot, hooks mailboxRepairHooks) MailboxRepairResult {
+	t.Helper()
+	authorization, _, err := OpenMailboxConfigAuthorization(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = authorization.Close() }()
+	return repairMailboxLayoutHandlesAuthorized(root, authorization, []string{"legacy"}, hooks)
 }
 
 func mailboxLayoutTestRoot(t *testing.T, agents ...string) string {
@@ -125,7 +137,7 @@ func TestRepairMailboxLayoutAuthorizationVerifyAndRepairHappyPath(t *testing.T) 
 	if err := EnsureAgentDirs(rootPath, "legacy"); err != nil {
 		t.Fatal(err)
 	}
-	missing := AgentDLQCur(rootPath, "legacy")
+	missing := AgentMailboxPath(rootPath, "legacy", MailboxDLQCur)
 	if err := os.Remove(missing); err != nil {
 		t.Fatal(err)
 	}
@@ -162,10 +174,17 @@ func TestRepairMailboxLayoutForAgentsRepairsRequestedHandle(t *testing.T) {
 	if err := EnsureAgentDirs(rootPath, "legacy"); err != nil {
 		t.Fatal(err)
 	}
-	missing := AgentDLQCur(rootPath, "cursor")
+	missing := AgentMailboxPath(rootPath, "cursor", MailboxDLQCur)
 	root := openMailboxLayoutTestRoot(t, rootPath)
 
-	result := RepairMailboxLayoutForAgents(root, []string{"cursor"})
+	result := func() MailboxRepairResult {
+		authorization, _, err := OpenMailboxConfigAuthorization(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = authorization.Close() }()
+		return RepairMailboxLayoutForAgentsWithAuthorization(root, authorization, []string{"cursor"})
+	}()
 	if result.Status != "repaired" {
 		t.Fatalf("repair result = %#v, want repaired for handle outside config roster", result)
 	}
@@ -179,13 +198,18 @@ func TestRepairMailboxLayoutRepairsFullConfiguredRoster(t *testing.T) {
 	if err := EnsureAgentDirs(rootPath, "legacy"); err != nil {
 		t.Fatal(err)
 	}
-	missing := AgentDLQCur(rootPath, "legacy")
+	missing := AgentMailboxPath(rootPath, "legacy", MailboxDLQCur)
 	if err := os.Remove(missing); err != nil {
 		t.Fatal(err)
 	}
 	root := openMailboxLayoutTestRoot(t, rootPath)
 
-	result := RepairMailboxLayout(root)
+	authorization, _, err := OpenMailboxConfigAuthorization(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = authorization.Close() }()
+	result := RepairMailboxLayoutForConfiguredAgentsWithAuthorization(root, authorization, []string{"legacy"})
 	if result.Status != "repaired" {
 		t.Fatalf("repair result = %#v, want repaired", result)
 	}

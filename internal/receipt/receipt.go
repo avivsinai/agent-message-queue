@@ -60,23 +60,6 @@ func (r Receipt) Marshal() ([]byte, error) {
 	return append(b, '\n'), nil
 }
 
-// Emit writes a receipt to the consumer's receipts directory.
-// Receipts live only in the consumer namespace; callers that need to observe
-// them must read from the delivery root where the consumer emitted them.
-func Emit(root string, r Receipt) error {
-	data, err := r.Marshal()
-	if err != nil {
-		return fmt.Errorf("receipt marshal: %w", err)
-	}
-
-	rel := filepath.Join(fsq.AgentReceipts("", r.Consumer), r.filename())
-	if _, err := fsq.WriteStateFile(root, rel, data, 0o600); err != nil {
-		return fmt.Errorf("receipt write (consumer %s): %w", r.Consumer, err)
-	}
-
-	return nil
-}
-
 // EmitDeliveryRoot writes a receipt through an already authorized root.
 func EmitDeliveryRoot(root *fsq.DeliveryRoot, r Receipt) error {
 	data, err := r.Marshal()

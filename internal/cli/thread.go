@@ -61,12 +61,16 @@ func runThread(args []string) error {
 		return UsageError("--agents: %v", err)
 	}
 	if len(agents) == 0 {
-		if cfg, err := config.LoadConfig(filepath.Join(root, "meta", "config.json")); err == nil {
+		cfg, cfgErr := config.LoadConfig(filepath.Join(root, "meta", "config.json"))
+		if cfgErr == nil {
 			agents, err = parseHandles(strings.Join(cfg.Agents, ","))
 			if err != nil {
 				return err
 			}
 		} else {
+			if common.Strict {
+				return cfgErr
+			}
 			var listErr error
 			agents, listErr = fsq.ListAgents(root)
 			if listErr != nil {

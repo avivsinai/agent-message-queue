@@ -175,7 +175,7 @@ func (c *layoutDirCapability) mode() (os.FileMode, error) {
 }
 
 func (c *layoutDirCapability) sync() error {
-	return nil
+	return c.syncPlatform()
 }
 
 func layoutModeSupported(_ os.FileMode) bool {

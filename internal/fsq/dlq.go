@@ -407,14 +407,26 @@ func ReadDLQEnvelope(root *DeliveryRoot, path string) (*DLQEnvelope, []byte, err
 	return envelope, body, nil
 }
 
-// ReadDLQEnvelopePath is the legacy pathname reader used only by non-mutating
-// listing code. Mutating DLQ flows must use ReadDLQEnvelope with a capability.
-func ReadDLQEnvelopePath(path string) (*DLQEnvelope, []byte, error) {
-	data, err := ReadRegularNoFollow(path)
-	if err != nil {
-		return nil, nil, err
+// requireDLQEnvelopePresent returns os.ErrNotExist when no envelope with this
+// name is in dlq/new or dlq/cur, without creating the envelope lock for a name
+// that does not exist. The authoritative check repeats under the lock.
+func requireDLQEnvelopePresent(root *DeliveryRoot, agent, filename string) error {
+	if err := ValidateHandle(agent); err != nil {
+		return err
 	}
-	return parseDLQMessage(data)
+	if err := ValidateMessageFilename(filename); err != nil {
+		return err
+	}
+	for _, box := range []string{BoxNew, BoxCur} {
+		_, err := root.Lstat(filepath.Join("agents", agent, "dlq", box, filename))
+		if err == nil {
+			return nil
+		}
+		if !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return os.ErrNotExist
 }
 
 // InspectDLQEnvelope reads one DLQ envelope and marks a new envelope inspected
@@ -428,6 +440,9 @@ func InspectDLQEnvelope(root *DeliveryRoot, agent, filename string) (
 	box string,
 	err error,
 ) {
+	if err = requireDLQEnvelopePresent(root, agent, filename); err != nil {
+		return nil, nil, "", err
+	}
 	err = root.WithDLQEnvelopeLock(agent, filename, func(batch *DeliveryRoot) error {
 		path, foundBox, findErr := FindDLQMessage(batch, agent, filename)
 		if findErr != nil {
@@ -455,6 +470,9 @@ func InspectDLQEnvelope(root *DeliveryRoot, agent, filename string) (
 // RetryFromDLQ moves a message from DLQ back to inbox/new for reprocessing.
 // Returns error if retry_count >= MaxRetries and force is false.
 func RetryFromDLQ(root *DeliveryRoot, agent, dlqFilename string, force bool) error {
+	if err := requireDLQEnvelopePresent(root, agent, dlqFilename); err != nil {
+		return err
+	}
 	return root.WithDLQEnvelopeLock(agent, dlqFilename, func(batch *DeliveryRoot) error {
 		return retryFromDLQLocked(batch, agent, dlqFilename, force)
 	})
@@ -663,14 +681,7 @@ func FindDLQMessage(root *DeliveryRoot, agent, filename string) (string, string,
 	return "", "", os.ErrNotExist
 }
 
-// MoveDLQNewToCur moves a DLQ message from new to cur (marks as inspected).
 var beforeMoveDLQNewToCurRenameForTest func(*DeliveryRoot, string, string)
-
-func MoveDLQNewToCur(root *DeliveryRoot, agent, filename string) error {
-	return root.WithDLQEnvelopeLock(agent, filename, func(batch *DeliveryRoot) error {
-		return moveDLQNewToCurLocked(batch, agent, filename)
-	})
-}
 
 func moveDLQNewToCurLocked(root *DeliveryRoot, agent, filename string) error {
 	if err := ValidateMessageFilename(filename); err != nil {

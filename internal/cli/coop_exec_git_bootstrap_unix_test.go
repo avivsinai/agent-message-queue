@@ -22,7 +22,7 @@ func TestCoopExecBootstrapsFreshGitWorktreeWithoutConsultingHomeAmqrc(t *testing
 	}
 	t.Cleanup(func() { globalAmqrcReadFile = originalReadFile })
 
-	execEnv := captureCoopExecEnvironment(t, []string{"--no-wake", "--me", "alice", "sh"})
+	execEnv := captureCoopExecEnvironment(t, []string{"--no-wake", "--me", "alice", "-y", "sh"})
 	wantBase := filepath.Join(repo, defaultCoopRoot)
 	wantRoot := filepath.Join(wantBase, defaultSessionName)
 	if got := envValue(execEnv, envRoot); !sameTreeIdentity(got, wantRoot) {

@@ -167,6 +167,7 @@ func TestConcurrentAppendsAcrossRotation(t *testing.T) {
 	// attempted so the assertion can check every one survived.
 	type appenderResult struct {
 		ids []string
+		at  []string
 	}
 	results := make([]appenderResult, appenders)
 
@@ -175,6 +176,7 @@ func TestConcurrentAppendsAcrossRotation(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			local := make([]string, 0, recordsEach)
+			localAt := make([]string, 0, recordsEach)
 			for i := 0; i < recordsEach; i++ {
 				id := fmt.Sprintf("xrot-%d-%d", a, i)
 				rec := Record{
@@ -187,27 +189,25 @@ func TestConcurrentAppendsAcrossRotation(t *testing.T) {
 					RecordedAt: time.Now().UTC().Format(time.RFC3339Nano),
 				}
 				if err := writer.append(rec); err != nil {
-					// A burst can make the mandatory nonterminal snapshot exceed
-					// the hard archive cap before LOCK_EX is acquired. The writer
-					// must report that condition, but it still appends this record
-					// and must not truncate the current generation.
-					if !strings.Contains(err.Error(), "nonterminal attempts") {
-						t.Errorf("append %d/%d: %v", a, i, err)
-						return
-					}
+					t.Errorf("append %d/%d: %v", a, i, err)
+					return
 				}
 				local = append(local, id)
+				localAt = append(localAt, rec.RecordedAt)
 			}
 			results[a].ids = local
+			results[a].at = localAt
 		}()
 	}
 	wg.Wait()
 
 	// Collect every attempted ID.
 	attempted := make(map[string]bool)
+	recordedAt := make(map[string]string)
 	for _, r := range results {
-		for _, id := range r.ids {
+		for i, id := range r.ids {
 			attempted[id] = true
+			recordedAt[id] = r.at[i]
 		}
 	}
 	if len(attempted) == 0 {
@@ -239,14 +239,28 @@ func TestConcurrentAppendsAcrossRotation(t *testing.T) {
 		}
 	}
 
-	// The assertion: every attempted record must survive. If rotation's
-	// read→merge→truncate ran unlocked, an O_APPEND writer could land a record
-	// after rotation's read and before its truncate, and that record is gone —
-	// trace would then report "no record" for an injection that happened.
+	// The assertion: compaction may drop only the oldest records to honor the
+	// cap, so a lost record must never be newer than a surviving one. If
+	// rotation's read→merge→truncate ran unlocked, an O_APPEND writer could land
+	// a record after rotation's read and before its truncate and lose it while
+	// older records survive — trace would then report "no record" for an
+	// injection that happened.
+	newer := func(x, y string) bool { // x sorts before y in newest-first order
+		if recordedAt[x] == recordedAt[y] {
+			return x < y
+		}
+		return recordedAt[x] > recordedAt[y]
+	}
 	var lost []string
 	for id := range attempted {
-		if !surviving[id] {
-			lost = append(lost, id)
+		if surviving[id] {
+			continue
+		}
+		for other := range surviving {
+			if attempted[other] && newer(id, other) {
+				lost = append(lost, id)
+				break
+			}
 		}
 	}
 	if len(lost) > 0 {
@@ -860,21 +874,32 @@ func TestListDeduplicatesCrashWindowAcrossGenerations(t *testing.T) {
 	}
 }
 
-func TestCompactionRefusesNonterminalOverflow(t *testing.T) {
-	first := Record{
-		Schema: SchemaVersion, AttemptID: "overflow-first", Phase: PhasePrepared,
-		MessageIDs: []string{"msg-overflow-first"}, Agent: "codex", Mode: "external",
-		RecordedAt: "2026-09-01T10:00:00Z", State: StateAttempt,
+// Rotation must succeed when unresolved attempts alone exceed the cap: the
+// oldest are dropped and the newest remain (audit 2026-11-10).
+func TestCompactionDropsOldestUnresolvedOverCap(t *testing.T) {
+	var records []Record
+	for i := 0; i < 5; i++ {
+		records = append(records, Record{
+			Schema: SchemaVersion, AttemptID: fmt.Sprintf("unresolved-%d", i), Phase: PhasePrepared,
+			MessageIDs: []string{fmt.Sprintf("msg-%d", i)}, Agent: "codex", Mode: "external",
+			RecordedAt: fmt.Sprintf("2026-09-01T10:00:0%dZ", i), State: StateAttempt,
+		})
 	}
-	second := first
-	second.AttemptID = "overflow-second"
-	second.MessageIDs = []string{"msg-overflow-second"}
-	firstData, err := marshalRecords([]Record{first})
+	oneData, err := marshalRecords(records[:1])
 	if err != nil {
-		t.Fatalf("marshal first overflow record: %v", err)
+		t.Fatalf("marshal: %v", err)
 	}
-	if _, err := compactRecords([]Record{first, second}, "codex", int64(len(firstData))); err == nil {
-		t.Fatal("compaction accepted a nonterminal archive larger than cap")
+	maxBytes := int64(len(oneData))*2 + 10
+	data, err := compactRecords(records, "codex", maxBytes)
+	if err != nil {
+		t.Fatalf("compactRecords: %v", err)
+	}
+	if int64(len(data)) > maxBytes {
+		t.Fatalf("compacted size %d exceeds cap %d", len(data), maxBytes)
+	}
+	out := string(data)
+	if !strings.Contains(out, "unresolved-4") || !strings.Contains(out, "unresolved-3") || strings.Contains(out, "unresolved-0") {
+		t.Fatalf("want newest two attempts kept and oldest dropped, got %s", out)
 	}
 }
 

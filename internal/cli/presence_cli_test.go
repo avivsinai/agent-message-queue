@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
@@ -68,13 +69,10 @@ func TestRunPresenceSetKeepsWakeFields(t *testing.T) {
 	if err := fsq.EnsureAgentDirs(root, "claude"); err != nil {
 		t.Fatal(err)
 	}
-	if err := presence.SetNotifierStatus(root, "claude", "input_recovery_required", "raw", "inspect the composer"); err != nil {
-		t.Fatal(err)
-	}
-	wake, err := presence.Read(root, "claude")
-	if err != nil {
-		t.Fatal(err)
-	}
+	wake := presence.New("claude", "", "", time.Now())
+	wake.NotifierStatus = "input_recovery_required"
+	wake.NotifierMode = "raw"
+	wake.NotifierReason = "inspect the composer"
 	wake.DoorbellParked = true
 	wake.DoorbellAttempts = 3
 	if err := presence.Write(root, wake); err != nil {

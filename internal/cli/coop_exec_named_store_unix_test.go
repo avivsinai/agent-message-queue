@@ -133,3 +133,32 @@ func TestCoopNamedSlashCommandStopsWhenADialogOpens(t *testing.T) {
 		t.Fatalf("err = %v, written = %q; want the command typed and no Enter after the dialog opened", err, written)
 	}
 }
+
+// One corrupt meta.json for another chat must not stop Cursor naming for this
+// cwd's chat (audit 2026-11-10).
+func TestCursorNamedStoreReaderSkipsCorruptMeta(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	good := filepath.Join(home, ".cursor", "chats", "workspace", "good", "meta.json")
+	bad := filepath.Join(home, ".cursor", "chats", "workspace", "bad", "meta.json")
+	for path, body := range map[string]string{
+		good: `{"title":"t","createdAtMs":` + strconv.FormatInt(start.UnixMilli(), 10) + `,"cwd":"` + cwd + `"}`,
+		bad:  `{"title":`,
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	candidate, err := (cursorNamedStoreReader{}).locate(cwd, start)
+	if err != nil || candidate.storePath != good {
+		t.Fatalf("locate = %#v, %v; want the valid chat", candidate, err)
+	}
+}

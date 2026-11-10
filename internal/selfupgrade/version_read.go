@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/avivsinai/agent-message-queue/internal/semver"
 )
 
 var errEmbeddedVersionUnavailable = errors.New("embedded version is unavailable")
@@ -48,7 +50,7 @@ func readEmbeddedVersionFromOpenFile(image *os.File, path string) (string, error
 	if !ok {
 		return "", fmt.Errorf("%w for %s", errEmbeddedVersionUnavailable, path)
 	}
-	if _, ok := parseSemanticVersion(version); !ok {
+	if _, ok := semver.Parse(version); !ok {
 		return "", fmt.Errorf("%w for %s", errEmbeddedVersionUnavailable, path)
 	}
 	return version, nil

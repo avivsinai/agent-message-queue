@@ -815,10 +815,21 @@ func recordDeduplicationKey(record Record) recordDedupKey {
 }
 
 type compactedAttempt struct {
-	id         string
-	records    []Record
+	id      string
+	records []Record
+	// mandatory attempts (unresolved or contradictory) are kept before optional
+	// ones, newest first, while they fit the cap.
 	mandatory  bool
 	latestTime string
+}
+
+func sortCompactedNewestFirst(attempts []compactedAttempt) {
+	sort.SliceStable(attempts, func(i, j int) bool {
+		if attempts[i].latestTime == attempts[j].latestTime {
+			return attempts[i].id < attempts[j].id
+		}
+		return attempts[i].latestTime > attempts[j].latestTime
+	})
 }
 
 func compactRecords(records []Record, agent string, maxBytes int64) ([]byte, error) {
@@ -847,37 +858,43 @@ func compactRecords(records []Record, agent string, maxBytes int64) ([]byte, err
 		}
 	}
 
+	// Mandatory attempts are kept newest first while they fit under the cap;
+	// older ones are dropped so rotation always produces a bounded file.
+	sortCompactedNewestFirst(mandatory)
+	// marshalRecords is a plain concatenation of per-record lines, so sizes add.
 	var archive []Record
+	var size int64
+	kept := 0
 	for _, attempt := range mandatory {
-		archive = append(archive, attempt.records...)
-	}
-	mandatoryData, err := marshalRecords(archive)
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(mandatoryData)) > maxBytes {
-		return nil, fmt.Errorf(
-			"notification attempt journal compaction needs %d bytes for nonterminal attempts and preserved contradictory history, cap is %d",
-			len(mandatoryData), maxBytes,
-		)
-	}
-
-	sort.SliceStable(optional, func(i, j int) bool {
-		if optional[i].latestTime == optional[j].latestTime {
-			return optional[i].id < optional[j].id
-		}
-		return optional[i].latestTime > optional[j].latestTime
-	})
-	for _, attempt := range optional {
-		candidate := append(append([]Record{}, archive...), attempt.records...)
-		candidateData, err := marshalRecords(candidate)
+		attemptData, err := marshalRecords(attempt.records)
 		if err != nil {
 			return nil, err
 		}
-		if int64(len(candidateData)) > maxBytes {
+		if size+int64(len(attemptData)) > maxBytes {
+			break
+		}
+		size += int64(len(attemptData))
+		archive = append(archive, attempt.records...)
+		kept++
+	}
+	if kept == 0 && len(mandatory) > 0 {
+		return nil, fmt.Errorf(
+			"notification attempt journal compaction: newest unresolved attempt does not fit the %d byte cap",
+			maxBytes,
+		)
+	}
+
+	sortCompactedNewestFirst(optional)
+	for _, attempt := range optional {
+		attemptData, err := marshalRecords(attempt.records)
+		if err != nil {
+			return nil, err
+		}
+		if size+int64(len(attemptData)) > maxBytes {
 			continue
 		}
-		archive = candidate
+		size += int64(len(attemptData))
+		archive = append(archive, attempt.records...)
 	}
 
 	if err := validateCompactedRecords(archive, groups, agent); err != nil {

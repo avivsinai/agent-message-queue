@@ -5,7 +5,6 @@ package fsq
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"unsafe"
@@ -147,7 +146,7 @@ func (r *DeliveryRoot) syncDirPlatform(dir string) error {
 // syncDirPlatformAmbient is the ambient-path form behind the package-level
 // SyncDir, whose callers hold no DeliveryRoot; it opens by absolute path —
 // the only form available there. No DeliveryRoot path reaches it. A missing
-// directory is not an error here, unlike the pinned form and the Unix SyncDir.
+// directory is an open error, like the pinned form and the Unix SyncDir.
 func syncDirPlatformAmbient(dir string) error {
 	namePtr, err := windows.UTF16PtrFromString(dir)
 	if err != nil {
@@ -161,9 +160,6 @@ func syncDirPlatformAmbient(dir string) error {
 		windows.FILE_FLAG_BACKUP_SEMANTICS,
 		0)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) || errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
-			return nil
-		}
 		return fmt.Errorf("open dir %s for sync: %w", dir, err)
 	}
 	return flushDirHandle(handle, dir)

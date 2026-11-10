@@ -60,7 +60,7 @@ func TestWindowsNoReplaceDLQMovePreservesCollision(t *testing.T) {
 	}
 	const filename = "windows-dlq-collision.md"
 	newPath := filepath.Join(AgentDLQNew(base, "alice"), filename)
-	curPath := filepath.Join(AgentDLQCur(base, "alice"), filename)
+	curPath := filepath.Join(AgentMailboxPath(base, "alice", MailboxDLQCur), filename)
 	if err := os.WriteFile(newPath, []byte("new envelope"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,10 @@ func TestWindowsNoReplaceDLQMovePreservesCollision(t *testing.T) {
 		}
 	}
 	t.Cleanup(func() { beforeMoveDLQNewToCurRenameForTest = oldHook })
-	err := MoveDLQNewToCur(root, "alice", filename)
+	// The move itself is under test, so the fixture need not be an envelope.
+	err := root.WithDLQEnvelopeLock("alice", filename, func(batch *DeliveryRoot) error {
+		return moveDLQNewToCurLocked(batch, "alice", filename)
+	})
 	if !errors.Is(err, os.ErrExist) {
 		t.Fatalf("DLQ no-replace move error = %T %v, want os.ErrExist", err, err)
 	}

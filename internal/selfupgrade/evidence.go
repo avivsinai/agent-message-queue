@@ -105,7 +105,7 @@ func ValidSHA256(value string) bool {
 }
 
 func CaptureImageEvidence(path, embeddedVersion string) (ImageEvidence, error) {
-	return CaptureImageEvidenceWithMutator(path, embeddedVersion, nil)
+	return captureImageEvidence(path, embeddedVersion, nil)
 }
 
 // CaptureImageEvidenceWithEmbeddedVersion reads the candidate version and
@@ -141,9 +141,9 @@ func CaptureImageEvidenceWithEmbeddedVersion(path string) (ImageEvidence, error)
 	return evidence, nil
 }
 
-// CaptureImageEvidenceWithMutator exists for race tests that mutate the file
-// between the before-hash and after-hash observations.
-func CaptureImageEvidenceWithMutator(path, embeddedVersion string, mutator func()) (ImageEvidence, error) {
+// captureImageEvidence runs mutator, when set, between the before-hash and
+// after-hash observations so in-package race tests can change the file.
+func captureImageEvidence(path, embeddedVersion string, mutator func()) (ImageEvidence, error) {
 	path = strings.TrimSpace(path)
 	file, before, err := openImageEvidenceFile(path)
 	if err != nil {
@@ -151,7 +151,7 @@ func CaptureImageEvidenceWithMutator(path, embeddedVersion string, mutator func(
 	}
 	defer func() { _ = file.Close() }()
 
-	evidence, err := CaptureImageEvidenceFromOpenFileWithMutator(
+	evidence, err := captureImageEvidenceFromOpenFile(
 		file,
 		path,
 		embeddedVersion,

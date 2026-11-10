@@ -40,7 +40,7 @@ func TestMoveToDLQ(t *testing.T) {
 	}
 
 	// Verify DLQ envelope content
-	env, body, err := ReadDLQEnvelopePath(dlqPath)
+	env, body, err := readDLQEnvelopeForTest(t, dlqPath)
 	if err != nil {
 		t.Fatalf("ReadDLQEnvelope: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestMoveCurToDLQ(t *testing.T) {
 		t.Fatalf("claimed original should be removed from inbox/cur")
 	}
 
-	env, body, err := ReadDLQEnvelopePath(dlqPath)
+	env, body, err := readDLQEnvelopeForTest(t, dlqPath)
 	if err != nil {
 		t.Fatalf("ReadDLQEnvelope: %v", err)
 	}
@@ -303,9 +303,9 @@ func TestRetryFromDLQ(t *testing.T) {
 	}
 
 	// Verify DLQ envelope moved to cur with incremented retry count
-	dlqCur := AgentDLQCur(root, "alice")
+	dlqCur := AgentMailboxPath(root, "alice", MailboxDLQCur)
 	curPath := filepath.Join(dlqCur, dlqFilename)
-	env, _, err := ReadDLQEnvelopePath(curPath)
+	env, _, err := readDLQEnvelopeForTest(t, curPath)
 	if err != nil {
 		t.Fatalf("ReadDLQEnvelope from cur: %v", err)
 	}
@@ -344,7 +344,7 @@ func TestRetryFromDLQRefusesCompletedEnvelopeAfterDeliveryIsRedLQed(t *testing.T
 	if _, statErr := os.Stat(filepath.Join(AgentInboxNew(rootPath, agent), filename)); !os.IsNotExist(statErr) {
 		t.Fatalf("late retry recreated inbox/new delivery: %v", statErr)
 	}
-	envelope, _, readErr := ReadDLQEnvelopePath(filepath.Join(AgentDLQCur(rootPath, agent), dlqFilename))
+	envelope, _, readErr := readDLQEnvelopeForTest(t, filepath.Join(AgentMailboxPath(rootPath, agent, MailboxDLQCur), dlqFilename))
 	if readErr != nil {
 		t.Fatalf("read completed retry audit: %v", readErr)
 	}
@@ -400,7 +400,7 @@ func TestRetryFromDLQRejectsTraversalOriginalFile(t *testing.T) {
 	}
 
 	dlqPath := createDLQMessage(t, root, "alice", "safe_msg.md", []byte("test content"))
-	env, body, err := ReadDLQEnvelopePath(dlqPath)
+	env, body, err := readDLQEnvelopeForTest(t, dlqPath)
 	if err != nil {
 		t.Fatalf("ReadDLQEnvelope: %v", err)
 	}
@@ -445,7 +445,7 @@ func TestRetryFromDLQMaxRetries(t *testing.T) {
 	}
 
 	// Manually set retry_count to MaxRetries
-	env, body, _ := ReadDLQEnvelopePath(dlqPath)
+	env, body, _ := readDLQEnvelopeForTest(t, dlqPath)
 	env.RetryCount = MaxRetries
 	data, _ := serializeDLQMessage(*env, body)
 	if err := os.WriteFile(dlqPath, data, 0o600); err != nil {
@@ -469,6 +469,18 @@ func TestRetryFromDLQMaxRetries(t *testing.T) {
 	}
 }
 
+// readDLQEnvelopeForTest reads the envelope at an absolute
+// <root>/agents/<agent>/dlq/<box>/<file> path through the production reader.
+func readDLQEnvelopeForTest(t *testing.T, path string) (*DLQEnvelope, []byte, error) {
+	t.Helper()
+	root := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(path)))))
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		t.Fatalf("relative DLQ path: %v", err)
+	}
+	return ReadDLQEnvelope(openDeliveryRootForTest(t, root), rel)
+}
+
 func createDLQMessage(t *testing.T, root, agent, filename string, content []byte) string {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(AgentInboxNew(root, agent), filename), content, 0o600); err != nil {
@@ -488,11 +500,7 @@ func TestFindDLQMessage(t *testing.T) {
 	}
 
 	// Create DLQ message in new
-	dlqNew := AgentDLQNew(root, "alice")
-	filename := "dlq_test.md"
-	if err := os.WriteFile(filepath.Join(dlqNew, filename), []byte("test"), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	filename := filepath.Base(createDLQMessage(t, root, "alice", "dlq_test.md", []byte("test")))
 
 	// Find in new
 	path, box, err := FindDLQMessage(openDeliveryRootForTest(t, root), "alice", filename)
@@ -506,9 +514,9 @@ func TestFindDLQMessage(t *testing.T) {
 		t.Errorf("path should end with filename")
 	}
 
-	// Move to cur
-	if err := MoveDLQNewToCur(openDeliveryRootForTest(t, root), "alice", filename); err != nil {
-		t.Fatalf("MoveDLQNewToCur: %v", err)
+	// Inspect moves new to cur
+	if _, _, _, err := InspectDLQEnvelope(openDeliveryRootForTest(t, root), "alice", filename); err != nil {
+		t.Fatalf("InspectDLQEnvelope: %v", err)
 	}
 
 	// Find in cur

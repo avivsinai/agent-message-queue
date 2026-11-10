@@ -55,8 +55,8 @@ func TestRetryFromDLQSerializesIndependentDeliveryRoots(t *testing.T) {
 		t.Fatalf("second retry error = %v, want clear already-delivered result", err)
 	}
 
-	curPath := filepath.Join(AgentDLQCur(rootPath, agent), dlqFilename)
-	env, _, err := ReadDLQEnvelopePath(curPath)
+	curPath := filepath.Join(AgentMailboxPath(rootPath, agent, MailboxDLQCur), dlqFilename)
+	env, _, err := readDLQEnvelopeForTest(t, curPath)
 	if err != nil {
 		t.Fatalf("read retry audit envelope: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestRetryFromDLQCrashRecoveryFinalizesPendingRetryWithVisibleDestination(t 
 	const filename = "resume-pending.md"
 	content := []byte("body")
 	dlqPath := createDLQMessage(t, rootPath, "alice", filename, content)
-	env, body, err := ReadDLQEnvelopePath(dlqPath)
+	env, body, err := readDLQEnvelopeForTest(t, dlqPath)
 	if err != nil {
 		t.Fatalf("read envelope: %v", err)
 	}
@@ -100,8 +100,8 @@ func TestRetryFromDLQCrashRecoveryFinalizesPendingRetryWithVisibleDestination(t 
 	if err := RetryFromDLQ(openDeliveryRootForTest(t, rootPath), "alice", filepath.Base(dlqPath), false); !errors.Is(err, ErrDLQRetryDelivered) {
 		t.Fatalf("resume pending retry = %v, want terminal delivered result", err)
 	}
-	curPath := filepath.Join(AgentDLQCur(rootPath, "alice"), filepath.Base(dlqPath))
-	resumed, _, err := ReadDLQEnvelopePath(curPath)
+	curPath := filepath.Join(AgentMailboxPath(rootPath, "alice", MailboxDLQCur), filepath.Base(dlqPath))
+	resumed, _, err := readDLQEnvelopeForTest(t, curPath)
 	if err != nil {
 		t.Fatalf("read resumed envelope: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestRetryFromDLQCrashRecoveryRefusesPendingRetryWithoutDestination(t *testi
 		t.Fatalf("EnsureAgentDirs: %v", err)
 	}
 	dlqPath := createDLQMessage(t, rootPath, agent, filename, []byte("body"))
-	env, body, err := ReadDLQEnvelopePath(dlqPath)
+	env, body, err := readDLQEnvelopeForTest(t, dlqPath)
 	if err != nil {
 		t.Fatalf("read envelope: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestRetryFromDLQCrashRecoveryRefusesPendingRetryWithoutDestination(t *testi
 	if string(after) != string(before) {
 		t.Fatal("indeterminate retry mutated its pending audit")
 	}
-	if _, statErr := os.Stat(filepath.Join(AgentDLQCur(rootPath, agent), filepath.Base(dlqPath))); !os.IsNotExist(statErr) {
+	if _, statErr := os.Stat(filepath.Join(AgentMailboxPath(rootPath, agent, MailboxDLQCur), filepath.Base(dlqPath))); !os.IsNotExist(statErr) {
 		t.Fatalf("indeterminate retry moved its envelope: %v", statErr)
 	}
 	if _, statErr := os.Stat(filepath.Join(AgentInboxNew(rootPath, agent), filename)); !os.IsNotExist(statErr) {

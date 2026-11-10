@@ -20,11 +20,25 @@ func setupTestRoot(t *testing.T) string {
 	return root
 }
 
+// emitForTest writes a receipt through a delivery root opened on rootPath.
+func emitForTest(rootPath string, r Receipt) error {
+	identity, err := fsq.SnapshotDeliveryRoot(rootPath)
+	if err != nil {
+		return err
+	}
+	root, err := fsq.OpenDeliveryRoot(rootPath, identity)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	return EmitDeliveryRoot(root, r)
+}
+
 func TestEmitAndRead(t *testing.T) {
 	root := setupTestRoot(t)
 
 	r := New("msg_001", "p2p/claude__codex", "claude", "codex", StageDrained, "")
-	if err := Emit(root, r); err != nil {
+	if err := emitForTest(root, r); err != nil {
 		t.Fatalf("Emit: %v", err)
 	}
 
@@ -48,7 +62,7 @@ func TestReadRejectsSymlink(t *testing.T) {
 	root := setupTestRoot(t)
 
 	r := New("msg_symlink", "p2p/claude__codex", "claude", "codex", StageDrained, "")
-	if err := Emit(root, r); err != nil {
+	if err := emitForTest(root, r); err != nil {
 		t.Fatalf("Emit: %v", err)
 	}
 	target := filepath.Join(root, "agents", "codex", "receipts", r.filename())
@@ -67,7 +81,7 @@ func TestEmitSelfSend(t *testing.T) {
 	root := setupTestRoot(t)
 
 	r := New("msg_002", "", "claude", "claude", StageDLQ, "")
-	if err := Emit(root, r); err != nil {
+	if err := emitForTest(root, r); err != nil {
 		t.Fatalf("Emit: %v", err)
 	}
 
@@ -93,7 +107,7 @@ func TestListFilter(t *testing.T) {
 		{"msg_012", StageDLQ},
 	} {
 		r := New(tc.msgID, "p2p/claude__codex", "claude", "codex", tc.stage, "")
-		if err := Emit(root, r); err != nil {
+		if err := emitForTest(root, r); err != nil {
 			t.Fatalf("Emit %s/%s: %v", tc.msgID, tc.stage, err)
 		}
 	}
@@ -152,7 +166,7 @@ func TestDLQReceiptDetail(t *testing.T) {
 	root := setupTestRoot(t)
 
 	r := New("msg_030", "", "claude", "codex", StageDLQ, "parse_error: invalid JSON header")
-	if err := Emit(root, r); err != nil {
+	if err := emitForTest(root, r); err != nil {
 		t.Fatalf("Emit: %v", err)
 	}
 
@@ -174,7 +188,7 @@ func TestWaitForCrossRoot(t *testing.T) {
 		defer close(done)
 		time.Sleep(100 * time.Millisecond)
 		r := New("msg_cross_root", "p2p/claude__codex", "claude", "codex", StageDrained, "")
-		_ = Emit(deliveryRoot, r)
+		_ = emitForTest(deliveryRoot, r)
 	}()
 
 	got, err := WaitFor(deliveryRoot, "msg_cross_root", "codex", StageDrained, 2*time.Second, 25*time.Millisecond)
@@ -199,7 +213,7 @@ func TestWaitForCrossRoot(t *testing.T) {
 func TestEmitReceiptMode0600(t *testing.T) {
 	root := setupTestRoot(t)
 	r := New("msg_mode", "p2p/claude__codex", "claude", "codex", StageDrained, "")
-	if err := Emit(root, r); err != nil {
+	if err := emitForTest(root, r); err != nil {
 		t.Fatalf("Emit: %v", err)
 	}
 	info, err := os.Stat(filepath.Join(root, "agents", "codex", "receipts", r.filename()))
@@ -224,7 +238,7 @@ func TestWaitForTimeoutZeroWaitsUntilReceipt(t *testing.T) {
 	case <-time.After(80 * time.Millisecond):
 	}
 	r := New("msg_zero", "p2p/claude__codex", "claude", "codex", StageDrained, "")
-	if err := Emit(root, r); err != nil {
+	if err := emitForTest(root, r); err != nil {
 		t.Fatalf("Emit: %v", err)
 	}
 	select {
@@ -243,7 +257,7 @@ func TestListFilterConsumerAndMsgIDDelimiter(t *testing.T) {
 		New("msg_01", "p2p/claude__codex", "claude", "codex", StageDrained, ""),
 		New("msg_010", "p2p/claude__codex", "claude", "codex", StageDrained, ""),
 	} {
-		if err := Emit(root, r); err != nil {
+		if err := emitForTest(root, r); err != nil {
 			t.Fatalf("Emit %s: %v", r.MsgID, err)
 		}
 	}
@@ -275,12 +289,12 @@ func TestListFilterConsumerAndMsgIDDelimiter(t *testing.T) {
 func TestListOrdersByEmittedAt(t *testing.T) {
 	root := setupTestRoot(t)
 	first := New("msg_early", "p2p/claude__codex", "claude", "codex", StageDrained, "")
-	if err := Emit(root, first); err != nil {
+	if err := emitForTest(root, first); err != nil {
 		t.Fatalf("Emit first: %v", err)
 	}
 	time.Sleep(5 * time.Millisecond)
 	second := New("msg_late", "p2p/claude__codex", "claude", "codex", StageDrained, "")
-	if err := Emit(root, second); err != nil {
+	if err := emitForTest(root, second); err != nil {
 		t.Fatalf("Emit second: %v", err)
 	}
 	got, err := List(root, "codex", ListFilter{})
