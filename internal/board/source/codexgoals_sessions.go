@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/board"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -70,6 +72,7 @@ func codexGoalSessions(ctx context.Context, env board.Env, home string, owners m
 		o := owners[id]
 		eligible[id] = codexGoalSession{Owner: o, Structural: o.Kind == board.OwnerAgent}
 	}
+	var skipped []string
 	err = filepath.WalkDir(filepath.Join(home, "sessions"), func(path string, entry fs.DirEntry, walkErr error) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -96,33 +99,20 @@ func codexGoalSessions(ctx context.Context, env board.Env, home string, owners m
 		}
 		info, err := entry.Info()
 		if err != nil {
-			return err
+			if !errors.Is(err, os.ErrNotExist) {
+				skipped = append(skipped, name)
+			}
+			return nil
 		}
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-
-		f, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		// Read only the first complete line. The rest is transcript data and
-		// is never opened by this reader's decoder.
-		line, readErr := bufio.NewReader(io.LimitReader(f, 1<<20)).ReadBytes('\n')
-		_ = f.Close()
-		if readErr != nil {
-			coverage.Unresolved++
+		fileCwd, ok := rolloutCwd(path, id, info)
+		if !ok {
+			skipped = append(skipped, name)
 			return nil
 		}
-		var meta struct {
-			Type    string                   `json:"type"`
-			Payload struct{ ID, Cwd string } `json:"payload"`
-		}
-		if json.Unmarshal(line, &meta) != nil || meta.Type != "session_meta" || meta.Payload.ID != id {
-			coverage.Unresolved++
-			return nil
-		}
-		cwd, err := filepath.EvalSymlinks(meta.Payload.Cwd)
+		cwd, err := filepath.EvalSymlinks(fileCwd)
 		if err != nil || !worktrees[cwd] {
 			return nil
 		}
@@ -130,8 +120,62 @@ func codexGoalSessions(ctx context.Context, env board.Env, home string, owners m
 		return nil
 	})
 
-	if coverage.Unresolved > 0 {
-		coverage.Detail = fmt.Sprintf("%d incomplete or unreadable session headers", coverage.Unresolved)
+	coverage.Unresolved = len(skipped)
+	if len(skipped) > 0 {
+		names := skipped
+		if len(names) > 3 {
+			names = names[:3]
+		}
+		coverage.Detail = fmt.Sprintf("%d incomplete or unreadable session headers: %s", len(skipped), strings.Join(names, ", "))
 	}
 	return eligible, coverage, err
+}
+
+// rolloutMemo keeps the working directory of a rollout header, keyed by path
+// and validated by size and mtime, so an unchanged transcript is not opened
+// again on the next read.
+var rolloutMemo = struct {
+	sync.Mutex
+	m map[string]rolloutMemoEntry
+}{m: map[string]rolloutMemoEntry{}}
+
+type rolloutMemoEntry struct {
+	size int64
+	mod  time.Time
+	cwd  string
+}
+
+// rolloutCwd reads only the first complete line of a rollout; the rest is
+// transcript data. It reports false for a header that is unreadable or does
+// not name id.
+func rolloutCwd(path, id string, info fs.FileInfo) (string, bool) {
+	rolloutMemo.Lock()
+	hit, ok := rolloutMemo.m[path]
+	rolloutMemo.Unlock()
+	if ok && hit.size == info.Size() && hit.mod.Equal(info.ModTime()) {
+		return hit.cwd, true
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	line, readErr := bufio.NewReader(io.LimitReader(f, 1<<20)).ReadBytes('\n')
+	_ = f.Close()
+	if readErr != nil {
+		return "", false
+	}
+	var meta struct {
+		Type    string                   `json:"type"`
+		Payload struct{ ID, Cwd string } `json:"payload"`
+	}
+	if json.Unmarshal(line, &meta) != nil || meta.Type != "session_meta" || meta.Payload.ID != id {
+		return "", false
+	}
+	rolloutMemo.Lock()
+	if len(rolloutMemo.m) >= 8192 {
+		clear(rolloutMemo.m)
+	}
+	rolloutMemo.m[path] = rolloutMemoEntry{size: info.Size(), mod: info.ModTime(), cwd: meta.Payload.Cwd}
+	rolloutMemo.Unlock()
+	return meta.Payload.Cwd, true
 }

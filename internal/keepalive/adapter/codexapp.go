@@ -124,6 +124,9 @@ func (c CodexApp) Probe(ctx context.Context, target string) error {
 // argument. There is no System Events/keystroke/clipboard/activate, and
 // crucially no submit — this seat never sends Enter.
 //
+// The app must already be running: a deep-link to a stopped app would start
+// it, so Inject refuses with a one-line reason instead.
+//
 // Identity is revalidated before the write: `open` is scheme-bound, not
 // identity-bound (it dispatches to whatever app owns codex:// at call time),
 // so Probe runs here, not only at Discover/registration. On any identity
@@ -137,6 +140,9 @@ func (c CodexApp) Inject(ctx context.Context, target string, payload string) err
 		return err
 	}
 	if err := c.Probe(ctx, normalized); err != nil {
+		return fmt.Errorf("inject Codex app: %w", err)
+	}
+	if err := requireAppRunning(ctx, c.runner(), codexAppBundleID, "Codex app"); err != nil {
 		return fmt.Errorf("inject Codex app: %w", err)
 	}
 	u := url.URL{Scheme: "codex", Host: "threads"}

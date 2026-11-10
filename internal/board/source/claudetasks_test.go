@@ -159,3 +159,13 @@ func checkClaudeAggregateBudget(t *testing.T, env board.Env) {
 		t.Fatal("acquisition bound did not preserve per-scope completeness")
 	}
 }
+
+type claudePermRunner func([]string) ([]byte, error)
+
+func (r claudePermRunner) Run(_ context.Context, _ string, argv []string) ([]byte, error) {
+	return r(argv)
+}
+
+func (r claudePermRunner) RunLimited(_ context.Context, _ string, argv []string, _ int) ([]byte, error) {
+	return r(argv)
+}

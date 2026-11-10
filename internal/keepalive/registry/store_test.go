@@ -145,8 +145,9 @@ func TestStoreRejectsSecondOwnerForSameAdapterTarget(t *testing.T) {
 	if !errors.Is(err, ErrTargetOwned) {
 		t.Fatalf("Upsert(second) error = %v, want ErrTargetOwned", err)
 	}
+	firstRoot, _ := CanonicalRoot("/tmp/first")
 	loaded, loadErr := store.Load()
-	if loadErr != nil || len(loaded.Entries) != 1 || loaded.Entries[0].Root != "/tmp/first" {
+	if loadErr != nil || len(loaded.Entries) != 1 || loaded.Entries[0].Root != firstRoot {
 		t.Fatalf("registry changed after collision: entries=%#v err=%v", loaded.Entries, loadErr)
 	}
 }
@@ -237,7 +238,7 @@ func TestStoreUpsertRewritesEquivalentLegacyRootAlias(t *testing.T) {
 		State:   StateActive,
 	}
 	store := New(filepath.Join(dir, "registry.json"))
-	if err := store.Save(File{Entries: []Entry{legacy}}); err != nil {
+	if err := saveForTest(store, File{Entries: []Entry{legacy}}); err != nil {
 		t.Fatalf("Save legacy entry: %v", err)
 	}
 	rewritten, err := store.Upsert(Entry{Root: realRoot, Agent: "codex", Adapter: "file", Target: target})
@@ -257,7 +258,7 @@ func TestStoreRejectsCanonicalCmuxTargetOwnedByLegacyLowercaseRow(t *testing.T) 
 		ID: EntryID("/tmp/first", "codex", "cmux", lower), Root: "/tmp/first", Agent: "codex",
 		Adapter: "cmux", Target: lower, State: StateActive,
 	}
-	if err := store.Save(File{SchemaVersion: SchemaVersion, Entries: []Entry{legacy}}); err != nil {
+	if err := saveForTest(store, File{SchemaVersion: SchemaVersion, Entries: []Entry{legacy}}); err != nil {
 		t.Fatalf("Save legacy row: %v", err)
 	}
 	upper := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
@@ -277,7 +278,7 @@ func TestStoreRejectsCanonicalGhosttyTargetOwnedByLegacyLowercaseRow(t *testing.
 		ID: EntryID("/tmp/first", "codex", "ghostty", "ghostty:terminal:terminal-1"), Root: "/tmp/first", Agent: "codex",
 		Adapter: "ghostty", Target: "ghostty:terminal:terminal-1", State: StateActive,
 	}
-	if err := store.Save(File{Entries: []Entry{legacy}}); err != nil {
+	if err := saveForTest(store, File{Entries: []Entry{legacy}}); err != nil {
 		t.Fatalf("Save legacy row: %v", err)
 	}
 	_, err := store.Upsert(Entry{Root: "/tmp/second", Agent: "claude", Adapter: "ghostty", Target: "ghostty:terminal:TERMINAL-1"})
@@ -308,7 +309,7 @@ func TestStoreRejectsFileTargetOwnedByLegacySymlinkAlias(t *testing.T) {
 		Adapter: "file", Target: filepath.Join(aliasParent, "inbox.txt"), State: StateActive,
 	}
 	store := New(filepath.Join(dir, "registry.json"))
-	if err := store.Save(File{Entries: []Entry{legacy}}); err != nil {
+	if err := saveForTest(store, File{Entries: []Entry{legacy}}); err != nil {
 		t.Fatalf("Save legacy row: %v", err)
 	}
 	_, err := store.Upsert(Entry{
@@ -473,7 +474,7 @@ func TestStoreReplaceSessionAdapterRemovesAllEntriesForRootAndAgent(t *testing.T
 		t.Fatalf("Load legacy registry: %v", err)
 	}
 	legacy.Entries = append(legacy.Entries, replaceDifferentAdapter)
-	if err := store.Save(legacy); err != nil {
+	if err := saveForTest(store, legacy); err != nil {
 		t.Fatalf("Save legacy duplicate registration: %v", err)
 	}
 
@@ -658,7 +659,7 @@ func TestStoreSaveReportsRenameFailure(t *testing.T) {
 	if err := os.Mkdir(path, 0o700); err != nil {
 		t.Fatalf("Mkdir registry destination: %v", err)
 	}
-	if err := New(path).Save(File{}); err == nil {
+	if err := saveForTest(New(path), File{}); err == nil {
 		t.Fatal("Save error = nil, want rename failure for directory destination")
 	}
 }
@@ -670,7 +671,7 @@ func TestStoreSaveReportsCommittedDurabilityError(t *testing.T) {
 		return &CommittedDurabilityError{Path: path, Err: errors.New("sync failed")}
 	}
 	path := registryTestPath(t)
-	err := New(path).Save(File{})
+	err := saveForTest(New(path), File{})
 	var committed *CommittedDurabilityError
 	if !errors.As(err, &committed) || committed.Path != path {
 		t.Fatalf("Save error = %T %v, want CommittedDurabilityError for %q", err, err, path)
@@ -709,7 +710,7 @@ func TestStoreSaveWrapsPostRenameChmodAndSyncFailures(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			test.setup()
 			path := registryTestPath(t)
-			err := New(path).Save(File{})
+			err := saveForTest(New(path), File{})
 			var committed *CommittedDurabilityError
 			if !errors.As(err, &committed) || committed.Path != path {
 				t.Fatalf("Save error = %T %v, want committed durability error for %q", err, err, path)
@@ -940,4 +941,10 @@ func TestDefaultPathKeepsLegacyHomeElseAMQHome(t *testing.T) {
 			}
 		})
 	}
+}
+
+// saveForTest writes file as the registry content, the way a store holding
+// earlier-version rows would have.
+func saveForTest(s *Store, file File) error {
+	return s.withLock(func() error { return s.saveUnlocked(file) })
 }

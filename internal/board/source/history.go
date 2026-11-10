@@ -18,8 +18,11 @@ import (
 // A missing export is a coverage gap, including commands that warned but
 // returned success. Nothing here consumes mail or infers task identity.
 // Message ids that pruned reports are pruned history and are not exported;
-// a nil pruned exports all history.
-func ReadHistory(ctx context.Context, env board.Env, base string, pruned func(id string) bool) (board.Result, []board.Message, [][]byte) {
+// a nil pruned exports all history. A message that held returns is already
+// published with its immutable content: it is carried with the currently
+// enumerated copies and not exported again, so each pass spends its bounds on
+// messages the snapshot lacks and every thread is reached in finite passes.
+func ReadHistory(ctx context.Context, env board.Env, base string, pruned func(id string) bool, held func(id string) (board.Message, bool)) (board.Result, []board.Message, [][]byte) {
 	ctx, cancel := context.WithTimeout(ctx, board.SourceTimeout)
 	defer cancel()
 	result := board.Result{Status: board.StatusOK, ObservedAt: env.Now(), Feeds: []board.Column{board.ColumnRequests}}
@@ -93,19 +96,56 @@ func ReadHistory(ctx context.Context, env board.Env, base string, pruned func(id
 			}
 		}
 	}
+	heldIDs := map[string]bool{}
+	if held != nil {
+		for id, copies := range copyFacts {
+			if message, ok := held(id); ok {
+				message.Copies = copies
+				messagesByID[id] = message
+				heldIDs[id] = true
+			}
+		}
+	}
+	needsExport := func(record int) bool {
+		for _, root := range index.Threads[record].Roots {
+			for _, id := range root.MessageIDs {
+				if !heldIDs[id] {
+					return true
+				}
+			}
+		}
+		return false
+	}
 	used := len(raw)
+	exporting := 0
 acquire:
 	for n, record := range index.Threads {
-		if n >= 1000 || used >= 64<<20 {
-			result.Coverage.Truncated += len(index.Threads) - n
+		if !needsExport(n) {
+			continue
+		}
+		if exporting >= 1000 || used >= 64<<20 {
+			for m := n; m < len(index.Threads); m++ {
+				if needsExport(m) {
+					result.Coverage.Truncated++
+				}
+			}
 			gap("history acquisition bound reached")
 			break
 		}
+		exporting++
 		for _, root := range record.Roots {
 			expected := map[string]bool{}
+			var unheld []string
 			for _, id := range root.MessageIDs {
-				expected[id] = true
+				if !heldIDs[id] {
+					expected[id] = true
+					unheld = append(unheld, id)
+				}
 			}
+			if len(root.MessageIDs) > 0 && len(unheld) == 0 {
+				continue
+			}
+			root.MessageIDs = unheld
 			seen := map[string]bool{}
 			if len(expected) == 0 {
 				gap("history root has no enumerated message identities")

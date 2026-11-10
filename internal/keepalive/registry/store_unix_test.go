@@ -251,3 +251,32 @@ func writeRawRegistry(t *testing.T, path string, entries []Entry) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 }
+
+// A root registered before it exists keeps the same identity once it exists
+// behind a symlinked ancestor (audit 2026-11-10).
+func TestCanonicalRootOfMissingRootResolvesSymlinkedAncestor(t *testing.T) {
+	base := t.TempDir()
+	realDir := filepath.Join(base, "real")
+	if err := os.Mkdir(realDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	linkDir := filepath.Join(base, "link")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(linkDir, "amq", "root")
+	before, err := CanonicalRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	after, err := CanonicalRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Fatalf("identity changed when the root was created: %q -> %q", before, after)
+	}
+}

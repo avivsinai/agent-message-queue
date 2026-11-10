@@ -47,23 +47,24 @@ func TestClaudeDesktopInjectPrefillsOnlyWithEscapedURL(t *testing.T) {
 	// call is the prefill open.
 	runner := &fakeCommandRunner{results: []fakeCommandResult{
 		{output: []byte(claudeDesktopBundleID + "\n")},
+		{output: []byte("ASN:0x0-0x1: \n")},
 		{},
 	}}
 	payload := "hello world & q=x"
 	if err := (ClaudeDesktop{Runner: runner}).Inject(context.Background(), claudeDesktopTarget, payload); err != nil {
 		t.Fatalf("Inject() error = %v", err)
 	}
-	// Prefill-only: exactly two runner calls (probe + open), no submit step.
-	if len(runner.calls) != 2 {
-		t.Fatalf("calls = %d, want probe + open (no submit)", len(runner.calls))
+	// Prefill-only: probe, running check, open; no submit step.
+	if len(runner.calls) != 3 {
+		t.Fatalf("calls = %d, want probe + running check + open (no submit)", len(runner.calls))
 	}
 	probeCall := runner.calls[0]
 	if probeCall.name != "swift" {
 		t.Fatalf("first call = %q, want swift scheme-handler probe", probeCall.name)
 	}
-	call := runner.calls[1]
+	call := runner.calls[2]
 	if call.name != "open" {
-		t.Fatalf("second call = %q, want open", call.name)
+		t.Fatalf("third call = %q, want open", call.name)
 	}
 	if len(call.args) != 1 {
 		t.Fatalf("open args = %#v, want a single URL argument", call.args)
@@ -136,21 +137,22 @@ func TestCodexAppInjectPrefillsOnlyWithEscapedURL(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			runner := &fakeCommandRunner{results: []fakeCommandResult{
 				{output: []byte(codexAppBundleID + "\n")},
+				{output: []byte("ASN:0x0-0x1: \n")},
 				{},
 			}}
 			payload := "hello world & q=x"
 			if err := (CodexApp{Runner: runner}).Inject(context.Background(), tc.target, payload); err != nil {
 				t.Fatalf("Inject() error = %v", err)
 			}
-			if len(runner.calls) != 2 {
-				t.Fatalf("calls = %d, want probe + open (no submit)", len(runner.calls))
+			if len(runner.calls) != 3 {
+				t.Fatalf("calls = %d, want probe + running check + open (no submit)", len(runner.calls))
 			}
 			if runner.calls[0].name != "swift" {
 				t.Fatalf("first call = %q, want swift scheme-handler probe", runner.calls[0].name)
 			}
-			openCall := runner.calls[1]
+			openCall := runner.calls[2]
 			if openCall.name != "open" {
-				t.Fatalf("second call = %q, want open", openCall.name)
+				t.Fatalf("third call = %q, want open", openCall.name)
 			}
 			if len(openCall.args) != 1 || openCall.args[0] != tc.wantURL {
 				t.Fatalf("open args = %#v, want single URL %q", openCall.args, tc.wantURL)
@@ -215,5 +217,36 @@ func TestDefaultRegistryRegistersCodexAppBehindCapabilityGate(t *testing.T) {
 	// The thread target DOES satisfy an existing-exact+prefill+RH-tolerant min.
 	if !threadCap.Satisfies(Capability{Delivery: DeliveryPrefilled, Session: SessionExistingExact, RequiresHuman: true}) {
 		t.Fatal("codex-app:thread does not satisfy the existing-exact+prefill+requires-human minimum")
+	}
+}
+
+// A deep-link seat refuses when its app is not running instead of letting
+// `open` start it (audit 2026-11-10).
+func TestDeepLinkSeatsRefuseWhenAppIsNotRunning(t *testing.T) {
+	skipNonDarwin(t)
+	for _, tc := range []struct {
+		name   string
+		bundle string
+		inject func(CommandRunner) error
+	}{
+		{"codex", codexAppBundleID, func(r CommandRunner) error {
+			return (CodexApp{Runner: r}).Inject(context.Background(), codexAppTargetNew, "p")
+		}},
+		{"claude", claudeDesktopBundleID, func(r CommandRunner) error {
+			return (ClaudeDesktop{Runner: r}).Inject(context.Background(), claudeDesktopTarget, "p")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &fakeCommandRunner{results: []fakeCommandResult{{output: []byte(tc.bundle + "\n")}, {}}}
+			err := tc.inject(runner)
+			if err == nil || !strings.Contains(err.Error(), "not running") {
+				t.Fatalf("Inject() error = %v, want a not-running refusal", err)
+			}
+			for _, c := range runner.calls {
+				if c.name == "open" {
+					t.Fatalf("Inject opened the app: %#v", c)
+				}
+			}
+		})
 	}
 }

@@ -67,20 +67,20 @@ func TestLiveReloadsConfigAndKeepsLastGoodOnRefusedEdit(t *testing.T) {
 
 	write(`{"liveness_window": "30m"}`)
 	l.Refresh(ctx, false)
-	if got := liveness(l.Model()); got != "quiet" {
+	if got := liveness(l.model); got != "quiet" {
 		t.Fatalf("30m window: alpha is %s, want quiet", got)
 	}
 
 	write(`{"liveness_window": "1h"}`)
 	l.Refresh(ctx, false)
-	if got := liveness(l.Model()); got != "recent" {
+	if got := liveness(l.model); got != "recent" {
 		t.Fatalf("after the edit to 1h: alpha is %s, want recent", got)
 	}
 
 	write(`{"liveness_window": "1h",`)
 	l.Refresh(ctx, false)
 	l.Refresh(ctx, false)
-	if got := liveness(l.Model()); got != "recent" {
+	if got := liveness(l.model); got != "recent" {
 		t.Fatalf("after a refused edit: alpha is %s, want recent (the last good 1h, not the 30m default)", got)
 	}
 	refused := 0
@@ -139,7 +139,7 @@ func TestLiveRoutesNeedTheToken(t *testing.T) {
 	}
 	// Native-pane acceptance found the full export above 4 MiB. The cached
 	// route and CLI encoder share a thin DTO and never include retained evidence.
-	want, err := PaneJSON(l.Model())
+	want, err := PaneJSON(l.model)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,5 +212,19 @@ func TestLivePressedRefreshEndsWithTheView(t *testing.T) {
 	l.Wait()
 	if !cancelled {
 		t.Fatal("the pressed refresh did not see the view end")
+	}
+}
+
+// The live page reads the publication error from pane.json, so a degraded
+// source carries its detail there (audit 2026-11-10).
+func TestPaneCarriesDegradedSourceDetail(t *testing.T) {
+	sources := []SourceView{}
+	for i := 0; i < 40; i++ {
+		sources = append(sources, SourceView{Name: "ok", Status: StatusOK, Detail: "fine"})
+	}
+	sources = append(sources, SourceView{Name: "board-state", Status: StatusDegraded, Detail: "publication failed"})
+	pane := ProjectPane(Model{Sources: sources})
+	if len(pane.Sources) != paneSourceLimit || pane.Sources[0].Name != "board-state" || pane.Sources[0].Detail != "publication failed" || pane.Sources[1].Detail != "" {
+		t.Fatalf("sources %+v", pane.Sources)
 	}
 }
