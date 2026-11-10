@@ -63,9 +63,9 @@ type LaunchJournal struct {
 	JoinDeltas       []JoinDelta            `json:"join_deltas,omitempty"`
 	// JoinKept lists, sorted, the seats a join left untouched; a replay never
 	// rewrites their conversation record or execution ticket.
-	JoinKept         []string               `json:"join_kept,omitempty"`
-	Placement        PlacementPreview       `json:"placement,omitempty"`
-	CallerContext    map[string]string      `json:"caller_context,omitempty"`
+	JoinKept      []string          `json:"join_kept,omitempty"`
+	Placement     PlacementPreview  `json:"placement,omitempty"`
+	CallerContext map[string]string `json:"caller_context,omitempty"`
 	// CandidateBinding is an immutable backend marker for an exact resource
 	// discovered before reconciliation can publish the created phase.
 	CandidateBinding *BindingRecord `json:"candidate_binding,omitempty"`
