@@ -173,7 +173,7 @@ func TestSecondRequestToABusyHandleIsDeliveredNotRejected(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	store, err := requests.Open(t.TempDir(), requests.WithClock(now))
+	store, err := requests.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

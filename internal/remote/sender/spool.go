@@ -153,11 +153,6 @@ type Spool struct {
 // Option configures Open.
 type Option func(*Spool)
 
-// WithClock injects the clock used for timestamps. Tests pass a fixed clock.
-func WithClock(now func() time.Time) Option {
-	return func(s *Spool) { s.now = now }
-}
-
 var (
 	hostSegmentRe = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
 	uuidRe        = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)

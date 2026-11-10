@@ -109,7 +109,7 @@ func newHarness(t *testing.T, c *corpusFile, boundary string) *harness {
 }
 
 func (h *harness) open() {
-	store, err := requests.Open(h.dir, requests.WithClock(func() time.Time { return h.clock }))
+	store, err := requests.Open(h.dir)
 	if err != nil {
 		h.t.Fatalf("open store: %v", err)
 	}

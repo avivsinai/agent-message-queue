@@ -21,7 +21,7 @@ func TestCloseCannotReleaseOwnershipBeforeSettlementWrite(t *testing.T) {
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
 	defer unblock()
-	old, err := Open(dir, WithClock(func() time.Time {
+	old, err := Open(dir, withClock(func() time.Time {
 		if armed.CompareAndSwap(true, false) {
 			close(entered)
 			<-release

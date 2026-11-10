@@ -20,7 +20,7 @@ func TestCaseAliasKeysDoNotShareARecord(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "PROBE")); err != nil {
 		t.Skip("filesystem is case-sensitive; keys cannot alias")
 	}
-	s, err := Open(dir, WithClock(fixedClock))
+	s, err := Open(dir, withClock(fixedClock))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -17,7 +17,7 @@ import (
 func openStore(t *testing.T) (*requests.Store, func() time.Time) {
 	clk := time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC)
 	now := func() time.Time { return clk }
-	store, err := requests.Open(t.TempDir(), requests.WithClock(now))
+	store, err := requests.Open(t.TempDir())
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

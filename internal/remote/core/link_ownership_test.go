@@ -47,7 +47,7 @@ func (c *linkClock) advance(d time.Duration) { c.mu.Lock(); c.t = c.t.Add(d); c.
 func newLinkEndpoint(t *testing.T, atts ...core.Attachment) (*core.Endpoint, *requests.Store, *linkClock) {
 	t.Helper()
 	clk := &linkClock{t: time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC)}
-	store, err := requests.Open(t.TempDir(), requests.WithClock(clk.now))
+	store, err := requests.Open(t.TempDir())
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

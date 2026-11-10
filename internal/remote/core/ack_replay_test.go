@@ -26,7 +26,7 @@ func TestCrashAfterTerminalCommitReplaysAck(t *testing.T) {
 	dir := t.TempDir()
 	clk := time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC)
 	now := func() time.Time { return clk }
-	store, err := requests.Open(dir, requests.WithClock(now))
+	store, err := requests.Open(dir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestCrashAfterTerminalCommitReplaysAck(t *testing.T) {
 	if err := ep.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	store2, err := requests.Open(dir, requests.WithClock(now))
+	store2, err := requests.Open(dir)
 	if err != nil {
 		t.Fatalf("reopen store: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestCrashAfterAckDeliveredConvergesWithoutRelookup(t *testing.T) {
 	dir := t.TempDir()
 	clk := time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC)
 	now := func() time.Time { return clk }
-	store, err := requests.Open(dir, requests.WithClock(now))
+	store, err := requests.Open(dir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestCrashAfterAckDeliveredConvergesWithoutRelookup(t *testing.T) {
 	if err := ep.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	store2, err := requests.Open(dir, requests.WithClock(now))
+	store2, err := requests.Open(dir)
 	if err != nil {
 		t.Fatalf("reopen store: %v", err)
 	}
@@ -355,7 +355,7 @@ func TestPreUpgradeRecordConvergesOnHistoryShape(t *testing.T) {
 	dir := t.TempDir()
 	clk := time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC)
 	now := func() time.Time { return clk }
-	store, err := requests.Open(dir, requests.WithClock(now))
+	store, err := requests.Open(dir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -412,7 +412,7 @@ func TestPreUpgradeRecordConvergesOnHistoryShape(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	store2, err := requests.Open(dir, requests.WithClock(now))
+	store2, err := requests.Open(dir)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}

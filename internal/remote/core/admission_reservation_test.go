@@ -118,7 +118,7 @@ func TestReservationRefusesSecondConcurrentDispatch(t *testing.T) {
 // counted no room for its result and admitted other work into that room.
 func TestBusyRetryTakesTheStoreReservation(t *testing.T) {
 	now := func() time.Time { return time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC) }
-	store, err := requests.Open(t.TempDir(), requests.WithClock(now),
+	store, err := requests.Open(t.TempDir(),
 		requests.WithMaxStoreBytes(protocol.MaxRecordBytes+protocol.MaxRecordBytes/2))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -165,7 +165,7 @@ func TestBusyRetryTakesTheStoreReservation(t *testing.T) {
 // Regression: bead agent-message-queue-39v (review of the B4 fix).
 func TestFailedDispatchingWriteKeepsTheReservation(t *testing.T) {
 	now := func() time.Time { return time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC) }
-	store, err := requests.Open(t.TempDir(), requests.WithClock(now),
+	store, err := requests.Open(t.TempDir(),
 		requests.WithMaxStoreBytes(protocol.MaxRecordBytes+protocol.MaxRecordBytes/2))
 	if err != nil {
 		t.Fatalf("open store: %v", err)

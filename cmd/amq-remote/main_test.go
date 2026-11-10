@@ -922,7 +922,7 @@ func TestSenderB7ReapWithoutDrain(t *testing.T) {
 func TestSenderB7FailedReaped(t *testing.T) {
 	now := time.Now()
 	dir := t.TempDir()
-	spool, err := sender.Open(dir, sender.WithClock(func() time.Time { return now }))
+	spool, err := sender.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1206,10 +1206,8 @@ func TestBK4ServeWiringCompactionNonVacuous(t *testing.T) {
 	stateDir := filepath.Join(root, "extensions", "remote")
 
 	// --- Seed one settled old record eligible for compaction ---
-	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	seedStore, err := requests.Open(stateDir,
 		requests.WithMaxStoreBytes(protocol.DefaultMaxStoreBytes),
-		requests.WithClock(func() time.Time { return now }),
 	)
 	if err != nil {
 		t.Fatalf("seed open: %v", err)

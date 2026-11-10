@@ -207,11 +207,6 @@ type Store struct {
 // Option configures Open.
 type Option func(*Store)
 
-// WithClock injects the clock used for UpdatedAt. Tests pass a fixed clock.
-func WithClock(now func() time.Time) Option {
-	return func(s *Store) { s.now = now }
-}
-
 // WithMaxStoreBytes sets the aggregate quota across every record in this
 // store. Zero disables the aggregate quota. Production sets
 // protocol.DefaultMaxStoreBytes; tests shrink it. The quota is enforced on

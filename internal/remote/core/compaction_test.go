@@ -44,7 +44,7 @@ func rejectedRecord(t *testing.T, store *requests.Store, id string, tombstone bo
 // after them was ever compacted and the store grew without bound.
 func TestCompactBudgetCountsCompactedNotScanned(t *testing.T) {
 	clk := time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC)
-	store, err := requests.Open(t.TempDir(), requests.WithClock(func() time.Time { return clk }))
+	store, err := requests.Open(t.TempDir())
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestCompactDoesNotRepublishTombstone(t *testing.T) {
 	clk := time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC)
 	var pubMu sync.Mutex
 	var published []protocol.Snapshot
-	epStore, err := requests.Open(dir, requests.WithClock(func() time.Time { return clk }))
+	epStore, err := requests.Open(dir)
 	if err != nil {
 		t.Fatalf("open ep store: %v", err)
 	}
