@@ -104,12 +104,10 @@ type Carrier struct {
 	Warn func(error)
 }
 
-// claimedEntry pairs a cur filename with its message ID for steady-state
-// reconciliation: the filename locates the cur entry, the message ID locates
-// the receipt (a stat, not a file read).
+// claimedEntry locates a claimed command's cur entry for steady-state
+// reconciliation.
 type claimedEntry struct {
 	filename string // cur entry name (same as the new filename)
-	msgID    string // message header ID, for the receipt filename
 }
 
 // ReplyRouter resolves where a cross-project caller's reply must be written.
@@ -503,37 +501,19 @@ func (c *Carrier) clearCurFailure(name string) {
 }
 
 // recoverClaimed reconciles only the cur entries this process claimed during
-// this run (steady state). For each, it stats the receipt by message ID — a
-// filesystem stat, not a message-file read. If the receipt exists, the claim
-// completed and the entry is dropped from the pending set. If not, the entry
-// is recovered via recoverOne (the crash gap: we claimed but the receipt
-// never landed, likely because of an error between MoveNewToCur and
-// EmitDeliveryRoot in THIS process).
+// this run (steady state). Each entry is recovered via recoverOne, which
+// emits a missing drained receipt and re-sends the idempotent reply when the
+// claim's receipt or reply did not land (an error between MoveNewToCur and
+// the reply in THIS process). An entry leaves the pending set only when
+// recoverOne succeeds.
 func (c *Carrier) recoverClaimed(root *fsq.DeliveryRoot, claimed map[string]claimedEntry) error {
 	curDir := filepath.Join("agents", c.me, "inbox", "cur")
 	var errs []error
 	for id, entry := range claimed {
-		receiptPath := filepath.Join("agents", c.me, "receipts", fmt.Sprintf("%s__%s__%s.json", entry.msgID, c.me, receipt.StageDrained))
-		if _, err := receipt.ReadDeliveryRoot(root, receiptPath); err == nil {
-			// Receipt exists, but the reply may not have been delivered.
-			// recoverOne writes the receipt BEFORE sending the reply, so a
-			// receipt-only state means the reply was lost. Re-run recoverOne
-			// to re-send the idempotent recovery reply. Only delete from the
-			// pending set when recoverOne succeeds (receipt + reply both done).
-			if err := c.recoverOne(root, curDir, entry.filename); err != nil {
-				errs = append(errs, fmt.Errorf("%s: %w", entry.filename, err))
-				continue
-			}
-			c.mu.Lock()
-			delete(c.claimedThisRun, id)
-			c.mu.Unlock()
-			continue
-		}
 		if err := c.recoverOne(root, curDir, entry.filename); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", entry.filename, err))
 			continue
 		}
-		// recoverOne emitted the receipt (or confirmed it); drop from the set.
 		c.mu.Lock()
 		delete(c.claimedThisRun, id)
 		c.mu.Unlock()
@@ -744,7 +724,13 @@ func (c *Carrier) recoverOne(root *fsq.DeliveryRoot, curDir, name string) error 
 			// Nothing to say is not an answer; never send a null body.
 			return nil
 		}
-		if err := c.replyWithRecovery(root, origin, "remote reply", body, nil, msg.Header.ID, msg.Header.Created); err != nil {
+		// A reconstructed refusal travels as a refusal, never as a
+		// success-shaped body.
+		var refusal error
+		if r, ok := body.(error); ok {
+			body, refusal = nil, r
+		}
+		if err := c.replyWithRecovery(root, origin, "remote reply", body, refusal, msg.Header.ID, msg.Header.Created); err != nil {
 			return err
 		}
 	}
@@ -889,8 +875,9 @@ func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) (bool, error) {
 	if !typed {
 		// The endpoint could not say whether a record exists. Leave the
 		// message in new so the next import retries it; never drain a
-		// command whose record may not exist.
-		return false, nil
+		// command whose record may not exist. The error goes to the caller
+		// so a command that keeps failing is visible.
+		return false, fmt.Errorf("handle: %w", herr)
 	}
 	// A typed Refusal is not automatically a DURABLE one. The store refuses
 	// with storage_full (ENOSPC, EPERM, oversize) and store_closed (shutdown),
@@ -942,7 +929,7 @@ func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) (bool, error) {
 	if c.claimedThisRun == nil {
 		c.claimedThisRun = map[string]claimedEntry{}
 	}
-	c.claimedThisRun[msg.Header.ID] = claimedEntry{filename: name, msgID: msg.Header.ID}
+	c.claimedThisRun[msg.Header.ID] = claimedEntry{filename: name}
 	c.mu.Unlock()
 	rc := receipt.New(msg.Header.ID, msg.Header.Thread, msg.Header.From, c.me, receipt.StageDrained, detail)
 	if err := receipt.EmitDeliveryRoot(root, rc); err != nil {
@@ -1294,7 +1281,8 @@ func (c *Carrier) replyWithRecovery(root *fsq.DeliveryRoot, origin map[string]st
 }
 
 // transientRefusal reports whether a refusal describes the STORE's inability
-// to persist rather than a decision about the request. Such a command must
+// to persist, or an endpoint that is shutting down, rather than a decision
+// about the request. Such a command must
 // stay in inbox/new: it has no durable record, and claiming it would consume
 // the caller's request with neither an outcome nor a retry. The code can
 // arrive either as a Refusal error (most ops) or as a Reply Outcome
@@ -1302,7 +1290,7 @@ func (c *Carrier) replyWithRecovery(root *fsq.DeliveryRoot, origin map[string]st
 func transientRefusal(refusal *protocol.Refusal, outcome protocol.Code) bool {
 	for _, code := range []protocol.Code{outcome, refusalCode(refusal)} {
 		switch code {
-		case protocol.CodeStorageFull, protocol.CodeStoreClosed:
+		case protocol.CodeStorageFull, protocol.CodeStoreClosed, protocol.CodeDraining:
 			return true
 		}
 	}

@@ -306,6 +306,17 @@ func MirrorHandler(ep *core.Endpoint) ipc.ActivityHandler {
 			_, err := ep.Wait(wctx, req.RequestRef)
 			settled <- err
 		}()
+		// finish stops observing, applies what is queued, and sends what the
+		// coalesce window still holds.
+		finish := func() error {
+			stop()
+			for len(items) > 0 {
+				if err := (<-items)(); err != nil {
+					return err
+				}
+			}
+			return m.Flush()
+		}
 		tick := time.NewTicker(coalesceWindow)
 		defer tick.Stop()
 		var grace <-chan time.Time
@@ -319,7 +330,7 @@ func MirrorHandler(ep *core.Endpoint) ipc.ActivityHandler {
 				}
 			case now := <-tick.C:
 				if ep.NativeSessionID(target) != native {
-					return nil
+					return finish()
 				}
 				if err := m.Tick(now); err != nil {
 					return err
@@ -331,13 +342,7 @@ func MirrorHandler(ep *core.Endpoint) ipc.ActivityHandler {
 				settled = nil
 				grace = time.After(mirrorGrace)
 			case <-grace:
-				stop()
-				for len(items) > 0 {
-					if err := (<-items)(); err != nil {
-						return err
-					}
-				}
-				return m.Flush()
+				return finish()
 			}
 		}
 	}

@@ -110,11 +110,11 @@ type Record struct {
 	AckDigest string `json:"ack_digest,omitempty"`
 
 	// Acknowledged records that the native AcknowledgeResult call for this
-	// record DELIVERED (returned without error), written AFTER the call —
-	// the durable half of ack replay convergence. AckDigest alone means
-	// "intent memoed"; Acknowledged means "delivered". Bookkeeping-only,
-	// written in place with no revision bump (mirrors PublishedRevision),
-	// so replayTerminalAck short-circuits already-acked terminal records
+	// record RETURNED, written AFTER the call — the durable half of ack
+	// replay convergence. AckDigest alone means "intent memoed";
+	// Acknowledged means "returned" (the call has no error to prove
+	// delivery). Bookkeeping-only, written in place with no revision bump
+	// (mirrors PublishedRevision), so replayTerminalAck short-circuits already-acked terminal records
 	// instead of re-Lookuping them every tick forever. Zero-value false for
 	// pre-upgrade stores: the first post-upgrade Reconcile replays each
 	// terminal record once (Lookup reports EvidenceNone after the runtime
@@ -263,7 +263,9 @@ func Open(stateDir string, opts ...Option) (*Store, error) {
 // a quota is set (after a restart, running records hold nothing in memory;
 // without the reseed, fresh submits are admitted into their room and their
 // results are refused after the work ran), and classifies every record
-// into the sweep index.
+// into the sweep index. It reads the same files ListWithPoison lists: the
+// record files directly under a valid host directory, dot-prefixed names
+// excluded.
 //
 // A file the bounded reader refuses (unreadable, not a regular file,
 // oversized) is an error naming its path relative to the store, so Open
@@ -273,14 +275,22 @@ func Open(stateDir string, opts ...Option) (*Store, error) {
 func (s *Store) loadRecords() error {
 	s.sweep, s.compactable = map[Key]struct{}{}, map[Key]string{}
 	var used int64
-	err := filepath.Walk(filepath.Join(s.dir, requestsDir), func(path string, info os.FileInfo, err error) error {
+	base := filepath.Join(s.dir, requestsDir)
+	err := filepath.Walk(base, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil
 			}
 			return err
 		}
-		if info.IsDir() || !strings.HasSuffix(path, recordSuffix) {
+		inBase := filepath.Dir(path) == base
+		if info.IsDir() {
+			if path == base || (inBase && safeSegment(info.Name())) {
+				return nil
+			}
+			return filepath.SkipDir
+		}
+		if inBase || !strings.HasSuffix(info.Name(), recordSuffix) || strings.HasPrefix(info.Name(), ".") {
 			return nil
 		}
 		data, rErr := fsq.ReadRegularNoFollowBounded(path, int64(MaxRecordBytes))

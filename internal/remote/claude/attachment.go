@@ -525,8 +525,6 @@ func (a *Attachment) Respond(requests.Key, string, string, string) (protocol.Cod
 	return protocol.CodeUnsupported, nil
 }
 
-// AcknowledgeResult implements core.Attachment: nothing is retained, so
-// the release is a no-op.
 // AcknowledgeResult releases the retained terminal evidence for the key
 // (mirrors codex): once the endpoint has persisted the outcome the
 // adapter drops its record, so a restarted attachment's Unknown is honest.

@@ -16,7 +16,6 @@ const (
 	OpInspect     = "inspect"
 	OpStatus      = "status"
 	OpCancel      = "cancel"
-	OpRespond     = "respond"
 	OpUnsupported = "unsupported"
 )
 

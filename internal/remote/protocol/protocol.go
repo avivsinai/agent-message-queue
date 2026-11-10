@@ -572,17 +572,17 @@ func ValidEpoch(s string) bool { return validOpaque(s) }
 const digestPrefix = "sha256:"
 
 // CommandDigest is the digest of the immutable submit command payload, over
-// exactly {schema, op, request_id, target_id, epoch, not_after, input}. The
+// exactly {schema, op, request_id, target_id, epoch, input}. The
 // canonical form is JSON with the keys in the FIXED ORDER listed below and no
 // insignificant whitespace, so every carrier agrees on the bytes. The order is
 // deliberately NOT alphabetical: it is the declaration order of digestPayload,
 // which is what Go's encoder emits; a non-Go carrier that sorted the keys
 // would compute a different digest and turn every idempotent retry into
-// request_conflict. A retry with a changed epoch or not_after (or
-// input) yields a different digest and is request_conflict; a retry that
-// recovers the original command bytes yields the same digest. The digest
-// excludes revision/state/result — those are server-derived, not part of the
-// client's command.
+// request_conflict. A retry with a changed epoch (or input) yields a
+// different digest and is request_conflict; a retry that changes only
+// not_after yields the same digest. The digest excludes not_after (a
+// deadline is policy, not identity) and revision/state/result — those are
+// server-derived, not part of the client's command.
 //
 // Canonical byte construction: the canonical form is EXACTLY what Go's
 // json.Marshal produces for a digestPayload struct with these field values
@@ -987,10 +987,6 @@ func TruncateText(text string, max int) (string, bool) {
 	}
 	// Step back to the last rune start at or before max bytes.
 	end := max
-	for end > 0 && !utf8.RuneStart(text[end]) {
-		end--
-	}
-	// If the byte at end is not itself a valid rune start, back up until it is.
 	for end > 0 && !utf8.RuneStart(text[end]) {
 		end--
 	}

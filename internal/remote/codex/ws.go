@@ -319,6 +319,8 @@ func (w *wsConn) close() error {
 	// close must never hang (a blocked close-frame send wedges teardown).
 	select {
 	case w.wmu <- struct{}{}:
+		// A peer that stopped reading must not hold the close frame.
+		_ = w.conn.SetWriteDeadline(time.Now().Add(time.Second))
 		_ = w.writeFrameBody(opClose, nil)
 		<-w.wmu
 	default:

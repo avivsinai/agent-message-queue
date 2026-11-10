@@ -280,3 +280,19 @@ func TestLinkCallErrorStatusExitsNonZero(t *testing.T) {
 		t.Fatalf("exit 0 for a not_allowed call; stdout %s stderr %s", out.String(), errOut.String())
 	}
 }
+
+// --args null is not a JSON object and is refused as usage, not sent as
+// arguments: null (audit 2026-11-10).
+func TestLinkCallRefusesNullArgs(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	mf := manifest.File{SchemaVersion: manifest.RelaySchemaVersion, Layer: manifest.Layer,
+		Links: []manifest.Link{{Name: "example", URL: "wss://link.example.test/link"}}}
+	if err := manifest.Write(manifest.DefaultPath(filepath.Join(root, stateDirName)), mf); err != nil {
+		t.Fatal(err)
+	}
+	_, code, err := linkCall([]string{"--root", root, "get_issue", "--args", "null"}, io.Discard, &jsonProbe{})
+	if code != protocol.ExitUsage || protocol.RefusalCode(err) != protocol.CodeInvalid {
+		t.Fatalf("--args null = %d, %v; want a usage refusal", code, err)
+	}
+}

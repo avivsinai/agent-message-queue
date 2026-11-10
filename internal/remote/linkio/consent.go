@@ -120,7 +120,7 @@ func verifySignedSubmit(view *ConsentView, m SignedSubmit, now time.Time) (*prot
 		return nil, "", Binding{}, nil, refuse(CodeConsentInvalid, "the passkey is not one this machine accepts")
 	}
 	docSum := sha256.Sum256(doc)
-	originOK := func(o string) bool { return o == key.Origin }
+	originOK := func(o string) bool { return key.Origin != "" && o == key.Origin }
 	if err := verifyWebAuthnGet(key, docSum[:], originOK, m.AuthenticatorData, m.ClientDataJSON, m.Signature); err != nil {
 		return nil, "", Binding{}, nil, refuse(CodeConsentInvalid, "%v", err)
 	}

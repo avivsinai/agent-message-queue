@@ -194,18 +194,16 @@ func StoreID(stateDir string) (string, error) {
 	if err := os.MkdirAll(Dir(stateDir), 0o700); err != nil {
 		return "", err
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if errors.Is(err, os.ErrExist) {
-		return StoreID(stateDir) // another process minted it first
-	}
+	// The id is written and synced under a temporary name and then linked
+	// into place, so a crash never leaves an empty store_id behind.
+	created, err := fsq.CreateNewFile(path, []byte(id+"\n"), 0o600)
 	if err != nil {
 		return "", err
 	}
-	defer func() { _ = f.Close() }()
-	if _, err := f.WriteString(id + "\n"); err != nil {
-		return "", err
+	if !created {
+		return StoreID(stateDir) // another process minted it first
 	}
-	return id, f.Sync()
+	return id, nil
 }
 
 // WritePin records what a link fixed at linking.

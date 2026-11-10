@@ -1769,3 +1769,18 @@ func TestLoaderAbsentLeavesForEmptyKeyDir(t *testing.T) {
 		}
 	}
 }
+
+// A doctor share remedy names the root doctor checked, so it runs in a shell
+// without AM_ROOT (audit 2026-11-10).
+func TestDoctorShareRemedyNamesTheRoot(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	runShare(t, "--root", root, "--session", "rr1")
+	if err := os.Remove(filepath.Join(root, "extensions", "remote", "keys", "rr1", "body.key")); err != nil {
+		t.Fatal(err)
+	}
+	info := doctorShareInspection(root)["rr1"].(map[string]any)
+	if remedy, _ := info["remedy"].(string); !strings.Contains(remedy, "--root "+shQuote(root)) {
+		t.Fatalf("remedy %q does not name the root", remedy)
+	}
+}

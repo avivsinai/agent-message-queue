@@ -260,6 +260,9 @@ func linkCall(args []string, stderr io.Writer, probe *jsonProbe) (any, int, erro
 		if err := json.Unmarshal([]byte(*argsJSON), &arguments); err != nil {
 			return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--args must be a JSON object: %v", err)
 		}
+		if arguments == nil { // null decodes into a nil map without an error
+			return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--args must be a JSON object, not null")
+		}
 		say(stderr, "call key %s (resume with: amq-remote link call resume %s)", key, key)
 		reply, err = cl.send(ctx, ipc.LinkRequest{Name: name, Op: "call", CallID: callID, Tool: pos[0],
 			Arguments: json.RawMessage(*argsJSON), IdempotencyKey: key, WaitMS: linkCallWait.Milliseconds()})

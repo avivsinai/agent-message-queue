@@ -577,11 +577,10 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 			e.mu.Unlock()
 			return err
 		}
-		e.transitionLocked(cur, causeRefused, nativeEvidence{code: protocol.CodeUnsupported})
+		reason := fmt.Sprintf("%s=%s is disabled in v1; full ownership/evidence model deferred — use busy=reject deliver=turn", mode, value)
+		e.transitionLocked(cur, causeRefused, nativeEvidence{code: protocol.CodeUnsupported, reason: reason})
 		_, err = e.commitLocked(cur, nil)
 		e.mu.Unlock()
-		_ = mode
-		_ = value
 		return err
 	}
 	e.mu.Lock()

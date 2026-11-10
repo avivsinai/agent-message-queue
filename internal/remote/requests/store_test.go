@@ -790,3 +790,31 @@ func TestAmbiguousTerminalWriteReleasesItsReservation(t *testing.T) {
 		t.Fatalf("next create: %v", err)
 	}
 }
+
+// Open reads only the record files List reads: a dot-prefixed leftover
+// under a host directory cannot stop the store from opening (audit
+// 2026-11-10).
+func TestOpenSkipsFilesListSkips(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir, WithClock(fixedClock))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	hostDir := filepath.Join(s.Dir(), requestsDir, "hostA")
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(hostDir, dirMode); err != nil {
+		t.Fatal(err)
+	}
+	// Over the bounded reader's limit, so reading it would fail Open.
+	big := make([]byte, protocol.MaxRecordBytes+1)
+	if err := os.WriteFile(filepath.Join(hostDir, ".leftover.json"), big, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(dir, WithClock(fixedClock))
+	if err != nil {
+		t.Fatalf("reopen over a dot-prefixed leftover: %v", err)
+	}
+	_ = s.Close()
+}

@@ -53,3 +53,21 @@ func TestPartialFrameWritePoisonsTheConnection(t *testing.T) {
 		t.Fatalf("second write reached the conn; writes=%d, want it to fail fast at 1", len(fc.writes))
 	}
 }
+
+// close returns when the peer stops reading: the close-frame write is
+// bounded by a deadline (audit 2026-11-10).
+func TestCloseReturnsWhenPeerStopsReading(t *testing.T) {
+	client, server := net.Pipe() // unbuffered: a write blocks until read
+	t.Cleanup(func() { _ = server.Close() })
+	w := newWSConn(client, bufio.NewReader(bytes.NewReader(nil)))
+	done := make(chan struct{})
+	go func() {
+		_ = w.close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("close hung behind a peer that never reads")
+	}
+}
