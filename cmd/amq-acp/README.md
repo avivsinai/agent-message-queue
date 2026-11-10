@@ -364,8 +364,16 @@ and `AMQ_ACP_REMOTE_NATIVE_SESSION` are refused in this mode.
 The system prompt line `AMQ Remote machine` makes the agent this machine's
 machine agent, one agent for every session. It never uses a pin, a selected
 model or the only binding; a role line beside a session pin or beside the
-helper line refuses every prompt. Its lifecycle leader checks the bindings
-every 2 s, reading them again when they changed, and makes a private
+helper line refuses every prompt. Its lifecycle leader, its dialog poster
+and its mirror each watch the files they read (the bindings, the channel
+records, each session's dialogs, its transcript and the transcript's
+directory, so a new transcript after `/clear` is seen) and pass at once when one
+changes, at most every 2 s; a pass with work in flight (an open dialog, a
+queued edit, a channel being set up) runs again in 2 s, and a settled one
+at least every 10 s (the leader) or 30 s (dialogs and mirror). A session
+whose process exited is seen ended, and its channel archived, within about
+10 s, or 20 s for a Codex thread whose daemon is gone. Without a file watch each passes every 2 s and says why on
+stderr. The leader makes a private
 channel for each named binding whose session is proven live and that has
 no agent of its own that runs or is idle:
 `channels create` (type stream, visibility private, the session's label as

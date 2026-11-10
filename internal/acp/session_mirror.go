@@ -99,6 +99,10 @@ type mirrorState struct {
 	// seen is what each binding's last tick read when it left nothing
 	// queued; a tick whose inputs still match it reads nothing.
 	seen map[string]mirrorSeen
+	// settled holds each binding whose last tick left nothing queued and
+	// nothing to read until its record changes: it has no record yet, or
+	// the note that its record cannot be read was posted.
+	settled map[string]bool
 	// scans are each mailbox binding's buzz inbox scans, new and cur.
 	scans map[string]mirrorScans
 }
@@ -116,6 +120,26 @@ type mirrorSeen struct {
 	off                      bool
 	path                     string
 	info                     os.FileInfo
+	// dir is set when the transcript's directory is small enough to watch
+	// (mirrorDirWatchMax), so a new transcript there wakes the mirror.
+	dir bool
+}
+
+// mirrorDirWatchMax is the most entries a transcript's directory may have
+// for the mirror to watch it: on macOS a directory watch holds one file
+// descriptor per entry. A record that moves to a new file in a larger
+// directory is found at the idle poll.
+const mirrorDirWatchMax = 1024
+
+// smallDir reports whether dir has at most mirrorDirWatchMax entries.
+func smallDir(dir string) bool {
+	f, err := os.Open(dir)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+	names, _ := f.Readdirnames(mirrorDirWatchMax + 1)
+	return len(names) <= mirrorDirWatchMax
 }
 
 // unchanged reports whether a tick with these inputs would read nothing new:
@@ -219,35 +243,58 @@ func (s *Server) mirrorLead() bool {
 
 // mirrorTick mirrors every live Claude binding with a channel, then posts
 // the open turn of each binding that ended and removes the state of each
-// binding that is gone.
-func (s *Server) mirrorTick(now time.Time) {
+// binding that is gone. Its pace asks for the next tick in mirrorInterval
+// while a binding has more to read or send, or a gone binding's last post
+// waits, and else on a change to the bindings, the records, a mirrored
+// binding's record (its transcript), the record's directory, where a record
+// that moves to a new file (mirror.Source Locate) usually appears, or its
+// off switch. A record that moves elsewhere is found at the idle poll.
+func (s *Server) mirrorTick(now time.Time) (p pace) {
 	served := map[string]bool{}
+	p.watch = s.sessionWatch()
 	for _, t := range s.dialogTargets() {
 		if s.mirrorStopped() {
-			return
+			return p
 		}
 		served[t.name] = true
 		// A mirrored binding is read fresh: it names the transcript to post.
 		if mirror.SourceFor(t.binding.Harness) == nil {
 			continue
 		}
-		if b, err := binding.ReadNamed(t.name); err == nil && mirror.SourceFor(b.Harness) != nil {
-			s.mirrorBinding(t, b, now, false)
+		b, err := binding.ReadNamed(t.name)
+		if err != nil || mirror.SourceFor(b.Harness) == nil {
+			continue
+		}
+		s.mirrorBinding(t, b, now, false)
+		seen, read := s.mirrors.seen[t.name]
+		if !read && !s.mirrors.settled[t.name] {
+			p.due(now.Add(mirrorInterval))
+		}
+		if read {
+			p.watch = append(p.watch, seen.path)
+			if seen.dir {
+				p.watch = append(p.watch, filepath.Dir(seen.path))
+			}
+		}
+		if dir, err := mirror.DirFor(t.name); err == nil {
+			p.watch = append(p.watch, dir)
 		}
 	}
-	if !s.mirrorStopped() {
-		s.dropGoneMirrors(served, now)
+	if !s.mirrorStopped() && !s.dropGoneMirrors(served, now) {
+		p.due(now.Add(mirrorInterval))
 	}
+	return p
 }
 
 // dropGoneMirrors posts the open turn of each binding that is gone or ended
 // as "session ended", then removes its state, claims and carrier records.
-// A post proved not sent keeps them for the next tick.
-func (s *Server) dropGoneMirrors(served map[string]bool, now time.Time) {
+// A post proved not sent keeps them for the next tick; done is false then.
+func (s *Server) dropGoneMirrors(served map[string]bool, now time.Time) (done bool) {
 	root, err := mirror.Root()
 	if err != nil {
-		return
+		return true
 	}
+	done = true
 	entries, _ := os.ReadDir(root)
 	snap := s.snapshot()
 	for _, e := range entries {
@@ -271,6 +318,7 @@ func (s *Server) dropGoneMirrors(served map[string]bool, now time.Time) {
 		dir := filepath.Join(root, name)
 		if st, _, found := readMirrorFile(dir); found && st.Channel != "" && binding.ValidName(name) == nil {
 			if !s.mirrorBinding(dialogTarget{name: name, channel: st.Channel}, b, now, true) {
+				done = false
 				continue
 			}
 		}
@@ -278,7 +326,9 @@ func (s *Server) dropGoneMirrors(served map[string]bool, now time.Time) {
 		delete(s.mirrors.scans, name)
 		delete(s.mirrors.backoff, name)
 		delete(s.mirrors.seen, name)
+		delete(s.mirrors.settled, name)
 	}
+	return done
 }
 
 // mirrorBinding is one tick of one binding: locate, read, fold, queue and
@@ -301,10 +351,12 @@ func (s *Server) mirrorBinding(t dialogTarget, b binding.Binding, now time.Time,
 		return true
 	}
 	off := mirror.Off(dir)
-	if !ended && s.mirrors.seen[t.name].unchanged(t, b, off) {
+	prev := s.mirrors.seen[t.name]
+	if !ended && prev.unchanged(t, b, off) {
 		return true
 	}
 	delete(s.mirrors.seen, t.name)
+	delete(s.mirrors.settled, t.name)
 	if os.MkdirAll(dir, 0o700) != nil {
 		return false
 	}
@@ -317,8 +369,10 @@ func (s *Server) mirrorBinding(t dialogTarget, b binding.Binding, now time.Time,
 	if src == nil {
 		return true
 	}
-	// read is the transcript as it was before a read that reached its end.
+	// read is the transcript as it was before a read that reached its end;
+	// waits is set when there is nothing to read until the record changes.
 	var read os.FileInfo
+	waits := false
 	path := src.Locate(b, st.Path)
 	switch {
 	case ended:
@@ -330,12 +384,17 @@ func (s *Server) mirrorBinding(t dialogTarget, b binding.Binding, now time.Time,
 		st.Queue = append(st.Queue, evs...)
 	case path == "":
 		s.mirrorUnavailable(dir, &st, "", off)
+		waits = off || st.noted("")
 	default:
 		info, statErr := os.Stat(path)
-		if !s.mirrorRead(dir, src, &st, path, now) {
+		switch {
+		case !s.mirrorRead(dir, src, &st, path, now):
 			s.mirrorUnavailable(dir, &st, path, off)
-		} else if statErr == nil && st.Offset >= info.Size() {
+			waits = off || st.noted(path)
+		case statErr == nil && st.Offset >= info.Size():
 			read = info
+		case statErr != nil:
+			waits = true // a lazy record that does not exist yet
 		}
 	}
 	st.Queue = mergeQueue(st.Queue, st.Watermark, func(id string) bool { return mirrorRunning(dir, id) })
@@ -352,10 +411,22 @@ func (s *Server) mirrorBinding(t dialogTarget, b binding.Binding, now time.Time,
 		if s.mirrors.seen == nil {
 			s.mirrors.seen = map[string]mirrorSeen{}
 		}
-		s.mirrors.seen[t.name] = mirrorSeen{channel: t.channel, harness: b.Harness, source: st.Harness, off: off, path: path, info: read}
+		dir := prev.dir
+		if prev.path != path {
+			dir = smallDir(filepath.Dir(path))
+		}
+		s.mirrors.seen[t.name] = mirrorSeen{channel: t.channel, harness: b.Harness, source: st.Harness, off: off, path: path, info: read, dir: dir}
+	} else if waits && len(st.Queue) == 0 {
+		if s.mirrors.settled == nil {
+			s.mirrors.settled = map[string]bool{}
+		}
+		s.mirrors.settled[t.name] = true
 	}
 	return true
 }
+
+// noted reports whether the note that locator cannot be read was posted.
+func (st *mirrorFile) noted(locator string) bool { return st.Noted != nil && *st.Noted == locator }
 
 // mirrorRead reads the new lines of path and queues the turn events they
 // make. A changed path ends the open turn as "session cleared" and reads
