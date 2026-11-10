@@ -265,9 +265,7 @@ func TestRunEnqueueUnitRejectsRootFlag(t *testing.T) {
 
 func TestRunEnqueueWritesTxForPinnedPeer(t *testing.T) {
 	root := newBridgeRoot(t, "codex")
-	if err := bridge.WriteHostID(root, "grok-host"); err != nil {
-		t.Fatal(err)
-	}
+	writeHostID(t, root, "grok-host")
 	key, err := bridge.GenerateHostKey("1")
 	if err != nil {
 		t.Fatal(err)
@@ -284,7 +282,7 @@ func TestRunEnqueueWritesTxForPinnedPeer(t *testing.T) {
 		t.Fatal(err)
 	}
 	var xPublic [32]byte
-	peer, err := xferv3.NewPeer(host, []xferv3.Handle{allow}, "", xPublic)
+	peer, err := xferv3.NewPeer(host, []xferv3.Handle{allow}, xPublic)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,9 +361,7 @@ func TestRunEnqueueWritesTxForPinnedPeer(t *testing.T) {
 
 func TestRunEnqueuePinnedDestMustBeAllowlisted(t *testing.T) {
 	root := newBridgeRoot(t, "codex")
-	if err := bridge.WriteHostID(root, "grok-host"); err != nil {
-		t.Fatal(err)
-	}
+	writeHostID(t, root, "grok-host")
 	key, err := bridge.GenerateHostKey("1")
 	if err != nil {
 		t.Fatal(err)
@@ -382,7 +378,7 @@ func TestRunEnqueuePinnedDestMustBeAllowlisted(t *testing.T) {
 		t.Fatal(err)
 	}
 	var xPublic [32]byte
-	peer, err := xferv3.NewPeer(host, []xferv3.Handle{allow}, "", xPublic)
+	peer, err := xferv3.NewPeer(host, []xferv3.Handle{allow}, xPublic)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -19,7 +19,7 @@ func TestPutTxWritesIdempotentBundle(t *testing.T) {
 		t.Fatal(err)
 	}
 	var xPublic [32]byte
-	peer, err := NewPeer(host, []Handle{allow}, "", xPublic)
+	peer, err := NewPeer(host, []Handle{allow}, xPublic)
 	if err != nil {
 		t.Fatal(err)
 	}

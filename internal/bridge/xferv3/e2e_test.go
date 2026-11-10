@@ -135,7 +135,11 @@ func newPeerHost(t *testing.T, hostName, agent string, seed []byte) peerHost {
 	if err := fsq.EnsureAgentDirs(root, agent); err != nil {
 		t.Fatal(err)
 	}
-	if err := bridge.WriteHostID(root, hostName); err != nil {
+	// bridge/host-id is written as the host bootstrap script writes it.
+	if err := os.MkdirAll(filepath.Join(root, "bridge"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bridge.HostIDPath(root), []byte(hostName+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	key := ed25519.NewKeyFromSeed(seed)
@@ -165,7 +169,7 @@ func newPeerHost(t *testing.T, hostName, agent string, seed []byte) peerHost {
 
 func pinPeers(t *testing.T, local, remote *peerHost) {
 	t.Helper()
-	peer, err := NewPeer(remote.host, []Handle{remote.agent}, "", remote.state.Static.Public())
+	peer, err := NewPeer(remote.host, []Handle{remote.agent}, remote.state.Static.Public())
 	if err != nil {
 		t.Fatal(err)
 	}

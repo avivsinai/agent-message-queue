@@ -78,12 +78,12 @@ func TestRecoverIntentWithStagePublishes(t *testing.T) {
 	if err := appendFact(root, Fact{State: StateIntent, Peer: snap.Peer, ID: rec.ID()}); err != nil {
 		t.Fatal(err)
 	}
-	state, err := Recover(root, snap, rec.ID())
+	got, err := Lookup(root, snap, rec.ID())
 	if err != nil {
-		t.Fatalf("recover: %v", err)
+		t.Fatalf("lookup: %v", err)
 	}
-	if state != StatePublished {
-		t.Fatalf("state = %q, want published", state)
+	if got.Decision != DecideStored {
+		t.Fatalf("lookup = %+v, want stored", got)
 	}
 	if got := inboxFiles(t, root, "grok"); len(got) != 1 {
 		t.Fatalf("filings = %d, want 1", len(got))
@@ -102,12 +102,12 @@ func TestRecoverStageWithoutIntentDeletes(t *testing.T) {
 	if err := os.WriteFile(stagePath(root, snap.Peer, signed.ID()), payload, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	state, err := Recover(root, snap, signed.ID())
+	got, err := Lookup(root, snap, signed.ID())
 	if err != nil {
-		t.Fatalf("recover: %v", err)
+		t.Fatalf("lookup: %v", err)
 	}
-	if state != "" {
-		t.Fatalf("state = %q, want absent", state)
+	if got.Decision != DecideWant {
+		t.Fatalf("lookup = %+v, want want", got)
 	}
 	if fileExists(stagePath(root, snap.Peer, signed.ID())) {
 		t.Fatal("staged copy should be gone")
@@ -147,7 +147,7 @@ func TestRecoverUsesAdmittedDestNotPayloadTo(t *testing.T) {
 	if err := appendFact(root, Fact{State: StateIntent, Peer: snap.Peer, ID: signed.ID()}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Recover(root, snap, signed.ID()); err == nil {
+	if _, err := Lookup(root, snap, signed.ID()); err == nil {
 		t.Fatal("recover used payload To without an admitted dest")
 	}
 	if got := inboxFiles(t, root, "staff"); len(got) != 0 {
@@ -156,12 +156,12 @@ func TestRecoverUsesAdmittedDestNotPayloadTo(t *testing.T) {
 	if err := os.WriteFile(stagePath(root, snap.Peer, signed.ID())+".dest", []byte("grok\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	state, err := Recover(root, snap, signed.ID())
+	got, err := Lookup(root, snap, signed.ID())
 	if err != nil {
-		t.Fatalf("recover with dest sidecar: %v", err)
+		t.Fatalf("lookup with dest sidecar: %v", err)
 	}
-	if state != StatePublished {
-		t.Fatalf("state = %q", state)
+	if got.Decision != DecideStored {
+		t.Fatalf("lookup = %+v, want stored", got)
 	}
 	if got := inboxFiles(t, root, "grok"); len(got) != 1 {
 		t.Fatalf("grok inbox = %v", got)
@@ -224,9 +224,9 @@ func TestRecoverTornEmptyPrefixIsUncertain(t *testing.T) {
 	if err := os.WriteFile(path, first, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	state, recErr := Recover(root, snap, signed.ID())
-	if recErr == nil || state != StateUncertain {
-		t.Fatalf("state=%q err=%v, want uncertain", state, recErr)
+	got, lookErr := Lookup(root, snap, signed.ID())
+	if lookErr != nil || got.Decision != DecideNo || got.Reason != ReasonUncertain {
+		t.Fatalf("lookup = %+v err=%v, want NO uncertain", got, lookErr)
 	}
 	if got := inboxFiles(t, root, "grok"); len(got) != 0 {
 		t.Fatalf("inbox = %v", got)
@@ -385,8 +385,8 @@ func TestRecoverTornTailAfterIntentWithoutStageReadsPublished(t *testing.T) {
 	if err := os.WriteFile(path, append(intent, published[:6]...), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if state, err := Recover(root, snap, signed.ID()); err != nil || state != StatePublished {
-		t.Fatalf("recover: state=%q err=%v, want published", state, err)
+	if got, err := Lookup(root, snap, signed.ID()); err != nil || got.Decision != DecideStored {
+		t.Fatalf("lookup = %+v err=%v, want stored", got, err)
 	}
 	facts, torn, err := readLedger(path)
 	if err != nil || torn || foldState(facts) != StatePublished {

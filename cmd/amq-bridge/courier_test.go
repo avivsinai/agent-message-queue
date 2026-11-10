@@ -715,10 +715,19 @@ func newBridgeRoot(t *testing.T, agent string) string {
 func hostIDRoot(t *testing.T, host string) string {
 	t.Helper()
 	root := t.TempDir()
-	if err := bridge.WriteHostID(root, host); err != nil {
+	writeHostID(t, root, host)
+	return root
+}
+
+// writeHostID writes bridge/host-id as the host bootstrap script does.
+func writeHostID(t *testing.T, root, host string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(root, "bridge"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	return root
+	if err := os.WriteFile(bridge.HostIDPath(root), []byte(host+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func testHostKey(host, generation string) bridge.HostKey {
@@ -741,9 +750,7 @@ func ensureHostID(t *testing.T, root, host string) {
 		}
 		return
 	}
-	if err := bridge.WriteHostID(root, host); err != nil {
-		t.Fatal(err)
-	}
+	writeHostID(t, root, host)
 }
 
 func ensureIdentity(t *testing.T, root, host string) {
@@ -950,8 +957,12 @@ func TestPollRejectsAllowlistedForgedSourceHost(t *testing.T) {
 		Root: root, RendezvousURL: server.URL, DestAlias: "mac/claude",
 		AllowedDestAliases: []string{"mac/claude"}, AllowedSourceHosts: []string{"grok-host"},
 	})
-	if _, err := courier.PollOnce(context.Background()); err == nil || !strings.Contains(err.Error(), "authenticate") {
-		t.Fatalf("forged poll error = %v, want authenticate refusal", err)
+	poll, err := courier.PollOnce(context.Background())
+	if err != nil {
+		t.Fatalf("forged poll error = %v, want a refused transfer", err)
+	}
+	if len(poll.Refused) != 1 || poll.Refused[0].TransferID != forged.TransferID || !strings.Contains(poll.Refused[0].Reason, "authenticate") {
+		t.Fatalf("refused = %#v, want the forged transfer refused as unauthenticated", poll.Refused)
 	}
 	entries, err := os.ReadDir(filepath.Join(root, "agents", "claude", "inbox", "new"))
 	if err != nil {
@@ -962,25 +973,22 @@ func TestPollRejectsAllowlistedForgedSourceHost(t *testing.T) {
 	}
 }
 
-func TestPollRejectsBumpedTrustedGenerationWithoutAck(t *testing.T) {
+// A stale-generation envelope after a trust rotation is refused and skipped;
+// the envelope behind it still applies and ACKs (audit 2026-11-10).
+func TestPollStaleGenerationIsRefusedNotBatchFatal(t *testing.T) {
+	fake, server := newFakeRendezvous(t)
 	root := newBridgeRoot(t, "claude")
-	env := testEnvelope(t, "bumped-gen")
-	raw, err := bridge.MarshalEnvelope(env)
-	if err != nil {
+	stale := testSignedEnvelope(t, "msg-stale", "thread-stale", "signed before rotation")
+	good := testSignedEnvelope(t, "msg-good", "thread-good", "signed after rotation")
+	good.KeyGeneration = "2"
+	if err := bridge.SignEnvelope(&good, testHostKey("grok-host", "2")); err != nil {
 		t.Fatal(err)
 	}
-	var ackHits int
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			writeJSON(w, http.StatusOK, pollResponse{Envelopes: []json.RawMessage{raw}})
-			return
-		}
-		if strings.HasPrefix(r.URL.Path, transfersPath+"/") && strings.HasSuffix(r.URL.Path, "/ack") {
-			ackHits++
-		}
-		http.Error(w, "ack should not run", http.StatusInternalServerError)
-	}))
-	t.Cleanup(server.Close)
+	fake.mu.Lock()
+	fake.queue = append(fake.queue, stale, good)
+	fake.accepted[stale.TransferID] = stale
+	fake.accepted[good.TransferID] = good
+	fake.mu.Unlock()
 	courier := testCourier(t, Config{
 		Root: root, RendezvousURL: server.URL, DestAlias: "mac/claude",
 		AllowedDestAliases: []string{"mac/claude"}, AllowedSourceHosts: []string{"grok-host"},
@@ -992,18 +1000,28 @@ func TestPollRejectsBumpedTrustedGenerationWithoutAck(t *testing.T) {
 	if err := bridge.WriteTrusted(root, "grok-host", rotated.Public(), "2"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := courier.PollOnce(context.Background()); err == nil || !strings.Contains(err.Error(), "authenticate") {
-		t.Fatalf("bumped-generation poll error = %v, want authenticate refusal", err)
+	poll, err := courier.PollOnce(context.Background())
+	if err != nil {
+		t.Fatalf("PollOnce must not abort the batch on a stale generation: %v", err)
 	}
-	if ackHits != 0 {
-		t.Fatalf("revoked generation reached ACK %d times", ackHits)
+	if len(poll.Refused) != 1 || poll.Refused[0].TransferID != stale.TransferID || poll.Refused[0].Uncertain || poll.Refused[0].Conflict {
+		t.Fatalf("refused = %#v, want only the stale transfer", poll.Refused)
+	}
+	if len(poll.Receipts) != 1 || poll.Receipts[0].TransferID != good.TransferID {
+		t.Fatalf("receipts = %#v, want only the good transfer", poll.Receipts)
+	}
+	fake.mu.Lock()
+	ackIDs := append([]string(nil), fake.ackIDs...)
+	fake.mu.Unlock()
+	if len(ackIDs) != 1 || ackIDs[0] != good.TransferID {
+		t.Fatalf("acks = %v, want only the good transfer", ackIDs)
 	}
 	entries, err := os.ReadDir(filepath.Join(root, "agents", "claude", "inbox", "new"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 0 {
-		t.Fatalf("revoked generation was applied: %d inbox entries", len(entries))
+	if len(entries) != 1 || entries[0].Name() != bridge.TransferFilename(good.SourceHost, good.TransferID) {
+		t.Fatalf("inbox entries = %v, want only the good transfer", entries)
 	}
 }
 

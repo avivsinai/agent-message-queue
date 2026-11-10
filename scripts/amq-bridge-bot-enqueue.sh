@@ -32,7 +32,7 @@ usage="usage: amq-bridge-bot-enqueue.sh --dest-alias host/agent"
 [[ "$1" == "--dest-alias" ]] || refuse "$usage"
 
 dest_alias=$2
-[[ "$dest_alias" =~ ^[a-z0-9_][a-z0-9_-]*/[a-z0-9_][a-z0-9_-]*$ ]] \
+[[ "$dest_alias" =~ ^[a-z0-9_][a-z0-9._-]{0,62}/[a-z0-9_][a-z0-9._-]{0,62}$ ]] \
   || refuse "--dest-alias must be host/agent: $dest_alias"
 
 config=${AMQ_BRIDGE_ENQUEUE_CONFIG:-}

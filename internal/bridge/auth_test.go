@@ -137,9 +137,6 @@ func TestLoadIdentityRefusesSymlinkAndPermissiveMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteHostID(root, "grok"); err != nil {
-		t.Fatal(err)
-	}
 	if err := WriteIdentity(root, key); err != nil {
 		t.Fatal(err)
 	}
@@ -154,9 +151,6 @@ func TestLoadIdentityRefusesSymlinkAndPermissiveMode(t *testing.T) {
 	}
 
 	linkRoot := t.TempDir()
-	if err := WriteHostID(linkRoot, "grok"); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.MkdirAll(filepath.Join(linkRoot, "bridge"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -170,9 +164,6 @@ func TestLoadIdentityRefusesSymlinkAndPermissiveMode(t *testing.T) {
 
 func TestLoadTrustedRejectsUnknownHostKey(t *testing.T) {
 	root := t.TempDir()
-	if err := WriteHostID(root, "mac"); err != nil {
-		t.Fatal(err)
-	}
 	pub := make(ed25519.PublicKey, ed25519.PublicKeySize)
 	if err := WriteTrusted(root, "grok", pub, "1"); err != nil {
 		t.Fatal(err)

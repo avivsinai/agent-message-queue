@@ -244,7 +244,7 @@ func NewCourier(cfg Config) (*Courier, error) {
 		return nil, fmt.Errorf("receive alias: %w", err)
 	}
 	if cfg.LocalHost != "" {
-		if err := fsq.ValidateHandle(cfg.LocalHost); err != nil {
+		if err := bridge.ValidateHost(cfg.LocalHost); err != nil {
 			return nil, fmt.Errorf("local host: %w", err)
 		}
 		if cfg.LocalHost != localHost {
@@ -256,7 +256,7 @@ func NewCourier(cfg Config) (*Courier, error) {
 		return nil, err
 	}
 	if cfg.SourceHost != "" {
-		if err := fsq.ValidateHandle(cfg.SourceHost); err != nil {
+		if err := bridge.ValidateHost(cfg.SourceHost); err != nil {
 			return nil, fmt.Errorf("source host: %w", err)
 		}
 	}
@@ -344,7 +344,7 @@ func handleSet(values []string, kind string) (map[string]struct{}, error) {
 			if value == "" {
 				continue
 			}
-			if err := fsq.ValidateHandle(value); err != nil {
+			if err := bridge.ValidateHost(value); err != nil {
 				return nil, fmt.Errorf("%s %q: %w", kind, value, err)
 			}
 			set[value] = struct{}{}
@@ -505,7 +505,14 @@ func (c *Courier) PollOnce(ctx context.Context) (PollResult, error) {
 			return result, fmt.Errorf("authenticate source host %q: %w", env.SourceHost, err)
 		}
 		if err := bridge.VerifyEnvelope(env, pub, generation); err != nil {
-			return result, fmt.Errorf("authenticate transfer %s: %w", env.TransferID, err)
+			// An envelope that does not verify (a generation retired by a
+			// trust rotation, or a forged signature) is never applied or
+			// ACKed, and it does not stop the envelopes behind it.
+			result.Refused = append(result.Refused, RefusedTransfer{
+				TransferID: env.TransferID,
+				Reason:     fmt.Sprintf("authenticate transfer: %v", err),
+			})
+			continue
 		}
 		applyOutcome, err := bridge.ApplyWithLedger(ledger, root, c.localHost, c.localAgent, env)
 		if err != nil {

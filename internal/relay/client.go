@@ -52,7 +52,6 @@ type Client struct {
 
 	mu     sync.Mutex
 	status Status
-	conn   *Conn
 
 	// for tests
 	minBackoff, maxBackoff time.Duration
@@ -75,26 +74,13 @@ func (c *Client) Status() Status {
 	return c.status
 }
 
-// Conn returns the current authenticated connection, or nil. A connection
-// whose grant expired is never handed out, even before its transport ends.
-func (c *Client) Conn() *Conn {
-	c.mu.Lock()
-	conn := c.conn
-	c.mu.Unlock()
-	if conn != nil && conn.Expired() {
-		return nil
-	}
-	return conn
-}
-
-func (c *Client) set(state State, err error, conn *Conn) {
+func (c *Client) set(state State, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.status = Status{State: state, Since: time.Now()}
 	if err != nil {
 		c.status.Err = Category(err)
 	}
-	c.conn = conn
 }
 
 // identityCheck is how often a live connection's enrolled identity is
@@ -119,7 +105,7 @@ func (c *Client) hold(ctx context.Context, conn *Conn, authed Config) bool {
 	for {
 		select {
 		case <-conn.Done():
-			c.set(StateUnavailable, conn.Err(), nil)
+			c.set(StateUnavailable, conn.Err())
 			return false
 		case <-ctx.Done():
 			if c.BeforeClose != nil {
@@ -136,7 +122,7 @@ func (c *Client) hold(ctx context.Context, conn *Conn, authed Config) bool {
 				if err == nil {
 					err = errIdentityChanged
 				}
-				c.set(StateUnavailable, err, nil)
+				c.set(StateUnavailable, err)
 				return false
 			}
 		}
@@ -200,7 +186,7 @@ func StatusText(err error) string {
 func (c *Client) Run(ctx context.Context) error {
 	backoff := c.minBackoff
 	for {
-		c.set(StateAuthPending, nil, nil)
+		c.set(StateAuthPending, nil)
 		start := time.Now()
 		cfg, err := c.config()
 		var conn *Conn
@@ -209,12 +195,12 @@ func (c *Client) Run(ctx context.Context) error {
 		}
 		if err != nil {
 			if ctx.Err() != nil {
-				c.set(StateUnavailable, nil, nil)
+				c.set(StateUnavailable, nil)
 				return nil
 			}
-			c.set(StateUnavailable, err, nil)
+			c.set(StateUnavailable, err)
 		} else {
-			c.set(StateAuthenticated, nil, conn)
+			c.set(StateAuthenticated, nil)
 			connCtx, connCancel := context.WithCancel(ctx)
 			hookDone := make(chan struct{})
 			if c.OnConnect != nil {
@@ -229,7 +215,7 @@ func (c *Client) Run(ctx context.Context) error {
 			connCancel()
 			<-hookDone
 			if ended {
-				c.set(StateUnavailable, nil, nil)
+				c.set(StateUnavailable, nil)
 				return nil
 			}
 			// A connection that stayed up for a while resets the backoff.
