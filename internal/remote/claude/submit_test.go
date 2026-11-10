@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -342,5 +344,67 @@ func TestSubmitWritesNothingAfterNotAfter(t *testing.T) {
 	case b := <-ft.received:
 		t.Fatalf("adapter wrote %d bytes after not_after", len(b))
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// A Lookup while the frame is still being written reads the run as
+// tentative, never as a lost run that core would record as uncertain
+// (audit 2026-11-10).
+func TestLookupDuringSocketWriteIsTentative(t *testing.T) {
+	ft := newFakeTarget(t, 4242, nil)
+	att := ft.attach(t)
+	// Replace the listener with one that looks the key up before it reads a
+	// byte. The frame is larger than any socket buffer, so the write cannot
+	// finish until that lookup is done.
+	_ = ft.stopListener()
+	if err := os.Remove(ft.sockPath); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", ft.sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	seen := make(chan core.Evidence, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		ev, _ := att.Lookup(pr2Key(), "")
+		seen <- ev
+		_, _ = io.Copy(io.Discard, conn)
+	}()
+	adm, err := att.Submit(pr2BoundRequest(strings.Repeat("x", 4<<20)))
+	if err != nil || !adm.Admitted {
+		t.Fatalf("Submit = %+v, %v; want admitted", adm, err)
+	}
+	if ev := <-seen; ev.Class != core.EvidenceTentative {
+		t.Fatalf("lookup during the write = %s, want tentative", ev.Class)
+	}
+}
+
+// A frame written but never shown in the session's transcript leaves the
+// run's admission unknown once its window closes, instead of running for
+// ever (audit 2026-11-10).
+func TestLookupOfAnUndeliveredFrameIsUnknownAfterItsWindow(t *testing.T) {
+	ft := newFakeTarget(t, 4242, nil)
+	att := ft.attach(t)
+	start := time.Now()
+	var skew atomic.Int64 // the poller reads the clock too
+	att.clock = func() time.Time { return start.Add(time.Duration(skew.Load())) }
+	req := pr2BoundRequest("hello")
+	req.NotAfter = protocol.FormatTime(start.Add(time.Minute))
+	if adm, err := att.Submit(req); err != nil || !adm.Admitted {
+		t.Fatalf("Submit = %+v, %v; want admitted", adm, err)
+	}
+	waitRecv(t, ft)
+	if ev, _ := att.Lookup(pr2Key(), ""); ev.Class != core.EvidenceTentative {
+		t.Fatalf("lookup inside the window = %s, want tentative", ev.Class)
+	}
+	skew.Store(int64(2 * time.Minute))
+	if ev, _ := att.Lookup(pr2Key(), ""); ev.Class != core.EvidenceUnknown {
+		t.Fatalf("lookup after the window = %s, want unknown", ev.Class)
 	}
 }

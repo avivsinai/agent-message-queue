@@ -68,6 +68,9 @@ type runRecord struct {
 	// after turnEndTS belongs to this run.
 	turnEnded bool
 	turnEndTS int64
+	// notAfter is the request's admission window. A delivery entry not seen
+	// by then leaves the run's admission unknown.
+	notAfter time.Time
 	// lastText is the newest non-empty assistant text of this run's turn,
 	// or the final text its Stop marker carried; lastCut marks it cut.
 	lastText  string
@@ -96,7 +99,23 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		a.mu.Unlock()
 		return core.Admission{Admitted: true, RunID: existing.msgID}, nil
 	}
+	// From here until it returns, a Lookup of the key reads the send as
+	// tentative, never as a lost run; the run is recorded when the frame
+	// is written.
+	a.submitting[req.Key] = struct{}{}
 	a.mu.Unlock()
+	var rec *runRecord
+	defer func() {
+		a.mu.Lock()
+		delete(a.submitting, req.Key)
+		if rec != nil {
+			a.runs[req.Key] = rec
+		}
+		a.mu.Unlock()
+		if rec != nil {
+			a.kickConfirmations()
+		}
+	}()
 
 	// The receiver has no deadline of its own, so not_after holds only if
 	// this adapter checks it: before the pre-send work, and again right
@@ -159,18 +178,15 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		return refusal(err), nil
 	}
 
-	rec := &runRecord{
+	rec = &runRecord{
 		key:       req.Key,
 		epoch:     req.Epoch,
 		msgID:     frame.MsgID,
 		state:     protocol.StateRunning,
 		fromOff:   fromOff,
+		notAfter:  notAfter,
 		createdAt: a.now(),
 	}
-	a.mu.Lock()
-	a.runs[req.Key] = rec
-	a.mu.Unlock()
-	a.kickConfirmations()
 	return core.Admission{Admitted: true, RunID: frame.MsgID}, nil
 }
 
@@ -289,8 +305,18 @@ func (a *Attachment) Lookup(key requests.Key, _ string) (core.Evidence, error) {
 	a.mu.Lock()
 	if rec, ok := a.runs[key]; ok {
 		ev := evidenceFor(rec)
+		if undelivered(rec, a.now()) {
+			// The frame was written, but the session showed no delivery
+			// within the window: whether it ran is unknown. The run is
+			// kept, so a late delivery still confirms it.
+			ev = core.Evidence{Known: true, Class: core.EvidenceUnknown, RunID: rec.msgID}
+		}
 		a.mu.Unlock()
 		return ev, nil
+	}
+	if _, sending := a.submitting[key]; sending {
+		a.mu.Unlock()
+		return core.Evidence{Known: true, Class: core.EvidenceTentative, RunID: frameMsgID(key), State: protocol.StateRunning}, nil
 	}
 	_, released := a.released[key]
 	a.mu.Unlock()
@@ -300,6 +326,12 @@ func (a *Attachment) Lookup(key requests.Key, _ string) (core.Evidence, error) {
 		return core.Evidence{Known: true, Class: core.EvidenceUnknown}, nil
 	}
 	return a.recoverRun(key), nil
+}
+
+// undelivered reports a run whose delivery entry was not seen before its
+// admission window closed.
+func undelivered(rec *runRecord, now time.Time) bool {
+	return !rec.submitted && !rec.admitted && !rec.terminal && !rec.notAfter.IsZero() && !now.Before(rec.notAfter)
 }
 
 // kickConfirmations starts the transcript confirmation poller if it is not
@@ -823,6 +855,10 @@ func (a *Attachment) recoverRun(key requests.Key) core.Evidence {
 		ev := evidenceFor(rec)
 		a.mu.Unlock()
 		return ev
+	}
+	if _, sending := a.submitting[key]; sending { // a Submit started meanwhile
+		a.mu.Unlock()
+		return core.Evidence{Known: true, Class: core.EvidenceTentative, RunID: msgID, State: protocol.StateRunning}
 	}
 	if !found {
 		a.recoverFrom[key] = recoverScan{path: path, file: fi, off: next, skipping: nextSkipping}
