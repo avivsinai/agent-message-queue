@@ -32,7 +32,6 @@ func (a launchFixtureAdapter) Mode() launch.AdapterMode {
 	}
 	return launch.AdapterModeMint
 }
-func (launchFixtureAdapter) CommittedEnvKeys() []string { return nil }
 func (a launchFixtureAdapter) Capabilities(context.Context) launch.AdapterCapabilities {
 	return launch.AdapterCapabilities{
 		Provider: a.Name(), Mode: a.Mode(), Available: a.available,
