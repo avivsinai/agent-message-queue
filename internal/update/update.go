@@ -20,6 +20,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/semver"
 )
 
 const (
@@ -131,7 +133,7 @@ func (n Notifier) Start(ctx context.Context) (wait func(budget time.Duration)) {
 	if current == "" {
 		return noWait
 	}
-	if _, ok := parseSemver(current); !ok {
+	if _, ok := semver.Parse(current); !ok {
 		return noWait
 	}
 
@@ -243,80 +245,15 @@ func CompareVersions(current, latest string) (int, bool) {
 	if current == "" || latest == "" {
 		return 0, false
 	}
-	c, ok := parseSemver(current)
+	c, ok := semver.Parse(current)
 	if !ok {
 		return 0, false
 	}
-	l, ok := parseSemver(latest)
+	l, ok := semver.Parse(latest)
 	if !ok {
 		return 0, false
 	}
-	if c.Major != l.Major {
-		return compareInts(c.Major, l.Major), true
-	}
-	if c.Minor != l.Minor {
-		return compareInts(c.Minor, l.Minor), true
-	}
-	return compareInts(c.Patch, l.Patch), true
-}
-
-func compareInts(a, b int) int {
-	switch {
-	case a < b:
-		return -1
-	case a > b:
-		return 1
-	default:
-		return 0
-	}
-}
-
-type semver struct {
-	Major int
-	Minor int
-	Patch int
-}
-
-func parseSemver(version string) (semver, bool) {
-	version = strings.TrimSpace(version)
-	version = strings.TrimPrefix(version, "v")
-	if version == "" {
-		return semver{}, false
-	}
-	if cut := strings.IndexAny(version, "+-"); cut >= 0 {
-		version = version[:cut]
-	}
-	parts := strings.Split(version, ".")
-	if len(parts) != 3 {
-		return semver{}, false
-	}
-	major, ok := parsePositiveInt(parts[0])
-	if !ok {
-		return semver{}, false
-	}
-	minor, ok := parsePositiveInt(parts[1])
-	if !ok {
-		return semver{}, false
-	}
-	patch, ok := parsePositiveInt(parts[2])
-	if !ok {
-		return semver{}, false
-	}
-	return semver{Major: major, Minor: minor, Patch: patch}, true
-}
-
-func parsePositiveInt(raw string) (int, bool) {
-	if raw == "" {
-		return 0, false
-	}
-	value := 0
-	for _, r := range raw {
-		if r < '0' || r > '9' {
-			return 0, false
-		}
-		value = value*10 + int(r-'0')
-	}
-	return value, true
+	return semver.CompareCore(c, l), true
 }
 
 func normalizeVersion(version string) string {
