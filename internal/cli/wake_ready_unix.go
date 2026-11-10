@@ -86,7 +86,6 @@ func publishWakeReadyFile(path string, marker wakeReady) (*wakeReadyPublication,
 		var err error
 		snapshot, err = writeWakeReadyGenerationFileAtWithSnapshot(
 			dirfd,
-			parent,
 			name,
 			"wake ready file",
 			marker,

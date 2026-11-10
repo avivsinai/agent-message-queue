@@ -709,7 +709,6 @@ func removeWakeReadyGenerationFileIfSnapshotMatchesAt(
 
 func writeWakeReadyGenerationFileAtWithSnapshot(
 	dirfd int,
-	_ *wakeAgentDir,
 	name string,
 	label string,
 	marker wakeReady,
