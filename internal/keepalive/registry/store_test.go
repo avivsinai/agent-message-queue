@@ -145,8 +145,9 @@ func TestStoreRejectsSecondOwnerForSameAdapterTarget(t *testing.T) {
 	if !errors.Is(err, ErrTargetOwned) {
 		t.Fatalf("Upsert(second) error = %v, want ErrTargetOwned", err)
 	}
+	firstRoot, _ := CanonicalRoot("/tmp/first")
 	loaded, loadErr := store.Load()
-	if loadErr != nil || len(loaded.Entries) != 1 || loaded.Entries[0].Root != "/tmp/first" {
+	if loadErr != nil || len(loaded.Entries) != 1 || loaded.Entries[0].Root != firstRoot {
 		t.Fatalf("registry changed after collision: entries=%#v err=%v", loaded.Entries, loadErr)
 	}
 }

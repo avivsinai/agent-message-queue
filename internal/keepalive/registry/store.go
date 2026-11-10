@@ -214,8 +214,8 @@ func EntryID(root, agent, adapterName, target string) string {
 // CanonicalRoot returns the stable filesystem identity used for AMQ wake
 // ownership. Existing roots are resolved through symlinks. EACCES and ELOOP
 // fail closed instead of falling back to a lexical spelling. A not-yet-created
-// root still receives an absolute, cleaned spelling so registration remains
-// deterministic before AMQ creates its layout.
+// root keeps its missing tail below its resolved nearest existing ancestor, so
+// registration stays deterministic before AMQ creates its layout.
 func CanonicalRoot(root string) (string, error) {
 	if strings.TrimSpace(root) == "" {
 		return "", errors.New("entry root is required")
@@ -230,6 +230,22 @@ func CanonicalRoot(root string) (string, error) {
 	}
 	if uncertainSymlinkResolution(err) {
 		return "", fmt.Errorf("canonicalize root %q: %w", abs, err)
+	}
+	// The root does not exist yet: resolve its nearest existing ancestor so the
+	// identity does not change when the root is created behind a symlink.
+	rest := filepath.Base(abs)
+	for dir := filepath.Dir(abs); dir != abs; dir = filepath.Dir(dir) {
+		real, err := filepath.EvalSymlinks(dir)
+		if err == nil {
+			return filepath.Join(real, rest), nil
+		}
+		if uncertainSymlinkResolution(err) {
+			return "", fmt.Errorf("canonicalize root %q: %w", abs, err)
+		}
+		if filepath.Dir(dir) == dir {
+			break
+		}
+		rest = filepath.Join(filepath.Base(dir), rest)
 	}
 	return abs, nil
 }
