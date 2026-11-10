@@ -3,13 +3,9 @@ package acp
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
-
-	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 const (
@@ -97,28 +93,6 @@ func resolveEventID(meta json.RawMessage) (string, *rpcError) {
 
 func eventJournalPath(me, eventID string) string {
 	return filepath.Join("agents", me, "outbox", "acp-events", eventID+".json")
-}
-
-func rememberEvent(cfg Config, rec eventRecord) error {
-	identity, err := fsq.SnapshotDeliveryRoot(cfg.Root)
-	if err != nil {
-		return err
-	}
-	root, err := fsq.OpenDeliveryRoot(cfg.Root, identity)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = root.Close() }()
-
-	data, err := json.Marshal(rec)
-	if err != nil {
-		return err
-	}
-	err = root.CreateExclusiveFile(eventJournalPath(cfg.Me, rec.EventID), append(data, '\n'), 0o600)
-	if errors.Is(err, os.ErrExist) {
-		return os.ErrExist
-	}
-	return err
 }
 
 // lookupEventID is the id of the Buzz event that triggered a prompt, to
