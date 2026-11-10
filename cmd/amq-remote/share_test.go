@@ -1047,6 +1047,10 @@ func TestExplicitDaysShorteningRefused(t *testing.T) {
 	if _, _, code = runShareLoose("--root", root, "--session", "sd1", "--renew", "--days", "1", "--dry-run"); code == 0 {
 		t.Fatal("renewal preview accepted --days 1 over a 60-day bound")
 	}
+	// A plain dry-run refuses like the plain run (audit 2026-11-10).
+	if _, _, code = runShareLoose("--root", root, "--session", "sd1", "--days", "1", "--dry-run"); code != 6 {
+		t.Fatalf("plain --days 1 --dry-run exit = %d, want 6 like the real run", code)
+	}
 	_, stderr, code = runShareLoose("--root", root, "--session", "sd1", "--renew", "--days", "1")
 	if code == 0 {
 		t.Fatal("renew --days 1 over a 60-day bound was silently bumped")

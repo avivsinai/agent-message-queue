@@ -229,21 +229,29 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 		// exists; it is labelled non-enrollable and the current window is
 		// never substituted for it (with --renew --days 1 over a --days 90
 		// window the preview refuses exactly where the real run refuses).
-		pendingTags := st.Pending.Tags
-		if *renew {
-			preview, err := renewalWindow(st, *days, daysSet, enable)
-			if err != nil {
-				return protocol.ExitActionRequired, err
+		// The dry run asks the same questions as the real run, through the
+		// same functions, and stops before the first write.
+		preview, err := renewalWindow(st, *days, daysSet, enable)
+		if err != nil {
+			return protocol.ExitActionRequired, err
+		}
+		outcome, code, err := shareDisposition(*session, st, *renew, enable)
+		if err != nil {
+			return code, err
+		}
+		switch outcome {
+		case shareReprintOutstanding:
+			printShareOutstanding(stdout, *session, k, outstandingPending(st.Pending.Tags, st.Staged.Tags, st.Enrolled.Gen), st.Staged.Tags, st.Pending.Tags, st.Enrolled.Gen)
+		case shareShowEnrolled:
+			printShareEnrolled(stdout, *session, k, st.Enrolled.Gen.Tags)
+		default:
+			if *renew {
+				printSharePending(stdout, *session, k, preview.tags, preview.notAfter)
+				say(stdout, "(dry-run preview only: no state written; bound is fixed when --renew runs — sign the preimages that plain share prints afterwards)")
+			} else {
+				printShareDryRun(stdout, *session, k, *days, enable)
 			}
-			printSharePending(stdout, *session, k, preview.tags, preview.notAfter)
-			say(stdout, "(dry-run preview only: no state written; bound is fixed when --renew runs — sign the preimages that plain share prints afterwards)")
-			return 0, nil
 		}
-		if len(pendingTags) > 0 {
-			printSharePending(stdout, *session, k, pendingTags, time.Time{})
-			return 0, nil
-		}
-		printShareDryRun(stdout, *session, k, *days, enable)
 		return 0, nil
 	}
 
@@ -324,34 +332,25 @@ func mintOrRenewShare(root, session, keyDir string, k *bodykey.BodyKey, st *shar
 	if err := st2.refuseIfConfined(); err != nil {
 		return protocol.ExitActionRequired, err
 	}
-	pendingTags := st2.Pending.Tags
-	pendingGone := st2.Pending.State == leafAbsent
-	if !renew {
-		if !pendingGone && len(pendingTags) > 0 {
-			// An enrollment is incomplete: reprint the OUTSTANDING pending
-			// preimages (the owner signs one kind at a time
-			// offline and must be able to recover the preimage list without
-			// rotating the window). Enrolled credentials are untouched.
-			if st2.Staged.Err != nil {
-				return protocol.ExitActionRequired, stagedCorruptRefusal(session, st2.Staged.leafRead)
-			}
-			outstanding := outstandingPending(pendingTags, st2.Staged.Tags, st2.Enrolled.Gen)
-			printShareOutstanding(stdout, session, k, outstanding, st2.Staged.Tags, pendingTags, st2.Enrolled.Gen)
-			return 0, nil
-		}
-		if st2.Enrolled.Gen != nil && len(st2.Enrolled.Gen.Tags) > 0 && len(enable) > 0 {
-			// A new surface needs fresh owner signatures in a new window;
-			// the enrolled grants stay active until it completes.
-			return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid,
-				"--enable on an enrolled session needs --renew: the new window keeps every enrolled kind and adds the surface")
-		}
-		if st2.Enrolled.Gen != nil && len(st2.Enrolled.Gen.Tags) > 0 {
-			// Fully enrolled; plain `share` does not disturb the state.
-			// Print the ENROLLED state (expiry derived from the signed
-			// conditions).
-			printShareEnrolled(stdout, session, k, st2.Enrolled.Gen.Tags)
-			return 0, nil
-		}
+	outcome, code, err := shareDisposition(session, st2, renew, enable)
+	if err != nil {
+		return code, err
+	}
+	switch outcome {
+	case shareReprintOutstanding:
+		// An enrollment is incomplete: reprint the OUTSTANDING pending
+		// preimages (the owner signs one kind at a time offline and must be
+		// able to recover the preimage list without rotating the window).
+		// Enrolled credentials are untouched.
+		pendingTags := st2.Pending.Tags
+		outstanding := outstandingPending(pendingTags, st2.Staged.Tags, st2.Enrolled.Gen)
+		printShareOutstanding(stdout, session, k, outstanding, st2.Staged.Tags, pendingTags, st2.Enrolled.Gen)
+		return 0, nil
+	case shareShowEnrolled:
+		// Fully enrolled; plain `share` does not disturb the state. Print the
+		// ENROLLED state (expiry derived from the signed conditions).
+		printShareEnrolled(stdout, session, k, st2.Enrolled.Gen.Tags)
+		return 0, nil
 	}
 	if err := writeSharePending(keyDir, pending, notAfter); err != nil {
 		return protocol.ExitActionRequired, err
@@ -359,6 +358,41 @@ func mintOrRenewShare(root, session, keyDir string, k *bodykey.BodyKey, st *shar
 	printSharePending(stdout, session, k, pending, notAfter)
 	say(stderr, "save this output, sign it in one step, then enroll the bundle:\n  amq-owner-sign --share <this-output> --out <bundle.json> --relay <wss-url>\n  amq-remote share --root %s --session %s --bundle <bundle.json> --target <target> --relay <wss-url> [--dm-channel <channel> --native-session <id>]", root, session)
 	return 0, nil
+}
+
+type shareOutcome int
+
+const (
+	// shareWriteWindow mints or renews a pending window.
+	shareWriteWindow shareOutcome = iota
+	shareReprintOutstanding
+	shareShowEnrolled
+)
+
+// shareDisposition decides what a real `share` run does with the loaded
+// state after the window is computed, and returns the refusal exit code with
+// any error. --dry-run calls it too, so a preview cannot drift from the run.
+func shareDisposition(session string, st *shareState, renew bool, enable []uint16) (shareOutcome, int, error) {
+	if renew {
+		return shareWriteWindow, 0, nil
+	}
+	enrolled := st.Enrolled.Gen != nil && len(st.Enrolled.Gen.Tags) > 0
+	if st.Pending.State != leafAbsent && len(st.Pending.Tags) > 0 {
+		if st.Staged.Err != nil {
+			return 0, protocol.ExitActionRequired, stagedCorruptRefusal(session, st.Staged.leafRead)
+		}
+		return shareReprintOutstanding, 0, nil
+	}
+	if enrolled && len(enable) > 0 {
+		// A new surface needs fresh owner signatures in a new window; the
+		// enrolled grants stay active until it completes.
+		return 0, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid,
+			"--enable on an enrolled session needs --renew: the new window keeps every enrolled kind and adds the surface")
+	}
+	if enrolled {
+		return shareShowEnrolled, 0, nil
+	}
+	return shareWriteWindow, 0, nil
 }
 
 // shareWindow is one computed attestation window: the per-kind condition
