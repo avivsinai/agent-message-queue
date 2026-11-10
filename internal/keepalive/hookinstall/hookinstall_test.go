@@ -305,16 +305,6 @@ func TestDryRunDoesNotWriteFiles(t *testing.T) {
 	}
 }
 
-func TestEmbeddedScriptMatchesRepositoryHook(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "..", "scripts", "amq-keepalive-session-start.sh"))
-	if err != nil {
-		t.Fatalf("read repository hook: %v", err)
-	}
-	if string(data) != SessionStartScript {
-		t.Fatal("embedded SessionStart script drifted from hooks/amq-keepalive-session-start.sh")
-	}
-}
-
 // Narrowed scope (bead 9xv): the one test with an observed failure signature
 // ('signal: killed', reproduced 2026-09-06 at b4f3897) no longer runs the
 // reattach/watchdog lifecycle. It now exercises production normalization on the

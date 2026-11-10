@@ -399,14 +399,25 @@ func migrateHomeKeepaliveResidue(old string, own bool) (paths []string, why stri
 			for _, session := range sessions {
 				sessionDir := filepath.Join(path, session.Name())
 				files, err := os.ReadDir(sessionDir)
-				if !session.IsDir() || err != nil || len(files) != 1 || files[0].Name() != "inject.lock" || !files[0].Type().IsRegular() {
+				if !session.IsDir() || err != nil {
 					return nil, "holds claude-print state in " + sessionDir
 				}
-				lock := filepath.Join(sessionDir, "inject.lock")
-				if held, err := registry.ProbeLockHeld(lock); err != nil || held {
-					return nil, "holds an inject lock that is held or cannot be probed: " + lock
+				// A stream log is a record of a finished inject, not state. A
+				// held inject lock still blocks.
+				for _, file := range files {
+					fileName := file.Name()
+					switch {
+					case file.Type().IsRegular() && fileName == "inject.lock":
+						lock := filepath.Join(sessionDir, fileName)
+						if held, err := registry.ProbeLockHeld(lock); err != nil || held {
+							return nil, "holds an inject lock that is held or cannot be probed: " + lock
+						}
+					case file.Type().IsRegular() && strings.HasSuffix(fileName, ".stream.jsonl"):
+					default:
+						return nil, "holds claude-print state in " + sessionDir
+					}
+					paths = append(paths, filepath.Join(sessionDir, fileName))
 				}
-				paths = append(paths, lock)
 				dirs = append(dirs, sessionDir)
 			}
 			dirs = append(dirs, path)

@@ -69,8 +69,8 @@ func doctorSelfUpgradeSetting(path string) doctorSetting {
 // process-lifetime lock. A row whose lock is held is live;
 // a row whose lock is not held is STALE — its up died hard (kill -9)
 // without Forget — and doctor must never present it as active. A probe
-// error is surfaced as "unknown" and counts as a warning in the exit
-// code, never silently as active.
+// error is surfaced as "unknown", never silently as active. The command exits
+// 0 either way; the counts carry the verdict.
 func companionOpsReport(regPath string, file registry.File) map[string]any {
 	type row struct {
 		ID       string `json:"id"`

@@ -53,3 +53,18 @@ func probeSchemeOwner(ctx context.Context, runner CommandRunner, scheme, wantBun
 	}
 	return nil
 }
+
+// requireAppRunning refuses when no process of the app with bundleID is
+// running. `open <scheme>://` starts a stopped app, and AMQ never starts a
+// user's app. `lsappinfo find` only queries LaunchServices and prints nothing
+// for an app that is not running.
+func requireAppRunning(ctx context.Context, runner CommandRunner, bundleID, appName string) error {
+	out, err := runner.Run(ctx, "lsappinfo", "find", "bundleid="+bundleID)
+	if err != nil {
+		return fmt.Errorf("check whether %s is running: %w: %s", appName, err, strings.TrimSpace(string(out)))
+	}
+	if strings.TrimSpace(string(out)) == "" {
+		return fmt.Errorf("%s is not running; AMQ does not start it, open it and retry", appName)
+	}
+	return nil
+}

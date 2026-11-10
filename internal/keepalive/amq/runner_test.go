@@ -918,3 +918,25 @@ func waitForFakeWakePID(path string, timeout time.Duration) (int, bool) {
 	}
 	return 0, false
 }
+
+// An agent with no wake lock counts as retired, so keepalive forgets its row
+// (audit 2026-11-10).
+func TestRetireWakeWithNoWakeLockIsAlreadyAbsent(t *testing.T) {
+	requireWakeProcessLane(t)
+	dir := t.TempDir()
+	fakeAMQ := writeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
+if [ "$1" = "wake" ] && [ "$2" = "check" ]; then
+  printf '%s\n' '{"schema":1,"live_wake":false,"image_status":"unknown","wake_status":"missing"}'
+  exit 0
+fi
+printf '%s\n' '{"status":"refused","reason":"no wake lock present; wake process absence cannot be proven"}'
+exit 6
+`)
+	result, err := NewCLI(fakeAMQ).RetireWake(context.Background(), RetireWakeRequest{
+		Root: "/tmp/amq-root", Me: "codex", InjectVia: "/tmp/amq-keepalive",
+		Adapter: "cmux", Target: "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3",
+	})
+	if err != nil || !result.Retired() {
+		t.Fatalf("RetireWake() = %+v, %v; want already absent", result, err)
+	}
+}

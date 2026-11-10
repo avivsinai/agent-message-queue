@@ -69,6 +69,8 @@ type WakeCheckResult struct {
 	LiveWake    bool   `json:"live_wake"`
 	ImageStatus string `json:"image_status"`
 	Generation  string `json:"wake_generation"`
+	// WakeMissing is true when AMQ found no wake lock at all.
+	WakeMissing bool `json:"-"`
 }
 
 type wakeCheckWireResult struct {
@@ -76,6 +78,7 @@ type wakeCheckWireResult struct {
 	LiveWake    *bool   `json:"live_wake"`
 	ImageStatus *string `json:"image_status"`
 	Generation  *string `json:"wake_generation"`
+	WakeStatus  *string `json:"wake_status"`
 }
 
 // RetireWakeRequest names the exact inject-via identity that AMQ must match
@@ -108,10 +111,17 @@ type RetireWakeResult struct {
 	Reason string `json:"reason"`
 }
 
+// wakeStatusMissing is the wake check status for an agent with no wake lock.
+const wakeStatusMissing = "missing"
+
+// StatusAlreadyAbsent is the RetireWake result status when AMQ reported no
+// wake lock for the agent, so there is nothing to stop.
+const StatusAlreadyAbsent = "already_absent"
+
 // Retired reports whether AMQ positively confirmed the wake was stopped (or its
 // exactly-bound proven-stale lock removed).
 func (r RetireWakeResult) Retired() bool {
-	return r.Status == "retired" || r.Status == "retired_with_residue"
+	return r.Status == "retired" || r.Status == "retired_with_residue" || r.Status == StatusAlreadyAbsent
 }
 
 // ErrWakeRetireNotConfirmed wraps every non-retired outcome so callers can log
@@ -363,6 +373,7 @@ func (c CLI) checkWake(ctx context.Context, req StartWakeRequest) (WakeCheckResu
 	if wire.Generation != nil {
 		result.Generation = strings.TrimSpace(*wire.Generation)
 	}
+	result.WakeMissing = wire.WakeStatus != nil && *wire.WakeStatus == wakeStatusMissing
 	return result, nil
 }
 
@@ -385,6 +396,14 @@ func (c CLI) RetireWake(ctx context.Context, req RetireWakeRequest) (RetireWakeR
 	}
 	if req.Target == "" {
 		return RetireWakeResult{}, errors.New("target is required")
+	}
+
+	// With no observed generation, a wake check tells an agent with no wake
+	// lock (nothing to retire) from one whose retirement AMQ refused.
+	if req.Generation == "" {
+		if check, err := c.checkWake(ctx, StartWakeRequest{Root: req.Root, Me: req.Me}); err == nil && check.WakeMissing && !check.LiveWake {
+			return RetireWakeResult{Status: StatusAlreadyAbsent, Agent: req.Me, Root: req.Root, Target: req.Target}, nil
+		}
 	}
 
 	args := []string{"wake", "retire", "--me", req.Me}

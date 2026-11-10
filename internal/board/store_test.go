@@ -878,6 +878,16 @@ func checkSuggestionAdoption(t *testing.T, ctx context.Context) {
 	if published.SuggestionFingerprint(cfg) != fp || len(published.Tasks) != 0 || len(published.SuggestionViews()[0].Commands) != 2 {
 		t.Fatal("suggestion publication changed its own fingerprint or admitted work")
 	}
+	// An idle cycle keeps proposals the owner has not reviewed (audit 2026-11-10).
+	if err = store.publishSuggestions(ctx, published, cfg, nil, false, nil, SuggestionAttempt{Fingerprint: fp, Status: "idle"}); err != nil {
+		t.Fatal(err)
+	}
+	if published, err = store.ReadContext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(published.Suggestions.Proposals) != 1 {
+		t.Fatal("an idle suggestion cycle wiped an unreviewed proposal")
+	}
 	adopted, err := store.AdoptSuggestion(ctx, SuggestionAdoption{ID: proposal.ID, Choices: proposal.Selected, ExpectedGeneration: published.Generation, ConfirmIndependent: true})
 	if err != nil {
 		t.Fatal(err)

@@ -197,3 +197,29 @@ func TestCodexGoalsReadCheckpointedWALDatabase(t *testing.T) {
 		t.Fatalf("read created %v", sidecars)
 	}
 }
+
+// One unreadable rollout is skipped and named; the readable sessions still
+// resolve (audit 2026-11-10).
+func TestCodexGoalSessionsSkipUnreadableRollout(t *testing.T) {
+	home, project := t.TempDir(), t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	good, bad := "019f0000-0000-7000-8000-000000000001", "019f0000-0000-7000-8000-000000000002"
+	meta, _ := json.Marshal(map[string]any{"type": "session_meta", "payload": map[string]string{"id": good, "cwd": project}})
+	if err := os.WriteFile(filepath.Join(home, "sessions", "rollout-a-"+good+".jsonl"), append(meta, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	badPath := filepath.Join(home, "sessions", "rollout-a-"+bad+".jsonl")
+	if err := os.WriteFile(badPath, []byte("{}\n"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	runner := codexGoalsRunner(func(_ context.Context, argv []string) ([]byte, error) {
+		return []byte("worktree " + project + "\x00\x00"), nil
+	})
+	env := board.Env{Dir: project, Now: time.Now, Run: runner}
+	eligible, coverage, err := codexGoalSessions(context.Background(), env, home, nil, nil)
+	if err != nil || len(eligible) != 1 || coverage.Unresolved != 1 || !strings.Contains(coverage.Detail, "-"+bad+".jsonl") {
+		t.Fatalf("eligible %v, coverage %+v, err %v", eligible, coverage, err)
+	}
+}

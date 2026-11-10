@@ -12,8 +12,9 @@ export const PROTOCOL = "amq:pi-bridge:v1";
 // BRIDGE_REVISION names the implementation rules the adapter relies on
 // (docs/pi-bridge-protocol.md, bridge revision). The adapter sends no new
 // requests to a bridge that publishes a lower revision or none. Revision 4
-// is revision 3 plus pi's session id in liveness.
-export const BRIDGE_REVISION = 4;
+// is revision 3 plus pi's session id in liveness; revision 5 adds the exact
+// cancel of one request (cancels/<ref>.json).
+export const BRIDGE_REVISION = 5;
 // A request carries the bridge_revision its adapter requires. A request
 // without one comes from an adapter that predates the revision fence and is
 // refused, so an old adapter cannot send work through this bridge.
@@ -131,6 +132,13 @@ type Bridge = {
 	// last listing.
 	listedMtime: number;
 	listedAt: number;
+	// cancelsOpen holds the refs of cancel files not applied yet; cancelsDone
+	// the refs of cancel files that need no more work. cancelListedMtime and
+	// cancelListedAt are cancels/'s mtime and the time of the last listing.
+	cancelsOpen: Set<string>;
+	cancelsDone: Set<string>;
+	cancelListedMtime: number;
+	cancelListedAt: number;
 	// refusals holds a refusal decided for a ref whose append failed. The
 	// ref is never examined again; only this same refusal is retried.
 	refusals: Map<string, EventFields>;
@@ -587,6 +595,10 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOption
 		pending: new Map(),
 		listedMtime: -1,
 		listedAt: 0,
+		cancelsOpen: new Set(),
+		cancelsDone: new Set(),
+		cancelListedMtime: -1,
+		cancelListedAt: 0,
 		refusals: new Map(),
 		inflight: null,
 		orphans: null,
@@ -753,6 +765,69 @@ function discover(b: Bridge): void {
 	for (const ref of b.handled) if (!listed.has(ref)) b.handled.delete(ref);
 }
 
+// applyCancels applies the cancel files in cancels/ (docs/pi-bridge-protocol.md,
+// bridge revision 5). A cancel names one request: one without a receipt or a
+// terminal event is refused cancelled and never runs; the request in flight
+// is aborted only once it has started, so the abort never reaches a local
+// turn; any other request is left alone. A cancel that is not applied yet
+// stays open and is tried again on the next poll.
+function applyCancels(b: Bridge): void {
+	const dir = path.join(b.dir, "cancels");
+	const now = Date.now();
+	let names: string[];
+	let mtime: number;
+	try {
+		mtime = fs.statSync(dir).mtimeMs;
+		const unchanged = mtime === b.cancelListedMtime && b.cancelListedAt - mtime > COARSE_MTIME_MS && now - b.cancelListedAt < RECONCILE_MS;
+		if (unchanged && b.cancelsOpen.size === 0) return;
+		names = unchanged ? [] : fs.readdirSync(dir);
+	} catch {
+		return;
+	}
+	if (names.length > 0 || b.cancelListedMtime !== mtime) {
+		b.cancelListedMtime = mtime;
+		b.cancelListedAt = now;
+	}
+	const listed = new Set<string>();
+	for (const name of names) {
+		const m = REQUEST_FILE.exec(name);
+		if (!m) continue;
+		listed.add(m[1]);
+		if (!b.cancelsDone.has(m[1])) b.cancelsOpen.add(m[1]);
+	}
+	if (names.length > 0) for (const ref of b.cancelsDone) if (!listed.has(ref)) b.cancelsDone.delete(ref);
+	for (const ref of [...b.cancelsOpen]) {
+		if (cancelApplied(b, ref)) {
+			b.cancelsOpen.delete(ref);
+			b.cancelsDone.add(ref);
+		}
+	}
+}
+
+// cancelApplied reports whether the cancel for ref needs no more work.
+function cancelApplied(b: Bridge, ref: string): boolean {
+	let rec: Record<string, unknown>;
+	try {
+		rec = JSON.parse(fs.readFileSync(path.join(b.dir, "cancels", `${ref}.json`), "utf8"));
+	} catch {
+		return true;
+	}
+	if (rec === null || typeof rec !== "object" || rec.protocol !== PROTOCOL || rec.ref !== ref) return true;
+	const f = b.inflight;
+	if (f?.ref === ref) {
+		if (f.terminal) return true;
+		if (!f.started) return false;
+		b.ctx.abort();
+		return true;
+	}
+	if (b.refusals.has(ref) || exists(path.join(b.dir, "receipts", `${ref}.json`)) || hasTerminal(b.dir, ref)) return true;
+	if (!b.pending.has(ref)) return !exists(path.join(b.dir, "requests", `${ref}.json`)) || b.handled.has(ref);
+	const fields: EventFields = { event: "refused", reason: "cancelled", error: "the request was cancelled before it was delivered" };
+	if (appendEvent(b.dir, ref, fields)) markHandled(b, ref);
+	else b.refusals.set(ref, fields);
+	return true;
+}
+
 // markHandled records that ref needs no more work.
 function markHandled(b: Bridge, ref: string): void {
 	b.pending.delete(ref);
@@ -768,6 +843,7 @@ function markHandled(b: Bridge, ref: string): void {
 // visible, because the line may not be durable.
 function scan(pi: ExtensionAPI, b: Bridge): void {
 	discover(b);
+	applyCancels(b);
 	const pending = [...b.pending].sort(([ra, ma], [rb, mb]) => ma - mb || (ra < rb ? -1 : ra > rb ? 1 : 0));
 
 	if (!b.orphans || b.orphans.size > 0) closeOrphanedReceipts(b);

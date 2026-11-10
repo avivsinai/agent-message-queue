@@ -108,13 +108,6 @@ func (l *Live) Loop(ctx context.Context, every time.Duration) {
 	}
 }
 
-// Model is the last built model.
-func (l *Live) Model() Model {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.model
-}
-
 func (l *Live) begin(force bool) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()

@@ -33,10 +33,11 @@ const beadLookupPR = "bd --readonly --sandbox list --all --id pr-11,pr-12,pr-13,
 
 func githubOutputs() map[string]string {
 	return map[string]string{
-		"git remote get-url origin":        "origin-url.txt",
-		"gh config get user -h github.com": "gh-user.txt",
-		"gh api graphql":                   "github-graphql.json",
-		"bd --readonly --sandbox list --json --status open,in_progress,blocked,deferred --limit 0": "bd-list-github.json",
+		"git remote get-url origin":                           "origin-url.txt",
+		"gh config get user -h github.com":                    "gh-user.txt",
+		"gh api graphql":                                      "github-graphql.json",
+		"bd --readonly --sandbox info --json":                 "bd-info.json",
+		"bd --readonly --sandbox list --json --all --limit 0": "bd-list-github.json",
 		beadLookupPR: "bd-lookup-empty.json",
 	}
 }
@@ -64,7 +65,7 @@ func cardText(c board.Card) string {
 func TestGitHubPlacesCapturedGraphQLResponse(t *testing.T) {
 	r := fakeRunner{t: t, outputs: githubOutputs(), calls: map[string]int{}}
 	sources := []board.Source{source.Beads{GitHubRepo: "octo-org/demo"}, demoGitHub()}
-	m := board.Run(context.Background(), githubEnv(r), sources, board.DefaultConfig(), "test")
+	m := board.Build(board.Acquire(context.Background(), githubEnv(r), sources, board.DefaultConfig(), "test"))
 	cards := cardsByRef(m)
 	// Live board 2026-11-02: words like "codex-cli" and "pr-11" filled the
 	// 200-id bead lookup on every sync. Only the beads' own prefix is looked up.
@@ -448,7 +449,7 @@ func TestGitHubReviewRequestsPageFiveTimes(t *testing.T) {
 		}
 	}
 	r := fakeRunner{t: t, outputs: out, edit: edit, calls: calls}
-	m := board.Run(context.Background(), githubEnv(r), []board.Source{demoGitHub()}, board.DefaultConfig(), "test")
+	m := board.Build(board.Acquire(context.Background(), githubEnv(r), []board.Source{demoGitHub()}, board.DefaultConfig(), "test"))
 
 	cards := cardsByRef(m)
 	for n := 41; n <= 44; n++ {
@@ -488,7 +489,7 @@ func TestGitHubTooManyReposLeavesWaitingNotAssessed(t *testing.T) {
 	for i := 0; i < 11; i++ {
 		repos = append(repos, "octo-org/r"+strconv.Itoa(i))
 	}
-	m := board.Run(context.Background(), githubEnv(r), []board.Source{source.GitHub{Repos: repos}}, board.DefaultConfig(), "test")
+	m := board.Build(board.Acquire(context.Background(), githubEnv(r), []board.Source{source.GitHub{Repos: repos}}, board.DefaultConfig(), "test"))
 	if got := column(m, board.ColumnWaiting).Empty; !strings.Contains(got, "Not assessed: github degraded") {
 		t.Fatalf("empty Waiting = %q", got)
 	}
@@ -497,7 +498,7 @@ func TestGitHubTooManyReposLeavesWaitingNotAssessed(t *testing.T) {
 func TestExternalProviderIsDataOnly(t *testing.T) {
 	ext := source.External{Provider: board.Provider{Name: "tracker", Exec: "/opt/tracker/board", Enabled: true}}
 	r := fakeRunner{t: t, outputs: map[string]string{"/opt/tracker/board": "provider.json"}}
-	m := board.Run(context.Background(), githubEnv(r), []board.Source{ext}, board.DefaultConfig(), "test")
+	m := board.Build(board.Acquire(context.Background(), githubEnv(r), []board.Source{ext}, board.DefaultConfig(), "test"))
 
 	src := source_(m, "ext:tracker")
 	if src.Status != board.StatusOK || src.Coverage.Skipped != 2 {
