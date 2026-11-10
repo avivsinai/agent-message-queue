@@ -218,8 +218,13 @@ func TestLivePressedRefreshEndsWithTheView(t *testing.T) {
 // The live page reads the publication error from pane.json, so a degraded
 // source carries its detail there (audit 2026-11-10).
 func TestPaneCarriesDegradedSourceDetail(t *testing.T) {
-	pane := ProjectPane(Model{Sources: []SourceView{{Name: "board-state", Status: StatusDegraded, Detail: "publication failed"}, {Name: "amq", Status: StatusOK, Detail: "fine"}}})
-	if pane.Sources[0].Detail != "publication failed" || pane.Sources[1].Detail != "" {
+	sources := []SourceView{}
+	for i := 0; i < 40; i++ {
+		sources = append(sources, SourceView{Name: "ok", Status: StatusOK, Detail: "fine"})
+	}
+	sources = append(sources, SourceView{Name: "board-state", Status: StatusDegraded, Detail: "publication failed"})
+	pane := ProjectPane(Model{Sources: sources})
+	if len(pane.Sources) != paneSourceLimit || pane.Sources[0].Name != "board-state" || pane.Sources[0].Detail != "publication failed" || pane.Sources[1].Detail != "" {
 		t.Fatalf("sources %+v", pane.Sources)
 	}
 }
