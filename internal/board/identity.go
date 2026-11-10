@@ -131,6 +131,7 @@ func (s Snapshot) Catalogue() []TaskCatalogueEntry {
 		}
 	}
 	sort.Strings(ids)
+	redirects := s.redirects()
 	result := make([]TaskCatalogueEntry, 0, len(ids))
 	for _, id := range ids {
 		task := s.Tasks[id]
@@ -138,7 +139,7 @@ func (s Snapshot) Catalogue() []TaskCatalogueEntry {
 		for _, alias := range task.Aliases {
 			entry.Facts = append(entry.Facts, s.Facts[alias])
 		}
-		for copied, redirect := range s.redirects() {
+		for copied, redirect := range redirects {
 			if redirect == id {
 				entry.CopiedIDs = append(entry.CopiedIDs, copied)
 			}

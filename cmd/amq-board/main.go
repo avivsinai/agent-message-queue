@@ -354,7 +354,9 @@ const stderrTail = 4 << 10
 
 // execRunner runs argv directly (no shell) with no stdin and returns stdout.
 // A failed command's error carries its stderr. A non-empty ghToken is passed
-// as GH_TOKEN to gh commands only, never to another tool or a provider.
+// as GH_TOKEN to gh commands only, never to another tool or a provider. Git
+// runs in the C locale, so its error text is English whatever the user's
+// language.
 type execRunner struct {
 	ghToken     string
 	amqEnv      []string
@@ -383,6 +385,9 @@ func (r execRunner) RunLimited(ctx context.Context, dir string, argv []string, m
 	}
 	if r.ghToken != "" && argv[0] == "gh" {
 		cmd.Env = append(os.Environ(), "GH_TOKEN="+r.ghToken)
+	}
+	if argv[0] == "git" {
+		cmd.Env = append(os.Environ(), "LC_ALL=C")
 	}
 	stdout := &limitBuffer{max: maxOut, overflow: cancel}
 	var stderr tailBuffer

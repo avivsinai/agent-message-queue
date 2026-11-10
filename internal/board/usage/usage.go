@@ -271,16 +271,26 @@ func read(cfg Config, now time.Time, roots []string, mapping Mapping, clock func
 func readHome(harness, home string, files []file, now time.Time, eligible Eligible, mapping Mapping, first func(string) bool, b *budget) Account {
 	acct := Account{Key: harness + ":" + displayHome(home), Harness: harness, Home: home}
 	acct.Files = len(files)
-	sort.SliceStable(files, func(i, j int) bool {
-		mi, mj := mappedPath(files[i].path, mapping), mappedPath(files[j].path, mapping)
-		if mi != mj {
-			return mi
+	type keyed struct {
+		f             file
+		mapped, first bool
+	}
+	keys := make([]keyed, len(files))
+	for i, f := range files {
+		keys[i] = keyed{f: f, mapped: mappedPath(f.path, mapping), first: first(f.path)}
+	}
+	sort.SliceStable(keys, func(i, j int) bool {
+		if keys[i].mapped != keys[j].mapped {
+			return keys[i].mapped
 		}
-		if fi, fj := first(files[i].path), first(files[j].path); fi != fj {
-			return fi
+		if keys[i].first != keys[j].first {
+			return keys[i].first
 		}
-		return files[i].mtime.After(files[j].mtime)
+		return keys[i].f.mtime.After(keys[j].f.mtime)
 	})
+	for i, k := range keys {
+		files[i] = k.f
+	}
 	switch harness {
 	case Claude:
 		readClaude(&acct, files, now, eligible, b)

@@ -480,6 +480,20 @@ func TestGitHubUnansweredQueryIsDegraded(t *testing.T) {
 	}
 }
 
+// Too many configured repos must not let an empty Waiting column say
+// "Nothing waits on you" (audit 2026-11-10).
+func TestGitHubTooManyReposLeavesWaitingNotAssessed(t *testing.T) {
+	r := fakeRunner{t: t, outputs: map[string]string{"git remote get-url origin": "origin-url.txt"}}
+	var repos []string
+	for i := 0; i < 11; i++ {
+		repos = append(repos, "octo-org/r"+strconv.Itoa(i))
+	}
+	m := board.Run(context.Background(), githubEnv(r), []board.Source{source.GitHub{Repos: repos}}, board.DefaultConfig(), "test")
+	if got := column(m, board.ColumnWaiting).Empty; !strings.Contains(got, "Not assessed: github degraded") {
+		t.Fatalf("empty Waiting = %q", got)
+	}
+}
+
 func TestExternalProviderIsDataOnly(t *testing.T) {
 	ext := source.External{Provider: board.Provider{Name: "tracker", Exec: "/opt/tracker/board", Enabled: true}}
 	r := fakeRunner{t: t, outputs: map[string]string{"/opt/tracker/board": "provider.json"}}

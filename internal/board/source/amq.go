@@ -450,13 +450,14 @@ func parseThreadOpen(data []byte) ([]board.Item, board.Coverage, string, error) 
 	if routed > 0 {
 		gaps = append(gaps, fmt.Sprintf("%d requests sent to other projects", routed))
 	}
-	cov.Detail = strings.Join(gaps, "; ")
 
 	var items []board.Item
+	rejected := 0
 	for _, o := range doc.Obligations {
 		ref, ok := board.Obligation(o.Key)
 		if !ok || fsq.ValidateHandle(o.OwedBy.Handle) != nil {
 			cov.Skipped++
+			rejected++
 			continue
 		}
 		owner := toOwner(o.OwedBy)
@@ -524,6 +525,10 @@ func parseThreadOpen(data []byte) ([]board.Item, board.Coverage, string, error) 
 		}
 		items = append(items, it)
 	}
+	if rejected > 0 {
+		gaps = append(gaps, fmt.Sprintf("%d obligations with an invalid key or handle", rejected))
+	}
+	cov.Detail = strings.Join(gaps, "; ")
 	return items, cov, doc.Schema, nil
 }
 
