@@ -11,6 +11,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/sessionguard"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -322,6 +323,8 @@ func isAssignedToMe(assignedTo, handle, agentID string) bool {
 	return strings.EqualFold(assignedTo, handle) || strings.EqualFold(assignedTo, agentID)
 }
 
+// deliverBridgeEvent self-delivers event to the agent's inbox, and refuses a
+// root the inherited session pin does not name (sessionguard.ContextError).
 func deliverBridgeEvent(cfg BridgeConfig, event BridgeEvent) error {
 	now := time.Now()
 	id, err := format.NewMessageID(now)
@@ -391,6 +394,9 @@ func deliverBridgeEvent(cfg BridgeConfig, event BridgeEvent) error {
 		return err
 	}
 	defer func() { _ = deliveryRoot.Close() }()
+	if err := sessionguard.VerifyEnvPinOn(deliveryRoot); err != nil {
+		return err
+	}
 	_, err = fsq.DeliverToInboxes(deliveryRoot, msg.Header.To, filename, data)
 	return err
 }

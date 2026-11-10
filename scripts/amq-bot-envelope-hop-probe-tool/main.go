@@ -39,7 +39,6 @@ func runWrite(args []string) error {
 	fs.SetOutput(os.Stderr)
 	rootFlag := fs.String("root", "", "G bridge root containing host-id and identity")
 	outputFlag := fs.String("output", "", "exclusive envelope output path")
-	transferIDFlag := fs.String("transfer-id", "", "probe transfer id; generated when empty")
 	sourceHostFlag := fs.String("source-host", defaultSourceHost, "source host alias")
 	sourceHandleFlag := fs.String("source-handle", defaultSourceHandle, "source AMQ handle")
 	destAliasFlag := fs.String("dest-alias", defaultDestAlias, "receiver-owned destination alias")
@@ -91,9 +90,6 @@ func runWrite(args []string) error {
 		return fmt.Errorf("generate message id: %w", err)
 	}
 	transferID := bridge.DeriveTransferID(sourceHost, sourceHandle, messageID, destAlias)
-	if requested := strings.TrimSpace(*transferIDFlag); requested != "" && requested != transferID {
-		return fmt.Errorf("transfer id %q does not match routing fields", requested)
-	}
 	threadID := strings.TrimSpace(*threadFlag)
 	if threadID == "" {
 		threadID = "probe/" + transferID

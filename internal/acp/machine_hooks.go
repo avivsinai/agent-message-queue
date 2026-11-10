@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,15 +18,13 @@ import (
 // The machine agent watches the Claude settings file of each session it
 // serves, the settings.json in the config_dir its binding records. A file
 // whose identity, size and mtime did not change since the last tick costs
-// one stat. When a changed file has lost the AMQ approval hook (or, for a
-// native session, the Stop hook), the agent puts the hook back through the
-// locked settings writer while the owner's opt-in for that file exists, and
-// says so once in the session's channel. A hook of an older form it
-// upgrades as doctor --fix does while the opt-in exists, and says so, else
-// says once that doctor --fix upgrades it; with no opt-in it only says, once
-// per change, that the session's approvals (or native turns) now stay in
-// the terminal. A removal the owner made with the uninstall commands clears
-// the opt-in, so it stays removed.
+// one stat. The agent never writes the file: only the install commands and
+// doctor --fix change a user's saved harness settings. When a changed file
+// has lost the AMQ approval hook (or, for a native session, the Stop hook),
+// it says once per version of the file, in the session's channel, that the
+// session's approvals (or native turns) now stay in the terminal; for a hook
+// of an older form it says once that doctor --fix upgrades it. After the
+// owner removed a hook with its uninstall command it says nothing about it.
 
 // settingsSeen is what the machine agent last saw of one settings file:
 // its stat, or nil when there was no file.
@@ -91,10 +88,6 @@ func (s *Server) watchHooks(all []binding.Binding) {
 	}
 }
 
-// remoteExecutable is the amq-remote a restored hook runs
-// (claude.HookBinary). Tests replace it.
-var remoteExecutable = func() (string, error) { return claude.HookBinary("amq-remote") }
-
 func statSettings(path string) os.FileInfo {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -103,20 +96,17 @@ func statSettings(path string) os.FileInfo {
 	return info
 }
 
-// Lines the machine agent posts about a hook that left a settings file.
+// Lines the machine agent posts about a hook that left a settings file or
+// is of an older form.
 const (
-	hookRestoredLine   = "The AMQ %s hook was missing from %s (changed %s); restored."
-	hookUpgradedLine   = "The AMQ %s hook in %s was an older form (changed %s); upgraded."
 	hookOldFormLine    = "The AMQ %s hook in %s is an older form (changed %s). Run `amq-remote doctor --fix`."
-	upgradeFailedLine  = " The upgrade failed: %v"
 	hookUnreadableLine = "Cannot read %s to check the AMQ %s hook: %v. Run `amq-remote doctor`."
 	approvalLostLine   = "Approvals of this session stay in the terminal: the AMQ approval hook left %s at %s. Run `amq-remote doctor --fix`."
-	restoreFailedLine  = " The restore failed: %v"
 	stopLostLine       = "Turns of this session sent from Buzz do not complete: the AMQ Stop hook left %s at %s. Run `amq-remote doctor --fix`."
 )
 
-// checkHooks handles one settings file that changed: the approval hook for
-// every session that reads it, the Stop hook for its native sessions.
+// checkHooks reports on one settings file that changed: the approval hook
+// for every session that reads it, the Stop hook for its native sessions.
 func (s *Server) checkHooks(path string, info os.FileInfo, readers []hookReader) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -132,7 +122,6 @@ func (s *Server) checkHooks(path string, info os.FileInfo, readers []hookReader)
 		form             func(home, settings string) (string, error)
 		nativeOnly       bool
 	}
-	restoredAny := false
 	for _, h := range []hook{
 		{claude.HookApproval, "approval", approvalLostLine, claude.PermissionHookState, claude.PermissionHookForm, false},
 		{claude.HookStop, "Stop", stopLostLine, claude.StopHookStateAt, claude.StopHookForm, true},
@@ -146,80 +135,25 @@ func (s *Server) checkHooks(path string, info os.FileInfo, readers []hookReader)
 		if len(channels) == 0 {
 			continue
 		}
-		post := func(text string) {
-			for _, channel := range channels {
-				_, _ = postAnswer(channel, mirror.Unmention(text), s.cfg.PostTimeout)
-			}
-		}
+		var text string
 		state, err := h.state(path)
-		if err != nil {
-			if s.warnOnce(path, h.kind, info) {
-				post(fmt.Sprintf(hookUnreadableLine, path, h.name, err))
-			}
-			continue
-		}
-		if state != claude.HookMissing {
-			// A hook of an older form is upgraded as doctor --fix does it,
-			// while the owner's opt-in exists; else it is reported once.
+		switch {
+		case err != nil:
+			text = fmt.Sprintf(hookUnreadableLine, path, h.name, err)
+		case state == claude.HookMissing:
+			text = fmt.Sprintf(h.lost, path, changed)
+		default:
 			if form, _ := h.form(home, path); !claude.FormFlagged(form) {
 				continue
 			}
-			upgraded := false
-			bin, err := remoteExecutable()
-			if err == nil {
-				upgraded, err = claude.UpgradeHook(home, path, h.kind, bin)
-				if errors.Is(err, claude.ErrSettingsBusy) {
-					delete(s.machine.settings, path)
-					return
-				}
-			}
-			if err == nil {
-				if upgraded {
-					restoredAny = true
-					post(fmt.Sprintf(hookUpgradedLine, h.name, path, changed))
-				}
-				continue
-			}
-			if !s.warnOnce(path, h.kind, info) {
-				continue
-			}
-			line := fmt.Sprintf(hookOldFormLine, h.name, path, changed)
-			if !errors.Is(err, claude.ErrNoOptIn) {
-				line += fmt.Sprintf(upgradeFailedLine, err)
-			}
-			post(line)
+			text = fmt.Sprintf(hookOldFormLine, h.name, path, changed)
+		}
+		if !s.warnOnce(path, h.kind, info) {
 			continue
 		}
-		restored := false
-		// With no installed amq-remote the hook is not written: a hook that
-		// runs a missing binary does nothing, and the warning says why.
-		bin, err := remoteExecutable()
-		if err == nil {
-			restored, err = claude.RestoreHook(home, path, h.kind, bin)
-			if errors.Is(err, claude.ErrSettingsBusy) {
-				// Another writer holds the file: check it again next tick.
-				delete(s.machine.settings, path)
-				return
-			}
+		for _, channel := range channels {
+			_, _ = postAnswer(channel, mirror.Unmention(text), s.cfg.PostTimeout)
 		}
-		text := fmt.Sprintf(hookRestoredLine, h.name, path, changed)
-		switch {
-		case restored && err == nil:
-			restoredAny = true
-		case !s.warnOnce(path, h.kind, info):
-			continue
-		default:
-			text = fmt.Sprintf(h.lost, path, changed)
-			if err != nil {
-				text += fmt.Sprintf(restoreFailedLine, err)
-			}
-		}
-		post(text)
-	}
-	if restoredAny {
-		// The restore or upgrade is this agent's own change: the next tick need not
-		// read the file again.
-		s.machine.settings[path] = settingsSeen{info: statSettings(path)}
 	}
 }
 

@@ -13,6 +13,17 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
+// rememberEvent plants the claim journal an earlier attempt left, through
+// the pinned root and the claim writer the deliver path uses.
+func rememberEvent(cfg Config, rec eventRecord) error {
+	root, err := openPinnedRoot(cfg.Root)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	return writeEventClaimExclusive(root, cfg.Me, rec)
+}
+
 // Regression: #965, a cockpit prompt that
 // reached the recipient inbox was reported as an error when the event journal
 // write failed afterwards, so Buzz cancelled and re-prompted a delivered

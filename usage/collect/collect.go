@@ -41,11 +41,6 @@ type Codex struct {
 	Homes []string
 }
 
-// Memory is the working state a caller hands back to the next pass. Codex
-// collection keeps none: every pass starts a new source instance, and all
-// pacing lives in the durable journal.
-type Memory struct{}
-
 // operation names the Codex dispatch in the journal.
 const operation = "codex.app-server.rate-limits"
 
@@ -88,12 +83,9 @@ func Due(facts usage.Result, req Request, now time.Time) bool {
 // Run is one bounded collection pass. It returns the current facts, the
 // newly collected ones included, with any failure of this pass as a failure
 // fact; a pass that finds nothing due, or the collector lock held, returns
-// the snapshot unchanged.
-func Run(ctx context.Context, req Request, mem Memory, fx edge.Effects) (usage.Result, Memory) {
-	return run(ctx, req, fx), mem
-}
-
-func run(ctx context.Context, req Request, fx edge.Effects) usage.Result {
+// the snapshot unchanged. A pass keeps no state for the next: all pacing
+// lives in the durable journal.
+func Run(ctx context.Context, req Request, fx edge.Effects) usage.Result {
 	facts, err := fx.Store.LoadFacts()
 	if err != nil {
 		// An unreadable snapshot is replaced by the next publication.
