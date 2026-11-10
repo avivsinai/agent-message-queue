@@ -31,10 +31,6 @@ func OpenRegularNoFollow(path string) (*os.File, os.FileInfo, error) {
 		_ = file.Close()
 		return nil, nil, err
 	}
-	if !openedIsLstatFile(info, openedInfo) {
-		_ = file.Close()
-		return nil, nil, fmt.Errorf("queue artifact %s replaced between lstat and open; refusing", path)
-	}
 	return file, openedInfo, nil
 }
 

@@ -608,7 +608,7 @@ func checkAmqrc() (doctorCheck, string, rootSource) {
 			return check, envVal, ""
 		}
 		check.Status = "error"
-		if strings.HasPrefix(err.Error(), noRootConfiguredPrefix) {
+		if strings.HasPrefix(err.Error(), noRootConfiguredPrefix) || strings.HasPrefix(err.Error(), noEligibleRootInGitPrefix) {
 			check.Status = "warn"
 		}
 		check.Message = err.Error()

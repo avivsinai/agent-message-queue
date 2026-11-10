@@ -588,3 +588,17 @@ func TestDoctorRootConfigNamesMalformedAmqrc(t *testing.T) {
 		t.Fatalf("root config check = %#v, root %q; want an error naming .amqrc", check, root)
 	}
 }
+
+// A Git repository with no queue yet is a warning, like any unconfigured
+// project, not a defect (review of the audit sweep, 2026-11-10).
+func TestDoctorRootConfigWarnsInAnUnconfiguredGitRepository(t *testing.T) {
+	project := isolateSessionProject(t)
+	t.Chdir(project)
+	if err := os.Mkdir(filepath.Join(project, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	check, root, _ := checkAmqrc()
+	if root != "" || check.Status != "warn" {
+		t.Fatalf("root config check = %#v, root %q; want a warning", check, root)
+	}
+}
