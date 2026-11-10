@@ -289,7 +289,8 @@ separate from `bridge_revision`, which names the request rules.
 
 The protocol string names the file formats; `bridge_revision` names the
 extension rules the adapter relies on. Revision 3 is the rule set of every
-section except [Bridge revision 4](#bridge-revision-4-session-identity): exact
+section except [Bridge revision 4](#bridge-revision-4-session-identity) and
+[Bridge revision 5](#bridge-revision-5-exact-cancel): exact
 generation addressing, busy refusal at the admission boundary, request ownership that ends at the next user message and completes
 only on a final answer, retained terminal and refusal decisions, and orphan
 recovery that retries until it succeeds. The protocol string stays
