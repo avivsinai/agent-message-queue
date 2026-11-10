@@ -71,7 +71,6 @@ type run struct {
 	// cancelPending records a cancel that arrived while tentative, to be
 	// delivered when the run confirms.
 	cancelPending bool
-	queued        bool
 	// acked records that the endpoint acknowledged this run's terminal
 	// result. The retained payload is released and Lookup reports
 	// EvidenceNone for the key, so reconcile's ack replay converges instead
@@ -441,7 +440,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		return core.Admission{Admitted: true, RunID: id}, nil
 	}
 	busy := a.status == "busy" || a.activeTurn != ""
-	activeTurn, codexHome := a.activeTurn, a.codexHome
+	codexHome := a.codexHome
 	a.mu.Unlock()
 	// A turn sent while the seat's TUI still shows a startup screen would
 	// end the hold that keeps the seat's own doorbell out of that screen.
@@ -460,35 +459,9 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 
 	switch {
 	case req.Input.Deliver == protocol.DeliverSteer:
-		// Steer interleaves into the running turn; expectedTurnId makes the
-		// app-server reject if the active turn changed under us, so no
-		// separate confirmation is needed.
-		if !busy {
-			return core.Admission{Code: protocol.CodeUnsupported, Message: "steer needs an active turn; use deliver=turn"}, nil
-		}
-		if err := a.call(sendBy, "turn/steer", map[string]any{"threadId": a.threadID, "expectedTurnId": activeTurn, "input": input, "clientUserMessageId": clientIDFor(req.Key)}, nil); err != nil {
-			return refusal(err), nil
-		}
-		r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, turnID: activeTurn, confirmed: true, createdAt: a.now()}
-		a.mu.Lock()
-		a.runs[req.Key] = r
-		a.byClientID[clientIDFor(req.Key)] = r
-		a.byTurn[activeTurn] = r
-		a.mu.Unlock()
-		return core.Admission{Admitted: true, RunID: a.runID(r)}, nil
-
-	case busy && req.Input.Busy == protocol.BusyQueue:
-		// Codex's own FIFO queue primitive; acceptance is Codex-native.
-		if err := a.call(sendBy, "thread/queue/add", map[string]any{"threadId": a.threadID, "clientUserMessageId": clientIDFor(req.Key), "input": input}, nil); err != nil {
-			return refusal(err), nil
-		}
-		r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, queued: true, createdAt: a.now()}
-		a.mu.Lock()
-		a.runs[req.Key] = r
-		a.byClientID[clientIDFor(req.Key)] = r
-		a.mu.Unlock()
-		return core.Admission{Admitted: true, RunID: a.runID(r)}, nil
-
+		// The endpoint refuses deliver=steer before it reaches an adapter;
+		// this adapter has no steer ownership model either.
+		return core.Admission{Code: protocol.CodeUnsupported, Message: "deliver=steer is not supported; use deliver=turn", NothingSent: true}, nil
 	case busy:
 		return core.Admission{Code: protocol.CodeBusy, Message: "a turn is active on this thread", NothingSent: true}, nil
 	}
@@ -777,9 +750,8 @@ func (a *Attachment) Lookup(key requests.Key, epoch string) (core.Evidence, erro
 		}
 		ev := core.Evidence{Known: true, RunID: r.runIDLocked(), State: r.state, LocalIntervention: r.local}
 		switch {
-		case r.confirmed || r.queued:
-			// A confirmed running turn, or a Codex-native-accepted queue item:
-			// real admission.
+		case r.confirmed:
+			// A confirmed running turn: real admission.
 			ev.Class = core.EvidenceConfirmed
 			ev.Admitted = true
 			if r.state.Terminal() {
@@ -991,27 +963,17 @@ func (a *Attachment) CancelExact(key requests.Key, epoch string) (core.CancelEvi
 		a.mu.Unlock()
 		return core.CancelEvidence{Disposition: protocol.CancelNoopTerminal}, nil
 	}
-	if !r.confirmed && !r.queued {
+	if !r.confirmed {
 		// We do not yet own a turn; interrupting r.turnID could hit a foreign
 		// turn. Record intent; confirmRun delivers it once ownership is proven.
 		r.cancelPending = true
 		a.mu.Unlock()
 		return core.CancelEvidence{Disposition: protocol.CancelRequested, Message: "intent recorded before native ownership"}, nil
 	}
-	turnID, queued := r.turnID, r.queued
+	turnID := r.turnID
 	a.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if queued && turnID == "" {
-		if err := a.client.Load().Call(ctx, "thread/queue/delete", map[string]any{"threadId": a.threadID, "clientUserMessageId": clientIDFor(key)}, nil); err != nil {
-			return core.CancelEvidence{Disposition: protocol.CancelUnsupported, Message: err.Error()}, nil
-		}
-		a.mu.Lock()
-		r.state = protocol.StateCancelled
-		a.mu.Unlock()
-		a.emit(core.NativeEvent{Type: core.EventRunCancelled, Key: key, RunID: a.runID(r)})
-		return core.CancelEvidence{Disposition: protocol.CancelConfirmed}, nil
-	}
 	if err := a.client.Load().Call(ctx, "turn/interrupt", map[string]any{"threadId": a.threadID, "turnId": turnID}, nil); err != nil {
 		return core.CancelEvidence{Disposition: protocol.CancelRequested, Message: err.Error()}, nil
 	}
@@ -1326,7 +1288,6 @@ func (a *Attachment) onItem(n Notification) {
 	switch p.Item.Type {
 	case "userMessage":
 		if r, ok := a.byClientID[p.Item.ClientID]; ok && p.Item.ClientID != "" {
-			r.queued = false
 			// Our text is confirmed in this turn: bind byTurn and mark owned.
 			if a.confirmRun(r, p.TurnID) {
 				go a.deliverPendingCancel(r.turnID)
