@@ -44,29 +44,39 @@ func TestClientAuthenticatesPublishesAndReconnects(t *testing.T) {
 	lr.DropOnce.Store(true)
 	defer srv.Close()
 
-	c := relay.NewClient(func() (relay.Config, error) {
-		return relay.Config{URL: url, Secret: body.Secret(), AuthTag: tag}, nil
-	})
-	relay.SetBackoffForTest(c, 10*time.Millisecond, 50*time.Millisecond)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = c.Run(ctx) }()
-
-	deadline := time.Now().Add(4 * time.Second)
-	for lr.AuthOK.Load() < 2 || c.Status().State != relay.StateAuthenticated {
-		if time.Now().After(deadline) {
-			t.Fatalf("auths=%d status=%+v, want a second authentication after the drop", lr.AuthOK.Load(), c.Status())
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 	evt := nostr.Event{CreatedAt: nostr.Now(), Kind: 1059, Content: "x"}
 	if err := evt.Sign(body.Secret()); err != nil {
 		t.Fatal(err)
 	}
-	pctx, pcancel := context.WithTimeout(ctx, 2*time.Second)
-	defer pcancel()
-	if err := c.Conn().Publish(pctx, evt); err != nil {
-		t.Fatalf("publish after reconnect: %v", err)
+	c := relay.NewClient(func() (relay.Config, error) {
+		return relay.Config{URL: url, Secret: body.Secret(), AuthTag: tag}, nil
+	})
+	relay.SetBackoffForTest(c, 10*time.Millisecond, 50*time.Millisecond)
+	published := make(chan error, 1)
+	var connects int
+	c.OnConnect = func(ctx context.Context, conn *relay.Conn) {
+		connects++
+		if connects != 2 {
+			return
+		}
+		pctx, pcancel := context.WithTimeout(ctx, 2*time.Second)
+		defer pcancel()
+		published <- conn.Publish(pctx, evt)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = c.Run(ctx) }()
+
+	select {
+	case err := <-published:
+		if err != nil {
+			t.Fatalf("publish after reconnect: %v", err)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatalf("auths=%d status=%+v, want a second authentication after the drop", lr.AuthOK.Load(), c.Status())
+	}
+	if lr.AuthOK.Load() < 2 {
+		t.Fatalf("auths=%d, want a second authentication after the drop", lr.AuthOK.Load())
 	}
 }
 

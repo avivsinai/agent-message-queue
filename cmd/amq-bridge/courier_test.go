@@ -715,10 +715,19 @@ func newBridgeRoot(t *testing.T, agent string) string {
 func hostIDRoot(t *testing.T, host string) string {
 	t.Helper()
 	root := t.TempDir()
-	if err := bridge.WriteHostID(root, host); err != nil {
+	writeHostID(t, root, host)
+	return root
+}
+
+// writeHostID writes bridge/host-id as the host bootstrap script does.
+func writeHostID(t *testing.T, root, host string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(root, "bridge"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	return root
+	if err := os.WriteFile(bridge.HostIDPath(root), []byte(host+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func testHostKey(host, generation string) bridge.HostKey {
@@ -741,9 +750,7 @@ func ensureHostID(t *testing.T, root, host string) {
 		}
 		return
 	}
-	if err := bridge.WriteHostID(root, host); err != nil {
-		t.Fatal(err)
-	}
+	writeHostID(t, root, host)
 }
 
 func ensureIdentity(t *testing.T, root, host string) {
