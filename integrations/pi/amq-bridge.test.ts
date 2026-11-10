@@ -233,6 +233,9 @@ test("an extension's own dialog takes the owner's Buzz answer", async () => {
 			{ n: 1, label: "Yes", value: "1" },
 			{ n: 2, label: "No", value: "2", deny: true },
 		]);
+		// The extension's terminal prompt posts no option-less copy beside it.
+		await h.emit("ui_prompt_start", { reason: "ui_prompt", kind: "select", title: "Deploy?" });
+		assert.deepEqual(fs.readdirSync(path.join(store.dialogs, "requests")).filter((f) => f.endsWith(".json")), [file]);
 		fs.writeFileSync(path.join(store.dialogs, "answers", file), JSON.stringify({ id: request.id, option: 2, by: "buzz", at: new Date().toISOString() }), { flag: "wx" });
 		assert.deepEqual(await answer, { by: "buzz", index: 1 });
 		const resolved = JSON.parse(fs.readFileSync(path.join(store.dialogs, "resolved", file), "utf8"));
