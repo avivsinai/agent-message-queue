@@ -58,14 +58,15 @@ func oneShotLimits(ctx context.Context, homes []string) usagefacts.Result {
 	if !collect.Due(r, req, fx.Clock()) {
 		return r
 	}
-	r = collect.Run(ctx, req, fx)
+	r, _ = collect.Run(ctx, req, collect.Memory{}, fx)
 	return r
 }
 
-// serveLimits runs one collection pass per sync --watch acquisition; the
-// mutex serializes passes.
+// serveLimits runs one collection pass per sync --watch acquisition and
+// keeps the pass's memory for the next.
 type serveLimits struct {
-	mu sync.Mutex
+	mu  sync.Mutex
+	mem collect.Memory
 }
 
 func (s *serveLimits) run(ctx context.Context, homes []string) usagefacts.Result {
@@ -75,7 +76,9 @@ func (s *serveLimits) run(ctx context.Context, homes []string) usagefacts.Result
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return collect.Run(ctx, limitsRequest(homes, serveLimitsDeadline), fx)
+	r, mem := collect.Run(ctx, limitsRequest(homes, serveLimitsDeadline), s.mem, fx)
+	s.mem = mem
+	return r
 }
 
 func storeFailure(err error) usagefacts.Result {
