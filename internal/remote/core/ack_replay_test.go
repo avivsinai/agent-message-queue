@@ -18,16 +18,15 @@ import (
 // crashes after the terminal result is durably committed but before (or
 // during) the native AcknowledgeResult call. On restart, startup
 // reconciliation must replay the native acknowledgement for the terminal
-// record from its durable ack intent, releasing the attachment's one
-// unacked-result slot — otherwise the next submit is refused busy ("a
-// completed result awaits acknowledgement") forever. The ack digest is the
+// record from its durable ack intent, so the attachment releases the
+// retained result. The ack digest is the
 // evidence digest of the retained result, not the input digest: the fake
 // runtime refuses an ack that names different evidence.
 func TestCrashAfterTerminalCommitReplaysAck(t *testing.T) {
 	dir := t.TempDir()
 	clk := time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC)
 	now := func() time.Time { return clk }
-	store, err := requests.Open(dir, requests.WithClock(now))
+	store, err := requests.Open(dir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -75,7 +74,7 @@ func TestCrashAfterTerminalCommitReplaysAck(t *testing.T) {
 	if err := ep.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	store2, err := requests.Open(dir, requests.WithClock(now))
+	store2, err := requests.Open(dir)
 	if err != nil {
 		t.Fatalf("reopen store: %v", err)
 	}
@@ -213,7 +212,7 @@ func TestCrashAfterAckDeliveredConvergesWithoutRelookup(t *testing.T) {
 	dir := t.TempDir()
 	clk := time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC)
 	now := func() time.Time { return clk }
-	store, err := requests.Open(dir, requests.WithClock(now))
+	store, err := requests.Open(dir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -263,7 +262,7 @@ func TestCrashAfterAckDeliveredConvergesWithoutRelookup(t *testing.T) {
 	if err := ep.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	store2, err := requests.Open(dir, requests.WithClock(now))
+	store2, err := requests.Open(dir)
 	if err != nil {
 		t.Fatalf("reopen store: %v", err)
 	}
@@ -356,7 +355,7 @@ func TestPreUpgradeRecordConvergesOnHistoryShape(t *testing.T) {
 	dir := t.TempDir()
 	clk := time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC)
 	now := func() time.Time { return clk }
-	store, err := requests.Open(dir, requests.WithClock(now))
+	store, err := requests.Open(dir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -413,7 +412,7 @@ func TestPreUpgradeRecordConvergesOnHistoryShape(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	store2, err := requests.Open(dir, requests.WithClock(now))
+	store2, err := requests.Open(dir)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}

@@ -194,9 +194,12 @@ type Store struct {
 	// sweep is the records Record.NeedsSweep selects. compactable is the
 	// records Record.compactCandidate selects, with their UpdatedAt;
 	// compaction reads its candidates from it, so neither set grows with
-	// the tombstones nothing deletes.
+	// the tombstones nothing deletes. indexed is the file name
+	// (<host>/<name>) of every record read or written here, so a listing
+	// can tell the files this store has not read without reading them.
 	sweep       map[Key]struct{}
 	compactable map[Key]string
+	indexed     map[string]struct{}
 	// syncedHosts is the creator hosts whose directory ancestry this process
 	// has synced. The first write to a host syncs it even when the directory
 	// exists, because an earlier process may have created it and died before
@@ -206,11 +209,6 @@ type Store struct {
 
 // Option configures Open.
 type Option func(*Store)
-
-// WithClock injects the clock used for UpdatedAt. Tests pass a fixed clock.
-func WithClock(now func() time.Time) Option {
-	return func(s *Store) { s.now = now }
-}
 
 // WithMaxStoreBytes sets the aggregate quota across every record in this
 // store. Zero disables the aggregate quota. Production sets
@@ -268,10 +266,10 @@ func Open(stateDir string, opts ...Option) (*Store, error) {
 // A file the bounded reader refuses (unreadable, not a regular file,
 // oversized) is an error naming its path relative to the store, so Open
 // stops. A file it reads but cannot decode is poison: counted
-// in used, reported by List, skipped. Nothing indexes a poison record that
+// in used, reported by ListWithPoison, skipped. Nothing indexes a poison record that
 // an operator repairs while the companion runs; the next Open does.
 func (s *Store) loadRecords() error {
-	s.sweep, s.compactable = map[Key]struct{}{}, map[Key]string{}
+	s.sweep, s.compactable, s.indexed = map[Key]struct{}{}, map[Key]string{}, map[string]struct{}{}
 	var used int64
 	err := filepath.Walk(filepath.Join(s.dir, requestsDir), func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -297,7 +295,7 @@ func (s *Store) loadRecords() error {
 		used += info.Size()
 		rec, dErr := decodeRecord(data)
 		if dErr != nil {
-			return nil // poison: counted above, reported by List
+			return nil // poison: counted above, reported by ListWithPoison
 		}
 		normalizeRecord(rec)
 		if s.maxStoreBytes > 0 && !rec.State.Terminal() && rec.Result == nil {
@@ -317,10 +315,16 @@ func (s *Store) loadRecords() error {
 	return nil
 }
 
+// indexName is a record's <host>/<file name> in the indexed set.
+func indexName(k Key) string {
+	return k.CreatorHost + "/" + k.TargetID + "__" + k.RequestID + recordSuffix
+}
+
 // indexLocked reclassifies one record after it was read or durably written.
 // The caller holds s.mu, or is Open before the store is shared.
 func (s *Store) indexLocked(rec *Record) {
 	k := keyOf(rec)
+	s.indexed[indexName(k)] = struct{}{}
 	if rec.NeedsSweep() {
 		s.sweep[k] = struct{}{}
 	} else {
@@ -366,9 +370,6 @@ func (s *Store) Close() error {
 	s.lock = nil
 	return err
 }
-
-// Dir is the versioned store directory.
-func (s *Store) Dir() string { return s.dir }
 
 // Digest returns the protocol digest of exact submit input bytes.
 func Digest(data []byte) string {
@@ -596,15 +597,6 @@ type Poison struct {
 	Error string
 }
 
-// List returns every decodable record, oldest write first: ListWithPoison
-// without the poison diagnostics. A poison (undecodable or invalid) record is
-// skipped, never allowed to abort the pass. Reconciliation reads through
-// ListWithPoison and ListSweep.
-func (s *Store) List() ([]*Record, error) {
-	recs, _, err := s.ListWithPoison()
-	return recs, err
-}
-
 // ListWithPoison returns every decodable record plus a diagnosed poison list.
 // Read and decode errors are isolated per file: a bad record is skipped, its
 // identity is recovered from the path, and the pass continues. The first
@@ -634,7 +626,7 @@ func (s *Store) ListWithPoison() ([]*Record, []Poison, error) {
 			return nil, nil, fmt.Errorf("list %s: %w", h.Name(), err)
 		}
 		for _, f := range files {
-			if f.IsDir() || !strings.HasSuffix(f.Name(), recordSuffix) || strings.HasPrefix(f.Name(), ".") {
+			if f.IsDir() || !strings.HasSuffix(f.Name(), recordSuffix) {
 				continue
 			}
 			path := filepath.Join(hostDir, f.Name())
@@ -659,6 +651,80 @@ func (s *Store) ListWithPoison() ([]*Record, []Poison, error) {
 	return out, poison, nil
 }
 
+// ListReserving returns the records a reservation check needs: the records
+// of the sweep index that match selects, read from disk (every record that
+// is not terminal is among them), and every record file the store has not
+// indexed, read from disk whatever its key: one that did not decode at
+// Open, or one something other than this store wrote after Open. The other
+// records were terminal when this store last read or wrote them, so they
+// are not read. A record that does not read is poison, as in
+// ListWithPoison; a host directory that cannot be listed is an error.
+func (s *Store) ListReserving(match func(Key) bool) ([]*Record, []Poison, error) {
+	base := filepath.Join(s.dir, requestsDir)
+	hosts, err := os.ReadDir(base)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list hosts: %w", err)
+	}
+	var names []string
+	for _, h := range hosts {
+		if !h.IsDir() || !safeSegment(h.Name()) {
+			continue
+		}
+		files, err := os.ReadDir(filepath.Join(base, h.Name()))
+		if err != nil {
+			return nil, nil, fmt.Errorf("list %s: %w", h.Name(), err)
+		}
+		for _, f := range files {
+			if !f.IsDir() && strings.HasSuffix(f.Name(), recordSuffix) {
+				names = append(names, h.Name()+"/"+f.Name())
+			}
+		}
+	}
+	// persist writes a file and indexes it under mu, so a file the listing
+	// saw is indexed by the time mu is taken here, or was not written here.
+	s.mu.Lock()
+	var keys []Key
+	for k := range s.sweep {
+		if match(k) {
+			keys = append(keys, k)
+		}
+	}
+	unread := names[:0]
+	for _, n := range names {
+		if _, ok := s.indexed[n]; !ok {
+			unread = append(unread, n)
+		}
+	}
+	s.mu.Unlock()
+
+	var out []*Record
+	var poison []Poison
+	for _, k := range keys {
+		rec, exists, err := s.Get(k)
+		if err != nil {
+			p, _ := s.path(k)
+			poison = append(poison, Poison{Key: k, Path: p, Error: err.Error()})
+			continue
+		}
+		if exists {
+			out = append(out, rec)
+		}
+	}
+	for _, n := range unread {
+		host, name, _ := strings.Cut(n, "/")
+		path := filepath.Join(base, host, name)
+		rec, exists, err := s.readRecord(path)
+		if err != nil {
+			poison = append(poison, Poison{Key: keyFromPath(host, name), Path: path, Error: err.Error()})
+			continue
+		}
+		if exists {
+			out = append(out, rec)
+		}
+	}
+	return out, poison, nil
+}
+
 // sortRecords orders records oldest write first, then by request ref.
 func sortRecords(recs []*Record) {
 	sort.Slice(recs, func(i, j int) bool {
@@ -670,8 +736,8 @@ func sortRecords(recs []*Record) {
 }
 
 // ListSweep returns the records the reconcile sweep may act on
-// (Record.NeedsSweep), in List's order, reading only those files. Every
-// record that is not terminal is among them. Like List, it skips a record
+// (Record.NeedsSweep), in ListWithPoison's order, reading only those files. Every
+// record that is not terminal is among them. Like ListWithPoison, it skips a record
 // that does not read.
 func (s *Store) ListSweep() []*Record {
 	s.mu.Lock()
@@ -707,7 +773,7 @@ func (s *Store) CompactionCandidates() []Key {
 }
 
 // readRecord reads and decodes one record file, applying the shared
-// state-normalization that both the event (Get) and recovery (List) paths
+// state-normalization that both the event (Get) and recovery (ListWithPoison) paths
 // use, so a record recovered during Reconcile is never silently stricter or
 // looser than one read by a live request. The boolean is false only when the
 // file does not exist; a present-but-undecodable file returns an error so a
@@ -715,7 +781,7 @@ func (s *Store) CompactionCandidates() []Key {
 //
 // The read is bounded and no-follow. A FIFO or an oversized file is an error
 // for this record, never a block and never a
-// missing record, so List can skip it and continue with the other targets.
+// missing record, so ListWithPoison can skip it and continue with the other targets.
 func (s *Store) readRecord(path string) (*Record, bool, error) {
 	data, err := fsq.ReadRegularNoFollowBounded(path, int64(MaxRecordBytes))
 	if errors.Is(err, os.ErrNotExist) {
@@ -734,11 +800,13 @@ func (s *Store) readRecord(path string) (*Record, bool, error) {
 
 // keyFromPath recovers a record key from its on-disk path segments so a poison
 // record's dedup identity survives even when the JSON does not. The layout is
-// <creatorHost>/<targetID>__<requestID>.json. A malformed name yields an empty
-// key; the poison entry is still reported with the raw path for repair.
+// <creatorHost>/<targetID>__<requestID>.json. A target id may contain "__"
+// and a request id (a UUID) contains no "_", so the last "__" is the
+// separator. A malformed name yields an empty key; the poison entry is still
+// reported with the raw path for repair.
 func keyFromPath(host, filename string) Key {
 	name := strings.TrimSuffix(filename, recordSuffix)
-	idx := strings.Index(name, "__")
+	idx := strings.LastIndex(name, "__")
 	if idx < 0 {
 		return Key{CreatorHost: host}
 	}
@@ -832,7 +900,7 @@ func (s *Store) CompactOne(key Key, before time.Time) (bool, error) {
 // and then waits for s.mu before releasing the owner lock, so a writer that
 // already passed this check finishes its durable write before a replacement
 // owner can open, and a writer that has not entered s.mu yet refuses.
-// Reads (Get/List) are still permitted on a closed store for diagnosis.
+// Reads (Get, ListWithPoison) are still permitted on a closed store for diagnosis.
 func (s *Store) checkClosed() error {
 	if s.closed.Load() {
 		return protocol.Refuse(protocol.CodeStoreClosed, "store is closed")
@@ -950,6 +1018,11 @@ func (s *Store) settleLocked(key Key, delta int64, rec *Record) {
 	if rec == nil {
 		cur, ok, err := s.Get(key)
 		if err != nil {
+			// The file's record is unknown: the sweep reads it, and a
+			// reservation check reads it as a file this store has not
+			// indexed, until a later write or Open classifies it.
+			s.sweep[key] = struct{}{}
+			delete(s.indexed, indexName(key))
 			return
 		}
 		if !ok {

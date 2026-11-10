@@ -66,10 +66,11 @@ func claudeUpdates(t *testing.T, line string) []map[string]any {
 // activity view mirrored that XML instead of the text the owner typed.
 func TestBuzzPromptMirrorsTypedText(t *testing.T) {
 	typed := "fix the flaky <test> & report"
-	env, err := claude.BuildCrossSessionEnvelope("amq-target", "amq", typed, "", "amq-remote", "code")
+	frame, err := claude.BuildFrame("amq-target", typed)
 	if err != nil {
 		t.Fatal(err)
 	}
+	env := frame.Message.Content
 	// The idle-target delivery shape: the harness wraps the envelope.
 	line, err := json.Marshal(map[string]any{
 		"type": "user", "uuid": "u1", "sessionId": "thread-1", "isMeta": true,

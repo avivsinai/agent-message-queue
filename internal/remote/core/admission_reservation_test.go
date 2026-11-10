@@ -42,7 +42,7 @@ func raceEndpoint(t *testing.T) (*core.Endpoint, *fake.Runtime, *requests.Store,
 // recovers its identity from the path.
 func writePoisonRecord(t *testing.T, store *requests.Store, host, targetID, id string) string {
 	t.Helper()
-	p := filepath.Join(store.Dir(), "requests", host, targetID+"__"+id+".json")
+	p := filepath.Join(recordsDir(t, store, host), targetID+"__"+id+".json")
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		t.Fatalf("mkdir poison dir: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestReservationRefusesSecondConcurrentDispatch(t *testing.T) {
 // counted no room for its result and admitted other work into that room.
 func TestBusyRetryTakesTheStoreReservation(t *testing.T) {
 	now := func() time.Time { return time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC) }
-	store, err := requests.Open(t.TempDir(), requests.WithClock(now),
+	store, err := requests.Open(t.TempDir(),
 		requests.WithMaxStoreBytes(protocol.MaxRecordBytes+protocol.MaxRecordBytes/2))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -165,7 +165,8 @@ func TestBusyRetryTakesTheStoreReservation(t *testing.T) {
 // Regression: bead agent-message-queue-39v (review of the B4 fix).
 func TestFailedDispatchingWriteKeepsTheReservation(t *testing.T) {
 	now := func() time.Time { return time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC) }
-	store, err := requests.Open(t.TempDir(), requests.WithClock(now),
+	stateDir := t.TempDir()
+	store, err := requests.Open(stateDir,
 		requests.WithMaxStoreBytes(protocol.MaxRecordBytes+protocol.MaxRecordBytes/2))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -191,7 +192,7 @@ func TestFailedDispatchingWriteKeepsTheReservation(t *testing.T) {
 	}
 
 	// Fail the sync after the rename of B's dispatching write.
-	hostDir := filepath.Join(store.Dir(), "requests", "local")
+	hostDir := filepath.Join(stateDir, "v1", "requests", "local")
 	calls := 0
 	restore := fsq.SetPackageSyncDirFaultForTest(func(dir string) error {
 		if filepath.Clean(dir) == hostDir {
@@ -271,6 +272,26 @@ func TestReservationPoisonFailClosed(t *testing.T) {
 	cmd.TargetID = "third"
 	if _, err := ep.Handle(cmd, core.Source{Host: "local"}); err != nil {
 		t.Fatalf("submit on a clean third target with unrelated poison: %v", err)
+	}
+}
+
+// A poison file of a target whose id contains "__" blocks that target and
+// not the target named by the id's first part (audit 2026-11-10).
+func TestReservationPoisonOfATargetWithDoubleUnderscore(t *testing.T) {
+	ep, _, store, _ := raceEndpoint(t)
+	for _, id := range []string{"a", "a__b"} {
+		ep.Register(fake.New(id, "e_1"))
+	}
+	writePoisonRecord(t, store, "local", "a__b", "11111111-1111-4111-8111-1111111111p1")
+	cmd := submitCmd("11111111-1111-4111-8111-1111111111a1")
+	cmd.TargetID = "a"
+	if _, err := ep.Handle(cmd, core.Source{Host: "local"}); err != nil {
+		t.Fatalf("submit to a with poison of a__b: %v", err)
+	}
+	cmd = submitCmd("11111111-1111-4111-8111-1111111111b2")
+	cmd.TargetID = "a__b"
+	if _, err := ep.Handle(cmd, core.Source{Host: "local"}); err == nil {
+		t.Fatal("submit to a__b succeeded despite its unreadable record")
 	}
 }
 

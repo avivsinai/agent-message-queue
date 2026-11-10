@@ -14,7 +14,7 @@ import (
 // the endpoint and a huge file was allocated. Both are poison for that record
 // only; a sibling target is still returned, and neither is reported as absent.
 func TestRequestStoreReadRejectsFIFOAndOversized(t *testing.T) {
-	s, err := Open(t.TempDir(), WithClock(fixedClock))
+	s, err := Open(t.TempDir(), withClock(fixedClock))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,7 +23,7 @@ func TestRequestStoreReadRejectsFIFOAndOversized(t *testing.T) {
 	if err := s.Create(good); err != nil {
 		t.Fatal(err)
 	}
-	hostDir := filepath.Join(s.Dir(), requestsDir, good.CreatorHost)
+	hostDir := filepath.Join(s.dir, requestsDir, good.CreatorHost)
 	over := filepath.Join(hostDir, "t_over__11111111-1111-4111-8111-1111111110a2.json")
 	f, err := os.OpenFile(over, os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {

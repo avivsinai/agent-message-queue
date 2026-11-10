@@ -117,7 +117,7 @@ func TestAdmittedRacedCancelErrorThenRetryConverges(t *testing.T) {
 
 	// Between the failed abort and the retry, the run finishes (produces a
 	// result). The retry's CancelExact returns noop_terminal.
-	rt.CompleteWhileAdmitHeld(id, "converged-out")
+	rt.CompleteCancelled(id, "converged-out")
 
 	// Reconcile re-drives CancelExact -> noop_terminal -> applyCancelOutcomeLocked
 	// records the result, confirms the cancel, memos AckDigest, and
@@ -170,7 +170,7 @@ func TestAdmittedRacedCancelNoopTerminalRecordsResult(t *testing.T) {
 	}
 	// The run finishes (produces a result) AFTER the cancel — the completion
 	// arrives for a terminal (cancelled) record. onNative must record it.
-	rt.CompleteWhileAdmitHeld(id, "out")
+	rt.CompleteCancelled(id, "out")
 	if !waitUntil(func() bool {
 		k := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
 		rec, ok, _ := store.Get(k)

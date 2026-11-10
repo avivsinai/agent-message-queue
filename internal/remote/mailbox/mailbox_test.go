@@ -173,7 +173,7 @@ func TestSecondRequestToABusyHandleIsDeliveredNotRejected(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	store, err := requests.Open(t.TempDir(), requests.WithClock(now))
+	store, err := requests.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,5 +246,21 @@ func TestSecondRequestToABusyHandleIsDeliveredNotRejected(t *testing.T) {
 	}
 	if rec, _, _ := store.Get(second); rec.Result == nil || !strings.Contains(rec.Result.Text, "second done") {
 		t.Fatalf("second result = %+v, want the handle's reply", rec.Result)
+	}
+}
+
+// A request whose ref is longer than a file name allows (a long creator host)
+// is still journaled and delivered (audit 2026-11-10).
+func TestSubmitDeliversARequestWithALongRef(t *testing.T) {
+	clk := time.Now().UTC()
+	a, root := newTestAttachment(t, &clk)
+	req := submitReq(clk)
+	req.Key.CreatorHost = strings.Repeat("h", 120)
+	adm, err := a.Submit(req)
+	if err != nil || !adm.Admitted {
+		t.Fatalf("Submit = %+v, %v; want admitted", adm, err)
+	}
+	if n := inboxCount(t, root); n != 1 {
+		t.Fatalf("handle inbox holds %d messages, want 1", n)
 	}
 }

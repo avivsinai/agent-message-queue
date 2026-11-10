@@ -15,13 +15,8 @@ import (
 // Frame is one peer message frame (capture §3).
 type Frame = claudepeer.Frame
 
-// BuildCrossSessionEnvelope mirrors the capture's pQe builder (§3.1).
-func BuildCrossSessionEnvelope(from, fromSession, body, hopChain, fromName, fromMode string) (string, error) {
-	return claudepeer.BuildCrossSessionEnvelope(from, fromSession, body, hopChain, fromName, fromMode)
-}
-
-// crossSessionBodies is the inverse of BuildCrossSessionEnvelope for the
-// transcript.
+// crossSessionBodies is the inverse of the frame's cross-session envelope
+// for the transcript.
 func crossSessionBodies(text string) (string, bool) {
 	return claudepeer.CrossSessionBodies(text)
 }

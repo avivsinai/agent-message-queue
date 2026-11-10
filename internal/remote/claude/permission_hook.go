@@ -172,9 +172,8 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 		Text: dialogText(in.ToolName, in.ToolInput), Options: options,
 		OpenedAt: opened.UTC(), PID: os.Getpid(),
 	}
-	// Claude signals no terminal approve: the call's tool_result in the
-	// transcript that records the call is the proof, so the watch starts
-	// before the request is visible.
+	// Claude signals no terminal approve: the transcript that records the
+	// call is the proof, so the watch starts before the request is visible.
 	watch := newToolWatch(in.callTranscript, in.AgentID != "", in.ToolName, in.ToolInput)
 	if dialog.Open(dir, req) != nil {
 		return 0
@@ -210,7 +209,7 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 				return 0
 			}
 		}
-		if watch != nil && watch.answered() {
+		if watch.answered() {
 			resolve(dialog.OutcomeTerminal, "", dialog.ByTerminal)
 			return 0
 		}
@@ -613,17 +612,24 @@ func writeDecision(stdout io.Writer, value string, sessionRules []json.RawMessag
 
 // toolWatch follows the transcript of the chain that asks (the main thread,
 // or a subagent in its own transcript) for proof that the dialog is gone:
-//   - the tool_result of the call: a tool_use with the same name and input
-//     that had no result when the hook started, or that appears later;
+//   - the call's tool_result: a tool_use of the chain with the same name
+//     and input that had no result when the dialog opened, and that is the
+//     only call with that name and input in its assistant message (its
+//     batch). The hook gets no tool_use_id, so with two identical calls in
+//     one batch the result of one proves nothing about the other's dialog;
+//     only the proofs below close it. No later batch can hold an identical
+//     call while this dialog blocks the current one;
 //   - the chain moved on: an assistant message the chain had not written
 //     when the dialog opened. While a dialog blocks a call the chain writes
 //     none, because the model waits for the whole tool batch; a line Claude
 //     Code writes itself (syntheticModel, an API error) proves nothing;
 //   - an interrupt of the chain, which Esc and a reject write.
 //
-// It locates the transcript (locate) until it is found; a transcript first
-// found after the hook started holds only lines written since, so its first
-// read can answer a result, and the chain proofs start at the asking call.
+// The proofs hold only for lines written after the dialog opened, so the
+// watch arms only when it read the transcript as the dialog opened. A
+// transcript first found later may hold an earlier batch with its results;
+// such a watch never answers, and the dialog ends by Buzz, a signal, the
+// parent or the timeout.
 type toolWatch struct {
 	locate           func() (string, error)
 	path, name, hash string
@@ -639,10 +645,10 @@ type toolWatch struct {
 	// read, which may start mid-line.
 	off  int64
 	skip bool
-	// primed: the first read is done, so a result read after it answers
-	// the dialog; one read by the first read settled an earlier call.
-	primed  bool
-	pending map[string]bool
+	// pending maps each matching call without a result to its assistant
+	// message id; batch counts the matching calls of each message.
+	pending map[string]string
+	batch   map[string]int
 }
 
 // transcriptTail is how far back the first read reaches: the call's
@@ -650,16 +656,14 @@ type toolWatch struct {
 const transcriptTail = 4 << 20
 
 func newToolWatch(locate func() (string, error), ownChain bool, name string, input json.RawMessage) *toolWatch {
-	hash, ok := actionHash(name, input)
-	if !ok {
-		return nil
+	w := &toolWatch{locate: locate, ownChain: ownChain, name: name, pending: map[string]string{}, batch: map[string]int{}, seen: map[string]bool{}}
+	if hash, ok := actionHash(name, input); ok {
+		w.hash = hash
 	}
-	w := &toolWatch{locate: locate, ownChain: ownChain, name: name, hash: hash, pending: map[string]bool{}, seen: map[string]bool{}}
 	if w.found() {
 		w.read()
 		w.armed = true
 	}
-	w.primed = true
 	return w
 }
 
@@ -680,7 +684,7 @@ func (w *toolWatch) found() bool {
 }
 
 // answered reads the lines written since the last read and reports whether
-// a pending call got its tool_result.
+// they prove the dialog gone.
 func (w *toolWatch) answered() bool { return w.found() && w.read() }
 
 func (w *toolWatch) read() bool {
@@ -705,26 +709,24 @@ func (w *toolWatch) read() bool {
 			continue
 		}
 		e, ok := parseTranscriptLine(strings.TrimSuffix(line, "\n"))
-		if !ok {
+		if !ok || e.Sidechain && !w.ownChain {
 			continue
 		}
-		if chain := !e.Sidechain || w.ownChain; chain {
-			if e.Type == "assistant" && e.MessageID != "" && !e.APIError && e.Model != syntheticModel {
-				answered = answered || w.armed && !w.seen[e.MessageID]
-				w.seen[e.MessageID] = true
-			}
-			answered = answered || w.armed && e.Type == "user" && interrupted(e)
+		if e.Type == "assistant" && e.MessageID != "" && !e.APIError && e.Model != syntheticModel {
+			answered = answered || w.armed && !w.seen[e.MessageID]
+			w.seen[e.MessageID] = true
 		}
+		answered = answered || w.armed && e.Type == "user" && interrupted(e)
 		for _, u := range e.ToolUses {
-			if u.Name == w.name && u.Hash == w.hash {
-				w.pending[u.ID] = true
-				w.armed = w.armed || w.primed
+			if w.hash != "" && u.Name == w.name && u.Hash == w.hash {
+				w.pending[u.ID] = e.MessageID
+				w.batch[e.MessageID]++
 			}
 		}
 		for _, id := range e.ToolResults {
-			if w.pending[id] {
+			if msg, ok := w.pending[id]; ok {
 				delete(w.pending, id)
-				answered = answered || w.primed
+				answered = answered || w.armed && msg != "" && w.batch[msg] == 1
 			}
 		}
 	}

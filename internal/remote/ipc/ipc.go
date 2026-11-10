@@ -300,12 +300,22 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	}
 	switch {
 	case req.Wait != nil:
-		timeout := time.Duration(req.Wait.TimeoutMS) * time.Millisecond
-		if timeout <= 0 {
-			timeout = 24 * time.Hour
+		// A timeout of 0 is no limit. The wait still ends when the caller
+		// goes away: a caller sends nothing after its request, so this read
+		// returns only when the connection closes.
+		var wctx context.Context
+		var cancel context.CancelFunc
+		if req.Wait.TimeoutMS > 0 {
+			wctx, cancel = context.WithTimeout(ctx, time.Duration(req.Wait.TimeoutMS)*time.Millisecond)
+		} else {
+			wctx, cancel = context.WithCancel(ctx)
 		}
-		wctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
+		go func() {
+			var b [1]byte
+			_, _ = conn.Read(b[:])
+			cancel()
+		}()
 		snap, err := s.ep.WaitAfter(wctx, req.Wait.RequestRef, req.Wait.AfterRevision)
 		// Wait never cancels work, so NO context error may be reported as
 		// failure. DeadlineExceeded is the caller's own timeout; Canceled is

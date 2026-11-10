@@ -106,7 +106,7 @@ func TestLateResultWhoseWriteFailedIsRecovered(t *testing.T) {
 	storeDir := t.TempDir()
 	clk := time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC)
 	now := func() time.Time { return clk }
-	store, err := requests.Open(storeDir, requests.WithClock(now))
+	store, err := requests.Open(storeDir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

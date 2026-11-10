@@ -20,7 +20,7 @@ func TestUninstallWithoutMarkedEntryLeavesFileUntouched(t *testing.T) {
 	if err := os.WriteFile(SettingsPath(home), original, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := UninstallStopHook(home); err != nil {
+	if err := OptOutHook(SettingsPath(home), HookStop); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := os.ReadFile(SettingsPath(home))
@@ -104,7 +104,7 @@ func TestInstalledStopHookShapeAndCommandWord(t *testing.T) {
 		t.Fatalf("command = %q, want the marker first and the quoted binary exec'd last", cmd)
 	}
 	// A second install of the same hook is a no-op.
-	if err := InstallStopHook(home, "/opt/amq bin/amq-remote"); err != nil {
+	if _, err := OptInStopHook(home, SettingsPath(home), "/opt/amq bin/amq-remote"); err != nil {
 		t.Fatal(err)
 	}
 	if again, _ := os.ReadFile(SettingsPath(home)); string(again) != installed {
@@ -112,7 +112,7 @@ func TestInstalledStopHookShapeAndCommandWord(t *testing.T) {
 	}
 	// A reinstall from a new binary kept the stop hook on an old worktree
 	// build while it printed "stop hook installed".
-	if err := InstallStopHook(home, "/opt/homebrew/bin/amq-remote"); err != nil {
+	if _, err := OptInStopHook(home, SettingsPath(home), "/opt/homebrew/bin/amq-remote"); err != nil {
 		t.Fatal(err)
 	}
 	moved, _ := os.ReadFile(SettingsPath(home))
@@ -166,7 +166,7 @@ func TestInstallIntoExistingHooksRoundTrips(t *testing.T) {
 			if strings.Contains(tc.original, "PreToolUse") && len(s.Hooks["PreToolUse"]) != 1 {
 				t.Fatalf("prior PreToolUse hooks lost:\n%s", installed)
 			}
-			if err := UninstallStopHook(home); err != nil {
+			if err := OptOutHook(SettingsPath(home), HookStop); err != nil {
 				t.Fatal(err)
 			}
 			got, _ := os.ReadFile(SettingsPath(home))
@@ -189,7 +189,7 @@ func TestUninstallFromMixedGroupKeepsForeignHook(t *testing.T) {
 	if err := os.WriteFile(SettingsPath(home), []byte(mixed), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := UninstallStopHook(home); err != nil {
+	if err := OptOutHook(SettingsPath(home), HookStop); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := os.ReadFile(SettingsPath(home))
@@ -376,10 +376,10 @@ func TestStopHookIgnoresATombstoneNamingTheSession(t *testing.T) {
 // Uninstall keeps the Stop hook.
 func TestInstallApprovalHookBesideStopHook(t *testing.T) {
 	home := t.TempDir()
-	if err := InstallStopHook(home, "/opt/amq-remote"); err != nil {
+	if _, err := OptInStopHook(home, SettingsPath(home), "/opt/amq-remote"); err != nil {
 		t.Fatal(err)
 	}
-	if err := InstallPermissionHook(home, "/opt/amq-remote"); err != nil {
+	if _, err := OptInPermissionHook(home, SettingsPath(home), "/opt/amq-remote"); err != nil {
 		t.Fatal(err)
 	}
 	cmds, err := hookfile.InstalledCommands(SettingsPath(home), permissionSpec)
@@ -415,7 +415,7 @@ func TestInstallApprovalHookBesideStopHook(t *testing.T) {
 			t.Fatalf("0.132.0 %s form = %q, %v; want stale", c.spec.Event, form, err)
 		}
 	}
-	if err := UninstallPermissionHook(home); err != nil {
+	if err := OptOutHook(SettingsPath(home), HookApproval); err != nil {
 		t.Fatal(err)
 	}
 	if state, _ := PermissionHookState(SettingsPath(home)); state != HookMissing {

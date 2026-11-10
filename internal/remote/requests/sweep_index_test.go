@@ -56,7 +56,7 @@ func TestSweepReadsOnlyRecordsThatNeedWork(t *testing.T) {
 	unacked.AckDigest = protocol.EvidenceDigest(unacked.Result)
 	put(unacked)
 
-	s, err := Open(dir, WithClock(fixedClock))
+	s, err := Open(dir, withClock(fixedClock))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

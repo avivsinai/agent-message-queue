@@ -43,7 +43,7 @@ func validUUID(n int) string {
 func newTestSpool(t *testing.T, now func() time.Time) *Spool {
 	t.Helper()
 	dir := t.TempDir()
-	s, err := Open(dir, WithClock(now))
+	s, err := Open(dir, withClock(now))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -68,7 +68,7 @@ type drainRig struct {
 func newDrainRig(t *testing.T, now time.Time) *drainRig {
 	t.Helper()
 	r := &drainRig{t: t, stateDir: t.TempDir()}
-	spool, err := Open(r.stateDir, WithClock(func() time.Time { return now }))
+	spool, err := Open(r.stateDir, withClock(func() time.Time { return now }))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestSenderDurablePersistAndDispatch(t *testing.T) {
 
 	// Restart: a fresh spool opens the same dir and recovers the envelope
 	// with the target and epoch the caller supplied, never a substitute.
-	reopened, err := Open(r.stateDir, WithClock(func() time.Time { return now }))
+	reopened, err := Open(r.stateDir, withClock(func() time.Time { return now }))
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -478,6 +478,26 @@ func TestSenderTransientRefusalRetriesNextTick(t *testing.T) {
 			makeUnbusy: func(r *drainRig) { r.start() },
 		},
 		{
+			// An unreadable record of the target makes its reservation
+			// undeterminable; the endpoint refuses and records nothing, so
+			// the envelope waits for the repair (audit 2026-11-10).
+			name: "unreadable record of the target",
+			code: protocol.CodeAttachmentLost,
+			makeBusy: func(r *drainRig, _ string) {
+				if err := os.MkdirAll(filepath.Dir(r.recordPath(validUUID(1))), 0o700); err != nil {
+					r.t.Fatalf("mkdir: %v", err)
+				}
+				if err := os.WriteFile(r.recordPath(validUUID(1)), []byte("{not json"), 0o600); err != nil {
+					r.t.Fatalf("poison record: %v", err)
+				}
+			},
+			makeUnbusy: func(r *drainRig) {
+				if err := os.Remove(r.recordPath(validUUID(1))); err != nil {
+					r.t.Fatalf("repair record: %v", err)
+				}
+			},
+		},
+		{
 			// A store read that fails without a typed refusal is the
 			// endpoint being unreachable for now, not a refusal of the
 			// request.
@@ -551,11 +571,11 @@ func TestSenderTransientRefusalRetriesNextTick(t *testing.T) {
 func TestASDConcurrentDifferentDigestNoOverwrite(t *testing.T) {
 	now := time.Now()
 	stateDir := t.TempDir()
-	spoolA, err := Open(stateDir, WithClock(func() time.Time { return now }))
+	spoolA, err := Open(stateDir, withClock(func() time.Time { return now }))
 	if err != nil {
 		t.Fatalf("Open A: %v", err)
 	}
-	spoolB, err := Open(stateDir, WithClock(func() time.Time { return now }))
+	spoolB, err := Open(stateDir, withClock(func() time.Time { return now }))
 	if err != nil {
 		t.Fatalf("Open B: %v", err)
 	}
@@ -611,7 +631,7 @@ func TestASDConcurrentDifferentDigestNoOverwrite(t *testing.T) {
 	}
 
 	// The surviving envelope is intact and readable through a third instance.
-	spoolC, err := Open(stateDir, WithClock(func() time.Time { return now }))
+	spoolC, err := Open(stateDir, withClock(func() time.Time { return now }))
 	if err != nil {
 		t.Fatalf("Open C: %v", err)
 	}
@@ -685,4 +705,9 @@ func TestSenderDrainRefusesEditedSpoolFiles(t *testing.T) {
 			t.Fatalf("dispatched submit carries origin %v, want none", o)
 		}
 	}
+}
+
+// withClock fixes the clock the spool stamps envelopes with.
+func withClock(now func() time.Time) Option {
+	return func(s *Spool) { s.now = now }
 }

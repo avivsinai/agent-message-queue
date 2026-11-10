@@ -37,7 +37,7 @@ func newRecord(id string) *Record {
 // graph, read back, and compact a completed result into a tombstone that
 // still answers result_expired.
 func TestRecordLifecycle(t *testing.T) {
-	s, err := Open(t.TempDir(), WithClock(fixedClock))
+	s, err := Open(t.TempDir(), withClock(fixedClock))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestCompactOneKeepsOwedResults(t *testing.T) {
 		{"caller has not received it (4b)", protocol.StateCompleted, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s, err := Open(t.TempDir(), WithClock(fixedClock))
+			s, err := Open(t.TempDir(), withClock(fixedClock))
 			if err != nil {
 				t.Fatalf("open: %v", err)
 			}
@@ -148,7 +148,7 @@ func TestCompactOneKeepsOwedResults(t *testing.T) {
 // TestStoreRefusesBadTransitions pins the state graph: no shortcuts, one
 // native dispatch, no duplicate create. Corpus Q17 owns one writer per root.
 func TestStoreRefusesBadTransitions(t *testing.T) {
-	s, err := Open(t.TempDir(), WithClock(fixedClock))
+	s, err := Open(t.TempDir(), withClock(fixedClock))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestStoreRefusesBadTransitions(t *testing.T) {
 // (Get surfaces it as an error, not as absent).
 func TestListIsolatesPoisonRecords(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir, WithClock(fixedClock))
+	s, err := Open(dir, withClock(fixedClock))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestListIsolatesPoisonRecords(t *testing.T) {
 	}
 
 	// The plain List() returns only healthy records (no abort).
-	recs2, err := s.List()
+	recs2, _, err := s.ListWithPoison()
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestNormalizeRecordClearsStaleInteraction(t *testing.T) {
 // re-acquires the lock and can write again.
 func TestClosedStoreRejectsEveryMutation(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir, WithClock(fixedClock))
+	s, err := Open(dir, withClock(fixedClock))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -309,7 +309,7 @@ func TestClosedStoreRejectsEveryMutation(t *testing.T) {
 		t.Fatalf("CompactOne after close: want code %q, got %v", wantCode, err)
 	}
 	// A fresh Open after Close re-acquires the lock and can write again.
-	s2, err := Open(dir, WithClock(fixedClock))
+	s2, err := Open(dir, withClock(fixedClock))
 	if err != nil {
 		t.Fatalf("reopen after close: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestClosedStoreRejectsEveryMutation(t *testing.T) {
 func TestAggregateQuotaRefusesBeforeWrite(t *testing.T) {
 	// One small record fits; the quota is tight enough that a second cannot.
 	// 600 bytes accommodates one ~530-byte record but refuses a second.
-	s, err := Open(t.TempDir(), WithClock(fixedClock), WithMaxStoreBytes(600))
+	s, err := Open(t.TempDir(), withClock(fixedClock), WithMaxStoreBytes(600))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -378,7 +378,7 @@ func TestAggregateQuotaRefusesBeforeWrite(t *testing.T) {
 func TestCompactVsAckRaceKeepsQuotaCounter(t *testing.T) {
 	const rounds = 20
 	for round := 0; round < rounds; round++ {
-		s, err := Open(t.TempDir(), WithClock(fixedClock), WithMaxStoreBytes(64*1024*1024))
+		s, err := Open(t.TempDir(), withClock(fixedClock), WithMaxStoreBytes(64*1024*1024))
 		if err != nil {
 			t.Fatalf("round %d: open: %v", round, err)
 		}
@@ -423,7 +423,7 @@ func TestCompactVsAckRaceKeepsQuotaCounter(t *testing.T) {
 		// equal a fresh recomputation of the on-disk sum. A lost update
 		// (CompactOne without s.mu) drifts this counter.
 		var want int64
-		_ = filepath.Walk(s.Dir(), func(path string, info os.FileInfo, err error) error {
+		_ = filepath.Walk(s.dir, func(path string, info os.FileInfo, err error) error {
 			if err == nil && strings.HasSuffix(path, recordSuffix) {
 				want += info.Size()
 			}
@@ -449,7 +449,7 @@ func TestTombstoneAtQuotaDoesNotBreakSweep(t *testing.T) {
 	// the tombstone write — before the fix, CompactOne returned storage_full
 	// and Reconcile broke the whole sweep (key-ordered List stops every later
 	// compaction too). Now settlement writes are quota-exempt.
-	s, err := Open(t.TempDir(), WithClock(fixedClock), WithMaxStoreBytes(510))
+	s, err := Open(t.TempDir(), withClock(fixedClock), WithMaxStoreBytes(510))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -505,7 +505,7 @@ func TestReservationIsReal(t *testing.T) {
 	// the 4th reservation does not). Before the fix, Reserve was a
 	// point-in-time check and all 6 were admitted.
 	quota := int64(4 * protocol.MaxRecordBytes)
-	s, err := Open(t.TempDir(), WithClock(fixedClock), WithMaxStoreBytes(quota))
+	s, err := Open(t.TempDir(), withClock(fixedClock), WithMaxStoreBytes(quota))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -571,7 +571,7 @@ func TestRestartReseedReservation(t *testing.T) {
 	dir := t.TempDir()
 	// First open: create a running record with no result.
 	quota := int64(2 * protocol.MaxRecordBytes)
-	s1, err := Open(dir, WithClock(fixedClock), WithMaxStoreBytes(quota))
+	s1, err := Open(dir, withClock(fixedClock), WithMaxStoreBytes(quota))
 	if err != nil {
 		t.Fatalf("open s1: %v", err)
 	}
@@ -597,7 +597,7 @@ func TestRestartReseedReservation(t *testing.T) {
 	// record's result write would be refused (used + result > quota). With
 	// reseeding, the reservation is reseeded and the result write succeeds
 	// (the reservation pays for it).
-	s2, err := Open(dir, WithClock(fixedClock), WithMaxStoreBytes(usedAfterCreate+int64(MaxRecordBytes)))
+	s2, err := Open(dir, withClock(fixedClock), WithMaxStoreBytes(usedAfterCreate+int64(MaxRecordBytes)))
 	if err != nil {
 		t.Fatalf("open s2: %v", err)
 	}
@@ -631,7 +631,7 @@ func TestOpenFailsWhenTheQuotaSeedCannotReadARecord(t *testing.T) {
 		t.Skip("file mode 000 does not stop this reader")
 	}
 	dir := t.TempDir()
-	s1, err := Open(dir, WithClock(fixedClock))
+	s1, err := Open(dir, withClock(fixedClock))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -653,7 +653,7 @@ func TestOpenFailsWhenTheQuotaSeedCannotReadARecord(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
 
-	s2, err := Open(dir, WithClock(fixedClock), WithMaxStoreBytes(2*protocol.MaxRecordBytes))
+	s2, err := Open(dir, withClock(fixedClock), WithMaxStoreBytes(2*protocol.MaxRecordBytes))
 	if err == nil {
 		_ = s2.Close()
 		t.Fatal("Open admitted work with a quota seed that could not read a record")
@@ -668,11 +668,11 @@ func TestOpenFailsWhenTheQuotaSeedCannotReadARecord(t *testing.T) {
 // starts, and the quota counts its bytes.
 func TestOpenCountsAPoisonRecordAndStarts(t *testing.T) {
 	dir := t.TempDir()
-	s1, err := Open(dir, WithClock(fixedClock))
+	s1, err := Open(dir, withClock(fixedClock))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	poison := filepath.Join(s1.Dir(), requestsDir, "hostA", "t_fake1__11111111-1111-4111-8111-11111111b802"+recordSuffix)
+	poison := filepath.Join(s1.dir, requestsDir, "hostA", "t_fake1__11111111-1111-4111-8111-11111111b802"+recordSuffix)
 	if err := os.MkdirAll(filepath.Dir(poison), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -682,7 +682,7 @@ func TestOpenCountsAPoisonRecordAndStarts(t *testing.T) {
 	if err := s1.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	s2, err := Open(dir, WithClock(fixedClock), WithMaxStoreBytes(protocol.MaxRecordBytes))
+	s2, err := Open(dir, withClock(fixedClock), WithMaxStoreBytes(protocol.MaxRecordBytes))
 	if err != nil {
 		t.Fatalf("Open over a poison record: %v", err)
 	}
@@ -708,7 +708,7 @@ func TestFirstWriteSyncsTheStoreAncestry(t *testing.T) {
 	})
 	defer restore()
 
-	s, err := Open(state, WithClock(fixedClock))
+	s, err := Open(state, withClock(fixedClock))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -723,7 +723,7 @@ func TestFirstWriteSyncsTheStoreAncestry(t *testing.T) {
 	_ = s.Close()
 
 	synced = nil
-	s2, err := Open(state, WithClock(fixedClock))
+	s2, err := Open(state, withClock(fixedClock))
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -742,7 +742,7 @@ func TestFirstWriteSyncsTheStoreAncestry(t *testing.T) {
 // Regression: bead agent-message-queue-39v (B4).
 func TestAmbiguousTerminalWriteReleasesItsReservation(t *testing.T) {
 	quota := int64(protocol.MaxRecordBytes) + 64*1024
-	s, err := Open(t.TempDir(), WithClock(fixedClock), WithMaxStoreBytes(quota))
+	s, err := Open(t.TempDir(), withClock(fixedClock), WithMaxStoreBytes(quota))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -789,4 +789,28 @@ func TestAmbiguousTerminalWriteReleasesItsReservation(t *testing.T) {
 	if err := s.Create(newRecord(k2.RequestID)); err != nil {
 		t.Fatalf("next create: %v", err)
 	}
+}
+
+// A target id may start with a dot, and its record is as visible to the
+// list as to Open and Get (audit 2026-11-10).
+func TestListWithPoisonListsADotTarget(t *testing.T) {
+	s, err := Open(t.TempDir(), withClock(fixedClock))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	rec := newRecord("11111111-1111-4111-8111-111111111401")
+	rec.TargetID = ".t_dot"
+	if err := s.Create(rec); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	recs, poison, err := s.ListWithPoison()
+	if err != nil || len(poison) != 0 || len(recs) != 1 || recs[0].TargetID != ".t_dot" {
+		t.Fatalf("list = %d records, %d poison, %v; want the dot target's record", len(recs), len(poison), err)
+	}
+}
+
+// withClock fixes the clock the store stamps records with.
+func withClock(now func() time.Time) Option {
+	return func(s *Store) { s.now = now }
 }

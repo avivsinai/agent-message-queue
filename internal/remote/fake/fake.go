@@ -185,12 +185,6 @@ func (r *Runtime) Submit(req core.BoundRequest) (core.Admission, error) {
 		r.mu.Unlock()
 		return core.Admission{Code: protocol.CodeBusy, Message: "a run is active"}, nil
 	}
-	for _, rn := range r.runsByKey {
-		if rn.state.Terminal() && !rn.acknowledged {
-			r.mu.Unlock()
-			return core.Admission{Code: protocol.CodeBusy, Message: "a completed result awaits acknowledgement"}, nil
-		}
-	}
 	r.nextRun++
 	rn := &run{id: fmt.Sprintf("run_%d", r.nextRun), key: req.Key, epoch: req.Epoch, state: protocol.StateRunning}
 	r.runsByKey[req.Key] = rn
@@ -307,7 +301,7 @@ func (r *Runtime) Respond(key requests.Key, _ string, interactionID, option stri
 // terminal evidence for the key only when the digest names exactly that
 // evidence — the design contract's "stale acknowledgements cannot release a
 // different request's result". An ack with a wrong or empty digest leaves
-// the record retained so the busy wedge stays observable.
+// the record retained.
 func (r *Runtime) AcknowledgeResult(key requests.Key, epoch, digest string) {
 	r.mu.Lock()
 	gate := r.ackGate
@@ -511,42 +505,6 @@ func (r *Runtime) Complete(requestID, text string) bool {
 	for _, rn := range r.runsByKey {
 		if rn.key.RequestID == requestID && rn.state == protocol.StateRunning {
 			target = rn
-		}
-	}
-	if target == nil {
-		r.mu.Unlock()
-		return false
-	}
-	target.state = protocol.StateCompleted
-	target.result = &protocol.Result{Text: text}
-	r.busy = false
-	ev := core.NativeEvent{Type: core.EventRunCompleted, Key: target.key, RunID: target.id, Result: target.result}
-	r.mu.Unlock()
-	r.emit(ev)
-	return true
-}
-
-// CompleteWhileAdmitHeld marks the run for requestID as completed with a
-// result and emits EventRunCompleted, EVEN IF the run was already cancelled
-// natively. This models the shape where Submit is parked in
-// afterAdmitGate, a native cancel moved the record to cancelled AND cancelled
-// the run, then the run finishes (produces output) before Submit returns.
-// The completion event arrives for a terminal (cancelled) record — onNative
-// must record the result, not discard it. Reports whether a run was found.
-func (r *Runtime) CompleteWhileAdmitHeld(requestID, text string) bool {
-	r.mu.Lock()
-	var target *run
-	for _, rn := range r.runsByKey {
-		if rn.key.RequestID == requestID && !rn.state.Terminal() {
-			target = rn
-		}
-	}
-	if target == nil {
-		// Fall back to any non-completed run (e.g. already cancelled).
-		for _, rn := range r.runsByKey {
-			if rn.key.RequestID == requestID && rn.state != protocol.StateCompleted {
-				target = rn
-			}
 		}
 	}
 	if target == nil {
@@ -810,8 +768,7 @@ func (r *Runtime) AckCalls() int {
 }
 
 // UnacknowledgedResults counts retained terminal results the endpoint has not
-// acknowledged. While this is nonzero the runtime refuses additional remote
-// work (the busy wedge).
+// acknowledged.
 func (r *Runtime) UnacknowledgedResults() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()

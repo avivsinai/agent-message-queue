@@ -131,7 +131,19 @@ func OptInPermissionHook(home, settings, bin string) (bool, error) {
 	return optIn(settings, HookApproval, bin, permissionSpec, permissionHookEntry(home, bin), optInInstall, hookfile.LockWait)
 }
 
-// OptInStopHook is OptInPermissionHook for the Stop hook.
+// OptInStopHook is OptInPermissionHook for the Stop hook: the fail-open
+// receiver at the end of the Stop chain of the user settings.
+//
+// Claude Code's durable hook scopes are the user, project, local, and
+// managed settings files. None of them is a single session: session hooks
+// exist only in memory inside that process
+// (https://code.claude.com/docs/en/hooks). The bound session can live in
+// any project, so the hook is user-level. The receiver returns before any
+// write unless that session is attached or the binding names it. The
+// command starts amq-remote only when a state the receiver reads exists:
+// AMQ_REMOTE_BINDING, a binding file, a binding in the bindings directory
+// (its tombstones are none), or the attachment sentinels. Everywhere else
+// the hook costs one sh.
 func OptInStopHook(home, settings, bin string) (bool, error) {
 	return optIn(settings, HookStop, bin, stopHook, stopHookEntry(home, bin), optInInstall, hookfile.LockWait)
 }

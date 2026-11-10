@@ -131,7 +131,7 @@ func TestDeferredDisabledModeRecordsTheReason(t *testing.T) {
 		t.Fatalf("offline submit: %v", err)
 	}
 	// The record an older build stored with deliver=steer.
-	path := filepath.Join(store.Dir(), "requests", "local", "fake__"+id+".json")
+	path := filepath.Join(recordsDir(t, store, "local"), "fake__"+id+".json")
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)

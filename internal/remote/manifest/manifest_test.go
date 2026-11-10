@@ -118,3 +118,19 @@ func TestWriteKeepsUnknownTopLevelKeys(t *testing.T) {
 		t.Fatalf("a removed known key came back: %s", data)
 	}
 }
+
+// The manifest holds the owner key and channel ids, so it is private to the
+// owner like every other AMQ state file (audit 2026-11-10).
+func TestWriteIsOwnerOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "remote", "manifest.json")
+	if err := Write(path, File{}); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("manifest mode = %v, want 0600", fi.Mode().Perm())
+	}
+}

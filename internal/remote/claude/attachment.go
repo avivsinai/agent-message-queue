@@ -231,6 +231,7 @@ func Attach(cfg config) (*Attachment, error) {
 		cancelIntent: map[requests.Key]bool{},
 		recoverFrom:  map[requests.Key]recoverScan{},
 		released:     map[requests.Key]struct{}{},
+		submitting:   map[requests.Key]struct{}{},
 		ctx:          context.Background(),
 	}
 	token, err := bindStopSession(home, reg.SessionID)
@@ -384,6 +385,9 @@ type Attachment struct {
 	// delivery is still in the transcript, and recovery must never bring
 	// them back as a phantom running run. Bounded by maxReleased.
 	released map[requests.Key]struct{}
+	// submitting holds the keys a Submit is sending; their run is recorded
+	// only once the frame is written.
+	submitting map[requests.Key]struct{}
 	// closed: the endpoint unsubscribed. The poller is stopped and never
 	// restarted; the attachment is being replaced or shut down.
 	closed bool

@@ -48,7 +48,7 @@ func installSettings(t *testing.T, original string) (home string, installed stri
 			t.Fatal(err)
 		}
 	}
-	if err := InstallStopHook(home, "/opt/amq bin/amq-remote"); err != nil {
+	if _, err := OptInStopHook(home, SettingsPath(home), "/opt/amq bin/amq-remote"); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(SettingsPath(home))

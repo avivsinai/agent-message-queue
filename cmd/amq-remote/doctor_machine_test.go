@@ -68,12 +68,12 @@ func installHooks(t *testing.T, approval, stop bool) {
 	home, _ := os.UserHomeDir()
 	bin := filepath.Join(home, "bin", "amq-remote")
 	if approval {
-		if err := claude.InstallPermissionHook(home, bin); err != nil {
+		if _, err := claude.OptInPermissionHook(home, claude.SettingsPath(home), bin); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if stop {
-		if err := claude.InstallStopHook(home, bin); err != nil {
+		if _, err := claude.OptInStopHook(home, claude.SettingsPath(home), bin); err != nil {
 			t.Fatal(err)
 		}
 	}

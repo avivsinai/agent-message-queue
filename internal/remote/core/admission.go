@@ -417,8 +417,7 @@ func (e *Endpoint) admissibleCodeLocked(targetID, epoch, notAfter, minEvidence s
 // achievedEvidence returns the live session's submit evidence class for a
 // target, for the human projection on a submit reply (the machine contract
 // floor lives on SubmitInput). Empty when the target is nil or the session
-// carries no evidence projection (legacy/unknown adapter). Callers must NOT
-// hold e.mu when calling Inspect (it may lock the adapter).
+// carries no evidence projection (legacy/unknown adapter).
 func achievedEvidence(t *target) string {
 	if t == nil {
 		return ""
@@ -487,7 +486,7 @@ func sessionBound(origin map[string]string) bool {
 // included, so all of them count. An unreadable record of this link makes
 // the count undeterminable and fails closed. The caller holds e.mu.
 func (e *Endpoint) linkFullLocked(host string) (bool, error) {
-	recs, poison, err := e.store.ListWithPoison()
+	recs, poison, err := e.store.ListReserving(func(k requests.Key) bool { return k.CreatorHost == host })
 	if err != nil {
 		return false, err
 	}
@@ -511,10 +510,8 @@ func (e *Endpoint) linkFullLocked(host string) (bool, error) {
 // This is the per-runtime reservation — the endpoint's own knowledge of
 // what it has outstanding, not the attachment's Inspect() status, which is
 // advisory and racy. Scope note: a terminal record whose ack is pending is
-// NOT reserved — the attachment owns the native unacked-result slot (its
-// Submit already refuses on one) and the ack-replay machinery recovers it;
-// reserving it at the endpoint too double-counted and made the endpoint
-// refuse submits the attachment would accept. Fail-closed: an enumeration
+// NOT reserved: its run is over, and the ack-replay machinery delivers the
+// ack. Fail-closed: an enumeration
 // error is PROPAGATED, never read as "none" — a storage error must not
 // authorize the dispatch the reservation exists
 // to prevent. A POISON record for the target itself (undecodable file whose
@@ -523,7 +520,7 @@ func (e *Endpoint) linkFullLocked(host string) (bool, error) {
 // block this target. A ConcurrentSubmitter target holds no reservation:
 // its requests share no native turn. The caller holds e.mu.
 func (e *Endpoint) runtimeInFlightLocked(targetID string, exclude requests.Key) (bool, error) {
-	recs, poison, err := e.store.ListWithPoison()
+	recs, poison, err := e.store.ListReserving(func(k requests.Key) bool { return k.TargetID == targetID })
 	if err != nil {
 		return false, err
 	}

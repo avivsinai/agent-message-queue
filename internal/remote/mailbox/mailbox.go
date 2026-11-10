@@ -3,7 +3,8 @@
 // handle's `amq reply` to that message is the request's result.
 //
 // The adapter keeps one journal per request under
-// extensions/remote/mailbox/<target>/ in the root: <ref>.json fixes the
+// extensions/remote/mailbox/<target>/ in the root, named by the request's
+// ref (journalStem): <ref>.json fixes the
 // message id, time and prompt before the first write, and records an
 // outcome that delivers nothing or the acknowledgement; <ref>.outcome.json
 // is the one decided terminal result, created exclusively; <ref>.lock
@@ -14,6 +15,8 @@ package mailbox
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -576,7 +579,7 @@ func (a *Attachment) Forget(key requests.Key) error {
 		if found && !ent.Acked && ent.Undelivered == "" {
 			return fmt.Errorf("mailbox: request %s has a result the endpoint has not acknowledged", ref)
 		}
-		for _, name := range []string{ref + ".outcome.json", ref + ".json"} {
+		for _, name := range []string{journalStem(ref) + ".outcome.json", journalStem(ref) + ".json"} {
 			if err := root.Remove(filepath.Join(a.dir(), name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				return err
 			}
@@ -628,7 +631,7 @@ func (a *Attachment) locked(ref string, wait bool, fn func(*fsq.DeliveryRoot) er
 		return err
 	}
 	defer func() { _ = root.Close() }()
-	f, err := root.OpenLockFile(a.dir(), ref+".lock", 0o600)
+	f, err := root.OpenLockFile(a.dir(), journalStem(ref)+".lock", 0o600)
 	if err != nil {
 		return err
 	}
@@ -663,13 +666,13 @@ func (a *Attachment) barrier(root *fsq.DeliveryRoot) error {
 
 func (a *Attachment) readEntry(root *fsq.DeliveryRoot, ref string) (entry, bool, error) {
 	var ent entry
-	found, err := readJSON(root, filepath.Join(a.dir(), ref+".json"), &ent)
+	found, err := readJSON(root, filepath.Join(a.dir(), journalStem(ref)+".json"), &ent)
 	return ent, found, err
 }
 
 func (a *Attachment) readOutcome(root *fsq.DeliveryRoot, ref string) (outcome, bool, error) {
 	var out outcome
-	found, err := readJSON(root, filepath.Join(a.dir(), ref+".outcome.json"), &out)
+	found, err := readJSON(root, filepath.Join(a.dir(), journalStem(ref)+".outcome.json"), &out)
 	if found && err == nil && !out.State.Terminal() {
 		err = fmt.Errorf("mailbox: outcome of %s records no terminal state", ref)
 	}
@@ -695,7 +698,7 @@ func (a *Attachment) createEntry(root *fsq.DeliveryRoot, ref string, ent entry) 
 	if err != nil {
 		return err
 	}
-	return root.CreateExclusiveFile(filepath.Join(a.dir(), ref+".json"), raw, 0o600)
+	return root.CreateExclusiveFile(filepath.Join(a.dir(), journalStem(ref)+".json"), raw, 0o600)
 }
 
 func (a *Attachment) writeEntry(root *fsq.DeliveryRoot, ref string, ent entry) error {
@@ -703,7 +706,7 @@ func (a *Attachment) writeEntry(root *fsq.DeliveryRoot, ref string, ent entry) e
 	if err != nil {
 		return err
 	}
-	if _, err := root.WriteFileAtomic(a.dir(), ref+".json", raw, 0o600); err != nil {
+	if _, err := root.WriteFileAtomic(a.dir(), journalStem(ref)+".json", raw, 0o600); err != nil {
 		return err
 	}
 	return a.barrier(root)
@@ -716,7 +719,7 @@ func (a *Attachment) decide(root *fsq.DeliveryRoot, ref string, proposed outcome
 	if err != nil {
 		return outcome{}, err
 	}
-	err = root.CreateExclusiveFile(filepath.Join(a.dir(), ref+".outcome.json"), raw, 0o600)
+	err = root.CreateExclusiveFile(filepath.Join(a.dir(), journalStem(ref)+".outcome.json"), raw, 0o600)
 	if err == nil {
 		return proposed, nil
 	}
@@ -737,3 +740,18 @@ func notDelivered(handle, reason string) string {
 func refOf(key requests.Key) string {
 	return protocol.EncodeRef(key.CreatorHost, key.TargetID, key.RequestID)
 }
+
+// journalStem names a request's journal files: its ref, or a digest of a ref
+// too long for a file name. The longest name is the atomic writer's
+// temporary ".<stem>.json.tmp-<unix ns>". A ref that fits keeps its own
+// name, so a journal written under it is still found.
+func journalStem(ref string) string {
+	if len(ref) <= maxJournalStem {
+		return ref
+	}
+	sum := sha256.Sum256([]byte(ref))
+	return "amqr1h_" + hex.EncodeToString(sum[:])
+}
+
+// maxJournalStem keeps every journal file name within NAME_MAX (255 bytes).
+const maxJournalStem = 255 - len(".") - len(".json") - len(".tmp-") - 20

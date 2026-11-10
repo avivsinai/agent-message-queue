@@ -381,12 +381,6 @@ func MarkedCursorHookCommandsAt(path, event, marker string) ([]string, error) {
 	return InstalledCommands(path, Spec{Event: event, Marker: marker, Flat: true})
 }
 
-// Remove removes spec's marked entries from the settings file at path.
-func Remove(path string, spec Spec) error {
-	_, err := Edit(path, nil, RemoveEdit(spec))
-	return err
-}
-
 func RemoveEdit(spec Spec) func([]byte) ([]byte, error) {
 	return func(raw []byte) ([]byte, error) { return rawRemoveEntries(raw, spec) }
 }
