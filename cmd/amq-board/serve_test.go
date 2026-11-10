@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -61,14 +63,24 @@ func TestServeRefusedEditKeepsUsageSettings(t *testing.T) {
 		Now:  time.Now,
 		Logf: func(string, ...any) {},
 	}
+	usageOn := func() bool {
+		host := "127.0.0.1:1"
+		rec := httptest.NewRecorder()
+		l.Handler("tok", host).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://"+host+"/tok/model.json", nil))
+		var m board.Model
+		if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+			t.Fatal(err)
+		}
+		return m.Usage != nil
+	}
 	write(`{"usage": {"enabled": false}}`)
 	l.Refresh(context.Background(), false)
-	if l.Model().Usage != nil {
+	if usageOn() {
 		t.Fatal("usage read while disabled")
 	}
 	write(`{"liveness_window": "soon", "usage": {"enabled": true}}`)
 	l.Refresh(context.Background(), false)
-	if l.Model().Usage != nil {
+	if usageOn() {
 		t.Fatal("a refused edit turned usage on")
 	}
 }

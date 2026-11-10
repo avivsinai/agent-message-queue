@@ -98,7 +98,7 @@ func runBoard(t *testing.T, r fakeRunner, bdInstalled bool) board.Model {
 		},
 		IsDir: func(string) bool { return true },
 	}
-	return board.Run(context.Background(), env, []board.Source{source.AMQ{}, source.Beads{}}, board.DefaultConfig(), "test")
+	return board.Build(board.Acquire(context.Background(), env, []board.Source{source.AMQ{}, source.Beads{}}, board.DefaultConfig(), "test"))
 }
 
 func column(m board.Model, id board.Column) board.ColumnView {

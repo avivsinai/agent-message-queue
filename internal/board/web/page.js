@@ -233,7 +233,7 @@
   function check() {
     if (checking) { return Promise.resolve(); }
     checking = true;
-    return fetch("model.json", {cache:"no-store"}).then(function (response) {
+    return fetch("pane.json", {cache:"no-store"}).then(function (response) {
       if (!response.ok) { throw new Error("read failed"); }
       return response.json();
     }).then(function (model) {

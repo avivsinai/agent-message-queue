@@ -27,7 +27,7 @@ func TestNextActionsUseRecordedStateAndPriority(t *testing.T) {
 	parent.Evidence = append(parent.Evidence, Evidence{Field: "issue_type", Value: "feature"})
 	child := bead("demo-child", StateQueued, "P3")
 	child.Relations = []Relation{{Kind: RelationRelated, To: parent.Ref, Basis: "parent-child"}}
-	waitRef, _ := ClaudeSession("aaaaaaaa-0000-4000-8000-000000000001")
+	waitRef := Ref{Kind: "claude-session", ID: "aaaaaaaa-0000-4000-8000-000000000001"}
 	waiting := Item{Ref: waitRef, State: StateNeedsHuman, Reason: Reason{Since: now}}
 	blocked := bead("demo-blocked", StateBlocked, "")
 	blocked.Owner = Owner{Kind: OwnerAgent, Handle: "alpha"}
