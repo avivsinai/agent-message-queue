@@ -110,8 +110,10 @@ serve`, so the bridge directory exists when the adapter attaches.
 }
 ```
 
-Submits deliver as follow-ups only. Steering and cancellation are not
-available through this bridge.
+Submits deliver as follow-ups only. Steering is not available through this
+bridge. Cancel is exact (bridge revision 5): the bridge aborts the request in
+flight when a `cancels/<ref>.json` names it, and refuses a request that has
+not run yet as `cancelled`.
 
 ## Test
 
