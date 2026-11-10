@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -66,17 +67,18 @@ func Enqueue(cfg EnqueueConfig, destAlias string, message []byte) (EnqueueResult
 	// The destination sidecar is durable before the message is visible: a
 	// courier that finds the .md always finds the alias it was enqueued for,
 	// never the courier's default. The exclusive sidecar also claims the
-	// message id against a concurrent enqueue.
+	// message id against an enqueue for another destination. A failed or
+	// crashed enqueue leaves the sidecar in place, never a message without
+	// one: a retry for the same destination reuses it, and a concurrent
+	// enqueue of the same message cannot lose it.
 	target := filepath.Join(spoolDir, filename)
-	if err := writeDestSidecar(target, destAlias); err != nil {
+	if err := claimDestSidecar(target, destAlias); err != nil {
 		return EnqueueResult{}, err
 	}
 	if err := syncDirectory(spoolDir); err != nil {
-		_ = os.Remove(DestSidecarPath(target))
 		return EnqueueResult{}, fmt.Errorf("sync bridge spool: %w", err)
 	}
 	if err := publishSpoolMessage(filepath.Join(filepath.Dir(spoolDir), "tmp"), target, message); err != nil {
-		_ = os.Remove(DestSidecarPath(target))
 		return EnqueueResult{}, err
 	}
 	if err := syncDirectory(spoolDir); err != nil {
@@ -116,6 +118,30 @@ func publishSpoolMessage(tmpDir, target string, message []byte) error {
 	}
 	if err := os.Link(tmp, target); err != nil {
 		return fmt.Errorf("publish spool file: %w", err)
+	}
+	return nil
+}
+
+// claimDestSidecar writes the sidecar for target. An existing sidecar with
+// exactly the bytes this enqueue would write, beside an unpublished message,
+// is left by an earlier attempt of the same enqueue and is reused; any other
+// existing sidecar refuses.
+func claimDestSidecar(target, destAlias string) error {
+	err := writeDestSidecar(target, destAlias)
+	if err == nil || !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	existing, readErr := fsq.ReadRegularNoFollow(DestSidecarPath(target))
+	if readErr != nil {
+		return fmt.Errorf("read existing dest sidecar: %w", readErr)
+	}
+	if string(existing) != destAlias+"\n" {
+		return fmt.Errorf("dest sidecar %q names another destination", DestSidecarPath(target))
+	}
+	if _, statErr := os.Lstat(target); statErr == nil {
+		return fmt.Errorf("spool message %q is already enqueued", target)
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("stat spool message: %w", statErr)
 	}
 	return nil
 }
