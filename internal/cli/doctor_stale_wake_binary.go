@@ -89,13 +89,6 @@ func checkStaleWakeBinaryHint(inspection wakeLockInspection) (opsHint, bool, err
 	if !comparison.Stale {
 		return opsHint{}, false, nil
 	}
-	if comparison.Method != wakeBinaryComparisonExactIdentity &&
-		comparison.Method != wakeBinaryComparisonDarwinProcessImage &&
-		comparison.Method != wakeBinaryComparisonDarwinDeletedImage &&
-		comparison.Method != wakeBinaryComparisonStartedMTime {
-		return opsHint{}, false, nil
-	}
-
 	// A PID can exit and be reused while its executable is inspected. Re-read
 	// both the lock generation and kernel process identity before reporting.
 	confirmed := inspectWakeLock(inspection.Root, inspection.Agent)
