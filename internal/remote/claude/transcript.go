@@ -243,6 +243,10 @@ type transcriptEntry struct {
 	// the same id as prompt_id. Absorbed frames and assistant lines carry
 	// none.
 	PromptID string
+	// ToolUses are the line's tool_use blocks with their input hash;
+	// ToolResults the tool_use ids its tool_result blocks answer.
+	ToolUses    []toolUseRef
+	ToolResults []string
 	// OriginKind is the harness's origin.kind for the input (human, peer,
 	// task-notification, auto-continuation); "" when the line has none.
 	OriginKind string
@@ -265,6 +269,12 @@ type transcriptEntry struct {
 	// Model is message.model; "<synthetic>" on a line Claude Code writes
 	// itself.
 	Model string
+}
+
+// toolUseRef is one tool_use block: its id, tool name and actionHash of
+// its input.
+type toolUseRef struct {
+	ID, Name, Hash string
 }
 
 // peerOrigin is the harness's provenance record on a delivered frame.
@@ -310,14 +320,19 @@ func parseTranscriptLine(line string) (transcriptEntry, bool) {
 	if err := json.Unmarshal([]byte(line), &raw); err != nil || raw.Type == "" {
 		return transcriptEntry{}, false
 	}
-	text, blocks := decodeContentBlocks(raw.Message.Content)
-	e := transcriptEntry{Type: raw.Type, Meta: raw.IsMeta, Text: text, Blocks: blocks, SessionID: raw.SessionID, UUID: raw.UUID, PromptID: raw.PromptID,
+	text, blocks, uses := decodeContentWalk(raw.Message.Content)
+	e := transcriptEntry{Type: raw.Type, Meta: raw.IsMeta, Text: text, Blocks: blocks, SessionID: raw.SessionID, UUID: raw.UUID, PromptID: raw.PromptID, ToolUses: uses,
 		TurnOrigin: raw.TurnOrigin, Sidechain: raw.IsSidechain, CompactSummary: raw.IsCompact, VisibleOnly: raw.IsVisibleOnly,
 		MessageID: raw.Message.ID, StopReason: raw.Message.StopReason, APIError: raw.IsAPIError, Model: raw.Message.Model}
+	for _, b := range blocks {
+		if b.Type == "tool_result" && b.ID != "" {
+			e.ToolResults = append(e.ToolResults, b.ID)
+		}
+	}
 	origin := raw.Origin
 	if raw.Type == "attachment" && raw.Attachment != nil && raw.Attachment.Type == "queued_command" {
 		e.Type, e.Absorbed, e.Meta, e.Text, origin = "user", true, false, raw.Attachment.Prompt, raw.Attachment.Origin
-		e.Blocks, e.PromptID = nil, ""
+		e.Blocks, e.ToolUses, e.ToolResults, e.PromptID = nil, nil, nil, ""
 		if e.Text != "" {
 			e.Blocks = []TranscriptBlock{{Type: "text", Text: e.Text}}
 		}
@@ -373,15 +388,23 @@ type TranscriptBlock struct {
 // tool_use and tool_result are kept beside that text, and tool_use input is
 // not copied: it carries local paths.
 func decodeContentBlocks(raw json.RawMessage) (string, []TranscriptBlock) {
+	text, blocks, _ := decodeContentWalk(raw)
+	return text, blocks
+}
+
+// decodeContentWalk is decodeContentBlocks plus each tool_use block's input
+// hash, which matches the call a permission dialog is about. The input is
+// hashed, never kept.
+func decodeContentWalk(raw json.RawMessage) (string, []TranscriptBlock, []toolUseRef) {
 	if len(raw) == 0 {
-		return "", nil
+		return "", nil, nil
 	}
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
 		if s == "" {
-			return "", nil
+			return "", nil, nil
 		}
-		return s, []TranscriptBlock{{Type: "text", Text: s}}
+		return s, []TranscriptBlock{{Type: "text", Text: s}}, nil
 	}
 	var blocks []struct {
 		Type      string          `json:"type"`
@@ -391,12 +414,14 @@ func decodeContentBlocks(raw json.RawMessage) (string, []TranscriptBlock) {
 		ToolUseID string          `json:"tool_use_id"`
 		IsError   bool            `json:"is_error"`
 		Content   json.RawMessage `json:"content"`
+		Input     json.RawMessage `json:"input"`
 	}
 	if err := json.Unmarshal(raw, &blocks); err != nil {
-		return "", nil
+		return "", nil, nil
 	}
 	var parts []string
 	var out []TranscriptBlock
+	var uses []toolUseRef
 	for _, b := range blocks {
 		switch b.Type {
 		case "text":
@@ -410,11 +435,14 @@ func decodeContentBlocks(raw json.RawMessage) (string, []TranscriptBlock) {
 				continue
 			}
 			out = append(out, TranscriptBlock{Type: "tool_use", Name: b.Name, ID: b.ID})
+			if h, ok := actionHash(b.Name, b.Input); ok && b.ID != "" {
+				uses = append(uses, toolUseRef{ID: b.ID, Name: b.Name, Hash: h})
+			}
 		case "tool_result":
 			out = append(out, TranscriptBlock{Type: "tool_result", ID: b.ToolUseID, Text: decodeContent(b.Content), Failed: b.IsError})
 		}
 	}
-	return strings.Join(parts, "\n"), out
+	return strings.Join(parts, "\n"), out, uses
 }
 
 // TranscriptLine is the activity and mirror view of one parsed transcript

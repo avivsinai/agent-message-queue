@@ -434,3 +434,32 @@ func TestPermissionHookKeepsTheDialogOfAnIdenticalCallOpen(t *testing.T) {
 		t.Fatalf("resolved = %+v, %v; want answered in the terminal", r, ok)
 	}
 }
+
+// The terminal approves the only call of its batch with that name and input:
+// its tool_result closes the Buzz dialog at once, before the model writes
+// its next message (audit 2026-11-10).
+func TestPermissionHookClosesTheDialogOfAUniqueCallOnItsResult(t *testing.T) {
+	dir := boundHookEnv(t)
+	transcript := filepath.Join(t.TempDir(), "s-1.jsonl")
+	batch := `{"type":"assistant","message":{"id":"msg_1","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"make"}}]}}` + "\n" +
+		`{"type":"assistant","message":{"id":"msg_1","content":[{"type":"tool_use","id":"toolu_2","name":"Bash","input":{"command":"make test"}}]}}` + "\n"
+	if err := os.WriteFile(transcript, []byte(batch), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdin, _ := json.Marshal(map[string]any{
+		"session_id": "s-1", "transcript_path": transcript, "hook_event_name": "PermissionRequest",
+		"tool_name": "Bash", "tool_input": map[string]any{"command": "make"},
+	})
+	wait := runHook(t, string(stdin))
+	req := openRequest(t, dir)
+	done := batch + `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}}` + "\n"
+	if err := os.WriteFile(transcript, []byte(done), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out := wait(); out != "" {
+		t.Fatalf("a terminal answer printed %q", out)
+	}
+	if r, ok, _ := dialog.ReadResolved(dir, req.ID); !ok || r.By != dialog.ByTerminal {
+		t.Fatalf("resolved = %+v, %v; want answered in the terminal", r, ok)
+	}
+}
