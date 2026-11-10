@@ -43,9 +43,9 @@ func TestGoldenExtensionVector(t *testing.T) {
 	live := bd.liveness(fixedNow)
 	// Bead agent-message-queue-611.60: the reference bridge's session id is
 	// the native session id a relay share pins. The reference bridge is
-	// revision 4 (revision 3 plus that session id).
-	if !live.live || live.pid != 4242 || live.gen != "golden-generation" || live.revision != 4 || live.sessionID != "pi-session-1" {
-		t.Fatalf("liveness = %+v, want live pid 4242 generation golden-generation revision 4 session pi-session-1", live)
+	// revision 5 (revision 4 plus exact cancel).
+	if !live.live || live.pid != 4242 || live.gen != "golden-generation" || live.revision != 5 || live.sessionID != "pi-session-1" {
+		t.Fatalf("liveness = %+v, want live pid 4242 generation golden-generation revision 5 session pi-session-1", live)
 	}
 
 	key := requests.Key{CreatorHost: "host1", TargetID: "pi-1", RequestID: "00000000-0000-4000-8000-000000000001"}

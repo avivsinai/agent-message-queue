@@ -60,7 +60,7 @@ function harness(host?: (root: string) => AmqBridgeOptions, shared?: string) {
 	}
 	const handlers = new Map<string, Handler[]>();
 	const sent: { content: unknown; options: unknown }[] = [];
-	const state = { idle: true, pending: false, idleChecks: 0 };
+	const state = { idle: true, pending: false, idleChecks: 0, aborts: 0 };
 	const notices: string[] = [];
 	const pi = {
 		on(name: string, h: Handler) {
@@ -84,6 +84,9 @@ function harness(host?: (root: string) => AmqBridgeOptions, shared?: string) {
 			return state.idle;
 		},
 		hasPendingMessages: () => state.pending,
+		abort: () => {
+			state.aborts++;
+		},
 		sessionManager: { getSessionId: () => "pi-session-1" },
 	};
 	const dir = path.join(root, "agents", "pi-seat", "extensions", "pi-bridge");
@@ -119,6 +122,13 @@ function harness(host?: (root: string) => AmqBridgeOptions, shared?: string) {
 			fs.writeFileSync(tmp, JSON.stringify(request));
 			fs.renameSync(tmp, path.join(dir, "requests", `${ref}.json`));
 		},
+		cancel(ref: string, fields: Record<string, unknown> = {}) {
+			const cancels = path.join(dir, "cancels");
+			fs.mkdirSync(cancels, { recursive: true });
+			const tmp = path.join(cancels, ".publish-test");
+			fs.writeFileSync(tmp, JSON.stringify({ protocol: "amq:pi-bridge:v1", ref, at: new Date().toISOString(), ...fields }));
+			fs.renameSync(tmp, path.join(cancels, `${ref}.json`));
+		},
 		events(ref: string): Record<string, string>[] {
 			let data: string;
 			try {
@@ -153,6 +163,68 @@ const toolUseMessage = (text: string) => ({
 		],
 		stopReason: "toolUse",
 	},
+});
+
+test("a cancel for a request that has not run refuses it cancelled and it never runs", async () => {
+	const h = harness();
+	fs.mkdirSync(path.join(h.dir, "requests"), { recursive: true });
+	h.write(REF, { ref: REF, text: "remote task", deliver_as: "followUp", not_after: new Date(Date.now() + 60_000).toISOString(), epoch_hint: "x", bridge_revision: 5 });
+	h.cancel(REF);
+	await h.start();
+	try {
+		await h.waitFor(() => h.events(REF).length > 0);
+		assert.deepEqual(h.sent, []);
+		assert.equal(h.hasReceipt(REF), false);
+		assert.deepEqual(
+			h.events(REF).map((e) => [e.event, e.reason]),
+			[["refused", "cancelled"]],
+		);
+	} finally {
+		await h.done();
+	}
+});
+
+test("a cancel for the request in flight aborts it and its terminal event is cancelled", async () => {
+	const h = harness();
+	await h.start();
+	try {
+		h.publish(REF, "remote task", h.generation());
+		await h.waitFor(() => h.sent.length === 1);
+		await h.emit("message_start", userMessage("remote task"));
+		h.cancel(REF);
+		await h.waitFor(() => h.state.aborts > 0);
+		assert.equal(h.state.aborts, 1);
+		await h.emit("agent_before_settle", { outcome: "aborted" });
+		await h.emit("agent_settled", { aborted: true });
+		assert.deepEqual(
+			h.events(REF).map((e) => e.event),
+			["started", "cancelled"],
+		);
+	} finally {
+		await h.done();
+	}
+});
+
+test("a cancel for a request that already ended does nothing", async () => {
+	const h = harness();
+	await h.start();
+	try {
+		h.publish(REF, "remote task", h.generation());
+		await h.waitFor(() => h.sent.length === 1);
+		await h.emit("message_start", userMessage("remote task"));
+		await h.emit("message_end", assistantMessage("done"));
+		await h.emit("agent_before_settle", { outcome: "completed" });
+		await h.emit("agent_settled");
+		h.cancel(REF);
+		await new Promise((r) => setTimeout(r, 600));
+		assert.equal(h.state.aborts, 0);
+		assert.deepEqual(
+			h.events(REF).map((e) => e.event),
+			["started", "completed"],
+		);
+	} finally {
+		await h.done();
+	}
 });
 
 // Bead agent-message-queue-vd4.6: the wake holds its doorbell while a pi
@@ -925,7 +997,7 @@ test("a host application's identity and delivery run a request without AM_ROOT o
 	try {
 		const live = JSON.parse(fs.readFileSync(path.join(h.dir, "bridge.liveness"), "utf8"));
 		assert.equal(live.upgrade, "update the host application");
-		assert.equal(live.bridge_revision, 4);
+		assert.equal(live.bridge_revision, 5);
 
 		h.publish(REF, "remote task", h.generation(), { bridge_revision: 3, origin: { carrier: "link", name: "example" } });
 		await h.waitFor(() => handed.length === 1);
