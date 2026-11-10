@@ -258,7 +258,7 @@ func retireWakeIfGeneration(root, me string, requested wakeTarget, ifGeneration 
 			commit = removeWakeLockIfUnchangedGuardedAtOutcome(
 				scope,
 				current,
-				wakeLockRemoval{unlink: scope.unlinkWakeLockForRetire, durable: true},
+				wakeLockRemoval{unlink: scope.unlinkWakeLock, durable: true},
 			)
 			if !commit.Committed {
 				return commit.Err

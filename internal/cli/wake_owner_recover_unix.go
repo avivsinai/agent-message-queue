@@ -242,14 +242,6 @@ func recoverOwnerWakeWithStopPreparer(
 				result.Reason = "exact owner claim released"
 				return nil
 			case wakeOwnerActionStopAndRelease:
-				if wakeCapability.Absent {
-					if err := removeAuthoritativeWakeClaimAt(scope, classified, target); err != nil {
-						return err
-					}
-					result.Status = "recovered"
-					result.Reason = "exact owner claim released"
-					return nil
-				}
 				stopCapability = &wakeCapability
 				keepWakeCapability = true
 				stopAuthorization = wakeOwnerReleaseAuthorization{Token: token}
