@@ -4,6 +4,7 @@ import (
 	"context"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/update"
 )
@@ -45,5 +46,17 @@ func startUpdateNotifier(command, version string, noCheck bool) {
 	notifier := update.Notifier{
 		CurrentVersion: version,
 	}
-	notifier.Start(context.Background())
+	waitUpdateCheck = notifier.Start(context.Background())
 }
+
+// updateCheckBudget bounds how long a finished command waits for a started
+// update refresh to land in the cache.
+const updateCheckBudget = 750 * time.Millisecond
+
+// waitUpdateCheck waits for the refresh startUpdateNotifier started; it is set
+// once, before the command runs.
+var waitUpdateCheck = func(time.Duration) {}
+
+// WaitUpdateCheck lets a started update refresh finish within a small budget.
+// The process calls it once after Run returns, before it exits.
+func WaitUpdateCheck() { waitUpdateCheck(updateCheckBudget) }

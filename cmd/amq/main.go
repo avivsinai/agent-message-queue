@@ -23,8 +23,12 @@ func getVersion() string {
 }
 
 func main() {
-	if err := cli.Run(os.Args[1:], getVersion()); err != nil {
+	err := cli.Run(os.Args[1:], getVersion())
+	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)
+	}
+	cli.WaitUpdateCheck()
+	if err != nil {
 		os.Exit(cli.GetExitCode(err))
 	}
 }

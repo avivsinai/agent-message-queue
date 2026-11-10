@@ -119,21 +119,25 @@ type Notifier struct {
 	FetchLatest func(context.Context, *http.Client) (string, error)
 }
 
-func (n Notifier) Start(ctx context.Context) {
+// Start prints a cached update hint and, when the cache is stale, starts a
+// background refresh. The returned wait blocks until that refresh finishes or
+// budget ends; it is a no-op when no refresh was started.
+func (n Notifier) Start(ctx context.Context) (wait func(budget time.Duration)) {
+	noWait := func(time.Duration) {}
 	if n.NoCheck {
-		return
+		return noWait
 	}
 	current := normalizeVersion(n.CurrentVersion)
 	if current == "" {
-		return
+		return noWait
 	}
 	if _, ok := parseSemver(current); !ok {
-		return
+		return noWait
 	}
 
 	cachePath, err := n.cachePath()
 	if err != nil {
-		return
+		return noWait
 	}
 	cache, err := LoadCache(cachePath)
 	hinted := false
@@ -145,8 +149,21 @@ func (n Notifier) Start(ctx context.Context) {
 	}
 
 	if cache == nil || n.now().Sub(cache.CheckedAt) >= n.interval() {
-		go n.refreshLatest(ctx, cachePath, current, hinted)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			n.refreshLatest(ctx, cachePath, current, hinted)
+		}()
+		return func(budget time.Duration) {
+			timer := time.NewTimer(budget)
+			defer timer.Stop()
+			select {
+			case <-done:
+			case <-timer.C:
+			}
+		}
 	}
+	return noWait
 }
 
 func (n Notifier) refreshLatest(ctx context.Context, cachePath, current string, alreadyHinted bool) {
