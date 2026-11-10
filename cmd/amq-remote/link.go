@@ -1162,6 +1162,9 @@ func linkStatus(args []string, probe *jsonProbe) (any, int, error) {
 			if stopped && (row.Status.State == "online" || row.Status.State == "connecting") {
 				row.Status.State = "offline" // the stored last ping stays
 			}
+			if stopped && (row.Status.State == "online" || row.Status.State == "connecting") {
+				row.Status.State = "offline" // the stored last ping stays
+			}
 			rows = append(rows, row)
 		}
 		for h, n := range retiredNames {
