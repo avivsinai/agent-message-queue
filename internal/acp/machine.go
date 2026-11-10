@@ -366,8 +366,8 @@ type appServerJudge struct {
 	gone map[string]launch.HolderIdentity
 	// judged is each binding's liveness as this tick judged it, so the
 	// workers ask the process table once per binding per tick. A judgement
-	// older than machineScanInterval is made again, so a slow tick never
-	// keeps an ended session live for longer.
+	// older than machineScanInterval is made again; the app-server answers
+	// of view are kept for the whole tick, as before.
 	judged sync.Map // livenessKey -> judgement
 }
 

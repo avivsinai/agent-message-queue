@@ -250,7 +250,9 @@ func sourceHostFromOrigin(origin map[string]string) string {
 // are accumulated, never abort the scan. Returns the count plus a joined error.
 func (c *Carrier) ImportOnce() (int, error) {
 	newDir := filepath.Join(c.root, "agents", c.me, "inbox", "new")
-	newV, stable, verr := fsq.LstatVersion(newDir, time.Now())
+	// The version is of the directory ReadDir lists, through an accepted
+	// in-root link.
+	newV, stable, verr := fsq.StatVersion(newDir, time.Now())
 	stable = stable && verr == nil
 	c.mu.Lock()
 	idle := c.curRecovered && len(c.owedReceipts) == 0 && len(c.claimedThisRun) == 0 && len(c.pendingRecovery) == 0

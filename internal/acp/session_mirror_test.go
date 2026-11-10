@@ -199,7 +199,7 @@ func TestMirrorTickShowsARunningTurnLive(t *testing.T) {
 		saved, _, _ := readMirrorFile(dir)
 		s.mirrorBinding(target, b, now.Add(time.Duration(step.after)*time.Second), false)
 		if step.crash {
-			if err := writeMirrorFile(dir, &saved); err != nil {
+			if err := writeMirrorFile(dir, &saved, false); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -596,4 +596,34 @@ func fileSize(t *testing.T, path string) int64 {
 		t.Fatal(err)
 	}
 	return fi.Size()
+}
+
+// Regression (review of agent-message-queue-udg): the cursor past turns
+// read while the mirror was off lived only in the unsynced progress.json.
+// After that file was lost in a crash and the mirror was switched on, the
+// off-period turn was posted.
+func TestMirrorNeverPostsAnOffPeriodTurnAfterLostProgress(t *testing.T) {
+	f := newMirrorFixture(t)
+	if err := mirror.SetOff("alpha", true); err != nil {
+		t.Fatal(err)
+	}
+	f.add(f.userLine("secret-u", "secret-p", 0, "private off-period input", nil),
+		f.assistantLine("secret-a", 1, "end_turn", textBlock("private off-period answer")))
+	if sent := f.tick(2); len(sent) != 0 {
+		t.Fatalf("posted while off: %q", sent)
+	}
+	dir, err := mirror.DirFor("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, "progress.json")); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := mirror.SetOff("alpha", false); err != nil {
+		t.Fatal(err)
+	}
+	f.s = NewServer(f.s.cfg, "restart")
+	if sent := f.tick(4); len(sent) != 0 {
+		t.Fatalf("off-period turn posted after the progress was lost: %q", sent)
+	}
 }

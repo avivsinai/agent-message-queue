@@ -423,3 +423,28 @@ func newCarrierOverExisting(t *testing.T, root string, store *requests.Store) (*
 	t.Cleanup(func() { _ = ep.Close() })
 	return c, rt
 }
+
+// Regression (review of agent-message-queue-udg): the idle gate versioned
+// an inbox/new that is an in-root link by the link itself, so a delivery
+// into the directory it names was never imported.
+func TestImportOnceSeesADeliveryIntoALinkedInboxNew(t *testing.T) {
+	root, carrier, _, _ := newCarrierEnv(t)
+	newDir := fsq.AgentInboxNew(root, DefaultHandle)
+	target := filepath.Join(filepath.Dir(newDir), "new-target")
+	if err := os.Rename(newDir, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("new-target", newDir); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(fsq.FileVersionSettle + 100*time.Millisecond) // the gate trusts only a settled version
+	for i := 0; i < 2; i++ {
+		if _, err := carrier.ImportOnce(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deliverCommand(t, root, "codex", sessionListBody, nil)
+	if n, err := carrier.ImportOnce(); err != nil || n != 1 {
+		t.Fatalf("delivery into the linked inbox/new was not imported: n=%d err=%v", n, err)
+	}
+}
