@@ -30,6 +30,7 @@ import (
 //
 //	state.json       the transcript cursor, the fold, the queue of turn
 //	                 events not yet sent, and the watermark
+//	progress.json    a later state.json of the same generation, not synced
 //	posted/<turn>    the claim of one turn's post, created before the post;
 //	                 a claim with no event id is never posted or edited again
 //	carrier/<msg_id> a frame the native carrier sent (mirror.RecordCarried)
@@ -163,6 +164,26 @@ type mirrorFile struct {
 	// Edited is the time of the binding's last post or edit, in unix
 	// milliseconds.
 	Edited int64 `json:"edited,omitempty"`
+	// Gen counts the synced writes of state.json; a progress.json applies
+	// only to the generation it names.
+	Gen int64 `json:"gen,omitempty"`
+}
+
+// mirrorDurable is the part of a binding's state that is written with a
+// sync: where its posts go and what may not be posted (again).
+type mirrorDurable struct {
+	Channel, Harness string
+	Watermark        int64
+	Noted            *string
+}
+
+func (st *mirrorFile) durable() mirrorDurable {
+	return mirrorDurable{Channel: st.Channel, Harness: st.Harness, Watermark: st.Watermark, Noted: st.Noted}
+}
+
+func (d mirrorDurable) equal(o mirrorDurable) bool {
+	return d.Channel == o.Channel && d.Harness == o.Harness && d.Watermark == o.Watermark &&
+		(d.Noted == nil) == (o.Noted == nil) && (d.Noted == nil || *d.Noted == *o.Noted)
 }
 
 // mirrorStopped reports whether the mirror worker is stopping.
@@ -321,7 +342,7 @@ func (s *Server) mirrorBinding(t dialogTarget, b binding.Binding, now time.Time,
 	if off {
 		st.offQueue(st.runningTurn(dir))
 	}
-	if raw, err := json.Marshal(st); err != nil || !bytes.Equal(raw, saved) && writeMirrorFile(dir, st) != nil {
+	if raw, err := json.Marshal(st); err != nil || !bytes.Equal(raw, saved) && writeMirrorFile(dir, &st, off) != nil {
 		return false
 	}
 	if !s.mirrorSend(dir, t, b, &st, now) {
@@ -625,7 +646,7 @@ func (s *Server) mirrorSend(dir string, t dialogTarget, b binding.Binding, st *m
 		}
 		if err != nil && edit && !sent && ev.Tries == 0 {
 			st.Queue[i].Tries++
-			_ = writeMirrorFile(dir, *st)
+			_ = writeMirrorFile(dir, st, false)
 			s.mirrorBackOff(t.name, now)
 			return false
 		}
@@ -636,7 +657,7 @@ func (s *Server) mirrorSend(dir string, t dialogTarget, b binding.Binding, st *m
 		if final {
 			st.Watermark = max(st.Watermark, ev.Turn.LastTS)
 		}
-		if writeMirrorFile(dir, *st) != nil {
+		if writeMirrorFile(dir, st, false) != nil {
 			return false
 		}
 		if err != nil {
@@ -889,7 +910,7 @@ func (s *Server) mirrorUnavailable(dir string, st *mirrorFile, key string, off b
 	}
 	was := st.Noted
 	st.Noted = &key
-	if writeMirrorFile(dir, *st) != nil {
+	if writeMirrorFile(dir, st, false) != nil {
 		st.Noted = was
 		return
 	}
@@ -911,9 +932,22 @@ func (s *Server) mirrorBackOff(name string, now time.Time) {
 	s.mirrors.backoff[name] = bo
 }
 
-// readMirrorFile returns dir's state and the bytes it was read from.
+// readMirrorFile returns dir's state and the bytes it was read from: the
+// progress.json of state.json's generation when there is a good one, else
+// state.json.
 func readMirrorFile(dir string) (mirrorFile, []byte, bool) {
-	raw, err := fsq.ReadRegularNoFollowBounded(filepath.Join(dir, "state.json"), 16<<20)
+	st, raw, ok := readMirrorState(filepath.Join(dir, "state.json"))
+	if !ok {
+		return mirrorFile{}, nil, false
+	}
+	if next, nraw, ok := readMirrorState(filepath.Join(dir, "progress.json")); ok && next.Gen == st.Gen && next.durable().equal(st.durable()) {
+		return next, nraw, true
+	}
+	return st, raw, true
+}
+
+func readMirrorState(path string) (mirrorFile, []byte, bool) {
+	raw, err := fsq.ReadRegularNoFollowBounded(path, 16<<20)
 	if err != nil {
 		return mirrorFile{}, nil, false
 	}
@@ -924,13 +958,40 @@ func readMirrorFile(dir string) (mirrorFile, []byte, bool) {
 	return st, raw, true
 }
 
-func writeMirrorFile(dir string, st mirrorFile) error {
-	raw, err := json.Marshal(st)
+// writeMirrorFile records st. Only what prevents a second post must survive
+// an OS crash: each post's claim under posted/ is created exclusively and
+// synced, and the watermark, the note and the channel are synced in
+// state.json. Everything else (the cursor, the fold, the queue and the edit
+// pacing) only moves forward from there, so it goes to progress.json
+// without a sync while those stay as state.json holds them. A crash then
+// rolls that part back to state.json: the mirror reads lines again, and the
+// claims and the watermark keep a turn from being posted twice. A change of
+// the synced part writes a new generation of state.json, and a progress.json
+// of an older generation, lost, or empty is never read.
+//
+// A tick that discards what it read, because the mirror is off, is synced
+// (discard): a rolled-back cursor would read those lines again, and once the
+// mirror is on it would post turns from the off period. Only a tick that
+// folds what it may still post is left unsynced.
+func writeMirrorFile(dir string, st *mirrorFile, discard bool) error {
+	if base, _, ok := readMirrorState(filepath.Join(dir, "state.json")); ok && !discard && base.Gen == st.Gen && base.durable().equal(st.durable()) {
+		raw, err := json.Marshal(st)
+		if err != nil {
+			return err
+		}
+		return fsq.WriteStateFileUnsynced(filepath.Dir(dir), filepath.Join(filepath.Base(dir), "progress.json"), raw, 0o600)
+	}
+	next := *st
+	next.Gen++
+	raw, err := json.Marshal(next)
 	if err != nil {
 		return err
 	}
-	_, err = fsq.WriteStateFile(filepath.Dir(dir), filepath.Join(filepath.Base(dir), "state.json"), raw, 0o600)
-	return err
+	if _, err := fsq.WriteStateFile(filepath.Dir(dir), filepath.Join(filepath.Base(dir), "state.json"), raw, 0o600); err != nil {
+		return err
+	}
+	st.Gen = next.Gen
+	return nil
 }
 
 // Replies to the owner's mirror switch.

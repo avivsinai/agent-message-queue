@@ -91,6 +91,11 @@ type Carrier struct {
 	// obligation is carried here and retried at the top of every ImportOnce;
 	// recoverDLQReceipts rebuilds it from the DLQ entries after a restart.
 	owedReceipts map[string]receipt.Receipt
+	// idleNew is the version of inbox/new taken before a scan that found
+	// it empty with nothing else owed; while it holds, ImportOnce has
+	// nothing to do and opens nothing.
+	idleNew   fsq.FileVersion
+	idleNewOK bool
 	// Warn is called for non-fatal durability failures. When a
 	// CommittedDurabilityError's SyncDir retry exhausts all attempts, the
 	// message IS in the mailbox (rename committed) but its fsync is
@@ -244,6 +249,19 @@ func sourceHostFromOrigin(origin map[string]string) string {
 // terminal-for-us — cannot ever be answered by this endpoint, DLQ it. Errors
 // are accumulated, never abort the scan. Returns the count plus a joined error.
 func (c *Carrier) ImportOnce() (int, error) {
+	newDir := filepath.Join(c.root, "agents", c.me, "inbox", "new")
+	// The version is of the directory ReadDir lists, through an accepted
+	// in-root link.
+	newV, stable, verr := fsq.StatVersion(newDir, time.Now())
+	stable = stable && verr == nil
+	c.mu.Lock()
+	idle := c.curRecovered && len(c.owedReceipts) == 0 && len(c.claimedThisRun) == 0 && len(c.pendingRecovery) == 0
+	if idle && stable && c.idleNewOK && newV == c.idleNew {
+		c.mu.Unlock()
+		return 0, nil
+	}
+	c.idleNewOK = false
+	c.mu.Unlock()
 	root, err := fsq.OpenDeliveryRoot(c.root, c.identity)
 	if err != nil {
 		return 0, err
@@ -281,6 +299,11 @@ func (c *Carrier) ImportOnce() (int, error) {
 		}
 	}
 	sort.Strings(names)
+	if len(names) == 0 && err == nil && idle && stable {
+		c.mu.Lock()
+		c.idleNew, c.idleNewOK = newV, true
+		c.mu.Unlock()
+	}
 	n := 0
 	var errs []error
 	for _, name := range names {
