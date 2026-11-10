@@ -244,7 +244,7 @@ func NewCourier(cfg Config) (*Courier, error) {
 		return nil, fmt.Errorf("receive alias: %w", err)
 	}
 	if cfg.LocalHost != "" {
-		if err := fsq.ValidateHandle(cfg.LocalHost); err != nil {
+		if err := bridge.ValidateHost(cfg.LocalHost); err != nil {
 			return nil, fmt.Errorf("local host: %w", err)
 		}
 		if cfg.LocalHost != localHost {
@@ -256,7 +256,7 @@ func NewCourier(cfg Config) (*Courier, error) {
 		return nil, err
 	}
 	if cfg.SourceHost != "" {
-		if err := fsq.ValidateHandle(cfg.SourceHost); err != nil {
+		if err := bridge.ValidateHost(cfg.SourceHost); err != nil {
 			return nil, fmt.Errorf("source host: %w", err)
 		}
 	}
@@ -344,7 +344,7 @@ func handleSet(values []string, kind string) (map[string]struct{}, error) {
 			if value == "" {
 				continue
 			}
-			if err := fsq.ValidateHandle(value); err != nil {
+			if err := bridge.ValidateHost(value); err != nil {
 				return nil, fmt.Errorf("%s %q: %w", kind, value, err)
 			}
 			set[value] = struct{}{}

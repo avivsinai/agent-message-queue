@@ -273,9 +273,13 @@ id text, and `STORED`. An offer page is `amq-offer-v3`, a page index, a
 count of at most 32, then that many record-plus-signature pairs. A disk
 bundle is the record, the signature, and the payload.
 
-v3 host and handle names are 1 to 63 bytes from `[a-z0-9._-]`, and are never
-`.` or `..`. v2 `ParseAlias` and `validateBridgeIdentifier` stay on the
-stricter grammar and refuse a dot.
+Every bridge identifier uses one grammar: 1 to 63 bytes from `[a-z0-9._-]`,
+and the first byte is from `[a-z0-9_]`. It binds v2 envelope hosts, handles,
+aliases, and key generations, the courier and enqueue host settings, v3
+host, handle, and destination names, and the enqueue wrapper script. A local
+handle (the sender, and the agent part of an alias when the message is
+filed) must also be a valid AMQ handle, so an agent name with a dot is
+refused there.
 
 The X25519 static is HKDF-SHA256 of the 32-byte Ed25519 seed, salt `amq-v3`,
 info `amq-v3-x25519-static`. It is never stored. The Noise session is

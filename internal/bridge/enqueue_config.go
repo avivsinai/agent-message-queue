@@ -76,7 +76,7 @@ func ValidateEnqueueConfig(cfg EnqueueConfig) error {
 	if strings.TrimSpace(cfg.Root) == "" {
 		return fmt.Errorf("enqueue config root is required")
 	}
-	if err := fsq.ValidateHandle(cfg.SourceHost); err != nil {
+	if err := ValidateHost(cfg.SourceHost); err != nil {
 		return fmt.Errorf("enqueue config source_host: %w", err)
 	}
 	if err := fsq.ValidateHandle(cfg.SourceHandle); err != nil {

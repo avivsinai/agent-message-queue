@@ -90,13 +90,18 @@ func (h Handle) String() string    { return h.s }
 func (m MessageID) String() string { return m.s }
 func (t ThreadID) String() string  { return t.s }
 
+// parseName is the bridge identifier grammar package bridge uses: 1 to 63
+// bytes of [a-z0-9._-], first byte [a-z0-9_].
 func parseName(s string) error {
-	if len(s) == 0 || len(s) > MaxNameBytes || s == "." || s == ".." {
+	if len(s) == 0 || len(s) > MaxNameBytes {
 		return ErrName
 	}
 	for i := 0; i < len(s); i++ {
 		b := s[i]
-		if (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') || b == '.' || b == '_' || b == '-' {
+		if (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') || b == '_' {
+			continue
+		}
+		if i > 0 && (b == '.' || b == '-') {
 			continue
 		}
 		return ErrName

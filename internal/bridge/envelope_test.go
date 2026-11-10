@@ -120,3 +120,19 @@ func TestDeriveTransferIDUsesLowercaseBase32SHA256Shape(t *testing.T) {
 		t.Fatalf("derived transfer_id is not lowercase: %q", id)
 	}
 }
+
+// v2 aliases follow the one bridge identifier grammar: dots and a leading
+// '_' are accepted, a leading '-' or '.' and 64 bytes are refused
+// (audit 2026-11-10).
+func TestParseAliasFollowsTheBridgeIdentifierGrammar(t *testing.T) {
+	for _, alias := range []string{"mac.lan/_bot", "a.b/c"} {
+		if _, _, err := ParseAlias(alias); err != nil {
+			t.Fatalf("ParseAlias(%s): %v", alias, err)
+		}
+	}
+	for _, alias := range []string{"-x/y", ".x/y", "x/-y", "x/" + strings.Repeat("a", 64)} {
+		if _, _, err := ParseAlias(alias); err == nil {
+			t.Fatalf("ParseAlias(%s) accepted", alias)
+		}
+	}
+}
