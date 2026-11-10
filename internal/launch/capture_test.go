@@ -118,7 +118,7 @@ func TestParseCursorCreateChatEvidenceRequiresOneCanonicalUUID(t *testing.T) {
 		{name: "carriage return", raw: testConversationID + "\r\n", version: cursorCaptureVersion},
 		{name: "surrounding space", raw: " " + testConversationID, version: cursorCaptureVersion},
 		{name: "uppercase", raw: strings.ToUpper(testConversationID), version: cursorCaptureVersion},
-		{name: "wrong version", raw: testConversationID, version: "2026.08.12-unknown"},
+		{name: "empty version", raw: testConversationID, version: ""},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

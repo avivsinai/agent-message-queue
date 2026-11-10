@@ -8,7 +8,6 @@ func platformCompatibilityFeaturesV1() []string {
 	return []string{
 		"launch_intent_v1",
 		"prepare_apply_v1",
-		"lifecycle_v1",
 		"managed_tmux_v1",
 		"plan_only_commands_v1",
 		FeatureInitialInput,

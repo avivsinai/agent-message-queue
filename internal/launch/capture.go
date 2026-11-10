@@ -256,8 +256,8 @@ func ParseCursorCreateChatEvidence(raw []byte, launchNonce, handle, providerVers
 	if err := fsq.ValidateHandle(handle); err != nil {
 		return CaptureEvidence{}, fmt.Errorf("invalid capture handle: %w", err)
 	}
-	if providerVersion != cursorCaptureVersion {
-		return CaptureEvidence{}, fmt.Errorf("cursor capture version %q is unsupported", providerVersion)
+	if providerVersion == "" {
+		return CaptureEvidence{}, fmt.Errorf("cursor capture requires a provider version")
 	}
 	stdout := string(raw)
 	stdout = strings.TrimSuffix(stdout, "\n")
@@ -284,7 +284,7 @@ func decodeCursorCreateChatPayload(raw []byte) (cursorCreateChatPayload, error) 
 		return payload, fmt.Errorf("decode cursor create-chat evidence: %w", err)
 	}
 	if payload.Source != CursorCreateChatV1 || payload.Provider != CursorProvider ||
-		payload.ProviderVersion != cursorCaptureVersion || !validUUID(payload.LaunchNonce) {
+		payload.ProviderVersion == "" || !validUUID(payload.LaunchNonce) {
 		return payload, fmt.Errorf("cursor create-chat evidence metadata is invalid")
 	}
 	if err := fsq.ValidateHandle(payload.Handle); err != nil {
@@ -348,7 +348,7 @@ func captureCursorIdentity(request CaptureRequest) CaptureResult {
 	if !validUUID(request.LaunchNonce) {
 		return degradedCapture(CaptureStale, CaptureReasonLaunchNonceMismatch)
 	}
-	if request.ExpectedProviderVersion != cursorCaptureVersion {
+	if request.ExpectedProviderVersion == "" {
 		return CaptureResult{State: CaptureUnsupported, Reason: CaptureReasonProviderVersion}
 	}
 	if len(request.Evidence) == 0 {

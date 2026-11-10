@@ -143,7 +143,7 @@ exec /bin/sleep 60
 	if err != nil || firstTicket.State != launch.ExecutionAcknowledged {
 		t.Fatalf("fresh execution ticket = %#v, %v", firstTicket, err)
 	}
-	recordData, err := os.ReadFile(launch.ConversationPath(sessionRoot, "claude"))
+	recordData, err := os.ReadFile(filepath.Join(sessionRoot, "meta", "launch", "conversations", "claude.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

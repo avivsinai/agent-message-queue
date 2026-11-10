@@ -9,7 +9,7 @@ import (
 // MarshalResultV1 is the canonical JSON encoder for all V1 result DTOs.
 func MarshalResultV1(result any) ([]byte, error) {
 	switch result.(type) {
-	case PrepareResultV1, ApplyResultV1, LifecycleResultV1:
+	case PrepareResultV1, ApplyResultV1:
 	default:
 		return nil, fmt.Errorf("unsupported launch result type %T", result)
 	}

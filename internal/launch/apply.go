@@ -137,7 +137,7 @@ func Apply(ctx context.Context, request ApplyRequest, dependencies ApplyDependen
 		}
 		return applyActionResult(current, "launch_lease_unavailable"), nil
 	}
-	defer func() { returnErr = errors.Join(returnErr, lease.Release()) }()
+	defer func() { releaseApplyLease(lease, &result, &returnErr) }()
 	return applyUnderAuthority(ctx, request, dependencies, state, lease)
 }
 
@@ -239,7 +239,7 @@ func applyPreparedUnderAuthority(ctx context.Context, request ApplyRequest, depe
 		if err != nil {
 			var committed *fsq.CommittedDurabilityError
 			if errors.As(err, &committed) && root != nil && stagedLease != nil {
-				result := applyActionResult(prepared, "session_publication_durability_uncertain")
+				result = applyActionResult(prepared, "session_publication_durability_uncertain")
 				result.SubjectDigest = request.SubjectDigest
 				if verifyErr := root.VerifyBase(); verifyErr != nil {
 					stagedLease.abandonCapability()
@@ -248,7 +248,7 @@ func applyPreparedUnderAuthority(ctx context.Context, request ApplyRequest, depe
 				}
 				defer func() { _ = root.Close() }()
 				lease = stagedLease
-				defer func() { returnErr = errors.Join(returnErr, lease.Release()) }()
+				defer func() { releaseApplyLease(lease, &result, &returnErr) }()
 				return result, nil
 			}
 			if stagedLease != nil {
@@ -271,7 +271,7 @@ func applyPreparedUnderAuthority(ctx context.Context, request ApplyRequest, depe
 		}
 		state.sessionRoot = root
 		lease = stagedLease
-		defer func() { returnErr = errors.Join(returnErr, lease.Release()) }()
+		defer func() { releaseApplyLease(lease, &result, &returnErr) }()
 	} else {
 		if err := provisionExistingApplyRoster(root, lease, handles); err != nil {
 			var committed *applyCommittedMutationError
@@ -810,6 +810,24 @@ func applyCreationLockPath(session string) string {
 	sum := sha256.Sum256([]byte(session))
 	name := "create-" + hex.EncodeToString(sum[:12]) + ".lock"
 	return filepath.Join("meta", "launch", name)
+}
+
+// releaseApplyLease releases the launch lease after Apply. A release failure
+// after a launch commit or uncertain mutation must not discard the result:
+// it becomes an action-required result that keeps the disposition and
+// binding generation. When nothing was mutated, the failure is a plain error.
+func releaseApplyLease(lease *Lease, result *ApplyResult, returnErr *error) {
+	releaseErr := lease.Release()
+	if releaseErr == nil {
+		return
+	}
+	if *returnErr != nil || result.Disposition == "" || result.Disposition == MutationNotApplied {
+		*returnErr = errors.Join(*returnErr, releaseErr)
+		return
+	}
+	result.Outcome = ApplyOutcomeActionRequired
+	result.ReasonCode = "lease_release_failed"
+	result.FailureDetail = releaseErr.Error()
 }
 
 func applyActionResult(prepared PrepareResult, reason string) ApplyResult {
