@@ -30,7 +30,7 @@ if [[ ! -f "$queue_root/bridge/host-id" ]]; then
   exit 1
 fi
 
-host_id_mode=$(stat -f '%OLp' "$queue_root/bridge/host-id" 2>/dev/null || stat -c '%a' "$queue_root/bridge/host-id")
+host_id_mode=$(stat -c '%a' "$queue_root/bridge/host-id" 2>/dev/null || stat -f '%OLp' "$queue_root/bridge/host-id")
 if [[ "$host_id_mode" != "600" ]]; then
   printf 'host-id mode = %s, want 600\n' "$host_id_mode" >&2
   exit 1
