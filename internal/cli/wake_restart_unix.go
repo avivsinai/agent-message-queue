@@ -1835,6 +1835,9 @@ func handleWakeRestartAtLoopBoundary(
 			return
 		}
 		reason := wakeRestartReasonWithRemedy(decision.Reason, cfg.root, cfg.me)
+		if decision.Disposition == wakeResumeDefer {
+			reason += "; this state is transient, run the command again"
+		}
 		_ = refuseWakeRestartRecord(
 			agentDir,
 			record,
