@@ -3,7 +3,6 @@ package core_test
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -23,7 +22,7 @@ func TestAsyncStorageFailureIsVisibleToTheOwner(t *testing.T) {
 		t.Skip("root ignores directory permissions")
 	}
 	readOnly := func(t *testing.T, store *requests.Store) func() {
-		dir := filepath.Join(store.Dir(), "requests", "local")
+		dir := recordsDir(t, store, "local")
 		if err := os.Chmod(dir, 0o500); err != nil {
 			t.Fatalf("chmod: %v", err)
 		}

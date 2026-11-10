@@ -229,7 +229,7 @@ func TestListIsolatesPoisonRecords(t *testing.T) {
 	}
 
 	// The plain List() returns only healthy records (no abort).
-	recs2, err := s.List()
+	recs2, _, err := s.ListWithPoison()
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -423,7 +423,7 @@ func TestCompactVsAckRaceKeepsQuotaCounter(t *testing.T) {
 		// equal a fresh recomputation of the on-disk sum. A lost update
 		// (CompactOne without s.mu) drifts this counter.
 		var want int64
-		_ = filepath.Walk(s.Dir(), func(path string, info os.FileInfo, err error) error {
+		_ = filepath.Walk(s.dir, func(path string, info os.FileInfo, err error) error {
 			if err == nil && strings.HasSuffix(path, recordSuffix) {
 				want += info.Size()
 			}
@@ -672,7 +672,7 @@ func TestOpenCountsAPoisonRecordAndStarts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	poison := filepath.Join(s1.Dir(), requestsDir, "hostA", "t_fake1__11111111-1111-4111-8111-11111111b802"+recordSuffix)
+	poison := filepath.Join(s1.dir, requestsDir, "hostA", "t_fake1__11111111-1111-4111-8111-11111111b802"+recordSuffix)
 	if err := os.MkdirAll(filepath.Dir(poison), 0o700); err != nil {
 		t.Fatal(err)
 	}

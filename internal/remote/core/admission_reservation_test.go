@@ -42,7 +42,7 @@ func raceEndpoint(t *testing.T) (*core.Endpoint, *fake.Runtime, *requests.Store,
 // recovers its identity from the path.
 func writePoisonRecord(t *testing.T, store *requests.Store, host, targetID, id string) string {
 	t.Helper()
-	p := filepath.Join(store.Dir(), "requests", host, targetID+"__"+id+".json")
+	p := filepath.Join(recordsDir(t, store, host), targetID+"__"+id+".json")
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		t.Fatalf("mkdir poison dir: %v", err)
 	}
@@ -165,7 +165,8 @@ func TestBusyRetryTakesTheStoreReservation(t *testing.T) {
 // Regression: bead agent-message-queue-39v (review of the B4 fix).
 func TestFailedDispatchingWriteKeepsTheReservation(t *testing.T) {
 	now := func() time.Time { return time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC) }
-	store, err := requests.Open(t.TempDir(),
+	stateDir := t.TempDir()
+	store, err := requests.Open(stateDir,
 		requests.WithMaxStoreBytes(protocol.MaxRecordBytes+protocol.MaxRecordBytes/2))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -191,7 +192,7 @@ func TestFailedDispatchingWriteKeepsTheReservation(t *testing.T) {
 	}
 
 	// Fail the sync after the rename of B's dispatching write.
-	hostDir := filepath.Join(store.Dir(), "requests", "local")
+	hostDir := filepath.Join(stateDir, "v1", "requests", "local")
 	calls := 0
 	restore := fsq.SetPackageSyncDirFaultForTest(func(dir string) error {
 		if filepath.Clean(dir) == hostDir {

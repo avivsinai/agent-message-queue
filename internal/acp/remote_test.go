@@ -708,7 +708,7 @@ func TestDeferredRefusalReasonReachesTheDM(t *testing.T) {
 	// target return with submit blocked and admit the deferred record.
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		recs, _ := store.List()
+		recs, _, _ := store.ListWithPoison()
 		if len(recs) == 1 && recs[0].State == protocol.StateReceived {
 			break
 		}

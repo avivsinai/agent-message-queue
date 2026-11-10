@@ -141,7 +141,7 @@ func TestLinkReadsAndCancelsOnlyItsOwnRequests(t *testing.T) {
 	if _, err := ep.Handle(getCmd(refA), core.Source{Host: core.LocalHost}); err != nil {
 		t.Errorf("local get of a link request: %v", err)
 	}
-	recs, err := store.List()
+	recs, _, err := store.ListWithPoison()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +241,7 @@ func TestLinkHoldsAtMostFourOpenRequests(t *testing.T) {
 	if fifth.Outcome.Code != protocol.CodeBusy || rts[4].Snapshot().Dispatches != 0 {
 		t.Fatalf("fifth open link submit = %q with %d dispatches, want busy before any dispatch", fifth.Outcome.Code, rts[4].Snapshot().Dispatches)
 	}
-	if recs, _ := store.List(); len(recs) != 4 {
+	if recs, _, _ := store.ListWithPoison(); len(recs) != 4 {
 		t.Fatalf("records = %d, want 4: the refused fifth submit left a record", len(recs))
 	}
 	if r := submitReply(t, ep, linkSubmit(clk, "t5", "11111111-1111-4111-8111-1111111111b5"), linkSource(hostB, "t5")); r.Snapshot.State != protocol.StateRunning {

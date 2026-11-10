@@ -17,12 +17,28 @@ import (
 func openStore(t *testing.T) (*requests.Store, func() time.Time) {
 	clk := time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC)
 	now := func() time.Time { return clk }
-	store, err := requests.Open(t.TempDir())
+	dir := t.TempDir()
+	store, err := requests.Open(dir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
+	storeDirs.Store(store, dir)
 	t.Cleanup(func() { _ = store.Close() })
 	return store, now
+}
+
+// storeDirs maps each store openStore opened to its state directory.
+var storeDirs sync.Map
+
+// recordsDir is the directory that holds the records of creator host in a
+// store openStore opened.
+func recordsDir(t *testing.T, store *requests.Store, host string) string {
+	t.Helper()
+	dir, ok := storeDirs.Load(store)
+	if !ok {
+		t.Fatal("store not opened by openStore")
+	}
+	return filepath.Join(dir.(string), "v1", "requests", host)
 }
 
 func submitCmd(id string) *protocol.Command {
@@ -159,7 +175,7 @@ func TestResultWriteFailureIsVisible(t *testing.T) {
 	}
 	// Make the record's host directory unwritable so the terminal Update fails
 	// with a storage-full class error.
-	hostDir := filepath.Join(store.Dir(), "requests", "local")
+	hostDir := recordsDir(t, store, "local")
 	if err := os.Chmod(hostDir, 0o500); err != nil {
 		t.Skipf("cannot chmod host dir: %v", err)
 	}

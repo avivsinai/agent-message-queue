@@ -483,7 +483,7 @@ func (h *harness) expect(where string, exp map[string]any) {
 				h.t.Fatalf("%s: creator host %s, want %v", where, rec.CreatorHost, v)
 			}
 		case "records":
-			all, err := h.store.List()
+			all, _, err := h.store.ListWithPoison()
 			if err != nil {
 				h.t.Fatalf("%s: list: %v", where, err)
 			}
@@ -577,7 +577,7 @@ func (h *harness) cli(where string, step map[string]any) {
 func (h *harness) endpointControl(where string, step map[string]any) {
 	switch step["endpoint"] {
 	case "compact_results":
-		recs, err := h.store.List()
+		recs, _, err := h.store.ListWithPoison()
 		if err != nil {
 			h.t.Fatalf("%s: list: %v", where, err)
 		}
@@ -587,7 +587,7 @@ func (h *harness) endpointControl(where string, step map[string]any) {
 			}
 		}
 	case "storage_fail_next_write":
-		dir := filepath.Join(h.store.Dir(), "requests", h.c.Defaults.CreatorHost)
+		dir := filepath.Join(h.dir, "v1", "requests", h.c.Defaults.CreatorHost)
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			h.t.Fatalf("%s: mkdir: %v", where, err)
 		}

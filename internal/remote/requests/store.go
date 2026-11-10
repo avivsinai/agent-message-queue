@@ -263,7 +263,7 @@ func Open(stateDir string, opts ...Option) (*Store, error) {
 // A file the bounded reader refuses (unreadable, not a regular file,
 // oversized) is an error naming its path relative to the store, so Open
 // stops. A file it reads but cannot decode is poison: counted
-// in used, reported by List, skipped. Nothing indexes a poison record that
+// in used, reported by ListWithPoison, skipped. Nothing indexes a poison record that
 // an operator repairs while the companion runs; the next Open does.
 func (s *Store) loadRecords() error {
 	s.sweep, s.compactable = map[Key]struct{}{}, map[Key]string{}
@@ -292,7 +292,7 @@ func (s *Store) loadRecords() error {
 		used += info.Size()
 		rec, dErr := decodeRecord(data)
 		if dErr != nil {
-			return nil // poison: counted above, reported by List
+			return nil // poison: counted above, reported by ListWithPoison
 		}
 		normalizeRecord(rec)
 		if s.maxStoreBytes > 0 && !rec.State.Terminal() && rec.Result == nil {
@@ -361,9 +361,6 @@ func (s *Store) Close() error {
 	s.lock = nil
 	return err
 }
-
-// Dir is the versioned store directory.
-func (s *Store) Dir() string { return s.dir }
 
 // Digest returns the protocol digest of exact submit input bytes.
 func Digest(data []byte) string {
@@ -591,15 +588,6 @@ type Poison struct {
 	Error string
 }
 
-// List returns every decodable record, oldest write first: ListWithPoison
-// without the poison diagnostics. A poison (undecodable or invalid) record is
-// skipped, never allowed to abort the pass. Reconciliation reads through
-// ListWithPoison and ListSweep.
-func (s *Store) List() ([]*Record, error) {
-	recs, _, err := s.ListWithPoison()
-	return recs, err
-}
-
 // ListWithPoison returns every decodable record plus a diagnosed poison list.
 // Read and decode errors are isolated per file: a bad record is skipped, its
 // identity is recovered from the path, and the pass continues. The first
@@ -665,8 +653,8 @@ func sortRecords(recs []*Record) {
 }
 
 // ListSweep returns the records the reconcile sweep may act on
-// (Record.NeedsSweep), in List's order, reading only those files. Every
-// record that is not terminal is among them. Like List, it skips a record
+// (Record.NeedsSweep), in ListWithPoison's order, reading only those files. Every
+// record that is not terminal is among them. Like ListWithPoison, it skips a record
 // that does not read.
 func (s *Store) ListSweep() []*Record {
 	s.mu.Lock()
@@ -702,7 +690,7 @@ func (s *Store) CompactionCandidates() []Key {
 }
 
 // readRecord reads and decodes one record file, applying the shared
-// state-normalization that both the event (Get) and recovery (List) paths
+// state-normalization that both the event (Get) and recovery (ListWithPoison) paths
 // use, so a record recovered during Reconcile is never silently stricter or
 // looser than one read by a live request. The boolean is false only when the
 // file does not exist; a present-but-undecodable file returns an error so a
@@ -710,7 +698,7 @@ func (s *Store) CompactionCandidates() []Key {
 //
 // The read is bounded and no-follow. A FIFO or an oversized file is an error
 // for this record, never a block and never a
-// missing record, so List can skip it and continue with the other targets.
+// missing record, so ListWithPoison can skip it and continue with the other targets.
 func (s *Store) readRecord(path string) (*Record, bool, error) {
 	data, err := fsq.ReadRegularNoFollowBounded(path, int64(MaxRecordBytes))
 	if errors.Is(err, os.ErrNotExist) {
@@ -827,7 +815,7 @@ func (s *Store) CompactOne(key Key, before time.Time) (bool, error) {
 // and then waits for s.mu before releasing the owner lock, so a writer that
 // already passed this check finishes its durable write before a replacement
 // owner can open, and a writer that has not entered s.mu yet refuses.
-// Reads (Get/List) are still permitted on a closed store for diagnosis.
+// Reads (Get, ListWithPoison) are still permitted on a closed store for diagnosis.
 func (s *Store) checkClosed() error {
 	if s.closed.Load() {
 		return protocol.Refuse(protocol.CodeStoreClosed, "store is closed")
