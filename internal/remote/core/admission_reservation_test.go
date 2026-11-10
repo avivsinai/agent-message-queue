@@ -275,6 +275,26 @@ func TestReservationPoisonFailClosed(t *testing.T) {
 	}
 }
 
+// A poison file of a target whose id contains "__" blocks that target and
+// not the target named by the id's first part (audit 2026-11-10).
+func TestReservationPoisonOfATargetWithDoubleUnderscore(t *testing.T) {
+	ep, _, store, _ := raceEndpoint(t)
+	for _, id := range []string{"a", "a__b"} {
+		ep.Register(fake.New(id, "e_1"))
+	}
+	writePoisonRecord(t, store, "local", "a__b", "11111111-1111-4111-8111-1111111111p1")
+	cmd := submitCmd("11111111-1111-4111-8111-1111111111a1")
+	cmd.TargetID = "a"
+	if _, err := ep.Handle(cmd, core.Source{Host: "local"}); err != nil {
+		t.Fatalf("submit to a with poison of a__b: %v", err)
+	}
+	cmd = submitCmd("11111111-1111-4111-8111-1111111111b2")
+	cmd.TargetID = "a__b"
+	if _, err := ep.Handle(cmd, core.Source{Host: "local"}); err == nil {
+		t.Fatal("submit to a__b succeeded despite its unreadable record")
+	}
+}
+
 // TestReservationPoisonFailClosed (deterministic) covers the same
 // fail-closed semantics this chmod test did, without the root-skip and the
 // 0700-vs-0755 cleanup issue. Removed per the test-bar.

@@ -795,11 +795,13 @@ func (s *Store) readRecord(path string) (*Record, bool, error) {
 
 // keyFromPath recovers a record key from its on-disk path segments so a poison
 // record's dedup identity survives even when the JSON does not. The layout is
-// <creatorHost>/<targetID>__<requestID>.json. A malformed name yields an empty
-// key; the poison entry is still reported with the raw path for repair.
+// <creatorHost>/<targetID>__<requestID>.json. A target id may contain "__"
+// and a request id (a UUID) contains no "_", so the last "__" is the
+// separator. A malformed name yields an empty key; the poison entry is still
+// reported with the raw path for repair.
 func keyFromPath(host, filename string) Key {
 	name := strings.TrimSuffix(filename, recordSuffix)
-	idx := strings.Index(name, "__")
+	idx := strings.LastIndex(name, "__")
 	if idx < 0 {
 		return Key{CreatorHost: host}
 	}
