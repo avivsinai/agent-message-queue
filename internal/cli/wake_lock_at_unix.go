@@ -655,42 +655,14 @@ func removeWakeGenerationFileIfSnapshotMatchesAt(
 	if err != nil {
 		return false, err
 	}
-	if err := assertNotWakeLockName(name); err != nil {
-		return false, err
-	}
-	current, exists, err := readWakeGenerationFileSnapshotAt(
+	return removeWakeGenerationFileIfSnapshotMatchesWith(
 		dirfd,
 		agentDir,
 		name,
 		label,
+		expected,
+		func(_ int, name string, flags int) error { return scope.unlinkAt(name, flags) },
 	)
-	if err != nil {
-		return false, fmt.Errorf("re-read %s before removal: %w", label, err)
-	}
-	if !exists {
-		return false, nil
-	}
-	if expected.FileInfo == nil ||
-		current.FileInfo == nil ||
-		!sameWakeFileIdentity(expected.FileInfo, current.FileInfo) ||
-		!bytes.Equal(expected.Raw, current.Raw) {
-		return false, fmt.Errorf("%s changed before removal; preserving it", label)
-	}
-	if expected.Marker.Schema != current.Marker.Schema ||
-		expected.Marker.Generation != current.Marker.Generation ||
-		expected.Marker.TargetDigest != current.Marker.TargetDigest {
-		return false, fmt.Errorf("%s semantics changed before removal; preserving it", label)
-	}
-	if err := scope.unlinkAt(name, 0); err != nil {
-		if err == unix.ENOENT {
-			return false, nil
-		}
-		return false, fmt.Errorf("remove %s: %w", label, err)
-	}
-	if err := syncWakeOwnerDirFD(dirfd); err != nil {
-		return true, fmt.Errorf("sync %s removal: %w", label, err)
-	}
-	return true, nil
 }
 
 func writeWakeGenerationFileAt(
@@ -709,92 +681,20 @@ func writeWakeGenerationFileAtWithSnapshot(
 	label string,
 	marker wakeReady,
 ) (wakeGenerationFileSnapshot, error) {
-	dirfd, agentDir, err := scope.location()
+	dirfd, _, err := scope.location()
 	if err != nil {
 		return wakeGenerationFileSnapshot{}, err
 	}
-	data, err := json.Marshal(marker)
-	if err != nil {
-		return wakeGenerationFileSnapshot{}, fmt.Errorf("marshal %s: %w", label, err)
-	}
-	raw := append(data, '\n')
-	temp, err := writeWakeOwnerTempAt(scope, "wake-generation", raw, 0o600)
-	if err != nil {
-		return wakeGenerationFileSnapshot{}, err
-	}
-	tempPresent := true
-	defer func() {
-		if tempPresent {
-			_ = wakeUnlinkAt(dirfd, temp, 0)
-		}
-	}()
-	tempFD, err := unix.Openat(
-		dirfd,
-		temp,
-		unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC,
-		0,
-	)
-	if err != nil {
-		return wakeGenerationFileSnapshot{}, fmt.Errorf("open %s temp file: %w", label, err)
-	}
-	tempFile := os.NewFile(uintptr(tempFD), temp)
-	tempInfo, statErr := tempFile.Stat()
-	_ = tempFile.Close()
-	if statErr != nil {
-		return wakeGenerationFileSnapshot{}, fmt.Errorf("stat %s temp file: %w", label, statErr)
-	}
-	if !tempInfo.Mode().IsRegular() || tempInfo.Mode().Perm() != 0o600 {
-		return wakeGenerationFileSnapshot{}, fmt.Errorf("%s temp must be a regular 0600 file", label)
-	}
-	if err := validateWakeTargetPathOwnership(label+" temp", temp, tempInfo); err != nil {
-		return wakeGenerationFileSnapshot{}, err
-	}
-	snapshot := wakeGenerationFileSnapshot{
-		Marker:   marker,
-		Raw:      bytes.Clone(raw),
-		FileInfo: tempInfo,
-	}
-	if err := scope.renameAt(dirfd, temp, dirfd, name); err != nil {
-		return wakeGenerationFileSnapshot{}, fmt.Errorf("install %s: %w", label, err)
-	}
-	tempPresent = false
-	installedFD, err := unix.Openat(
+	return writeWakeGenerationFileWith(
 		dirfd,
 		name,
-		unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC,
-		0,
+		label,
+		marker,
+		func(label string, data []byte, mode os.FileMode) (string, error) {
+			return writeWakeOwnerTempAt(scope, label, data, mode)
+		},
+		scope.renameAt,
 	)
-	if err != nil {
-		return snapshot, fmt.Errorf("open installed %s: %w", label, err)
-	}
-	installedFile := os.NewFile(uintptr(installedFD), name)
-	installedInfo, statErr := installedFile.Stat()
-	if statErr != nil {
-		_ = installedFile.Close()
-		return snapshot, fmt.Errorf("stat installed %s: %w", label, statErr)
-	}
-	if !os.SameFile(tempInfo, installedInfo) {
-		_ = installedFile.Close()
-		return snapshot, fmt.Errorf("installed %s changed during publication; preserving it", label)
-	}
-	snapshot.FileInfo = installedInfo
-	if !installedInfo.Mode().IsRegular() || installedInfo.Mode().Perm() != 0o600 {
-		_ = installedFile.Close()
-		return snapshot, fmt.Errorf("installed %s must be a regular 0600 file", label)
-	}
-	installedRaw, readErr := readWakeMetadata(installedFile, label, name)
-	_ = installedFile.Close()
-	if readErr != nil {
-		return snapshot, readErr
-	}
-	if !bytes.Equal(installedRaw, raw) {
-		return snapshot, fmt.Errorf("installed %s content changed during publication; preserving it", label)
-	}
-	if err := syncWakeOwnerDirFD(dirfd); err != nil {
-		return snapshot, fmt.Errorf("sync %s directory: %w", label, err)
-	}
-	_ = agentDir
-	return snapshot, nil
 }
 
 func removeWakeReadyGenerationFileIfSnapshotMatchesAt(
@@ -803,6 +703,38 @@ func removeWakeReadyGenerationFileIfSnapshotMatchesAt(
 	name string,
 	label string,
 	expected wakeGenerationFileSnapshot,
+) (bool, error) {
+	return removeWakeGenerationFileIfSnapshotMatchesWith(dirfd, parent, name, label, expected, wakeUnlinkAt)
+}
+
+func writeWakeReadyGenerationFileAtWithSnapshot(
+	dirfd int,
+	_ *wakeAgentDir,
+	name string,
+	label string,
+	marker wakeReady,
+) (wakeGenerationFileSnapshot, error) {
+	return writeWakeGenerationFileWith(
+		dirfd,
+		name,
+		label,
+		marker,
+		func(label string, data []byte, mode os.FileMode) (string, error) {
+			return writeWakeReadyTempAt(dirfd, label, data, mode)
+		},
+		wakeRenameAt,
+	)
+}
+
+// removeWakeGenerationFileIfSnapshotMatchesWith removes name only while its
+// file identity, bytes, and marker semantics still equal expected.
+func removeWakeGenerationFileIfSnapshotMatchesWith(
+	dirfd int,
+	parent *wakeAgentDir,
+	name string,
+	label string,
+	expected wakeGenerationFileSnapshot,
+	unlink func(dirfd int, name string, flags int) error,
 ) (bool, error) {
 	if err := assertNotWakeLockName(name); err != nil {
 		return false, err
@@ -824,7 +756,7 @@ func removeWakeReadyGenerationFileIfSnapshotMatchesAt(
 		expected.Marker.TargetDigest != current.Marker.TargetDigest {
 		return false, fmt.Errorf("%s semantics changed before removal; preserving it", label)
 	}
-	if err := wakeUnlinkAt(dirfd, name, 0); err != nil {
+	if err := unlink(dirfd, name, 0); err != nil {
 		if err == unix.ENOENT {
 			return false, nil
 		}
@@ -836,19 +768,22 @@ func removeWakeReadyGenerationFileIfSnapshotMatchesAt(
 	return true, nil
 }
 
-func writeWakeReadyGenerationFileAtWithSnapshot(
+// writeWakeGenerationFileWith installs marker at name through a private temp
+// file and verifies that the installed file is the temp file with its bytes.
+func writeWakeGenerationFileWith(
 	dirfd int,
-	parent *wakeAgentDir,
 	name string,
 	label string,
 	marker wakeReady,
+	writeTemp func(label string, data []byte, mode os.FileMode) (string, error),
+	rename func(fromDirFD int, from string, toDirFD int, to string) error,
 ) (wakeGenerationFileSnapshot, error) {
 	data, err := json.Marshal(marker)
 	if err != nil {
 		return wakeGenerationFileSnapshot{}, fmt.Errorf("marshal %s: %w", label, err)
 	}
 	raw := append(data, '\n')
-	temp, err := writeWakeReadyTempAt(dirfd, "wake-generation", raw, 0o600)
+	temp, err := writeTemp("wake-generation", raw, 0o600)
 	if err != nil {
 		return wakeGenerationFileSnapshot{}, err
 	}
@@ -884,7 +819,7 @@ func writeWakeReadyGenerationFileAtWithSnapshot(
 		Raw:      bytes.Clone(raw),
 		FileInfo: tempInfo,
 	}
-	if err := wakeRenameAt(dirfd, temp, dirfd, name); err != nil {
+	if err := rename(dirfd, temp, dirfd, name); err != nil {
 		return wakeGenerationFileSnapshot{}, fmt.Errorf("install %s: %w", label, err)
 	}
 	tempPresent = false
@@ -923,7 +858,6 @@ func writeWakeReadyGenerationFileAtWithSnapshot(
 	if err := syncWakeOwnerDirFD(dirfd); err != nil {
 		return snapshot, fmt.Errorf("sync %s directory: %w", label, err)
 	}
-	_ = parent
 	return snapshot, nil
 }
 
