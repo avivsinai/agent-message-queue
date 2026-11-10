@@ -8,6 +8,8 @@ import (
 	"github.com/flynn/noise"
 )
 
+const prologue = "amq-v3"
+
 const (
 	MaxFrameBytes          = MaxPayloadBytes + 64*1024
 	MaxHandshakeBytes      = 256

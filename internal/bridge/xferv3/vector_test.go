@@ -3,8 +3,10 @@ package xferv3
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -201,19 +203,48 @@ func TestVectors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The production Dial and Accept produce the vector handshake bytes: the
+	// initiator draws the first 32 ephemeral bytes, the responder the rest.
 	ephemeral := mustHex(t, "ephemeral", doc.Handshake.EphemeralHex)
-	msg1, msg2, err := handshake(from, to, bytes.NewReader(ephemeral))
-	if err != nil {
-		t.Fatal(err)
-	}
 	wantMsg1 := mustHex(t, "msg1", doc.Handshake.Message1Hex)
 	wantMsg2 := mustHex(t, "msg2", doc.Handshake.Message2Hex)
-	if !bytes.Equal(msg1, wantMsg1) {
-		t.Fatalf("handshake msg1 = %x, want %x", msg1, wantMsg1)
+	dialEnd := &pipeEnd{r: bytes.NewReader(frame(wantMsg2))}
+	initiator, err := Dial(dialEnd, from, to.Public(), bytes.NewReader(ephemeral[:32]))
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
 	}
-	if !bytes.Equal(msg2, wantMsg2) {
-		t.Fatalf("handshake msg2 = %x, want %x", msg2, wantMsg2)
+	if got := dialEnd.w.Bytes(); !bytes.Equal(got, frame(wantMsg1)) {
+		t.Fatalf("handshake msg1 frame = %x, want %x", got, frame(wantMsg1))
 	}
+	acceptEnd := &pipeEnd{r: bytes.NewReader(frame(wantMsg1))}
+	responder, err := Accept(acceptEnd, to, from.Public(), bytes.NewReader(ephemeral[32:]))
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	if got := acceptEnd.w.Bytes(); !bytes.Equal(got, frame(wantMsg2)) {
+		t.Fatalf("handshake msg2 frame = %x, want %x", got, frame(wantMsg2))
+	}
+	dialEnd.w.Reset()
+	if err := initiator.Send(frameDone, []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	acceptEnd.r = &dialEnd.w
+	kind, body, err := responder.Recv()
+	if err != nil || kind != frameDone || string(body) != "x" {
+		t.Fatalf("Recv = %d %q %v, want the sent frame", kind, body, err)
+	}
+}
+
+type pipeEnd struct {
+	r io.Reader
+	w bytes.Buffer
+}
+
+func (p *pipeEnd) Read(b []byte) (int, error)  { return p.r.Read(b) }
+func (p *pipeEnd) Write(b []byte) (int, error) { return p.w.Write(b) }
+
+func frame(body []byte) []byte {
+	return append(binary.BigEndian.AppendUint32(nil, uint32(len(body))), body...)
 }
 
 func loadVectors(t *testing.T) vectorFile {

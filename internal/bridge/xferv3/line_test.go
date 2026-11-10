@@ -17,7 +17,7 @@ func TestLineFingerprintStableAndRequired(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Host.String() != "box" || got.Ticket != "ticket-1" || got.X25519 != x {
+	if got.Host.String() != "box" || got.X25519 != x {
 		t.Fatalf("line = %+v", got)
 	}
 	fp := got.Fingerprint()

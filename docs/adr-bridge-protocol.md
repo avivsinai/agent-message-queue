@@ -27,18 +27,20 @@ existing Maildir `publishTmpNoReplace` on a stable transfer filename.
 The wire unit is the signed envelope below. Local apply is the same
 `ApplyEnvelope` path in every hop.
 
-The supported peer courier class is **initiator-driven peer exchange**. The
-initiator is the only dialer: it starts a fixed, config-pinned peer-stdio
-session and the responder answers. The session is duplex, so envelopes and
-signed outcomes can move in both directions, but the responder does not
-initiate this class. `amq` Core remains local and daemon-free; no socket is
-added to it.
+The supported peer courier class is **peer exchange over an
+operator-provided pipe**. `amq-bridge sync --stdio` runs the initiator side
+and `amq-bridge listen --stdio` the responder side. Each side speaks the
+session on its standard input and output, and the operator connects the two
+ends. `amq-bridge` does not dial, listen, or start the pipe, and both commands
+refuse to run without `--stdio`. The initiator opens the Noise handshake
+against the responder's pinned key. The session is duplex, so records and
+signed outcomes move in both directions. `amq` Core remains local and
+daemon-free; no socket is added to it.
 
-Peer exchange carries [transfer record v3](#transfer-record-v3).
-`amq-bridge sync --stdio` runs the initiator side and
-`amq-bridge listen --stdio` the responder side. The initiator offers records
-from its `bridge/tx/<peer>/` outbox; the receiver files each wanted record into
-the destination Maildir and answers with a signed `STORED` receipt.
+Peer exchange carries [transfer record v3](#transfer-record-v3). The
+initiator offers records from its `bridge/tx/<peer>/` outbox; the receiver
+files each wanted record into the destination Maildir and answers with a
+signed `STORED` receipt.
 
 The manually operated **`amq-bridge apply-file`** path remains available for
 recovery and file-based exchange. It verifies one complete envelope file
@@ -296,13 +298,14 @@ ledger is read-only beside this one.
 
 ## Consequences
 
-- Courier code implements this envelope and initiator-driven peer-stdio exchange;
-  HTTPS poll/push remains optional. It does not add listeners to `amq`.
+- Courier code implements this envelope and peer exchange over an
+  operator-provided pipe; HTTPS poll/push remains optional. It does not add
+  listeners to `amq`.
 - `amq-bridge apply-file` is the manual/recovery path: it uses the same
   envelope and local apply rules without a public locker, but it is not the
   live peer-exchange class.
-- The configured initiator is the only peer-exchange dialer, and destination apply remains the
-  commit. Operators may provision a public HTTPS rendezvous, but AMQ does not
-  ship a hosted relay as Core.
+- The operator owns the pipe between the two peers, and destination apply
+  remains the commit. Operators may provision a public HTTPS rendezvous, but
+  AMQ does not ship a hosted relay as Core.
 - Each peer is a normal AMQ install. Pin `AM_ROOT` in operator config, never in
   prompt text. Durable state belongs under a path that survives client close.

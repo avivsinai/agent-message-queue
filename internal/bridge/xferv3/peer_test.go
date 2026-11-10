@@ -17,7 +17,7 @@ func TestStorePeerRoundTrip(t *testing.T) {
 	}
 	var xPublic [32]byte
 	xPublic[0] = 0xab
-	peer, err := NewPeer(host, []Handle{allow}, "ticket", xPublic)
+	peer, err := NewPeer(host, []Handle{allow}, xPublic)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +28,7 @@ func TestStorePeerRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Host().String() != "box" || got.Ticket() != "ticket" || got.X25519Public() != xPublic {
+	if got.Host().String() != "box" || got.X25519Public() != xPublic {
 		t.Fatalf("peer = %+v", got)
 	}
 	if len(got.AllowIn()) != 1 || got.AllowIn()[0].String() != "grok" {

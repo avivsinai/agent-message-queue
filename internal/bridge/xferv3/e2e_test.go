@@ -169,7 +169,7 @@ func newPeerHost(t *testing.T, hostName, agent string, seed []byte) peerHost {
 
 func pinPeers(t *testing.T, local, remote *peerHost) {
 	t.Helper()
-	peer, err := NewPeer(remote.host, []Handle{remote.agent}, "", remote.state.Static.Public())
+	peer, err := NewPeer(remote.host, []Handle{remote.agent}, remote.state.Static.Public())
 	if err != nil {
 		t.Fatal(err)
 	}
