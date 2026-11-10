@@ -175,12 +175,12 @@ func classifyWakeLock(root, me string, inspection *wakeLockInspection) {
 	}
 	if lock.PID <= 0 {
 		inspection.Status = wakeLockStale
-		inspection.Reason = "invalid pid"
+		inspection.Reason = wakeLockReasonInvalidPID
 		return
 	}
 	if strings.TrimSpace(lock.Root) == "" {
 		inspection.Status = wakeLockStale
-		inspection.Reason = "lock root missing"
+		inspection.Reason = wakeLockReasonRootMissing
 		return
 	}
 	lockRoot, err := canonicalizeWakeRoot(lock.Root)
@@ -241,9 +241,11 @@ func sameWakeOwner(first, second *wakeOwner) bool {
 	return *first == *second
 }
 
-// Stale reasons for a lock that names another queue: the process was not
-// examined, so the lock is not proven dead.
+// Stale reasons set before the lock's process is examined (a malformed lock,
+// or one that names another queue): the lock is not proven dead.
 const (
+	wakeLockReasonInvalidPID    = "invalid pid"
+	wakeLockReasonRootMissing   = "lock root missing"
 	wakeLockReasonRootMismatch  = "root mismatch"
 	wakeLockReasonAgentMismatch = "agent mismatch"
 )
@@ -256,8 +258,8 @@ func validateWakeLockRepairable(inspection wakeLockInspection) error {
 		return fmt.Errorf("wake lock status %q is not repairable", inspection.Status)
 	}
 	switch inspection.Reason {
-	case wakeLockReasonRootMismatch, wakeLockReasonAgentMismatch:
-		// The lock names another queue; its process was not examined.
+	case wakeLockReasonInvalidPID, wakeLockReasonRootMissing, wakeLockReasonRootMismatch, wakeLockReasonAgentMismatch:
+		// The process was not examined.
 		return fmt.Errorf("wake lock stale reason %q is not repairable", inspection.Reason)
 	default:
 		return nil
