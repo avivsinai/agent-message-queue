@@ -445,7 +445,7 @@ type upConfig struct {
 }
 
 // runUpLoop is the supervision loop: spawn, respawn on non-zero exit with
-// exponential backoff (reusing keepalive's constants), stop on clean exit 0.
+// keepalive's failure backoff, stop on clean exit 0.
 // The spawner interface lets tests inject a fake (no real process). The
 // supervisor's log lines go to stderr.
 func runUpLoop(ctx context.Context, cfg upConfig, sp spawner, stderr io.Writer) (int, error) {
@@ -502,10 +502,9 @@ func runUpLoop(ctx context.Context, cfg upConfig, sp spawner, stderr io.Writer) 
 			say(stderr, "amq-remote up: max-restarts (%d) exceeded", cfg.maxRestarts)
 			return 1, fmt.Errorf("max-restarts exceeded")
 		}
-		// Backoff: reuse keepalive's failure-backoff constants (exponential,
-		// capped). Do not invent a second table. The index (restart), not
-		// the budget, drives escalation.
-		delay := backoff(restart, cfg.backoffBase, cfg.backoffMax)
+		// Backoff: keepalive's failure backoff step (exponential, capped).
+		// The index (restart), not the budget, drives escalation.
+		delay := supervisor.BackoffStep(restart, cfg.backoffBase, cfg.backoffMax)
 		say(stderr, "amq-remote up: respawning in %s (attempt %d)", delay, restart)
 		select {
 		case <-ctx.Done():
@@ -513,25 +512,6 @@ func runUpLoop(ctx context.Context, cfg upConfig, sp spawner, stderr io.Writer) 
 		case <-time.After(delay):
 		}
 	}
-}
-
-// backoff computes an exponential backoff capped at maxDelay, matching
-// keepalive's Reconciler.backoff / exponentialBackoff policy.
-func backoff(failureCount int, base, maxDelay time.Duration) time.Duration {
-	if failureCount < 1 {
-		failureCount = 1
-	}
-	delay := base
-	for i := 1; i < failureCount; i++ {
-		delay *= 2
-		if delay >= maxDelay {
-			return maxDelay
-		}
-	}
-	if delay > maxDelay {
-		return maxDelay
-	}
-	return delay
 }
 
 // buildServeArgs constructs the args to pass to serve, forwarding --root and
