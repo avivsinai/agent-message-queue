@@ -147,30 +147,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	}
 
 	fromOff := transcriptSize(transcriptPath(a.configDir, reg.Cwd, reg.SessionID))
-	// The run is registered before the write, so a Lookup during the write
-	// reads it as Tentative rather than recovering an Unknown. A failed
-	// write removes it again.
-	rec := &runRecord{
-		key:       req.Key,
-		epoch:     req.Epoch,
-		msgID:     frame.MsgID,
-		state:     protocol.StateRunning,
-		fromOff:   fromOff,
-		createdAt: a.now(),
-	}
-	a.mu.Lock()
-	if existing, ok := a.runs[req.Key]; ok {
-		a.mu.Unlock()
-		return core.Admission{Admitted: true, RunID: existing.msgID}, nil
-	}
-	a.runs[req.Key] = rec
-	a.mu.Unlock()
 	if err := a.sendFrame(reg.MessagingSocketPath, wire, notAfter, req.NativeSession); err != nil {
-		a.mu.Lock()
-		if a.runs[req.Key] == rec {
-			delete(a.runs, req.Key)
-		}
-		a.mu.Unlock()
 		switch {
 		case errors.Is(err, errPartialWrite):
 			return core.Admission{}, err // delivery unknown: never a refusal
@@ -181,8 +158,17 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		}
 		return refusal(err), nil
 	}
+
+	rec := &runRecord{
+		key:       req.Key,
+		epoch:     req.Epoch,
+		msgID:     frame.MsgID,
+		state:     protocol.StateRunning,
+		fromOff:   fromOff,
+		createdAt: a.now(),
+	}
 	a.mu.Lock()
-	rec.createdAt = a.now() // a Stop before the write ended is not this run's
+	a.runs[req.Key] = rec
 	a.mu.Unlock()
 	a.kickConfirmations()
 	return core.Admission{Admitted: true, RunID: frame.MsgID}, nil

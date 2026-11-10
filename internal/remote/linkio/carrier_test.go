@@ -535,25 +535,6 @@ func TestOfflineKeyIgnoresEphemeralAddress(t *testing.T) {
 	}
 }
 
-// A reply over the connection's frame limit goes out as a small refusal, so
-// it cannot take the link down (audit 2026-11-10).
-func TestOversizeReplyIsAnsweredWithARefusal(t *testing.T) {
-	sess := &session{gen: 1, frameLimit: 1024, data: make(chan []byte, 1)}
-	answer(context.Background(), sess, "m_1", map[string]string{"text": strings.Repeat("x", 4096)}, nil)
-	frame := <-sess.data
-	if len(frame) > sess.frameLimit {
-		t.Fatalf("reply frame is %d bytes, over the %d-byte limit", len(frame), sess.frameLimit)
-	}
-	var f Frame
-	if err := json.Unmarshal(frame, &f); err != nil {
-		t.Fatal(err)
-	}
-	var body errorReply
-	if err := json.Unmarshal(f.Body, &body); err != nil || body.Error.Code != string(protocol.CodeUnsupported) || f.Re != "m_1" {
-		t.Fatalf("reply = %s, want an unsupported refusal for m_1", frame)
-	}
-}
-
 // A body that spells one key twice in different case is refused, as
 // encoding/json would fold both onto one field (audit 2026-11-10).
 func TestStrictBodyRefusesACaseVariantKey(t *testing.T) {

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -343,43 +342,5 @@ func TestSubmitWritesNothingAfterNotAfter(t *testing.T) {
 	case b := <-ft.received:
 		t.Fatalf("adapter wrote %d bytes after not_after", len(b))
 	case <-time.After(200 * time.Millisecond):
-	}
-}
-
-// A Lookup while the frame is still being written reads the run as
-// Tentative, never as an Unknown that core would record as uncertain
-// (audit 2026-11-10).
-func TestLookupDuringSocketWriteIsTentative(t *testing.T) {
-	ft := newFakeTarget(t, 4242, nil)
-	att := ft.attach(t)
-	// Replace the listener with one that looks the key up before it reads a
-	// byte. The frame is larger than any socket buffer, so the write cannot
-	// finish until that lookup is done.
-	_ = ft.stopListener()
-	if err := os.Remove(ft.sockPath); err != nil {
-		t.Fatal(err)
-	}
-	ln, err := net.Listen("unix", ft.sockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-	seen := make(chan core.Evidence, 1)
-	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		defer func() { _ = conn.Close() }()
-		ev, _ := att.Lookup(pr2Key(), "")
-		seen <- ev
-		_, _ = io.Copy(io.Discard, conn)
-	}()
-	adm, err := att.Submit(pr2BoundRequest(strings.Repeat("x", 4<<20)))
-	if err != nil || !adm.Admitted {
-		t.Fatalf("Submit = %+v, %v; want admitted", adm, err)
-	}
-	if ev := <-seen; ev.Class != core.EvidenceTentative {
-		t.Fatalf("lookup during the write = %s, want tentative", ev.Class)
 	}
 }

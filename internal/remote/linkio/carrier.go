@@ -599,12 +599,8 @@ func (c *Carrier) serveOnce(ctx context.Context) error {
 	gen := welcome.ConnectionGeneration
 	connCtx, connCancel := context.WithCancel(ctx)
 	defer connCancel()
-	frameLimit := MaxFrameBytes
-	if l := int(welcome.Limits.FrameBytes); l > 0 && l < frameLimit {
-		frameLimit = l
-	}
 	sess := &session{
-		ws: ws, gen: gen, prefix: newPrefix(), frameLimit: frameLimit,
+		ws: ws, gen: gen, prefix: newPrefix(),
 		control: make(chan []byte, controlQueue), data: make(chan []byte, dataQueue),
 		dispatch: newDispatcher(connCtx),
 	}
@@ -619,7 +615,10 @@ func (c *Carrier) serveOnce(ctx context.Context) error {
 	c.byFrame = map[string]*offer{}
 	c.offerBytes = 0
 	c.sentBind, c.bindFrame = sentBind, ""
-	c.frameLimit = frameLimit
+	c.frameLimit = MaxFrameBytes
+	if l := int(welcome.Limits.FrameBytes); l > 0 && l < c.frameLimit {
+		c.frameLimit = l
+	}
 	c.maxCalls = welcome.Limits.ToolCallsInFlight
 	c.status = Status{State: "online", Gen: gen}
 	c.mu.Unlock()
@@ -1096,11 +1095,9 @@ type session struct {
 	prefix   string
 	seq      atomic.Int64
 	lastPing atomic.Int64
-	// frameLimit is the smaller of MaxFrameBytes and the server's limit.
-	frameLimit int
-	control    chan []byte // acknowledgements and refusals: never waits behind data
-	data       chan []byte
-	dispatch   *dispatcher
+	control  chan []byte // acknowledgements and refusals: never waits behind data
+	data     chan []byte
+	dispatch *dispatcher
 }
 
 func (s *session) nextID() string {

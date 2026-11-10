@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"sync"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
@@ -93,9 +92,6 @@ func (d *dispatcher) work(ctx context.Context) {
 // answer replies to a server request: the reply body, or a typed refusal.
 // A worker may wait for room on the data lane; the reader never does. The
 // control lane stays for acknowledgements and the reader's own refusals.
-// A reply over the connection's frame limit is answered with a refusal
-// instead: the server closes the socket on an oversize frame and would ask
-// again after the reconnect.
 func answer(ctx context.Context, sess *session, re string, out any, err error) {
 	body := out
 	if err != nil {
@@ -110,28 +106,17 @@ func answer(ctx context.Context, sess *session, re string, out any, err error) {
 		}
 		body = errorReply{Error: e}
 	}
-	frame, merr := replyFrame(sess, re, body)
+	raw, merr := json.Marshal(body)
 	if merr != nil {
 		return
 	}
-	if sess.frameLimit > 0 && len(frame) > sess.frameLimit {
-		e := ErrorBody{Code: string(protocol.CodeUnsupported), Message: fmt.Sprintf("the reply is %d bytes, over the link's %d-byte frame limit", len(frame), sess.frameLimit)}
-		if frame, merr = replyFrame(sess, re, errorReply{Error: e}); merr != nil {
-			return
+	frame, merr := json.Marshal(Frame{Schema: SchemaFrame, Re: re, Gen: sess.gen, Body: raw})
+	if merr == nil {
+		select {
+		case sess.data <- frame:
+		case <-ctx.Done():
 		}
 	}
-	select {
-	case sess.data <- frame:
-	case <-ctx.Done():
-	}
-}
-
-func replyFrame(sess *session, re string, body any) ([]byte, error) {
-	raw, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	return json.Marshal(Frame{Schema: SchemaFrame, Re: re, Gen: sess.gen, Body: raw})
 }
 
 // outcomeReply is the reply to a signed submit: AMQ's Outcome, never a
