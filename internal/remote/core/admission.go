@@ -417,8 +417,7 @@ func (e *Endpoint) admissibleCodeLocked(targetID, epoch, notAfter, minEvidence s
 // achievedEvidence returns the live session's submit evidence class for a
 // target, for the human projection on a submit reply (the machine contract
 // floor lives on SubmitInput). Empty when the target is nil or the session
-// carries no evidence projection (legacy/unknown adapter). Callers must NOT
-// hold e.mu when calling Inspect (it may lock the adapter).
+// carries no evidence projection (legacy/unknown adapter).
 func achievedEvidence(t *target) string {
 	if t == nil {
 		return ""

@@ -183,7 +183,9 @@ type SubmitBlocker interface {
 }
 
 type Attachment interface {
-	// Inspect returns the current session projection.
+	// Inspect returns the current session projection. It reads only the
+	// attachment's own state and never calls into the endpoint, so the
+	// endpoint may call it while it holds its lock.
 	Inspect() protocol.Session
 	// Submit performs the final epoch, busy and cancellation checks at the
 	// owning native boundary and, if admitted, binds the key to a run.
