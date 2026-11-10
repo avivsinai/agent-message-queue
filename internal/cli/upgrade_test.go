@@ -99,9 +99,9 @@ func TestRunUpgradeDirectInstallReplacesBinary(t *testing.T) {
 	oldExecutablePath := executablePathForUpgrade
 	executablePathForUpgrade = func() (string, string, error) { return bin, bin, nil }
 	t.Cleanup(func() { executablePathForUpgrade = oldExecutablePath })
-	oldDetect := detectHomebrewPrefixForUpgrade
-	detectHomebrewPrefixForUpgrade = func() string { return "" }
-	t.Cleanup(func() { detectHomebrewPrefixForUpgrade = oldDetect })
+	oldDetect := detectHomebrewInstallationsForUpgrade
+	detectHomebrewInstallationsForUpgrade = func() []homebrewInstallation { return nil }
+	t.Cleanup(func() { detectHomebrewInstallationsForUpgrade = oldDetect })
 	oldFetch := fetchLatestTagForUpgrade
 	fetchLatestTagForUpgrade = func(context.Context, *http.Client) (string, error) { return "v0.0.0-test", nil }
 	t.Cleanup(func() { fetchLatestTagForUpgrade = oldFetch })
@@ -154,9 +154,6 @@ func TestRunUpgradeHomebrewDelegatesWithYes(t *testing.T) {
 	}
 	t.Cleanup(func() { homebrewBrewExistsForUpgrade = oldBrewExists })
 	stubHomebrewPrefixProbe(t, prefix)
-	oldDetect := detectHomebrewPrefixForUpgrade
-	detectHomebrewPrefixForUpgrade = func() string { return "" }
-	t.Cleanup(func() { detectHomebrewPrefixForUpgrade = oldDetect })
 	var delegateRan []string
 	oldDelegate := runDelegateForUpgrade
 	runDelegateForUpgrade = func(argv []string) error { delegateRan = append(delegateRan, strings.Join(argv, " ")); return nil }
@@ -220,9 +217,9 @@ func TestRunUpgradeAllReplacesPresentCompanionsSkipsMissing(t *testing.T) {
 	oldExecutablePath := executablePathForUpgrade
 	executablePathForUpgrade = func() (string, string, error) { return amqBin, amqBin, nil }
 	t.Cleanup(func() { executablePathForUpgrade = oldExecutablePath })
-	oldDetect := detectHomebrewPrefixForUpgrade
-	detectHomebrewPrefixForUpgrade = func() string { return "" }
-	t.Cleanup(func() { detectHomebrewPrefixForUpgrade = oldDetect })
+	oldDetect := detectHomebrewInstallationsForUpgrade
+	detectHomebrewInstallationsForUpgrade = func() []homebrewInstallation { return nil }
+	t.Cleanup(func() { detectHomebrewInstallationsForUpgrade = oldDetect })
 	// Isolate companion search from the operator's real ~/.local/bin.
 	fakeHome := t.TempDir()
 	oldHome := homeDirForUpgrade
