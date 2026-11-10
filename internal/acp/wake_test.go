@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -136,6 +137,69 @@ func TestMirrorWorkerWakesOnAFinishedTurn(t *testing.T) {
 
 	f.add(f.userLine("o1", "p1", 0, "ship", nil), f.assistantLine("m1", 1, "end_turn", textBlock("Shipped.")))
 	within(t, "the turn post", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(posts) == 1 && posts[0] == "▶ ship\n✓ 1s\nShipped."
+	})
+}
+
+// After /clear a Claude session writes a new transcript beside the old one;
+// a settled mirror worker posts its first turn at once, with no tick to
+// wait for (bead agent-message-queue-udg).
+func TestMirrorWorkerWakesOnANewTranscript(t *testing.T) {
+	s, _ := machineServer(t)
+	holder, err := launch.HolderOf(os.Getpid())
+	if err != nil {
+		t.Skip("no process identity on this platform")
+	}
+	cfg := canonicalTempDir(t)
+	proj := filepath.Join(cfg, "projects", "-work-proj")
+	for _, d := range []string{proj, filepath.Join(cfg, "sessions")} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	session := func(id string) {
+		entry := `{"pid":` + strconv.Itoa(holder.PID) + `,"sessionId":"` + id + `","cwd":"/work/proj"}`
+		if err := os.WriteFile(filepath.Join(cfg, "sessions", strconv.Itoa(holder.PID)+".json"), []byte(entry), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f := &mirrorFixture{t: t, transcript: filepath.Join(proj, "cur.jsonl")}
+	if err := os.WriteFile(f.transcript, []byte(`{"type":"user","uuid":"o0","promptId":"p0","timestamp":"2026-11-04T09:00:00Z","message":{"content":"earlier"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session("cur")
+	root := canonicalTempDir(t)
+	if err := fsq.EnsureAgentDirs(root, "agent"); err != nil {
+		t.Fatal(err)
+	}
+	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent", Holder: holder, Name: "alpha",
+		Label: "claude · proj/alpha @ box", Harness: "claude", Transcript: f.transcript}
+	if err := binding.WriteNamed(b); err != nil {
+		t.Fatal(err)
+	}
+	activeChannel(t, s, b, machineChanA)
+	var mu sync.Mutex
+	var posts []string
+	savedPost := postAnswer
+	t.Cleanup(func() { postAnswer = savedPost })
+	postAnswer = func(_, content string, _ time.Duration) (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		posts = append(posts, content)
+		return strings.Repeat("a", 64), nil
+	}
+	passes := pacedPasses(t, s, newWakeup("mirror", 50*time.Millisecond, time.Hour), s.mirrorTick)
+	settled(t, passes)
+
+	session("next")
+	f.transcript = filepath.Join(proj, "next.jsonl")
+	if err := os.WriteFile(f.transcript, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.add(f.userLine("o1", "p1", 0, "ship", nil), f.assistantLine("m1", 1, "end_turn", textBlock("Shipped.")))
+	within(t, "the new transcript's turn post", func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		return len(posts) == 1 && posts[0] == "▶ ship\n✓ 1s\nShipped."

@@ -120,6 +120,26 @@ type mirrorSeen struct {
 	off                      bool
 	path                     string
 	info                     os.FileInfo
+	// dir is set when the transcript's directory is small enough to watch
+	// (mirrorDirWatchMax), so a new transcript there wakes the mirror.
+	dir bool
+}
+
+// mirrorDirWatchMax is the most entries a transcript's directory may have
+// for the mirror to watch it: on macOS a directory watch holds one file
+// descriptor per entry. A record that moves to a new file in a larger
+// directory is found at the idle poll.
+const mirrorDirWatchMax = 1024
+
+// smallDir reports whether dir has at most mirrorDirWatchMax entries.
+func smallDir(dir string) bool {
+	f, err := os.Open(dir)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+	names, _ := f.Readdirnames(mirrorDirWatchMax + 1)
+	return len(names) <= mirrorDirWatchMax
 }
 
 // unchanged reports whether a tick with these inputs would read nothing new:
@@ -226,8 +246,9 @@ func (s *Server) mirrorLead() bool {
 // binding that is gone. Its pace asks for the next tick in mirrorInterval
 // while a binding has more to read or send, or a gone binding's last post
 // waits, and else on a change to the bindings, the records, a mirrored
-// binding's record (its transcript) or its off switch. A record that moved
-// to another file (mirror.Source Locate) is found at the idle poll.
+// binding's record (its transcript), the record's directory, where a record
+// that moves to a new file (mirror.Source Locate) usually appears, or its
+// off switch. A record that moves elsewhere is found at the idle poll.
 func (s *Server) mirrorTick(now time.Time) (p pace) {
 	served := map[string]bool{}
 	p.watch = s.sessionWatch()
@@ -251,6 +272,9 @@ func (s *Server) mirrorTick(now time.Time) (p pace) {
 		}
 		if read {
 			p.watch = append(p.watch, seen.path)
+			if seen.dir {
+				p.watch = append(p.watch, filepath.Dir(seen.path))
+			}
 		}
 		if dir, err := mirror.DirFor(t.name); err == nil {
 			p.watch = append(p.watch, dir)
@@ -327,7 +351,8 @@ func (s *Server) mirrorBinding(t dialogTarget, b binding.Binding, now time.Time,
 		return true
 	}
 	off := mirror.Off(dir)
-	if !ended && s.mirrors.seen[t.name].unchanged(t, b, off) {
+	prev := s.mirrors.seen[t.name]
+	if !ended && prev.unchanged(t, b, off) {
 		return true
 	}
 	delete(s.mirrors.seen, t.name)
@@ -386,7 +411,11 @@ func (s *Server) mirrorBinding(t dialogTarget, b binding.Binding, now time.Time,
 		if s.mirrors.seen == nil {
 			s.mirrors.seen = map[string]mirrorSeen{}
 		}
-		s.mirrors.seen[t.name] = mirrorSeen{channel: t.channel, harness: b.Harness, source: st.Harness, off: off, path: path, info: read}
+		dir := prev.dir
+		if prev.path != path {
+			dir = smallDir(filepath.Dir(path))
+		}
+		s.mirrors.seen[t.name] = mirrorSeen{channel: t.channel, harness: b.Harness, source: st.Harness, off: off, path: path, info: read, dir: dir}
 	} else if waits && len(st.Queue) == 0 {
 		if s.mirrors.settled == nil {
 			s.mirrors.settled = map[string]bool{}

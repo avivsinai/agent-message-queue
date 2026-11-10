@@ -366,7 +366,8 @@ machine agent, one agent for every session. It never uses a pin, a selected
 model or the only binding; a role line beside a session pin or beside the
 helper line refuses every prompt. Its lifecycle leader, its dialog poster
 and its mirror each watch the files they read (the bindings, the channel
-records, each session's dialogs and transcript) and pass at once when one
+records, each session's dialogs, its transcript and the transcript's
+directory, so a new transcript after `/clear` is seen) and pass at once when one
 changes, at most every 2 s; a pass with work in flight (an open dialog, a
 queued edit, a channel being set up) runs again in 2 s, and a settled one
 at least every 10 s (the leader) or 30 s (dialogs and mirror). A session
