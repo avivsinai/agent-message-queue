@@ -86,9 +86,13 @@ func upgradeDiagnosticRoots(root string) []string {
 	}
 
 	add(base)
-	if sessions, err := canonicalSessionRoots(base); err == nil {
-		for _, session := range sessions {
-			add(session.Root)
+	// A legacy-named session can hold a live wake too; only a child that is
+	// not a real session directory is skipped.
+	if entries, err := os.ReadDir(base); err == nil {
+		for _, entry := range entries {
+			if session, _, skip := classifySessionChild(base, entry.Name()); !skip {
+				add(session.Path)
+			}
 		}
 	}
 	add(root)
