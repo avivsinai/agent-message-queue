@@ -1369,7 +1369,10 @@ func (r *recordingRetirer) RetireWake(context.Context, amq.RetireWakeRequest) (a
 func TestRegisterUsesEnvBaseRootAndSessionIndependently(t *testing.T) {
 	dir := t.TempDir()
 	envBase := filepath.Join(dir, ".agent-mail")
-	expectedRoot := filepath.Join(envBase, "session")
+	expectedRoot, err := registry.CanonicalRoot(filepath.Join(envBase, "session"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	target := filepath.Join(dir, "target")
 	if err := os.WriteFile(target, nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -1444,7 +1447,13 @@ func TestRetireSessionMatchesRootAdapterAndAgentTogether(t *testing.T) {
 		ID: registry.EntryID(root, "claude", "boundary", "wrong-agent"), Root: root, Agent: "claude", Adapter: "boundary", Target: "wrong-agent",
 	}
 	registryPath := testRegistryPath(t, dir)
-	if err := registry.New(registryPath).Save(registry.File{Entries: []registry.Entry{correct, wrongAdapter, wrongAgent}}); err != nil {
+	// Upsert refuses a second row for one root and agent, which is the shape
+	// this test needs, so the file is written as a registry would hold it.
+	seed, err := json.Marshal(registry.File{SchemaVersion: registry.SchemaVersion, Entries: []registry.Entry{correct, wrongAdapter, wrongAgent}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(registryPath, seed, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	fakeAMQ := filepath.Join(dir, "amq")
@@ -1584,5 +1593,24 @@ func TestSelfUpgradeHealthyPassAcceptsDeferredWithoutError(t *testing.T) {
 	// contains ONLY the ensured results of entries keepalive owns.
 	if !selfUpgradeHealthyPass([]supervisor.Result{{Action: supervisor.ActionEnsured}}) {
 		t.Fatal("pass without out-of-scope entries must settle")
+	}
+}
+
+// One detached or not-yet-due row must not keep a healthy pass from settling
+// the self-upgrade attempt (audit 2026-11-10).
+func TestSelfUpgradeHealthyPassIgnoresDetachedAndNotDueRows(t *testing.T) {
+	healthy := []supervisor.Result{
+		{Action: supervisor.ActionEnsured},
+		{Action: supervisor.ActionDeferred},
+		{Action: supervisor.ActionDetached, Error: errors.New("terminal gone")},
+	}
+	if !selfUpgradeHealthyPass(healthy) {
+		t.Fatal("pass with an ensured row plus detached and not-due rows must settle")
+	}
+	if selfUpgradeHealthyPass([]supervisor.Result{{Action: supervisor.ActionDeferred}}) {
+		t.Fatal("a pass that ensured nothing must not settle")
+	}
+	if selfUpgradeHealthyPass([]supervisor.Result{{Action: supervisor.ActionEnsured}, {Action: supervisor.ActionStartFailed, Error: errors.New("boom")}}) {
+		t.Fatal("a failed wake start must not settle")
 	}
 }

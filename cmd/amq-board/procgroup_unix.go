@@ -22,3 +22,10 @@ func killProcessGroupOnCancel(cmd *exec.Cmd) {
 		return err
 	}
 }
+
+// pidAlive reports whether a process with pid exists; a process of another
+// user exists too (EPERM).
+func pidAlive(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
+}

@@ -91,7 +91,10 @@ func runSync(args []string) int {
 		projectID := state.ProjectID
 		acquisition := acquireBoard(ctx, newEnv(dir, runner), cfg, opt)
 		acquisition.ProjectID = projectID
-		history, messages, evidence := source.ReadHistory(ctx, env, store.BaseRoot, state.Pruned)
+		history, messages, evidence := source.ReadHistory(ctx, env, store.BaseRoot, state.Pruned, func(id string) (board.Message, bool) {
+			m, ok := state.Messages[store.BaseRoot+"#"+id]
+			return m, ok
+		})
 		acquisition.Input.Results = append(acquisition.Input.Results, board.NamedResult{Name: "amq-history", Result: history})
 		acquisition.Messages, acquisition.Evidence = messages, evidence
 		if ctx.Err() == nil {

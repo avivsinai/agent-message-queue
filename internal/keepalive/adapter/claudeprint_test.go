@@ -653,3 +653,38 @@ func TestClaudePrintNegativePidOwnerRefusesZeroSpawns(t *testing.T) {
 		t.Fatalf("spawns = %d, want 0", len(spawner.calls))
 	}
 }
+
+// Stream logs of earlier injects stay bounded per session (audit 2026-11-10).
+func TestClaudePrintInjectPrunesOldStreamLogs(t *testing.T) {
+	cwd := t.TempDir()
+	configDir, stateDir, bin := writeClaudePrintFixture(t, testClaudeUUID, cwd)
+	dir := filepath.Join(stateDir, "claude-print", testClaudeUUID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 20; i++ {
+		name := "2026010" + strconv.Itoa(i%10) + "T0000" + strconv.Itoa(10+i) + ".000Z.stream.jsonl"
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner := &fakeCommandRunner{output: []byte("Usage: --resume --output-format --replay-user-messages\n")}
+	spawner := &fakeSpawner{onStart: func(spec processSpec) { writeInitThenAck(t, spec.LogPath, "hi") }}
+	a := testClaudePrint(configDir, stateDir, bin, runner, spawner)
+	if err := a.Inject(context.Background(), claudePrintTargetSessionPrefix+testClaudeUUID, "hi"); err != nil {
+		t.Fatalf("Inject() error = %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := 0
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".stream.jsonl") {
+			logs++
+		}
+	}
+	if logs != claudePrintKeepLogs {
+		t.Fatalf("stream logs = %d, want %d", logs, claudePrintKeepLogs)
+	}
+}

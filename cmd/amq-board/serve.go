@@ -170,33 +170,74 @@ func withServeLock(fn func(dir string) error) error {
 	return lock.WithExclusiveFileLock(filepath.Join(dir, serveFile+".lock"), func() error { return fn(dir) })
 }
 
-// writeServeFile replaces ~/.amq/board/serve.json atomically, mode 0600:
-// the token in it opens every route of the server.
+// ownServeFile is the record of one serve, kept beside serve.json so that
+// serve.json can name another running serve when the one it names stops.
+func ownServeFile(pid int) string { return fmt.Sprintf("serve.%d.json", pid) }
+
+// writeServeFile publishes r as this serve's own record and as
+// ~/.amq/board/serve.json, atomically, mode 0600: the token in it opens every
+// route of the server.
 func writeServeFile(r serveRecord) error {
 	data, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
 		return err
 	}
+	data = append(data, '\n')
 	return withServeLock(func(dir string) error {
-		_, err := fsq.WriteStateFile(filepath.Dir(dir), filepath.Join(filepath.Base(dir), serveFile), append(data, '\n'), 0o600)
-		return err
+		for _, name := range []string{ownServeFile(r.PID), serveFile} {
+			if _, err := fsq.WriteStateFile(filepath.Dir(dir), filepath.Join(filepath.Base(dir), name), data, 0o600); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 
-// removeServeFile removes serve.json only while it still names pid: a later
-// serve that replaced the record keeps it when this one exits.
+// readServeRecord reads one record file; ok is false for a missing or
+// unreadable record.
+func readServeRecord(path string) (serveRecord, bool) {
+	data, err := os.ReadFile(path)
+	var r serveRecord
+	return r, err == nil && json.Unmarshal(data, &r) == nil
+}
+
+// removeServeFile removes this serve's own record. serve.json is removed only
+// while it still names pid, and then it is replaced by the newest record of
+// another serve that is still alive, so stopping one serve does not hide
+// another. Records of dead serves are removed.
 func removeServeFile(pid int) {
 	_ = withServeLock(func(dir string) error {
+		_ = os.Remove(filepath.Join(dir, ownServeFile(pid)))
 		path := filepath.Join(dir, serveFile)
-		data, err := os.ReadFile(path)
+		current, ok := readServeRecord(path)
+		if !ok || current.PID != pid {
+			return nil
+		}
+		var next serveRecord
+		found := false
+		others, _ := filepath.Glob(filepath.Join(dir, "serve.*.json"))
+		for _, other := range others {
+			r, ok := readServeRecord(other)
+			if !ok || r.PID == pid || other != filepath.Join(dir, ownServeFile(r.PID)) {
+				continue
+			}
+			if !pidAlive(r.PID) {
+				_ = os.Remove(other)
+				continue
+			}
+			if !found || r.StartedAt.After(next.StartedAt) {
+				next, found = r, true
+			}
+		}
+		if !found {
+			return os.Remove(path)
+		}
+		data, err := json.MarshalIndent(next, "", "  ")
 		if err != nil {
 			return err
 		}
-		var r serveRecord
-		if json.Unmarshal(data, &r) == nil && r.PID == pid {
-			return os.Remove(path)
-		}
-		return nil
+		_, err = fsq.WriteStateFile(filepath.Dir(dir), filepath.Join(filepath.Base(dir), serveFile), append(data, '\n'), 0o600)
+		return err
 	})
 }
 

@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -114,6 +115,7 @@ func (c ClaudePrint) Inject(ctx context.Context, target string, payload string) 
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
 		return fmt.Errorf("inject Claude print: create log dir: %w", err)
 	}
+	pruneClaudePrintLogs(filepath.Dir(logPath), claudePrintKeepLogs)
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return fmt.Errorf("inject Claude print: open log: %w", err)
@@ -267,6 +269,32 @@ func (c ClaudePrint) configDir() (string, error) {
 		return "", fmt.Errorf("resolve CLAUDE_CONFIG_DIR: %w", err)
 	}
 	return dir, nil
+}
+
+// claudePrintKeepLogs is how many stream logs of earlier injects stay in a
+// session directory; older ones are removed before a new inject starts.
+const claudePrintKeepLogs = 8
+
+// pruneClaudePrintLogs removes all but the newest keep-1 stream logs in dir,
+// so that with the log the caller creates next there are at most keep. Names
+// start with a UTC timestamp, so name order is age order. Failures are
+// ignored: a log that stays is only disk use.
+func pruneClaudePrintLogs(dir string, keep int) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	var logs []string
+	for _, entry := range entries {
+		if entry.Type().IsRegular() && strings.HasSuffix(entry.Name(), ".stream.jsonl") {
+			logs = append(logs, entry.Name())
+		}
+	}
+	sort.Strings(logs)
+	for len(logs) > keep-1 {
+		_ = os.Remove(filepath.Join(dir, logs[0]))
+		logs = logs[1:]
+	}
 }
 
 func (c ClaudePrint) stateDir() (string, error) {

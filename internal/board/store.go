@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -796,7 +797,7 @@ func (s Store) saveEvidence(ctx context.Context, blobs [][]byte, pruned map[stri
 			continue
 		}
 		name := hash + ".json"
-		// The name is the content hash and every read re-hashes the file, so
+		// The name is the content hash and a read re-hashes the file whenever it changes, so
 		// an existing regular file of the same size holds this blob.
 		if info, err := os.Lstat(filepath.Join(dir, name)); err == nil {
 			if !info.Mode().IsRegular() {
@@ -1621,16 +1622,9 @@ func (s Store) verifyMessages(ctx context.Context, state *Snapshot) error {
 		}
 		entry, ok := entries[hash]
 		if !ok {
-			data, err := readBounded(filepath.Join(s.Dir, "evidence", hash+".json"), snapshotLimit)
+			entry, err = readEvidenceEntry(filepath.Join(s.Dir, "evidence", hash+".json"), hash, key)
 			if err != nil {
-				return fmt.Errorf("message evidence recovery required: %w", err)
-			}
-			sum := sha256.Sum256(data)
-			if hex.EncodeToString(sum[:]) != hash {
-				return fmt.Errorf("message evidence hash mismatch: %s", key)
-			}
-			if err = json.Unmarshal(data, &entry); err != nil {
-				return fmt.Errorf("message evidence unreadable: %w", err)
+				return err
 			}
 			entries[hash] = entry
 		}
@@ -1648,6 +1642,58 @@ func (s Store) verifyMessages(ctx context.Context, state *Snapshot) error {
 		state.Messages[key] = expected
 	}
 	return nil
+}
+
+// evidenceMemo keeps the verified decode of an evidence file, keyed by path
+// and validated by size, mtime, and file identity. The file name is its
+// content hash and the file is written once by rename, so an unchanged stat
+// means unchanged content; any change re-reads and re-hashes.
+var evidenceMemo = struct {
+	sync.Mutex
+	m map[string]evidenceMemoEntry
+}{m: map[string]evidenceMemoEntry{}}
+
+type evidenceMemoEntry struct {
+	size  int64
+	mtime time.Time
+	id    string
+	entry thread.Entry
+}
+
+func readEvidenceEntry(path, hash, key string) (thread.Entry, error) {
+	var stat evidenceMemoEntry
+	if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() {
+		if id, idErr := fsq.StableFileIdentityInfo(info); idErr == nil {
+			stat = evidenceMemoEntry{size: info.Size(), mtime: info.ModTime(), id: id}
+			evidenceMemo.Lock()
+			hit, ok := evidenceMemo.m[path]
+			evidenceMemo.Unlock()
+			if ok && hit.size == stat.size && hit.mtime.Equal(stat.mtime) && hit.id == stat.id {
+				return hit.entry, nil
+			}
+		}
+	}
+	data, err := readBounded(path, snapshotLimit)
+	if err != nil {
+		return thread.Entry{}, fmt.Errorf("message evidence recovery required: %w", err)
+	}
+	sum := sha256.Sum256(data)
+	if hex.EncodeToString(sum[:]) != hash {
+		return thread.Entry{}, fmt.Errorf("message evidence hash mismatch: %s", key)
+	}
+	var entry thread.Entry
+	if err = json.Unmarshal(data, &entry); err != nil {
+		return thread.Entry{}, fmt.Errorf("message evidence unreadable: %w", err)
+	}
+	if stat.id != "" {
+		evidenceMemo.Lock()
+		if len(evidenceMemo.m) >= 8192 {
+			clear(evidenceMemo.m)
+		}
+		evidenceMemo.m[path] = evidenceMemoEntry{size: stat.size, mtime: stat.mtime, id: stat.id, entry: entry}
+		evidenceMemo.Unlock()
+	}
+	return entry, nil
 }
 
 func (s Store) validateIdentity(ctx context.Context) error {
