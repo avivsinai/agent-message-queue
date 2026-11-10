@@ -263,9 +263,7 @@ func Open(stateDir string, opts ...Option) (*Store, error) {
 // a quota is set (after a restart, running records hold nothing in memory;
 // without the reseed, fresh submits are admitted into their room and their
 // results are refused after the work ran), and classifies every record
-// into the sweep index. It reads the same files ListWithPoison lists: the
-// record files directly under a valid host directory, dot-prefixed names
-// excluded.
+// into the sweep index.
 //
 // A file the bounded reader refuses (unreadable, not a regular file,
 // oversized) is an error naming its path relative to the store, so Open
@@ -275,22 +273,14 @@ func Open(stateDir string, opts ...Option) (*Store, error) {
 func (s *Store) loadRecords() error {
 	s.sweep, s.compactable = map[Key]struct{}{}, map[Key]string{}
 	var used int64
-	base := filepath.Join(s.dir, requestsDir)
-	err := filepath.Walk(base, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(filepath.Join(s.dir, requestsDir), func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil
 			}
 			return err
 		}
-		inBase := filepath.Dir(path) == base
-		if info.IsDir() {
-			if path == base || (inBase && safeSegment(info.Name())) {
-				return nil
-			}
-			return filepath.SkipDir
-		}
-		if inBase || !strings.HasSuffix(info.Name(), recordSuffix) || strings.HasPrefix(info.Name(), ".") {
+		if info.IsDir() || !strings.HasSuffix(path, recordSuffix) {
 			return nil
 		}
 		data, rErr := fsq.ReadRegularNoFollowBounded(path, int64(MaxRecordBytes))
