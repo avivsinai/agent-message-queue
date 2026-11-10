@@ -386,7 +386,8 @@ func recordDue(r channelRecord, now time.Time) (at time.Time, ok bool) {
 
 // awaitsThread reports whether b is a Codex app-server session that may
 // become live with no change on disk: its thread is not judged loaded or
-// ended yet, and no record of this agent serves it.
+// ended yet, no record of this agent serves it, and it has no agent of its
+// own that runs or is idle.
 func (s *Server) awaitsThread(b binding.Binding) bool {
 	if b.AppServer.Thread == "" || binding.ValidName(b.Name) != nil {
 		return false
@@ -394,8 +395,15 @@ func (s *Server) awaitsThread(b binding.Binding) bool {
 	if state, _ := s.liveness(b); state != binding.Unknown {
 		return false
 	}
-	r, ok := s.snapshot().slot(b.Name)
-	return !ok || r.State != channelActive
+	if r, ok := s.snapshot().slot(b.Name); ok && r.State == channelActive {
+		return false
+	}
+	for _, m := range s.agentMarkers(b.Name) {
+		if state := m.state(time.Now()); state == AgentRunning || state == AgentIdle {
+			return false
+		}
+	}
+	return true
 }
 
 // machineState is the machine worker's own state: its context, pacing,
