@@ -150,13 +150,16 @@ func recoverLocked(root string, snap Snapshot, id ID) (string, error) {
 		return "", err
 	}
 	staged := fileExists(stagePath(root, snap.Peer, id))
+	truncate := func() error {
+		keep, err := ledgerByteLen(facts)
+		if err != nil {
+			return err
+		}
+		return truncateTorn(path, keep)
+	}
 	if torn {
 		if staged {
-			keep, keepErr := ledgerByteLen(facts)
-			if keepErr != nil {
-				return "", keepErr
-			}
-			if err := truncateTorn(path, keep); err != nil {
+			if err := truncate(); err != nil {
 				return "", err
 			}
 		} else {
@@ -167,6 +170,11 @@ func recoverLocked(root string, snap Snapshot, id ID) (string, error) {
 				}
 				return StateUncertain, ErrUncertain
 			}
+			// The torn tail goes first: a fact appended after it is never
+			// read back.
+			if err := truncate(); err != nil {
+				return "", err
+			}
 			if err := appendFact(root, Fact{State: StatePublished, Peer: snap.Peer, ID: id}); err != nil {
 				return "", err
 			}
@@ -176,7 +184,13 @@ func recoverLocked(root string, snap Snapshot, id ID) (string, error) {
 	state := foldState(facts)
 	switch {
 	case staged && state != StateIntent && state != StatePublished:
-		if err := os.Remove(stagePath(root, snap.Peer, id)); err != nil && !os.IsNotExist(err) {
+		// The destination note goes before its stage: a note left without
+		// a stage would stop the next filing from creating it again.
+		stage := stagePath(root, snap.Peer, id)
+		if err := os.Remove(stage + ".dest"); err != nil && !os.IsNotExist(err) {
+			return "", err
+		}
+		if err := os.Remove(stage); err != nil && !os.IsNotExist(err) {
 			return "", err
 		}
 		return "", nil

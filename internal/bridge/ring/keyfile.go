@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -79,5 +80,17 @@ func parseWebhookURL(raw string) (string, error) {
 	if u.Host == "" {
 		return "", fmt.Errorf("ring webhook url host is required")
 	}
+	// The key and the URL itself are secrets: cleartext only to loopback.
+	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
+		return "", fmt.Errorf("non-loopback ring webhook url must use https")
+	}
 	return raw, nil
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

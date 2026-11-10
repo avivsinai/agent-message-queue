@@ -71,7 +71,10 @@ func deliver(cfg Config, body, thread, subject, priority string, labels, refs []
 	// inbox write refuses one of them as a collision. A replay passes the
 	// claim's recipient and thread, never the current call's.
 	build := func(messageID, created, to, thread string) ([]byte, error) {
-		all := append(append([]string(nil), labels...), "nostr:"+eventID)
+		all := append([]string(nil), labels...)
+		if eventID != "" {
+			all = append(all, "nostr:"+eventID)
+		}
 		data, err := format.Message{
 			Header: format.Header{
 				Schema:   format.CurrentSchema,

@@ -1274,11 +1274,11 @@ func (s *Server) steeringDialogReply(params json.RawMessage) (any, bool) {
 	// A steer whose event id is unreadable verifies nothing.
 	eventID, _ := resolveEventID(parsed.Meta)
 	if name, on, at, ok := s.mirrorSwitch(channel, eventID, text); ok {
-		go s.publish(channel, setMirror(name, on, at))
+		go func() { s.publish(channel, setMirror(name, on, at)) }()
 		return steeringResult{Outcome: SteeringAnswered}, true
 	}
 	if cmd, ok := s.ownerCommandFor(channel, eventID, text); ok {
-		go s.publish(channel, s.commandReply(channel, cmd))
+		go func() { s.publish(channel, s.commandReply(channel, cmd)) }()
 		return steeringResult{Outcome: SteeringAnswered}, true
 	}
 	dir, answer, ok := s.dialogReply(channel, eventID, text)

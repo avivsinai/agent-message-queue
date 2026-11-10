@@ -190,8 +190,13 @@ func (c *conn) read(in io.Reader) {
 			c.mu.Lock()
 			ch := c.pending[id]
 			c.mu.Unlock()
+			// The first response for an id answers the call; a duplicate is
+			// dropped, so it never blocks the reader.
 			if ch != nil {
-				ch <- reply{result: msg.Result, err: msg.Error}
+				select {
+				case ch <- reply{result: msg.Result, err: msg.Error}:
+				default:
+				}
 			}
 		}
 	}

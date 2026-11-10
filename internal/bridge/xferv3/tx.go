@@ -83,8 +83,14 @@ func readBundle(path string) (raw []byte, ok bool, err error) {
 	return raw, len(raw) <= maxBundleBytes, nil
 }
 
+// ConsumeTx removes a delivered item and the refusal note an earlier
+// round left beside it.
 func ConsumeTx(path string) error {
-	return os.Remove(path)
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	_ = os.Remove(path + ".no")
+	return nil
 }
 
 func VerifyAndConsume(path string, pub ed25519.PublicKey, receipt SignedReceipt, receiver, sender Host, id ID) error {

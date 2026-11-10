@@ -176,8 +176,8 @@ func (h *Host) writeLiveness(root *fsq.DeliveryRoot, live bool) error {
 		BridgeRevision:    bridgeRevision,
 		Agent:             h.agentName,
 	}
-	if sessionIDPattern.MatchString(h.sessionID) {
-		rec.SessionID = h.sessionID
+	if id := h.session(); sessionIDPattern.MatchString(id) {
+		rec.SessionID = id
 	}
 	data, err := json.Marshal(rec)
 	if err != nil {
@@ -509,7 +509,8 @@ func requestOutcome(res turnResult, exitStatus func() string) (bridgeEvent, erro
 // dialog cannot be opened, or it expires), so the caller applies its policy,
 // and cancelled=true when the turn is cancelled or ends meanwhile.
 func (h *Host) askOwner(turn *turnCollect, req permissionRequest) (chosen int, ok, cancelled bool) {
-	name, err := dialog.FindBinding(h.cfg.Root, h.cfg.Me, h.sessionID)
+	sessionID := h.session()
+	name, err := dialog.FindBinding(h.cfg.Root, h.cfg.Me, sessionID)
 	if err != nil || name == "" {
 		return 0, false, false
 	}
@@ -528,7 +529,7 @@ func (h *Host) askOwner(turn *turnCollect, req permissionRequest) (chosen int, o
 	r := dialog.Request{
 		ID:       dialog.NewID(),
 		Harness:  "acp",
-		Session:  h.sessionID,
+		Session:  sessionID,
 		Tool:     toolTitle(req.ToolCall),
 		Text:     cutUTF8(approvalPrompt(req.ToolCall), maxPrompt),
 		Options:  options,

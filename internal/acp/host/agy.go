@@ -224,7 +224,7 @@ func (s *agySession) ensure() error {
 	if id != s.id {
 		_, _ = fmt.Fprintf(s.h.cfg.Log, "amq-acp host: agy did not resume conversation %s; it runs as %s\n", s.id, id)
 		s.id = id
-		s.h.sessionID = id
+		s.h.setSession(id)
 		if err := s.h.recordSession(); err != nil {
 			return err
 		}

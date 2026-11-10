@@ -563,3 +563,25 @@ func TestReplayDeliversAndWaitsOnTheClaimedThread(t *testing.T) {
 		t.Fatalf("reply on the delivered thread: %q found=%v err=%v", got, found, err)
 	}
 }
+
+// A cockpit prompt with no Buzz event id carries no "nostr:" label
+// (audit 2026-11-10).
+func TestCockpitPromptWithoutEventIDHasNoNostrLabel(t *testing.T) {
+	root := canonicalTempDir(t)
+	for _, h := range []string{"buzz", "agent"} {
+		if err := fsq.EnsureAgentDirs(root, h); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d, err := DeliverCockpitPrompt(Config{Root: root, Me: "buzz", To: "agent"}, "build the thing", cockpitThread("s"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := format.ReadMessageFile(filepath.Join(fsq.AgentInboxNew(root, d.To), d.MessageID+".md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(msg.Header.Labels, ","); got != "acp,cockpit" {
+		t.Fatalf("labels = %q, want acp,cockpit", got)
+	}
+}

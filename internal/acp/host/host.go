@@ -89,7 +89,10 @@ type Host struct {
 	// statement of who decides tool calls; refusedNote (with %d) tells a
 	// peer how many tool calls of the turn were refused.
 	label, notice, refusedNote string
-	sessionID                  string
+	// sessionID is written only by the loop, under mu (setSession); the
+	// loop reads it bare, and every other goroutine reads it under mu
+	// (session).
+	sessionID string
 	// resumed is true when the session was loaded from session.json.
 	resumed   bool
 	agentName string
@@ -252,11 +255,26 @@ func (h *Host) handshake(ctx context.Context) error {
 		return err
 	}
 	h.agentName = h.sess.agentName()
-	h.sessionID, h.resumed = id, resumed
+	h.setSession(id)
+	h.resumed = resumed
 	if resumed {
 		return nil
 	}
 	return h.recordSession()
+}
+
+// session is the agent's current session id.
+func (h *Host) session() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.sessionID
+}
+
+// setSession records id as the agent's current session id.
+func (h *Host) setSession(id string) {
+	h.mu.Lock()
+	h.sessionID = id
+	h.mu.Unlock()
 }
 
 // recordSession writes h.sessionID to session.json for this agent and cwd.

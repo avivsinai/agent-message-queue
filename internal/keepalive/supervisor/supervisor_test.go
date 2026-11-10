@@ -106,32 +106,12 @@ func TestWrongExistingTargetFailsClosedInsteadOfMarkingActive(t *testing.T) {
 	}
 }
 
-func TestStartFreshStartsWithoutRepair(t *testing.T) {
-	now := fixedNow()
-	wake := &fakeWake{}
-
-	updated, result := testReconciler(wake, probeAdapter{}, now).StartFresh(context.Background(), testEntry())
-
-	if wake.repairCalls != 0 {
-		t.Fatalf("repairCalls = %d, want 0", wake.repairCalls)
-	}
-	if len(wake.starts) != 1 {
-		t.Fatalf("starts = %d, want 1", len(wake.starts))
-	}
-	if result.Action != ActionEnsured {
-		t.Fatalf("action = %q, want %q", result.Action, ActionEnsured)
-	}
-	if updated.State != registry.StateActive {
-		t.Fatalf("state = %q, want %q", updated.State, registry.StateActive)
-	}
-}
-
-func TestStartFreshDoesNotAcceptWakeStartFailureAsSuccess(t *testing.T) {
+func TestReconcileDoesNotAcceptWakeStartFailureAsSuccess(t *testing.T) {
 	now := fixedNow()
 	startErr := errors.New("wake already running for codex")
 	wake := &fakeWake{startErr: startErr}
 
-	updated, result := testReconciler(wake, probeAdapter{}, now).StartFresh(context.Background(), testEntry())
+	updated, result := testReconciler(wake, probeAdapter{}, now).Reconcile(context.Background(), testEntry())
 
 	if result.Action != ActionStartFailed {
 		t.Fatalf("action = %q, want %q", result.Action, ActionStartFailed)

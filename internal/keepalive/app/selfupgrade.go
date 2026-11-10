@@ -34,7 +34,6 @@ const (
 var (
 	errSelfUpgradeAttemptTimestampUncertain = errors.New("replacement attempt timestamp is uncertain")
 	errSelfUpgradeNoMatchingAttempt         = errors.New("no matching self-upgrade attempt")
-	errSelfUpgradeAttemptSettled            = errors.New("replacement attempt is already settled")
 	errSelfUpgradeCandidateRefused          = errors.New("candidate is already refused")
 )
 
@@ -767,10 +766,6 @@ func (controller *selfUpgradeController) maintain(ctx context.Context) error {
 		controller.lastObservation = nil
 		if errors.Is(err, errSelfUpgradeCandidateRefused) {
 			controller.lastObservation = controller.observe(candidate, selfUpgradeActionRefused)
-			return nil
-		}
-		if errors.Is(err, errSelfUpgradeAttemptSettled) {
-			controller.lastObservation = controller.observe(candidate, selfUpgradeActionUnchanged)
 			return nil
 		}
 		if errors.Is(err, errSelfUpgradeAttemptTimestampUncertain) {

@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -274,13 +275,22 @@ var errMachineStopped = errors.New("the machine agent's worker stopped")
 // stopped reports whether the machine worker is stopping: no new step and no
 // new record starts then.
 func (s *Server) stopped() bool {
-	return s.machine.ctx != nil && s.machine.ctx.Err() != nil
+	ctx := s.machineCtx()
+	return ctx != nil && ctx.Err() != nil
+}
+
+// machineCtx is the machine worker's context, nil before its first tick.
+func (s *Server) machineCtx() context.Context {
+	if ctx := s.machine.ctx.Load(); ctx != nil {
+		return *ctx
+	}
+	return nil
 }
 
 // call runs one buzz command for the machine lifecycle. A call cut off by
 // the worker's stop fails like a timeout: its outcome is unknown.
 func (s *Server) call(args ...string) ([]byte, error) {
-	ctx := s.machine.ctx
+	ctx := s.machineCtx()
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -297,7 +307,7 @@ func (s *Server) call(args ...string) ([]byte, error) {
 // Claude settings files, and every lateReplyInterval works through the
 // retired store.
 func (s *Server) machineTick(ctx context.Context, now time.Time) {
-	s.machine.ctx = ctx
+	s.machine.ctx.Store(&ctx)
 	// A daemon seen gone counts only on consecutive ticks that judge it,
 	// and no daemon answer outlives the tick that asked it.
 	gone := s.machine.goneDaemons
@@ -341,9 +351,10 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) {
 }
 
 // machineState is the machine worker's own state: its context, pacing,
-// and the settings files it watches (machine_hooks.go).
+// and the settings files it watches (machine_hooks.go). The context is
+// read from other goroutines (a steered command's wait), so it is atomic.
 type machineState struct {
-	ctx                    context.Context
+	ctx                    atomic.Pointer[context.Context]
 	marked, swept, rebound string
 	settings               map[string]settingsSeen
 	// goneDaemons is each binding name whose recorded app-server daemon the

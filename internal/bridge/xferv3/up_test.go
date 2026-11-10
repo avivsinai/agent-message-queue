@@ -126,3 +126,41 @@ func TestLaunchdPlistNamesBridgeUp(t *testing.T) {
 		t.Fatalf("plist = %s", text)
 	}
 }
+
+// A consumed or discarded item leaves no refusal note and no backoff file
+// behind (audit 2026-11-10).
+func TestSettledItemLeavesNoRefusalOrBackoff(t *testing.T) {
+	mac := newPeerHost(t, "mac", "codex", bytes.Repeat([]byte{0x51}, 32))
+	box := newPeerHost(t, "box", "grok", bytes.Repeat([]byte{0x52}, 32))
+	pinPeers(t, &mac, &box)
+	for _, name := range []string{"consume-me", "discard-me"} {
+		idText := writeOwed(t, mac, box, name, "body of "+name)
+		id, err := ParseID(idText)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(mac.root, "bridge", "tx", "box", idText)
+		if err := os.WriteFile(path+".no", []byte("refused"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := SetBackoff(mac.root, box.host, id, ReasonBusy, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		if name == "consume-me" {
+			err = ConsumeTx(path)
+		} else {
+			err = Discard(mac.root, box.host, id)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(path + ".no"); !os.IsNotExist(err) {
+			t.Fatalf("%s: refusal note remains: %v", name, err)
+		}
+		if name == "discard-me" {
+			if _, err := os.Stat(backoffPath(mac.root, box.host, id)); !os.IsNotExist(err) {
+				t.Fatalf("%s: backoff file remains: %v", name, err)
+			}
+		}
+	}
+}
