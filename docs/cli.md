@@ -526,7 +526,7 @@ Options:
   -tmp-older-than string
         Duration (e.g. 36h)
   -wake-quarantine-older-than string
-        Remove preserved wake quarantine artifacts older than this duration
+        Remove preserved wake quarantine artifacts and stopped wakes' reload sockets (.wr.*) older than this duration
   -yes
         Skip confirmation prompt
 ```
