@@ -1369,7 +1369,10 @@ func (r *recordingRetirer) RetireWake(context.Context, amq.RetireWakeRequest) (a
 func TestRegisterUsesEnvBaseRootAndSessionIndependently(t *testing.T) {
 	dir := t.TempDir()
 	envBase := filepath.Join(dir, ".agent-mail")
-	expectedRoot := filepath.Join(envBase, "session")
+	expectedRoot, err := registry.CanonicalRoot(filepath.Join(envBase, "session"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	target := filepath.Join(dir, "target")
 	if err := os.WriteFile(target, nil, 0o600); err != nil {
 		t.Fatal(err)
