@@ -154,6 +154,13 @@ func (w *retainedWakeInboxKqueueWatcher) run() {
 	defer close(w.errors)
 	eventName := filepath.Join(w.authority.inboxPath, "retained-inbox-event.md")
 	for {
+		// Close closes the kqueue descriptor after closing; never call kevent
+		// on it again once closing is signalled.
+		select {
+		case <-w.closing:
+			return
+		default:
+		}
 		events := make([]unix.Kevent_t, 2)
 		count, err := waitRetainedWakeInboxEvent(w.kqueueFD, events)
 		if err != nil {
