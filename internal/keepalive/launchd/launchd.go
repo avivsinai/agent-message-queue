@@ -522,7 +522,7 @@ const launchctlNotFound = 113
 func serviceLoaded(ctx context.Context, label string) bool {
 	var exit *exec.ExitError
 	err := runLaunchctl(ctx, "print", ServiceTarget(label))
-	return !(errors.As(err, &exit) && exit.ExitCode() == launchctlNotFound)
+	return !errors.As(err, &exit) || exit.ExitCode() != launchctlNotFound
 }
 
 func runLaunchctl(ctx context.Context, args ...string) error {
