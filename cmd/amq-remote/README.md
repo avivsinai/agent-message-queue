@@ -601,9 +601,11 @@ accepts a bare request id that is still in the sender spool.
 ### `requests release`
 
 An `uncertain` request keeps its target busy: every new submit to that
-target is refused `busy` (exit 6), also after a restart, because a frame
-that never showed in the session can still arrive and must not mix with a
-newer run. `cancel` cannot end it when the harness has no interrupt.
+target is refused `busy` (exit 6), also after a restart. A Claude Code
+request becomes `uncertain` (code `attachment_lost`) when no turn of it
+started within its window: its frame never showed in the session, or the
+session showed it and then moved on, for example to a new prompt or
+`/clear`. Either can still run later and must not mix with a newer run. `cancel` cannot end it when the harness has no interrupt.
 `requests release REQUEST_REF` is the owner's way out on this machine. It
 ends the record `failed` with code `released_by_owner`, and the target
 admits new work again. It stops nothing in the session: before it acts it

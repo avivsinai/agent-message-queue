@@ -68,8 +68,8 @@ type runRecord struct {
 	// after turnEndTS belongs to this run.
 	turnEnded bool
 	turnEndTS int64
-	// notAfter is the request's admission window. A delivery entry not seen
-	// by then leaves the run's admission unknown.
+	// notAfter is the request's admission window. A turn not started by
+	// then leaves the run's admission unknown.
 	notAfter time.Time
 	// lastText is the newest non-empty assistant text of this run's turn,
 	// or the final text its Stop marker carried; lastCut marks it cut.
@@ -305,10 +305,11 @@ func (a *Attachment) Lookup(key requests.Key, _ string) (core.Evidence, error) {
 	a.mu.Lock()
 	if rec, ok := a.runs[key]; ok {
 		ev := evidenceFor(rec)
-		if undelivered(rec, a.now()) {
-			// The frame was written, but the session showed no delivery
-			// within the window: whether it ran is unknown. The run is
-			// kept, so a late delivery still confirms it.
+		if unstarted(rec, a.now()) {
+			// The frame was written, but no turn of it started within the
+			// window: the session showed no delivery, or showed it and then
+			// moved on. Whether it runs is unknown. The run is kept, so a
+			// late delivery or turn still confirms it.
 			ev = core.Evidence{Known: true, Class: core.EvidenceUnknown, RunID: rec.msgID}
 		}
 		a.mu.Unlock()
@@ -328,11 +329,16 @@ func (a *Attachment) Lookup(key requests.Key, _ string) (core.Evidence, error) {
 	return a.recoverRun(key), nil
 }
 
-// undelivered reports a run whose delivery entry was not seen before its
-// admission window closed.
-func undelivered(rec *runRecord, now time.Time) bool {
-	return !rec.submitted && !rec.admitted && !rec.terminal && !rec.notAfter.IsZero() && !now.Before(rec.notAfter)
+// unstarted reports a run whose turn did not start before its admission
+// window closed, whether or not its delivery entry was seen.
+func unstarted(rec *runRecord, now time.Time) bool {
+	return !rec.admitted && !rec.terminal && !rec.notAfter.IsZero() && !now.Before(rec.notAfter)
 }
+
+// recoveredStartWindow is how long a run rebuilt from its delivery entry
+// after a restart may take to start its turn. It matches the default
+// admission window a submit carries.
+const recoveredStartWindow = 2 * time.Minute
 
 // kickConfirmations starts the transcript confirmation poller if it is not
 // running. The poller is NOT on the request path (no child process either):
@@ -873,6 +879,7 @@ func (a *Attachment) recoverRun(key requests.Key) core.Evidence {
 		submitted: true,
 		userTS:    ts,
 		fromOff:   off,
+		notAfter:  a.now().Add(recoveredStartWindow),
 		createdAt: a.now(),
 	}
 	a.runs[key] = rec

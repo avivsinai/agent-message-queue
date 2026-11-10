@@ -508,3 +508,34 @@ func TestReleaseRefusesARunningRecord(t *testing.T) {
 		t.Fatalf("record after the refused release = %s rev %d, want running rev %d", rec.State, rec.Revision, rep.Snapshot.Revision)
 	}
 }
+
+// A frame the session showed but never started a turn for (a new prompt or
+// /clear came first) left its record running and the target busy for good.
+// Past its window it reads uncertain, and a release disowns it so a turn of
+// it that starts later completes nothing (audit 2026-11-10).
+func TestReleaseCoversADeliveredFrameWhoseTurnNeverStarted(t *testing.T) {
+	ep, store, att, ft, skew := releaseFixture(t)
+	old := releaseSubmit(t, ep, "88888888-8888-4888-8888-888888888888", time.Minute)
+	oldKey := requests.Key{CreatorHost: core.LocalHost, TargetID: "cc-1", RequestID: old.Snapshot.RequestID}
+	appendTranscript(t, ft.home, deliveredLine(t, frameMsgID(oldKey), frameEnvelope(t, ft)))
+	att.pollConfirmations()
+	skew.Store(int64(2 * time.Minute))
+	if err := ep.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	if rec, _, _ := store.Get(oldKey); rec.State != protocol.StateUncertain {
+		t.Fatalf("delivered record with no turn past its window = %s, want uncertain", rec.State)
+	}
+	if rep, err := ep.Release(old.Snapshot.RequestRef); err != nil || rep.Snapshot.Code != protocol.CodeReleasedByOwner {
+		t.Fatalf("release = %+v, %v; want failed released_by_owner", rep.Snapshot, err)
+	}
+	appendTranscript(t, ft.home, transcriptLine(t, "assistant", "late turn"))
+	appendStopMarker(t, ft.home, att.now().UnixMilli()+1)
+	att.pollConfirmations()
+	if err := ep.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	if rec, _, _ := store.Get(oldKey); rec.State != protocol.StateFailed || rec.Result != nil {
+		t.Fatalf("released record after its late turn = %s result=%+v, want failed with no result", rec.State, rec.Result)
+	}
+}
