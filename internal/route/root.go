@@ -56,7 +56,8 @@ func ResolveCreateRoot(raw string) string {
 }
 
 // FindRootInParents finds relative below startDir or its nearest eligible
-// ancestor.
+// ancestor. Outside Git the walk stops before the home directory, as every
+// other cwd-ancestor walk does.
 func (w Walker) FindRootInParents(startDir, relative string) (string, bool) {
 	ceiling := ""
 	if top, insideGit := w.GitBoundary(startDir); insideGit {
@@ -66,7 +67,7 @@ func (w Walker) FindRootInParents(startDir, relative string) (string, bool) {
 		}
 	}
 	dir := startDir
-	for !w.StopsAt(dir) {
+	for w.Inspects(dir, ceiling) {
 		candidate := filepath.Join(dir, relative)
 		if dirExists(candidate) {
 			return absPath(candidate), true
