@@ -36,8 +36,8 @@ implementation that the build can call:
 
 | Build platform | Advertised launch features |
 | --- | --- |
-| macOS, Linux (including WSL) | The full set: `launch_intent_v1`, `prepare_apply_v1`, `lifecycle_v1`, `managed_tmux_v1`, `plan_only_commands_v1`, `initial_input`, `placement`, `base_root`, `on_live`, `caller_context`, `executable_identity`, `wrapper`, and `amq_executable`. |
-| Native Windows | `launch_intent_v1` and `plan_only_commands_v1` only. Negotiation rejects `prepare_apply_v1`, `lifecycle_v1`, and `managed_tmux_v1`. |
+| macOS, Linux (including WSL) | The full set: `launch_intent_v1`, `prepare_apply_v1`, `managed_tmux_v1`, `plan_only_commands_v1`, `initial_input`, `placement`, `base_root`, `on_live`, `caller_context`, `executable_identity`, `wrapper`, and `amq_executable`. |
+| Native Windows | `launch_intent_v1` and `plan_only_commands_v1` only. Negotiation rejects `prepare_apply_v1` and `managed_tmux_v1`. |
 
 WSL uses the Linux binary and gets the Linux row. Negotiation fails closed for
 a feature that is not in the current build's advertised set.
@@ -370,8 +370,7 @@ tmux omitted-placement session. Hostile live resources refuse even with
 - NUL, invalid UTF-8, and duplicate JSON keys are rejected.
 - Canonical key ordering enters subject schema 2 and immutable evidence,
   never the plan or trust digest.
-- Apply echoes the request map. Inspect, Focus, and Close load it from the
-  proven-owned binding; a lifecycle request cannot replace it.
+- Apply echoes the request map.
 
 `amq_executable` names the AMQ binary that managed panes run as
 `<amq_executable> coop exec ...` and that the Codex notify hook calls. A
@@ -437,7 +436,7 @@ stale-conversation, rebind, or degraded-capability decisions for the caller.
 
 ### Results
 
-Apply and lifecycle results carry a typed mutation disposition
+Apply results carry a typed mutation disposition
 (`not_applied`, `committed`, or `uncertain`) and, after a launch commit, its
 binding generation. These fields describe the launch backend binding only, not
 session or roster durability. A post-commit failure is an action-required

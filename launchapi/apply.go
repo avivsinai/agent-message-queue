@@ -82,3 +82,11 @@ func fromInternalApplyResult(result internallaunch.ApplyResult) ApplyResultV1 {
 	}
 	return public
 }
+
+func fromInternalEvidenceRef(evidence internallaunch.EvidenceRef) EvidenceRefV1 {
+	return EvidenceRefV1{
+		EvidenceVersion: evidence.EvidenceVersion, ID: evidence.ID, Kind: string(evidence.Kind),
+		SHA256: evidence.SHA256, ObservedAt: evidence.ObservedAt,
+		CallerContext: cloneStringMap(evidence.CallerContext),
+	}
+}

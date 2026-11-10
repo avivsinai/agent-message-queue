@@ -214,34 +214,6 @@ func (request ApplyRequestV1) Validate() error {
 	return nil
 }
 
-func DecodeInspectRequestV1(data []byte) (InspectRequestV1, error) {
-	var request InspectRequestV1
-	if err := decodeStrictJSON(data, &request); err != nil {
-		return InspectRequestV1{}, fmt.Errorf("decode inspect request v1: %w", err)
-	}
-	if err := request.validate(); err != nil {
-		return InspectRequestV1{}, err
-	}
-	return request, nil
-}
-
-func DecodeFocusRequestV1(data []byte) (FocusRequestV1, error) {
-	request, err := DecodeInspectRequestV1(data)
-	return FocusRequestV1(request), err
-}
-
-func DecodeCloseRequestV1(data []byte) (CloseRequestV1, error) {
-	request, err := DecodeInspectRequestV1(data)
-	return CloseRequestV1(request), err
-}
-
-func (request InspectRequestV1) validate() error {
-	if request.RequestVersion != RequestVersionV1 {
-		return fmt.Errorf("unsupported lifecycle request version %d", request.RequestVersion)
-	}
-	return request.Target.validate()
-}
-
 func (target TargetV1) validate() error {
 	if !cleanAbsolutePath(target.ProjectRoot) {
 		return fmt.Errorf("target project_root must be a clean absolute path")
