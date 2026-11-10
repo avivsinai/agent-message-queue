@@ -299,11 +299,12 @@ func lookupInBox(root *fsq.DeliveryRoot, agent, box, filename string) (present b
 // OriginalFile equals the transfer filename and whose ORIGINAL body bytes
 // (returned by ReadDLQEnvelope — never the wrapper) hash to wantDigest. It
 // also reports the root-relative path of the matching DLQ envelope (the
-// delivery carrier for an evidence promotion).
+// delivery carrier for an evidence promotion), and whether any envelope
+// wraps an original of that name whatever its digest (occupied).
 // DLQ delivery creates a new id/filename and wraps the original bytes
 // (internal/fsq/dlq.go moveInboxMessageToDLQ), so the transfer filename is
 // never the DLQ filename.
-func scanDLQForOriginalPath(root *fsq.DeliveryRoot, agent, filename, wantDigest string) (found bool, path string, evidenceErr bool) {
+func scanDLQForOriginalPath(root *fsq.DeliveryRoot, agent, filename, wantDigest string) (found bool, path string, occupied bool, evidenceErr bool) {
 	for _, box := range []string{"new", "cur"} {
 		dir := filepath.Join("agents", agent, "dlq", box)
 		entries, err := root.ReadDir(dir)
@@ -311,7 +312,7 @@ func scanDLQForOriginalPath(root *fsq.DeliveryRoot, agent, filename, wantDigest 
 			continue
 		}
 		if err != nil {
-			return false, "", true
+			return false, "", false, true
 		}
 		for _, entry := range entries {
 			if entry.IsDir() {
@@ -322,68 +323,18 @@ func scanDLQForOriginalPath(root *fsq.DeliveryRoot, agent, filename, wantDigest 
 			if err != nil {
 				// One unreadable DLQ envelope is not proof of absence;
 				// treat as evidence failure and fail closed.
-				return false, "", true
+				return false, "", false, true
 			}
 			if envelope.OriginalFile != filename {
 				continue
 			}
+			occupied = true
 			if Digest(original) == wantDigest {
-				return true, path, false
+				return true, path, true, false
 			}
 		}
 	}
-	return false, "", false
-}
-
-// scanDLQForOriginalFile reports whether any DLQ envelope wraps an original
-// named filename, regardless of content digest (the digest-agnostic twin of
-// scanDLQForOriginal, used to detect that a transfer key's filename slot is
-// occupied by SOME payload before binding a fresh arrival).
-func scanDLQForOriginalFile(root *fsq.DeliveryRoot, agent, filename string) (found bool, evidenceErr bool) {
-	for _, box := range []string{"new", "cur"} {
-		dir := filepath.Join("agents", agent, "dlq", box)
-		entries, err := root.ReadDir(dir)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return false, true
-		}
-		for _, entry := range entries {
-			if entry.IsDir() {
-				continue
-			}
-			envelope, _, err := fsq.ReadDLQEnvelope(root, filepath.Join(dir, entry.Name()))
-			if err != nil {
-				return false, true
-			}
-			if envelope.OriginalFile == filename {
-				return true, false
-			}
-		}
-	}
-	return false, false
-}
-
-// filenameSlotOccupied reports whether the deterministic transfer filename
-// is currently retained anywhere in the publication surface — inbox/new,
-// inbox/cur, or as a DLQ original — regardless of which payload's bytes it
-// holds. Digest-specific delivery proof is publicationEvidence's job; this
-// occupancy check is what keeps a fresh arrival from binding a key whose
-// filename slot already belongs to a different (possibly pre-ledger)
-// payload.
-func filenameSlotOccupied(root *fsq.DeliveryRoot, localAgent, sourceHost, transferID string) (occupied bool, evidenceErr bool) {
-	filename := TransferFilename(sourceHost, transferID)
-	for _, box := range []string{"new", "cur"} {
-		present, errFlag := lookupInBox(root, localAgent, box, filename)
-		if errFlag {
-			return false, true
-		}
-		if present {
-			return true, false
-		}
-	}
-	return scanDLQForOriginalFile(root, localAgent, filename)
+	return false, "", occupied, false
 }
 
 // publicationEvidencePath checks durable publication evidence independent
@@ -401,34 +352,46 @@ func filenameSlotOccupied(root *fsq.DeliveryRoot, localAgent, sourceHost, transf
 // its receipt) can name the retained delivery (evidence-promoted
 // commits must not lose committed_path).
 func publicationEvidencePath(root *fsq.DeliveryRoot, localAgent, sourceHost, transferID, wantDigest string) (found bool, path string, evidenceErr bool) {
+	found, path, _, evidenceErr = publicationEvidence(root, localAgent, sourceHost, transferID, wantDigest)
+	return found, path, evidenceErr
+}
+
+// publicationEvidence is publicationEvidencePath that also reports, from the
+// same scan, whether the deterministic transfer filename is retained
+// anywhere in the publication surface (inbox/new, inbox/cur, or as a DLQ
+// original) regardless of which payload's bytes it holds. That occupancy is
+// what keeps a fresh arrival from binding a key whose filename slot already
+// belongs to a different (possibly pre-ledger) payload.
+func publicationEvidence(root *fsq.DeliveryRoot, localAgent, sourceHost, transferID, wantDigest string) (found bool, path string, occupied bool, evidenceErr bool) {
 	filename := TransferFilename(sourceHost, transferID)
 	for _, box := range []string{"new", "cur"} {
 		rel := filepath.Join("agents", localAgent, "inbox", box, filename)
 		present, errFlag := lookupInBox(root, localAgent, box, filename)
 		if errFlag {
-			return false, "", true
+			return false, "", false, true
 		}
 		if present {
+			occupied = true
 			// The retained artifact is the delivery evidence. Its bytes were
 			// verified digest-matching at apply time; a present same-name
 			// artifact with unknown bytes cannot be distinguished here, so
 			// read and compare to fail closed rather than trust the name.
 			data, err := root.ReadRegularNoFollow(rel)
 			if err != nil {
-				return false, "", true
+				return false, "", false, true
 			}
 			if Digest(data) == wantDigest {
-				return true, rel, false
+				return true, rel, true, false
 			}
 			// Same name, different bytes: not evidence of THIS transfer.
 			continue
 		}
 	}
-	found, dlqPath, errFlag := scanDLQForOriginalPath(root, localAgent, filename, wantDigest)
+	found, dlqPath, dlqOccupied, errFlag := scanDLQForOriginalPath(root, localAgent, filename, wantDigest)
 	if errFlag {
-		return false, "", true
+		return false, "", false, true
 	}
-	return found, dlqPath, false
+	return found, dlqPath, occupied || dlqOccupied, false
 }
 
 // promoteViaEvidence is the single shared evidence-promotion path: every
@@ -618,7 +581,7 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 			// before applying: without this, a replay of a drained pre-ledger
 			// transfer re-applies (duplicate), and a conflicting first arrival
 			// would bind the key away from the legitimate winner's evidence.
-			found, evidencePath, evidenceErr := publicationEvidencePath(root, localAgent, env.SourceHost, env.TransferID, env.PayloadSHA256)
+			found, evidencePath, occupied, evidenceErr := publicationEvidence(root, localAgent, env.SourceHost, env.TransferID, env.PayloadSHA256)
 			if evidenceErr {
 				outcome = ApplyOutcome{
 					State:    LedgerUncertain,
@@ -644,14 +607,6 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 			// losing copy unambiguously without binding it, applying it, or
 			// touching the winner's evidence. The key stays unbound so the
 			// legitimate payload's own replay still recovers.
-			occupied, occErr := filenameSlotOccupied(root, localAgent, env.SourceHost, env.TransferID)
-			if occErr {
-				outcome = ApplyOutcome{
-					State:    LedgerUncertain,
-					Evidence: "publication evidence unreadable",
-				}
-				return nil
-			}
 			if occupied {
 				outcome = ApplyOutcome{
 					State:    LedgerRejected,
