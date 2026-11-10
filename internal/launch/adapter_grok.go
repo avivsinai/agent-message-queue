@@ -23,10 +23,6 @@ func NewGrokAdapter(executable string) *GrokAdapter {
 func (adapter *GrokAdapter) Name() string      { return GrokProvider }
 func (adapter *GrokAdapter) Mode() AdapterMode { return AdapterModeMint }
 
-func (adapter *GrokAdapter) CommittedEnvKeys() []string {
-	return committedEnvKeys(grokEnvRules())
-}
-
 func (adapter *GrokAdapter) ValidateCommittedConfig(request CommittedConfigRequest) error {
 	if err := validateCommittedConfig(request, grokEnvRules(), grokArgRules()); err != nil {
 		return err

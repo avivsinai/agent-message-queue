@@ -3,7 +3,6 @@ package launch
 import (
 	"fmt"
 	"regexp"
-	"slices"
 )
 
 type valueRule func(string) bool
@@ -34,13 +33,4 @@ func validateCommittedEnv(overlay map[string]string, rules map[string]valueRule)
 		}
 	}
 	return nil
-}
-
-func committedEnvKeys(rules map[string]valueRule) []string {
-	keys := make([]string, 0, len(rules))
-	for key := range rules {
-		keys = append(keys, key)
-	}
-	slices.Sort(keys)
-	return keys
 }

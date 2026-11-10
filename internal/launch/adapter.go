@@ -63,7 +63,6 @@ func HarnessForProvider(provider string) string {
 type HarnessAdapter interface {
 	Name() string
 	Mode() AdapterMode
-	CommittedEnvKeys() []string
 	Capabilities(context.Context) AdapterCapabilities
 	PlanFresh(PlanRequest) (AgentPlan, error)
 	PlanResume(ResumeRequest) (AgentPlan, error)

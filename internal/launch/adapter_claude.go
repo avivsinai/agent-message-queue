@@ -18,10 +18,6 @@ func NewClaudeAdapter(executable string) *ClaudeAdapter {
 func (adapter *ClaudeAdapter) Name() string      { return ClaudeProvider }
 func (adapter *ClaudeAdapter) Mode() AdapterMode { return AdapterModeMint }
 
-func (adapter *ClaudeAdapter) CommittedEnvKeys() []string {
-	return committedEnvKeys(claudeEnvRules())
-}
-
 func (adapter *ClaudeAdapter) ValidateCommittedConfig(request CommittedConfigRequest) error {
 	return validateCommittedConfig(request, claudeEnvRules(), claudeArgRules())
 }

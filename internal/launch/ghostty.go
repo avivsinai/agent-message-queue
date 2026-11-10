@@ -302,7 +302,7 @@ func (b *GhosttyBackend) Reclaim(req ReclaimRequest) (ReclaimResult, error) {
 	}
 	if req.Journal.RootPhysical != "" {
 		physical, physicalErr := fsq.StableTreeIdentityInfo(req.Root.FileInfo())
-		if physicalErr != nil || physical != req.Journal.RootPhysical {
+		if physicalErr != nil || !fsq.SamePersistedTreeIdentity(req.Journal.RootPhysical, physical) {
 			return ReclaimResult{Status: ReclaimForeign, Evidence: "journal session root identity changed"}, nil
 		}
 	}
@@ -818,17 +818,7 @@ func supportedGhosttyVersion(raw string) bool {
 	}
 	major, _ := strconv.Atoi(match[1])
 	minor, _ := strconv.Atoi(match[2])
-	patch := 0
-	if match[3] != "" {
-		patch, _ = strconv.Atoi(match[3])
-	}
-	if major != 1 || minor < 3 {
-		return false
-	}
-	if minor == 3 && patch < 0 {
-		return false
-	}
-	return true
+	return major == 1 && minor >= 3
 }
 
 func splitGhosttyIDs(raw string) []string {

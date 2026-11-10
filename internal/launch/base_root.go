@@ -92,7 +92,7 @@ func openExplicitBaseAuthority(projectRoot *fsq.DeliveryRoot, target PrepareTarg
 		if configured != nil && configured != parentRoot && configured != baseRoot {
 			_ = configured.Close()
 		}
-		if parentRoot != nil && parentRoot != configured {
+		if parentRoot != nil {
 			_ = parentRoot.Close()
 		}
 		return nil, nil, fmt.Errorf("%s: open base authority: %w", baseRootRelationInvalid, err)

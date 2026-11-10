@@ -84,10 +84,6 @@ func NewCodexAdapter(executable string) *CodexAdapter {
 func (adapter *CodexAdapter) Name() string      { return CodexProvider }
 func (adapter *CodexAdapter) Mode() AdapterMode { return AdapterModeCapture }
 
-func (adapter *CodexAdapter) CommittedEnvKeys() []string {
-	return committedEnvKeys(codexEnvRules())
-}
-
 func (adapter *CodexAdapter) ValidateCommittedConfig(request CommittedConfigRequest) error {
 	return validateCommittedConfig(request, codexEnvRules(), codexArgRules())
 }

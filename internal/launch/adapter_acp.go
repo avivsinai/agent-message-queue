@@ -44,10 +44,6 @@ func NewACPAdapter(amqExecutable string) *ACPAdapter {
 func (adapter *ACPAdapter) Name() string      { return ACPProvider }
 func (adapter *ACPAdapter) Mode() AdapterMode { return AdapterModeUnsupported }
 
-func (adapter *ACPAdapter) CommittedEnvKeys() []string {
-	return committedEnvKeys(commonCommittedEnvRules())
-}
-
 // ValidateCommittedConfig admits any agent argv, which the plan trust digest
 // binds byte for byte, and the common environment and cwd rules.
 func (adapter *ACPAdapter) ValidateCommittedConfig(request CommittedConfigRequest) error {

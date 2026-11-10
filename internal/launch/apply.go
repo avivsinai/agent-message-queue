@@ -329,12 +329,12 @@ func applyPreparedUnderAuthority(ctx context.Context, request ApplyRequest, depe
 			if lease != nil {
 				lease.abandonCapability()
 			}
-			return applyActionResult(prepared, "subject_changed"), nil
+			return classifyApplyMutation(applyActionResult(prepared, "subject_changed"), root), nil
 		}
 		return applyPostCommitFailure(applyResultFromPrepare(prepared), request, root, reconciled, "post_commit_prepare_failed", err), nil
 	}
 	if reconciled.AggregateCode == 0 && reconciled.Outcome != "" && reconciled.Outcome != OutcomeNoAction && !authorizedIdentitiesEqual(prepared, finalPrepared) {
-		return applyActionResult(finalPrepared, "subject_changed"), nil
+		return classifyApplyMutation(applyActionResult(finalPrepared, "subject_changed"), root), nil
 	}
 	result = applyResultFromPrepare(finalPrepared)
 	result.SubjectDigest = request.SubjectDigest

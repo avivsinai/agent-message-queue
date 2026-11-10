@@ -156,9 +156,8 @@ func (fixture internalPrepareFixture) dependencies(backend *prepareTestBackend) 
 
 type prepareTestAdapter struct{ provider string }
 
-func (adapter prepareTestAdapter) Name() string       { return adapter.provider }
-func (prepareTestAdapter) Mode() AdapterMode          { return AdapterModeMint }
-func (prepareTestAdapter) CommittedEnvKeys() []string { return nil }
+func (adapter prepareTestAdapter) Name() string { return adapter.provider }
+func (prepareTestAdapter) Mode() AdapterMode    { return AdapterModeMint }
 func (adapter prepareTestAdapter) Capabilities(context.Context) AdapterCapabilities {
 	return AdapterCapabilities{Provider: adapter.provider, Mode: adapter.Mode(), Available: true, ProviderVersion: "test", Fresh: true, Resume: true}
 }

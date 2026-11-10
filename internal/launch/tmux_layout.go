@@ -283,6 +283,9 @@ func (b *TmuxBackend) createNewWindowLayout(req CreateRequest, detect DetectResu
 			return CreateResult{}, fmt.Errorf("create tmux pane for %s: %w", agent.Handle, splitErr)
 		}
 		paneID = strings.TrimSpace(splitOut)
+		if !tmuxPaneID(paneID) {
+			return CreateResult{}, fmt.Errorf("tmux returned no pane identity for %s", agent.Handle)
+		}
 		if err := b.markPane(ctx, paneID, agent.Handle, agent.LaunchNonce); err != nil {
 			return CreateResult{}, err
 		}

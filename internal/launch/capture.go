@@ -38,7 +38,6 @@ const (
 	CaptureReasonEvidenceSource       CaptureReason = "evidence_source_unsupported"
 	CaptureReasonEvidenceUnverified   CaptureReason = "evidence_unverified"
 	CaptureReasonInvalidIdentity      CaptureReason = "invalid_conversation_identity"
-	CaptureReasonConversationActive   CaptureReason = "conversation_active_elsewhere"
 )
 
 type CaptureRequest struct {
@@ -58,7 +57,6 @@ type CaptureEvidence struct {
 	launchNonce     string
 	handle          string
 	conversationID  string
-	activeElsewhere bool
 	verified        bool
 	observedAt      time.Time
 	payload         []byte
@@ -328,9 +326,6 @@ func captureCodexIdentity(request CaptureRequest) CaptureResult {
 		}
 		if evidence.launchNonce != request.LaunchNonce {
 			return degradedCapture(CaptureStale, CaptureReasonLaunchNonceMismatch)
-		}
-		if evidence.activeElsewhere {
-			return degradedCapture(CaptureStale, CaptureReasonConversationActive)
 		}
 		if !validUUIDv7(evidence.conversationID) {
 			return degradedCapture(CaptureStale, CaptureReasonInvalidIdentity)

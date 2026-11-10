@@ -251,6 +251,12 @@ func TestGhosttyBackendLifecycleAndRecovery(t *testing.T) {
 	if !reflect.DeepEqual(reclaimed.Binding.Resources, created.Binding.Resources) {
 		t.Fatalf("Reclaim resources = %#v, want %#v", reclaimed.Binding.Resources, created.Binding.Resources)
 	}
+	// Reclaim accepts a journal written before a reboot renumbered the volume's device (audit 2026-11-10).
+	rebooted := journal
+	rebooted.RootPhysical = renumberedDevice(journal.RootPhysical)
+	if afterReboot, err := backend.Reclaim(ReclaimRequest{Context: context.Background(), Journal: rebooted, Root: root}); err != nil || afterReboot.Status != ReclaimAdoptable {
+		t.Fatalf("Reclaim after reboot = %#v, %v", afterReboot, err)
+	}
 
 	intent := journal
 	intent.Binding = nil
