@@ -17,19 +17,39 @@ import (
 // symlink and created 0700 when missing, so a planted link cannot redirect the
 // write; a directory it creates is synced into its parent. rel must be local.
 func WriteStateFile(root, rel string, data []byte, perm os.FileMode) (string, error) {
+	var path string
+	err := withStateDir(root, rel, func(r *DeliveryRoot, dir, name string) (err error) {
+		path, err = r.WriteFileAtomic(dir, name, data, perm)
+		return err
+	})
+	return path, err
+}
+
+// WriteStateFileUnsynced is WriteStateFile for a file whose loss its reader
+// tolerates: the rename keeps every read whole, but the file is not synced,
+// so an OS crash may leave the previous content, an empty file or none.
+func WriteStateFileUnsynced(root, rel string, data []byte, perm os.FileMode) error {
+	return withStateDir(root, rel, func(r *DeliveryRoot, dir, name string) error {
+		return r.WriteHeartbeatFile(dir, name, data, perm)
+	})
+}
+
+// withStateDir opens root, creates the directories of rel below it without
+// following a symlink, and calls write with the directory and file name.
+func withStateDir(root, rel string, write func(r *DeliveryRoot, dir, name string) error) error {
 	if !filepath.IsLocal(rel) {
-		return "", fmt.Errorf("state file %q is not a local path below %s", rel, root)
+		return fmt.Errorf("state file %q is not a local path below %s", rel, root)
 	}
 	if err := os.MkdirAll(root, 0o700); err != nil {
-		return "", err
+		return err
 	}
 	identity, err := SnapshotDeliveryRoot(root)
 	if err != nil {
-		return "", err
+		return err
 	}
 	r, err := OpenDeliveryRoot(root, identity)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer func() { _ = r.Close() }()
 	dir, name := filepath.Split(rel)
@@ -37,9 +57,9 @@ func WriteStateFile(root, rel string, data []byte, perm os.FileMode) (string, er
 	// The no-follow walk is the guard: WriteFileAtomic's own MkdirAll
 	// follows links that stay inside the root.
 	if err := r.mkdirAllNoFollow(dir); err != nil {
-		return "", err
+		return err
 	}
-	return r.WriteFileAtomic(dir, name, data, perm)
+	return write(r, dir, name)
 }
 
 // mkdirAllNoFollow creates each missing component of the root-relative dir at

@@ -199,7 +199,7 @@ func TestMirrorTickShowsARunningTurnLive(t *testing.T) {
 		saved, _, _ := readMirrorFile(dir)
 		s.mirrorBinding(target, b, now.Add(time.Duration(step.after)*time.Second), false)
 		if step.crash {
-			if err := writeMirrorFile(dir, saved); err != nil {
+			if err := writeMirrorFile(dir, &saved); err != nil {
 				t.Fatal(err)
 			}
 		}
