@@ -1096,3 +1096,22 @@ func TestAgyHostCountsOnlyNewDenialsPerTurn(t *testing.T) {
 		t.Fatalf("second reply=%q; want no note for a denial already reported", second)
 	}
 }
+
+// A duplicate response for one call id never blocks the connection's reader
+// (audit 2026-11-10).
+func TestDuplicateResponseDoesNotBlockReader(t *testing.T) {
+	pr, pw := io.Pipe()
+	c := newConn(pr, io.Discard, func(string, json.RawMessage) func() (any, *rpcError) { return nil }, func(string, json.RawMessage) {})
+	c.mu.Lock()
+	c.pending[1] = make(chan reply, 1)
+	c.mu.Unlock()
+	go func() {
+		_, _ = io.WriteString(pw, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n")
+		_ = pw.Close()
+	}()
+	select {
+	case <-c.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the reader blocked on a duplicate response")
+	}
+}

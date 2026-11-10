@@ -58,7 +58,7 @@ func runLaunchEngine(args []string, options launchCLIOptions) error {
 	rebindFlag := fs.Bool("rebind", false, "Confirm a deliberate launcher binding change")
 	requireAgentFlag := fs.Bool("require-agent", false, "Require at least one agent to launch or attach")
 	planFlag := fs.String("plan", "", "Public LaunchIntentV1 file, or - for stdin")
-	prepareFlag := fs.Bool("prepare", false, "Prepare the public launch intent without mutation (requires --plan and --json)")
+	prepareFlag := fs.Bool("prepare", false, "Prepare the public launch intent without mutation (requires --plan or --request, and --json)")
 	applyFlag := fs.String("apply", "", "Public ApplyRequestV1 file, or - for stdin (requires --json)")
 	placementFlag := fs.String("placement", "", "Public PlacementV1 JSON object (with --plan)")
 	requestFlag := fs.String("request", "", "Public PrepareRequestV1 file, or - for stdin (requires --json)")

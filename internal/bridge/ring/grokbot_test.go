@@ -125,3 +125,14 @@ func writeKeyFile(t *testing.T, fields map[string]string) string {
 	}
 	return path
 }
+
+// A ring key file never sends its key over cleartext http to a non-loopback
+// host (audit 2026-11-10).
+func TestRingWebhookURLRefusesCleartextToRemoteHost(t *testing.T) {
+	if _, err := parseWebhookURL("http://ring.example.com/hook"); err == nil {
+		t.Fatal("http to a remote host was accepted")
+	}
+	if _, err := parseWebhookURL("http://127.0.0.1:8080/hook"); err != nil {
+		t.Fatalf("http to loopback: %v", err)
+	}
+}

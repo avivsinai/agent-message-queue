@@ -41,4 +41,14 @@ if ! grep -q "Running pre-push checks" "$HOOK"; then
   exit 1
 fi
 
+# A linked worktree has no hooks directory of its own; git reads the shared one.
+git -C "$REPO" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m init
+git -C "$REPO" worktree add -q --detach "$WORK/linked"
+mv "$HOOK" "$HOOK.old"
+(cd "$WORK/linked" && sh "$ROOT/scripts/install-hooks.sh" >/dev/null)
+if ! grep -q "Running pre-push checks" "$HOOK"; then
+  echo "FAIL: install from a linked worktree did not install the hook"
+  exit 1
+fi
+
 echo "install-hooks keeps a foreign pre-push hook"

@@ -208,9 +208,41 @@ func TestSubcommandHelpListsFlags(t *testing.T) {
 		{[]string{"link", "tools", "--help"}, "-link"},
 		{[]string{"link", "status", "--help"}, "-root"},
 		{[]string{"mcp", "--help"}, "-link"},
+		// The usage line names the command, not the wire op (audit 2026-11-10).
+		{[]string{"sessions", "--help"}, "Usage: amq-remote sessions [flags]"},
+		{[]string{"inspect", "--help"}, "Usage: amq-remote inspect [flags]"},
 	} {
 		if code, _, stderr := cli(t, "", tc.args...); code != 0 || !strings.Contains(stderr, tc.flag) {
 			t.Errorf("%v: exit %d, stderr %q; want 0 and the %s flag", tc.args, code, stderr, tc.flag)
+		}
+	}
+}
+
+// A stray positional argument is refused, not taken as the end of the
+// flags, which dropped every flag after it (audit 2026-11-10).
+func TestCommandsWithoutPositionalsRefuseOne(t *testing.T) {
+	// A regression must not act on the developer's own session.
+	t.Setenv("AM_ROOT", t.TempDir())
+	t.Setenv("AM_ME", "")
+	for _, args := range [][]string{
+		{"attach", "--self", "x", "--native"},
+		{"detach", "--self", "x"},
+		{"bindings", "x"},
+		{"requests", "x"},
+		{"doctor", "x", "--fix"},
+	} {
+		if code, _, stderr := cli(t, "", args...); code != protocol.ExitUsage || !strings.Contains(stderr, "takes no positional arguments") {
+			t.Errorf("%v: exit %d, stderr %q; want %d and a positional refusal", args, code, stderr, protocol.ExitUsage)
+		}
+	}
+}
+
+// serve refuses a --poll that is not positive before it starts, instead of
+// panicking in its import loop (audit 2026-11-10).
+func TestServeRefusesNonPositivePoll(t *testing.T) {
+	for _, poll := range []string{"0", "-1s"} {
+		if code, _, stderr := cli(t, "", "serve", "--root", t.TempDir(), "--poll", poll); code != protocol.ExitUsage || !strings.Contains(stderr, "--poll must be positive") {
+			t.Errorf("--poll %s: exit %d, stderr %q; want %d and a --poll refusal", poll, code, stderr, protocol.ExitUsage)
 		}
 	}
 }

@@ -9,8 +9,9 @@ import (
 )
 
 // ValidateAmqrcFile enforces that project configuration is owned by the
-// invoking user. Permission bits are intentionally not enforced here: older
-// configs commonly use 0644 and the file contains no secrets.
+// invoking user, is not a symlink, and is not group- or world-writable. Read
+// bits are not enforced: older configs commonly use 0644 and the file
+// contains no secrets.
 func ValidateAmqrcFile(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {

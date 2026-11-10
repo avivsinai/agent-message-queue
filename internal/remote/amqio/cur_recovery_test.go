@@ -375,6 +375,15 @@ func TestCurRecoveryLostReplyIsResent(t *testing.T) {
 	if len(entries1) != 1 {
 		t.Fatalf("expected 1 reply after first recovery, got %d", len(entries1))
 	}
+	// No record exists, so the recovered reply is a refusal, never a
+	// success-shaped body (audit 2026-11-10).
+	refused, err := format.ReadMessageFile(filepath.Join(fsq.AgentInboxNew(root, "codex"), entries1[0].Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refused.Header.Subject != "remote reply refused" || refused.Header.Context["remote_error"] == nil {
+		t.Fatalf("recovered no-record reply is not a refusal: subject=%q context=%v", refused.Header.Subject, refused.Header.Context)
+	}
 
 	// Simulate the crash gap: the receipt landed, but the reply did not.
 	// Delete the reply file (the caller's inbox lost it).

@@ -62,6 +62,9 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	if err := fs.Parse(args); err != nil {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
+	if fs.NArg() > 0 {
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "attach takes no positional arguments (got %q)", fs.Arg(0))
+	}
 	if !*self {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "attach needs --self")
 	}
@@ -882,6 +885,9 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 	if err := fs.Parse(args); err != nil {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
+	if fs.NArg() > 0 {
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "bindings takes no positional arguments (got %q)", fs.Arg(0))
+	}
 	inspect := inspectOutsideLock(newCodexView())
 	pruned, err := binding.PruneEnded(inspect)
 	if err != nil {
@@ -974,6 +980,9 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	all := fs.Bool("all", false, "unbind every binding")
 	if err := fs.Parse(args); err != nil {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
+	}
+	if fs.NArg() > 0 {
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "detach takes no positional arguments (got %q)", fs.Arg(0))
 	}
 	*name = strings.TrimSpace(*name)
 	scopes := 0

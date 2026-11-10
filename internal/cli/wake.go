@@ -1970,9 +1970,7 @@ func deliverWakeNotificationViaInjector(cfg *wakeConfig, notice wakeNotification
 			if !errors.As(err, &uncertain) {
 				uncertain = &wakeTerminalProgressUncertainError{err: err}
 			}
-			if cfg.lastInjectorOutcome == wakeInjectorOutcomeNone {
-				cfg.lastInjectorOutcome = wakeInjectorOutcomeUncertain
-			}
+			cfg.lastInjectorOutcome = wakeInjectorOutcomeUncertain
 			cfg.inputDelivery.acceptanceUncertain = true
 			_ = writeWakeDiagnostic(cfg, "amq wake: warning: %v\n", uncertain)
 			cfg.fallbackWarn = false

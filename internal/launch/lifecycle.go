@@ -279,8 +279,10 @@ func lifecycleResultFromBinding(root *fsq.DeliveryRoot, binding BindingRecord) (
 	}
 	observations := make([]PrepareObservation, 0, len(handles))
 	for _, handle := range handles {
+		// A backend creates an agent resource only for a participant it
+		// runs, so every handle here is runnable.
 		observation := PrepareObservation{
-			Handle: handle, Mailbox: mailboxes[handle], Conversation: "none", Execution: "none", Resource: resources[handle],
+			Handle: handle, Mailbox: mailboxes[handle], Runnable: true, Conversation: "none", Execution: "none", Resource: resources[handle],
 			ConversationIdentityDigest: "absent", ExecutionIdentityDigest: "absent",
 		}
 		if conversation, err := LoadConversation(root, handle); err == nil {

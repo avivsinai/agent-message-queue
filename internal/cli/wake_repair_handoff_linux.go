@@ -12,8 +12,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-var ()
-
 func prepareWakeRepairChildCapabilityPlatform(cmd *exec.Cmd) (*wakeRepairChildCapability, error) {
 	if cmd == nil {
 		return nil, fmt.Errorf("wake repair child command is missing")

@@ -58,8 +58,8 @@ type Notification struct {
 }
 
 // Client multiplexes one WebSocket connection: requests get correlated
-// responses, notifications and server requests fan out to the handlers set
-// before Run starts reading.
+// responses, notifications and server requests fan out to the handlers Dial
+// installs before the read loop starts.
 type Client struct {
 	ws      *wsConn
 	nextID  atomic.Int64
@@ -371,10 +371,10 @@ func (c *Client) Respond(id json.RawMessage, result any) error {
 	return c.ws.writeTextBounded(data)
 }
 
-// Close tears the connection down and stops the callback workers:
-// the events channel closes (worker exits after the in-flight event; Close
-// waits, bounded), then the conn closes — aborting any blocked read or
-// write immediately. The stop lifecycle is a separate sync.Once from the
+// Close tears the connection down and stops the callback worker: the conn
+// closes — aborting any blocked read or write immediately — then reqQ
+// closes (the worker exits after the in-flight request; Close waits,
+// bounded). The stop lifecycle is a separate sync.Once from the
 // start Once, so it actually runs: one shared Once would leak the worker on
 // every teardown. Safe to call twice.
 func (c *Client) Close() error {

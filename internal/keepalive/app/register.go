@@ -314,21 +314,19 @@ func (a App) registerWithOptions(ctx context.Context, opts registerOptions) erro
 			}
 			next = entry
 			wakeReady := false
-			if !opts.NoStart {
-				if opts.RetireDetached {
-					var recoverErr error
-					next, wakeReady, recoverErr = recoverDetachedRegistration(ctx, removed, adapters, reconciler, envCLI, next)
-					if recoverErr != nil {
-						return resolveRegistrationReadinessFailure(store, entry, next, removed, recoverErr)
-					}
+			if opts.RetireDetached {
+				var recoverErr error
+				next, wakeReady, recoverErr = recoverDetachedRegistration(ctx, removed, adapters, reconciler, envCLI, next)
+				if recoverErr != nil {
+					return resolveRegistrationReadinessFailure(store, entry, next, removed, recoverErr)
 				}
-				if !wakeReady {
-					updated, result := reconciler.StartFresh(ctx, next)
-					if result.Error != nil {
-						return resolveRegistrationReadinessFailure(store, entry, updated, removed, result.Error)
-					}
-					next = updated
+			}
+			if !wakeReady {
+				updated, result := reconciler.Reconcile(ctx, next)
+				if result.Error != nil {
+					return resolveRegistrationReadinessFailure(store, entry, updated, removed, result.Error)
 				}
+				next = updated
 			}
 			if err := store.UpdateEntry(next); err != nil {
 				return fmt.Errorf("wake is ready and its attached registry reservation remains recoverable, but marking it active failed: %w", err)
@@ -581,7 +579,7 @@ func recoverDetachedRegistration(
 		return next, false, fmt.Errorf("recover detached %s wake: %w", previous.Agent, err)
 	}
 
-	updated, initialStart := reconciler.StartFresh(ctx, next)
+	updated, initialStart := reconciler.Reconcile(ctx, next)
 	if initialStart.Error == nil {
 		return updated, true, nil
 	}
@@ -608,7 +606,7 @@ func recoverDetachedRegistration(
 		)
 	}
 
-	retried, retryStart := reconciler.StartFresh(ctx, next)
+	retried, retryStart := reconciler.Reconcile(ctx, next)
 	if retryStart.Error == nil {
 		return retried, true, nil
 	}

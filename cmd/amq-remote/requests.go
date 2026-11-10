@@ -17,6 +17,9 @@ func listRequests(args []string, probe ...*jsonProbe) (any, int, error) {
 	if err := fs.Parse(args); err != nil {
 		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
+	if fs.NArg() > 0 {
+		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "requests takes no positional arguments (got %q)", fs.Arg(0))
+	}
 	stateDir, err := c.stateDir()
 	if err != nil {
 		return nil, protocol.ExitUsage, err

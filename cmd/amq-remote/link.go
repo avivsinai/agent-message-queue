@@ -712,7 +712,7 @@ var errFingerprintMismatch = errors.New("the fingerprint does not match the key 
 // pinned server id, checks that the server answered as that server, for this
 // device, with exactly one consent key, and accepts the key only when the
 // fingerprint the user types from the browser matches it.
-func redeemOneKey(client *http.Client, endpoint string, key linkio.DeviceKey, serverID, code, deviceName string, stdin io.Reader, stdout io.Writer) (redeemReply, linkio.ConsentKey, error) {
+func redeemOneKey(client *http.Client, endpoint string, key linkio.DeviceKey, serverID, code, deviceName string, in *bufio.Reader, stdout io.Writer) (redeemReply, linkio.ConsentKey, error) {
 	ts := time.Now().Unix()
 	req := redeemRequest{
 		DeviceKey: b64url(key.SPKI), DeviceName: deviceName, Code: code, TS: ts,
@@ -736,7 +736,7 @@ func redeemOneKey(client *http.Client, endpoint string, key linkio.DeviceKey, se
 		return rep, ck, err
 	}
 	say(stdout, "Type the passkey fingerprint shown in your browser:")
-	typed, _ := bufio.NewReader(stdin).ReadString('\n')
+	typed, _ := in.ReadString('\n')
 	if !linkio.SameFingerprint(typed, want) {
 		return rep, ck, errFingerprintMismatch
 	}
@@ -775,7 +775,7 @@ func linkKeysAdd(args []string, stdin io.Reader, stdout io.Writer, probe *jsonPr
 	if err != nil || pin.API == "" {
 		return nil, protocol.ExitActionRequired, fmt.Errorf("link %q has no server address; remove it and run link add again", name)
 	}
-	_, ck, err := redeemOneKey(linkHTTPClient(), pin.API+"/api/v1/link/consent-keys/redeem", key, pin.ServerID, *code, pin.DeviceName, stdin, stdout)
+	_, ck, err := redeemOneKey(linkHTTPClient(), pin.API+"/api/v1/link/consent-keys/redeem", key, pin.ServerID, *code, pin.DeviceName, bufio.NewReader(stdin), stdout)
 	if err != nil {
 		return nil, protocol.ExitActionRequired, err
 	}
@@ -1134,6 +1134,10 @@ func linkStatus(args []string, probe *jsonProbe) (any, int, error) {
 			return nil, protocol.ExitError, err
 		}
 		natives := &nativeProbe{stateDir: stateDir}
+		// status.json is written only by a running endpoint, so with none
+		// running a stored online or connecting state is stale.
+		_, running, ferr := ipc.EndpointFeatures(stateDir)
+		stopped := ferr == nil && !running
 		for _, l := range mf.Links {
 			row := linkStatusRow{Name: l.Name, Root: root, URL: l.URL, Status: linkio.Status{State: "offline"}, Shares: []string{}}
 			for _, sh := range l.Shares {
@@ -1152,6 +1156,9 @@ func linkStatus(args []string, probe *jsonProbe) (any, int, error) {
 			}
 			if data, err := os.ReadFile(filepath.Join(linkio.LinkDir(stateDir, l.Name), "status.json")); err == nil {
 				_ = json.Unmarshal(data, &row.Status)
+			}
+			if stopped && (row.Status.State == "online" || row.Status.State == "connecting") {
+				row.Status.State = "offline" // the stored last ping stays
 			}
 			rows = append(rows, row)
 		}

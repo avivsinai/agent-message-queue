@@ -371,3 +371,30 @@ func TestResolveRootFindsParent(t *testing.T) {
 		t.Fatalf("resolveRoot parent = %q, want %q", got, want)
 	}
 }
+
+// An answer piped without a final newline is the answer, not the default
+// (audit 2026-11-10).
+func TestConfirmPromptUsesAnswerWithoutNewline(t *testing.T) {
+	for _, tc := range []struct {
+		input      string
+		defaultYes bool
+		want       bool
+	}{
+		{"n", true, false},
+		{"y", false, true},
+	} {
+		restore := withStdin(t, tc.input)
+		var got bool
+		if _, err := captureEnvStdout(t, func() error {
+			var err error
+			got, err = doConfirmPrompt("go?", tc.defaultYes)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		restore()
+		if got != tc.want {
+			t.Fatalf("input %q default %v = %v, want %v", tc.input, tc.defaultYes, got, tc.want)
+		}
+	}
+}

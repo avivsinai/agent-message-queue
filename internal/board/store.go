@@ -796,8 +796,13 @@ func (s Store) saveEvidence(ctx context.Context, blobs [][]byte, pruned map[stri
 			continue
 		}
 		name := hash + ".json"
-		if previous, err := readBounded(filepath.Join(dir, name), snapshotLimit); err == nil {
-			if string(previous) != string(b) {
+		// The name is the content hash and every read re-hashes the file, so
+		// an existing regular file of the same size holds this blob.
+		if info, err := os.Lstat(filepath.Join(dir, name)); err == nil {
+			if !info.Mode().IsRegular() {
+				return written, fmt.Errorf("unsafe board file: %s", filepath.Join(dir, name))
+			}
+			if info.Size() != int64(len(b)) {
 				return written, errors.New("board evidence hash conflict")
 			}
 			continue

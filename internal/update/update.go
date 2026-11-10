@@ -39,9 +39,10 @@ const (
 )
 
 // CompanionBinaries are the amq-adjacent binaries published from the same
-// release but not packaged by the Homebrew formula or Scoop manifest: only
-// amq itself goes through a package manager. They are direct-installed at a
-// stable path (~/.local/bin or next to amq) and upgraded in place.
+// release. The Homebrew formula installs every one except amq-keepalive
+// beside amq; the Scoop manifest installs only amq. A companion no package
+// manager installed is direct-installed at a stable path (~/.local/bin or
+// next to amq) and upgraded in place.
 var CompanionBinaries = []string{"amq-keepalive", "amq-bridge", "amq-acp", "amq-remote", "amq-owner-sign", "amq-board"}
 
 // InstallKind classifies how a resolved executable path was installed.
@@ -53,7 +54,8 @@ const (
 	InstallDirect InstallKind = iota
 	// InstallHomebrew means the resolved path lives under a Homebrew Cellar
 	// or prefix bin dir; amq upgrade delegates to brew so it does not corrupt
-	// brew bookkeeping. Companions are never Homebrew-owned.
+	// brew bookkeeping. The formula owns every companion except
+	// amq-keepalive.
 	InstallHomebrew
 	// InstallScoop means the resolved path lives under the Scoop apps dir on
 	// Windows user scope; amq upgrade delegates to scoop. Companions are never
@@ -76,11 +78,6 @@ func (k InstallKind) IsPackageManaged() bool {
 // IsScoop reports whether the kind came from a Scoop-shaped installation.
 func (k InstallKind) IsScoop() bool {
 	return k == InstallScoop || k == InstallScoopGlobal || k == InstallScoopUnknown
-}
-
-// IsScoopGlobal reports whether the kind is a known global Scoop install.
-func (k InstallKind) IsScoopGlobal() bool {
-	return k == InstallScoopGlobal
 }
 
 // ScoopScope identifies the Scoop installation scope for a configured root.
@@ -323,10 +320,6 @@ func NormalizeVersion(version string) string {
 	return normalizeVersion(version)
 }
 
-func AssetName(tag, goos, goarch string) (string, error) {
-	return AssetNameFor(BinaryName, tag, goos, goarch)
-}
-
 // AssetNameFor returns the release archive asset name for a given binary
 // (amq, amq-keepalive, amq-bridge, amq-acp, amq-remote, amq-owner-sign, amq-board). The archive name template is
 // <binary>_<version>_<os>_<arch>.<ext>, matching .goreleaser.yaml's
@@ -449,10 +442,6 @@ func ExecutablePath() (string, string, error) {
 	return path, resolved, nil
 }
 
-func ExtractBinaryFromTarGz(archivePath, destDir string) (string, error) {
-	return ExtractBinaryFromTarGzNamed(BinaryName, archivePath, destDir)
-}
-
 // ExtractBinaryFromTarGzNamed extracts the named binary (without any .exe
 // suffix) from a tar.gz release archive into destDir and returns its path.
 // It accepts both the bare name and the name with a .exe suffix so a single
@@ -518,10 +507,6 @@ func ExtractBinaryFromTarGzNamed(binaryName, archivePath, destDir string) (strin
 		return outPath, nil
 	}
 	return "", errors.New("binary not found in archive")
-}
-
-func ExtractBinaryFromZip(archivePath, destDir string) (string, error) {
-	return ExtractBinaryFromZipNamed(BinaryName, archivePath, destDir)
 }
 
 // ExtractBinaryFromZipNamed extracts the named binary (without any .exe
@@ -1102,18 +1087,6 @@ func scoopInstallRootsFor(goos, scoop, scoopGlobal, home string) []ScoopInstallR
 	add(scoop, ScoopScopeUser)
 	add(scoopGlobal, ScoopScopeGlobal)
 	return roots
-}
-
-// ScoopAppsDir returns the user-scope Scoop apps directory on Windows. It is
-// empty on other operating systems and remains for callers that need only the
-// historical single-root view.
-func ScoopAppsDir() string {
-	for _, root := range ScoopInstallRoots() {
-		if root.Scope == ScoopScopeUser {
-			return root.Path
-		}
-	}
-	return ""
 }
 
 // IsScoopShapedPath reports whether path contains the conventional Scoop

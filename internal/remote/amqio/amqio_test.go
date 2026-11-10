@@ -166,8 +166,10 @@ func TestImportLeavesCommandOnPlainError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := carrier.ImportOnce(); err != nil {
-		t.Fatalf("import returned error: %v", err)
+	// The plain error reaches the caller so a command that keeps failing is
+	// logged rather than retried in silence (audit 2026-11-10).
+	if _, err := carrier.ImportOnce(); err == nil {
+		t.Fatal("import hid the plain handle error")
 	}
 	// The command must remain in new for retry; no record, no drained receipt.
 	if entries, _ := os.ReadDir(fsq.AgentInboxNew(root, DefaultHandle)); len(entries) != 1 {
@@ -445,6 +447,14 @@ func TestImportStoreRefusalLeavesCommandInNew(t *testing.T) {
 	// retry succeeds and the command is claimed.
 	if err := ep.Close(); err != nil {
 		t.Fatalf("close: %v", err)
+	}
+	// An endpoint that is shutting down refuses with draining; the command
+	// stays in new for the restarted endpoint (audit 2026-11-10).
+	if _, err := carrier.ImportOnce(); err != nil {
+		t.Fatalf("import while closed: %v", err)
+	}
+	if entries, _ := os.ReadDir(fsq.AgentInboxNew(root, DefaultHandle)); len(entries) != 1 {
+		t.Fatalf("draining-refused cancel not left in new: %d", len(entries))
 	}
 	store, err = requests.Open(storeDir)
 	if err != nil {

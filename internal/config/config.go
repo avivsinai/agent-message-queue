@@ -166,7 +166,7 @@ func ensureAgentOn(root *fsq.DeliveryRoot, handle string, create bool) (bool, er
 // (EnsureAgent/setup/apply overlay and the initializing writers, through
 // MarshalPreservingUnknowns). Creates an absent config only when create is true.
 func ensureAgentLocked(root *fsq.DeliveryRoot, handle string, create bool) (bool, error) {
-	data, err := root.ReadFile("meta/config.json")
+	data, err := root.ReadRegularNoFollow("meta/config.json")
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return false, fmt.Errorf("read config: %w", err)

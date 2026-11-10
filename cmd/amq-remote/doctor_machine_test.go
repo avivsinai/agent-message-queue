@@ -188,3 +188,16 @@ func TestDoctorMailboxesWarnsOfAWakeBeforeDialogEntries(t *testing.T) {
 		t.Fatalf("failed = %q, noted = %q; want one note %q", failed, noted, want)
 	}
 }
+
+// A failing channel prints once, as its FAIL line, not again as an INFO row
+// from the channels map (audit 2026-11-10).
+func TestDoctorTextPrintsAFailingChannelOnce(t *testing.T) {
+	var text bytes.Buffer
+	printDoctor(&text, doctorReport{
+		"failing":  []boundaryFailure{{Boundary: "channel", Subject: "b1", Detail: "the channel of binding b1 is failed"}},
+		"channels": map[string]string{"b1": "failed"},
+	})
+	if strings.Contains(text.String(), "INFO channels") {
+		t.Fatalf("doctor text repeats the channel: %q", text.String())
+	}
+}

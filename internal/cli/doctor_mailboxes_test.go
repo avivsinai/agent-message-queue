@@ -558,3 +558,47 @@ func findDoctorMailboxInspection(t *testing.T, mailboxes []fsq.MailboxInspection
 	t.Fatalf("mailbox %q not found in %#v", handle, mailboxes)
 	return fsq.MailboxInspection{}
 }
+
+// A session root without its own config.json reports its base's config, as
+// the mailbox check does (audit 2026-11-10).
+func TestDoctorConfigCheckFallsBackToSessionBase(t *testing.T) {
+	t.Setenv(envBaseRoot, "")
+	base := makeSessionBase(t)
+	writeKnownAgentsConfig(t, base, []string{"alpha"})
+	session := filepath.Join(base, "collab")
+	if err := os.Mkdir(session, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	check := checkConfig(session)
+	if check.Status != "ok" || !strings.Contains(check.Message, "alpha") || !strings.Contains(check.Message, base) {
+		t.Fatalf("config check = %#v, want ok from base %s", check, base)
+	}
+}
+
+// A malformed .amqrc is named as the root-config error, not reported as a
+// missing root (audit 2026-11-10).
+func TestDoctorRootConfigNamesMalformedAmqrc(t *testing.T) {
+	project := isolateSessionProject(t)
+	t.Chdir(project)
+	if err := os.WriteFile(filepath.Join(project, ".amqrc"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	check, root, _ := checkAmqrc()
+	if root != "" || check.Status != "error" || !strings.Contains(check.Message, ".amqrc") {
+		t.Fatalf("root config check = %#v, root %q; want an error naming .amqrc", check, root)
+	}
+}
+
+// A Git repository with no queue yet is a warning, like any unconfigured
+// project, not a defect (review of the audit sweep, 2026-11-10).
+func TestDoctorRootConfigWarnsInAnUnconfiguredGitRepository(t *testing.T) {
+	project := isolateSessionProject(t)
+	t.Chdir(project)
+	if err := os.Mkdir(filepath.Join(project, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	check, root, _ := checkAmqrc()
+	if root != "" || check.Status != "warn" {
+		t.Fatalf("root config check = %#v, root %q; want a warning", check, root)
+	}
+}

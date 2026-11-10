@@ -1068,8 +1068,6 @@ func compactID(id json.RawMessage) string {
 	return b.String()
 }
 
-// AcknowledgeResult implements core.Attachment. Codex keeps the transcript;
-// nothing is retained here beyond the process.
 // AcknowledgeResult implements core.Attachment: it releases the retained
 // terminal evidence for the key. It was a no-op, so the convergence
 // precondition the endpoint relies on ("once a native ack lands the

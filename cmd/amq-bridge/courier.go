@@ -423,9 +423,6 @@ func (c *Courier) PushOnce(ctx context.Context) (PushResult, error) {
 	if err != nil {
 		return result, err
 	}
-	if len(items) > c.cfg.BatchSize {
-		items = items[:c.cfg.BatchSize]
-	}
 	if len(items) == 0 {
 		return result, nil
 	}
@@ -503,7 +500,7 @@ func (c *Courier) PollOnce(ctx context.Context) (PollResult, error) {
 		if _, ok := c.allowedSource[env.SourceHost]; !ok {
 			return result, fmt.Errorf("inbound source host %q is not allowlisted", env.SourceHost)
 		}
-		pub, generation, err := bridge.LoadTrusted(c.cfg.Root, env.SourceHost)
+		pub, generation, err := bridge.LoadTrustedFromDeliveryRoot(root, env.SourceHost)
 		if err != nil {
 			return result, fmt.Errorf("authenticate source host %q: %w", env.SourceHost, err)
 		}
@@ -630,12 +627,20 @@ func (c *Courier) readSpool() ([]spoolItem, error) {
 	// os.ReadDir sorts by filename, but sort again after filtering to make the
 	// ordering explicit if the directory source changes in the future.
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
-	items := make([]spoolItem, 0, len(entries))
+	// Only the first BatchSize messages are read, parsed and signed.
+	names := make([]string, 0, min(len(entries), c.cfg.BatchSize))
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() || strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".md") {
 			continue
 		}
+		if len(names) == c.cfg.BatchSize {
+			break
+		}
+		names = append(names, name)
+	}
+	items := make([]spoolItem, 0, len(names))
+	for _, name := range names {
 		if err := fsq.ValidateMessageFilename(name); err != nil {
 			return nil, fmt.Errorf("spool file %q: %w", name, err)
 		}

@@ -102,6 +102,9 @@ func runKanbanBridge(args []string) error {
 		URL:            wsURL,
 		ReconnectDelay: *reconnectFlag,
 	}
+	if err := kanban.ValidateBridgeConfig(cfg); err != nil {
+		return UsageError("%v", err)
+	}
 
 	if *jsonFlag {
 		if err := writeJSON(os.Stdout, map[string]interface{}{

@@ -27,6 +27,9 @@ const (
 	frontmatterStartLine = "---json"
 	frontmatterStart     = frontmatterStartLine + "\n"
 	frontmatterEnd       = "\n---\n"
+	// frontmatterSpace is the blank space both parsers skip around the end
+	// marker, so a header ReadHeader accepts is one ParseMessage accepts.
+	frontmatterSpace = " \t\r\n"
 )
 
 // Sentinel errors for message parsing.
@@ -297,11 +300,16 @@ func splitFrontmatter(data []byte) ([]byte, []byte, error) {
 		return nil, nil, fmt.Errorf("parse frontmatter json: %w", err)
 	}
 	rest := payload[dec.InputOffset():]
-	rest = bytes.TrimLeft(rest, " \t\r\n")
-	if !bytes.HasPrefix(rest, []byte("---\n")) {
+	rest = bytes.TrimLeft(rest, frontmatterSpace)
+	if !bytes.HasPrefix(rest, []byte("---")) {
 		return nil, nil, ErrMissingFrontmatterEnd
 	}
-	body := rest[len("---\n"):]
+	// The end marker may carry trailing spaces and tabs.
+	rest = bytes.TrimLeft(rest[len("---"):], " \t\r")
+	if !bytes.HasPrefix(rest, []byte("\n")) {
+		return nil, nil, ErrMissingFrontmatterEnd
+	}
+	body := rest[len("\n"):]
 	return header, body, nil
 }
 
@@ -314,7 +322,7 @@ func consumeFrontmatterEnd(br *bufio.Reader) error {
 			}
 			return err
 		}
-		line = strings.TrimSpace(line)
+		line = strings.Trim(line, frontmatterSpace)
 		if line == "" {
 			continue
 		}
@@ -333,10 +341,15 @@ type Timestamped interface {
 }
 
 // SortByTimestamp sorts a slice of Timestamped items by time, then by ID for stability.
+// Items with a parsed time sort before items without one, so the order stays
+// transitive when only some items carry a parsed time.
 func SortByTimestamp[T Timestamped](items []T) {
 	sort.Slice(items, func(i, j int) bool {
 		ti, tj := items[i].GetRawTime(), items[j].GetRawTime()
-		if !ti.IsZero() && !tj.IsZero() {
+		if ti.IsZero() != tj.IsZero() {
+			return !ti.IsZero()
+		}
+		if !ti.IsZero() {
 			if ti.Equal(tj) {
 				return items[i].GetID() < items[j].GetID()
 			}

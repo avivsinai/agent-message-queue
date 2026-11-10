@@ -82,9 +82,13 @@ func bindWakeRestartCandidateAtPlatform(candidate wakeImageEvidenceV1, plannedSt
 	}
 	stagePath := filepath.Join(stageDir, filepath.Base(candidate.ExecutionPath))
 	stageCreated := false
+	stageKept := false
 	stageIdentityKnown := false
 	var stageIdentity os.FileInfo
 	defer func() {
+		if stageKept {
+			return
+		}
 		if !stageCreated {
 			_ = os.Remove(stageDir)
 			return
@@ -169,7 +173,7 @@ func bindWakeRestartCandidateAtPlatform(candidate wakeImageEvidenceV1, plannedSt
 	if !sameRequestedAndBoundWakeImageEvidence(candidate, bound.evidence) {
 		return nil, fmt.Errorf("darwin staged wake restart image differs from requested candidate")
 	}
-	stageCreated = false
+	stageKept = true
 	failed = false
 	return bound, nil
 }

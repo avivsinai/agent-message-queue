@@ -342,3 +342,54 @@ func mustThread(t *testing.T, id string) ThreadID {
 	}
 	return got
 }
+
+// A stage and its destination note left without an intent fact never block
+// a later filing of the same message (audit 2026-11-10).
+func TestRecoverStageAndDestWithoutIntentLetsFileSucceed(t *testing.T) {
+	root, snap, localKey, signed, payload := setupRecv(t, "m-dest")
+	rxDir := filepath.Join(root, "bridge", "rx", snap.Peer.String())
+	if err := os.MkdirAll(rxDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stage := stagePath(root, snap.Peer, signed.ID())
+	if err := os.WriteFile(stage, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stage+".dest", []byte("grok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := File(root, snap, signed, payload, localKey); err != nil {
+		t.Fatalf("file after a crash before intent: %v", err)
+	}
+	if got := inboxFiles(t, root, "grok"); len(got) != 1 {
+		t.Fatalf("filings = %d, want 1", len(got))
+	}
+}
+
+// Recovery of a torn ledger tail after intent, with no stage, leaves a
+// ledger that reads back as published (audit 2026-11-10).
+func TestRecoverTornTailAfterIntentWithoutStageReadsPublished(t *testing.T) {
+	root, snap, _, signed, _ := setupRecv(t, "m-torn")
+	intent, err := encodeLedgerRecord(Fact{State: StateIntent, Peer: snap.Peer, ID: signed.ID()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	published, err := encodeLedgerRecord(Fact{State: StatePublished, Peer: snap.Peer, ID: signed.ID()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := ledgerPath(root, signed.ID())
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(intent, published[:6]...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if state, err := Recover(root, snap, signed.ID()); err != nil || state != StatePublished {
+		t.Fatalf("recover: state=%q err=%v, want published", state, err)
+	}
+	facts, torn, err := readLedger(path)
+	if err != nil || torn || foldState(facts) != StatePublished {
+		t.Fatalf("ledger after recovery: state=%q torn=%v err=%v", foldState(facts), torn, err)
+	}
+}

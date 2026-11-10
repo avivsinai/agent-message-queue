@@ -948,3 +948,23 @@ func TestCodexImagePrefixedForkKeepsTheResumeGuard(t *testing.T) {
 		t.Fatal("an unknown option read as known grammar")
 	}
 }
+
+// A Cursor startup hold names the hooks that release it, not a trust
+// record Cursor never writes (audit 2026-11-10).
+func TestWakeStartupHoldNamesCursorRelease(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "cursor"); err != nil {
+		t.Fatal(err)
+	}
+	raw := `{"schema":1,"event":"Startup","harness":"cursor","cwd":"/work","opened_at":"x"}` + "\n"
+	if err := os.WriteFile(filepath.Join(fsq.AgentBase(root, "cursor"), wakeDialogFileName), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hold := inspectWakeStartupHold(root, "cursor", time.Now())
+	if hold == nil || !strings.Contains(hold.Release, "sessionStart hook") || strings.Contains(hold.Release, "trusts the directory") {
+		t.Fatalf("cursor startup hold = %#v", hold)
+	}
+}

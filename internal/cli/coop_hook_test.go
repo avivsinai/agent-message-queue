@@ -203,3 +203,24 @@ func TestCoopStopAllowsTheStopAfterFiveBlocksInAChain(t *testing.T) {
 		t.Fatalf("sixth block: %v chain %d, want a notice and a reset chain", out, next.ChainBlocks)
 	}
 }
+
+// The preamble's unread count skips a corrupt message, as amq list --new
+// does (audit 2026-11-10).
+func TestCoopHookUnreadSkipsACorruptMessage(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	root := filepath.Join(t.TempDir(), "queue")
+	if err := runInit([]string{"--root", root, "--agents", "claude,codex"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := captureStdout(t, func() error {
+		return runSend([]string{"--root", root, "--me", "codex", "--to", "claude", "--body", "hi"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "agents", "claude", "inbox", "new", "corrupt.md"), []byte("not a message"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := coopHookUnread(root, "claude"); got != 1 {
+		t.Fatalf("unread = %d, want 1", got)
+	}
+}

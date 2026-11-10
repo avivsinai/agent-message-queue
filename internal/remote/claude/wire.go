@@ -26,11 +26,6 @@ func crossSessionBodies(text string) (string, bool) {
 	return claudepeer.CrossSessionBodies(text)
 }
 
-// NewMsgID returns a fresh random v4-formatted UUID for msg_id.
-func NewMsgID() (string, error) {
-	return claudepeer.NewMsgID()
-}
-
 // BuildFrame assembles the deliverable frame (capture §3).
 func BuildFrame(from, body string) (*Frame, error) {
 	return claudepeer.BuildFrame(from, body)

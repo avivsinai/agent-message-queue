@@ -226,7 +226,7 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 		}
 		sourceRoot, err = resolveSessionRoot(root, fromSession)
 		if err != nil {
-			return fmt.Errorf("source session %q not found: %w", fromSession, err)
+			return WithExitCode(GetExitCode(err), fmt.Errorf("source session %q: %w", fromSession, err))
 		}
 		sourceSession = fromSession
 	}

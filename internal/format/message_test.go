@@ -647,3 +647,33 @@ type testTimestamped struct {
 func (t testTimestamped) GetCreated() string    { return t.created }
 func (t testTimestamped) GetID() string         { return t.id }
 func (t testTimestamped) GetRawTime() time.Time { return t.raw }
+
+// A message whose end marker has trailing spaces parses in full, as its
+// header does, so list and read agree (audit 2026-11-10).
+func TestParseAcceptsEndMarkerWithTrailingSpaces(t *testing.T) {
+	raw := "---json\n{\"schema\":1,\"id\":\"trail\",\"from\":\"alice\",\"to\":[\"bob\"],\"created\":\"2025-01-01T00:00:00Z\"}\n--- \t\nHello\n"
+	if _, err := ReadHeader(strings.NewReader(raw)); err != nil {
+		t.Fatalf("ReadHeader: %v", err)
+	}
+	parsed, err := ParseMessage([]byte(raw))
+	if err != nil {
+		t.Fatalf("ParseMessage: %v", err)
+	}
+	if parsed.Body != "Hello\n" {
+		t.Fatalf("body = %q, want %q", parsed.Body, "Hello\n")
+	}
+}
+
+// Items with and without a parsed time sort to one order whatever the input
+// order (audit 2026-11-10).
+func TestSortByTimestampIsTransitiveWithZeroRawTimes(t *testing.T) {
+	a := testTimestamped{id: "A", created: "a", raw: time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC)}
+	c := testTimestamped{id: "C", created: "c", raw: time.Date(2025, 1, 1, 9, 0, 0, 0, time.UTC)}
+	b := testTimestamped{id: "B", created: "b"}
+	for _, in := range [][]testTimestamped{{a, b, c}, {a, c, b}, {b, a, c}, {b, c, a}, {c, a, b}, {c, b, a}} {
+		SortByTimestamp(in)
+		if got := in[0].id + in[1].id + in[2].id; got != "CAB" {
+			t.Fatalf("order = %s, want CAB", got)
+		}
+	}
+}

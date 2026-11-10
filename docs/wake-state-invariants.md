@@ -95,7 +95,9 @@ acceptance requires the injector marker protocol.
 
 **Owns:** no wake authority. A quarantine artifact preserves the exact inode
 and bytes of a blocked lock or orphan target while freeing the live pathname
-for a fresh acquisition decision.
+for a fresh acquisition decision. `.wake.restart.quarantined.<timestamp>`
+preserves a stale or superseded restart record through the same
+verified rename, and the cleanup rules below apply to it too.
 
 **Commit domain:** under the lifecycle guard and retained agent-directory FD,
 AMQ revalidates identity and raw bytes, renames without replacement, syncs the
@@ -278,7 +280,8 @@ single file. An entry whose recorded Claude Code host process is proven gone
 closes; one whose host is unknown holds. The directory replaces a single
 file only by an atomic exchange and is removed only when empty, so the path
 is never absent while a dialog is open. It writes no marker; it removes only
-a Claude Code marker whose transcript proves its dialog gone (a tool call
+a Claude Code marker whose recorded host process is proven gone or whose
+transcript proves its dialog gone (a tool call
 marker by that call's result, a permission marker by a newer non-synthetic
 assistant message of its own chain; a subagent's marker only by that
 subagent's own transcript, its `agent_transcript_path` or else the one file

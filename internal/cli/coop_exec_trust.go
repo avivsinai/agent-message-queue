@@ -739,12 +739,6 @@ func startupTrustFileStamp(harness string) string {
 			configDir, _ = os.UserHomeDir()
 		}
 		path = filepath.Join(configDir, ".claude.json")
-	case launch.CodexProvider:
-		codexHome, err := codexHomeDir()
-		if err != nil {
-			return ""
-		}
-		path = filepath.Join(codexHome, "config.toml")
 	}
 	info, err := os.Stat(path)
 	if err != nil {
@@ -893,10 +887,17 @@ func inspectWakeStartupHold(root, handle string, now time.Time) *wakeStartupHold
 		return nil
 	}
 	const held = "input stays held, and the wake shows the held-doorbell notice at once"
-	release := fmt.Sprintf("the doorbell rings once %s records that it trusts the directory, or when its SessionStart dialog hook runs; %s",
-		marker.Harness, held)
-	if marker.Harness == launch.CodexProvider {
+	var release string
+	switch {
+	case marker.Harness == launch.CodexProvider:
 		release = codexStartupHoldRelease(marker) + "; " + held
+	case marker.Kind == claudeNativeStartupKind:
+		release = "the doorbell rings once the launched Claude Code session's own SessionStart or prompt hook acknowledges it; a trust record does not release it; " + held
+	case marker.Harness == "cursor":
+		release = "the doorbell rings once Cursor's sessionStart hook runs, a prompt is submitted there, or the session ends; " + held
+	default:
+		release = fmt.Sprintf("the doorbell rings once %s records that it trusts the directory, or when its SessionStart dialog hook runs; %s",
+			marker.Harness, held)
 	}
 	return &wakeStartupHoldStatus{
 		Harness: marker.Harness, Dir: marker.Cwd,

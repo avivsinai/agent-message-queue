@@ -121,30 +121,6 @@ func Collect(root, threadID string, agents []string, includeBody bool, onError f
 					continue
 				}
 				path := filepath.Join(dir, name)
-				if includeBody {
-					msg, err := format.ReadMessageFile(path)
-					if err != nil {
-						if onError == nil {
-							return nil, fmt.Errorf("parse message %s: %w", path, err)
-						}
-						if cbErr := onError(path, err); cbErr != nil {
-							return nil, cbErr
-						}
-						continue
-					}
-					if msg.Header.Thread != threadID {
-						continue
-					}
-					if _, ok := seen[msg.Header.ID]; ok {
-						continue
-					}
-					seen[msg.Header.ID] = struct{}{}
-					entry := entryFromHeader(msg.Header)
-					entry.Body = msg.Body
-					entries = append(entries, entry)
-					continue
-				}
-
 				header, err := format.ReadHeaderFile(path)
 				if err != nil {
 					if onError == nil {
@@ -161,8 +137,23 @@ func Collect(root, threadID string, agents []string, includeBody bool, onError f
 				if _, ok := seen[header.ID]; ok {
 					continue
 				}
-				seen[header.ID] = struct{}{}
 				entry := entryFromHeader(header)
+				// Only messages in the thread have their bodies read.
+				if includeBody {
+					msg, err := format.ReadMessageFile(path)
+					if err != nil {
+						if onError == nil {
+							return nil, fmt.Errorf("parse message %s: %w", path, err)
+						}
+						if cbErr := onError(path, err); cbErr != nil {
+							return nil, cbErr
+						}
+						continue
+					}
+					entry = entryFromHeader(msg.Header)
+					entry.Body = msg.Body
+				}
+				seen[header.ID] = struct{}{}
 				entries = append(entries, entry)
 			}
 		}

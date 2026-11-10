@@ -66,6 +66,10 @@ func TestLifecycleFacadeUsesOwnedBinding(t *testing.T) {
 	if err != nil || inspected.ResultVersion != ResultVersionV1 || inspected.State != "present" || len(inspected.Observations) != 1 || inspected.Observations[0].Resource != "window:one" {
 		t.Fatalf("Inspect = %#v, %v", inspected, err)
 	}
+	// A participant with a launched resource is reported runnable (audit 2026-11-10).
+	if !inspected.Observations[0].Runnable {
+		t.Fatalf("Inspect observation = %#v, want runnable", inspected.Observations[0])
+	}
 	assertLiveLifecycleResultMatchesPublishedSchema(t, "InspectResultV1", inspected)
 	if !reflect.DeepEqual(inspected.CallerContext, binding.CallerContext) {
 		t.Fatalf("Inspect caller context = %#v, want %#v", inspected.CallerContext, binding.CallerContext)

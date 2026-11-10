@@ -177,6 +177,9 @@ func validateCodexNamingTarget(target codexNamingTarget) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("inspect Codex Node launcher arguments: %w", err)
 	}
+	if len(args) == 0 {
+		return false, errors.New("codex Node launcher has no arguments")
+	}
 	for _, arg := range args[1:] {
 		if !filepath.IsAbs(arg) {
 			continue
@@ -202,7 +205,12 @@ func locateCodexProcessThread(ctx context.Context, target codexNamingTarget) (co
 		return codexProcessThread{}, err
 	}
 	pids := codexDescendantPIDs(target.PID, parents)
-	seen := make(map[codexFileIdentity]codexProcessThread)
+	type pidRollouts struct {
+		pid      int
+		before   wakeProcessInfo
+		rollouts []codexOpenRollout
+	}
+	var observed []pidRollouts
 	for _, pid := range pids {
 		before := inspectCodexNamingProcess(pid)
 		if !before.Running || before.InspectError != nil || before.StartToken == "" || before.BootID == "" {
@@ -212,16 +220,23 @@ func locateCodexProcessThread(ctx context.Context, target codexNamingTarget) (co
 		if err != nil {
 			return codexProcessThread{}, err
 		}
-		afterParents, err := codexProcessParents(ctx)
-		if err != nil {
-			return codexProcessThread{}, err
-		}
+		observed = append(observed, pidRollouts{pid: pid, before: before, rollouts: rollouts})
+	}
+	// One process-table snapshot taken after every rollout read confirms
+	// that each process kept its identity and parent while it was read.
+	afterParents, err := codexProcessParents(ctx)
+	if err != nil {
+		return codexProcessThread{}, err
+	}
+	seen := make(map[codexFileIdentity]codexProcessThread)
+	for _, o := range observed {
+		pid, before := o.pid, o.before
 		after := inspectCodexNamingProcess(pid)
 		parentChanged := pid != target.PID && parents[pid] != afterParents[pid]
 		if !after.Running || after.InspectError != nil || after.StartToken != before.StartToken || after.BootID != before.BootID || parentChanged || !codexPIDDescendsFrom(pid, target.PID, afterParents) {
 			continue
 		}
-		for _, rollout := range rollouts {
+		for _, rollout := range o.rollouts {
 			meta, err := readCodexSessionMeta(rollout.Path, rollout.Identity)
 			if err != nil || !isCodexRootUserThread(meta) {
 				continue

@@ -117,6 +117,7 @@ func offerPage(sess *Session, self HostState) (bool, error) {
 			if err := VerifyAndConsume(item.Path, self.Snap.PeerKey, receipt, self.Snap.Peer, self.Snap.Local, item.Signed.ID()); err != nil {
 				return false, err
 			}
+			_ = os.Remove(backoffPath(self.Root, self.Snap.Peer, item.Signed.ID()))
 		case frameWant:
 			id, err := ParseID(string(payload))
 			if err != nil {
@@ -151,6 +152,7 @@ func offerPage(sess *Session, self HostState) (bool, error) {
 			if err := VerifyAndConsume(item.Path, self.Snap.PeerKey, receipt, self.Snap.Peer, self.Snap.Local, item.Signed.ID()); err != nil {
 				return false, err
 			}
+			_ = os.Remove(backoffPath(self.Root, self.Snap.Peer, item.Signed.ID()))
 		case frameNo:
 			id, _, err := parseNo(payload)
 			if err != nil {

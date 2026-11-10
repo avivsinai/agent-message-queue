@@ -321,10 +321,6 @@ func IsValidation(err error) bool {
 // Validate checks the manifest: layer defaults to "remote" when absent (a
 // user-authored manifest without layer is valid); a non-empty layer other
 // than "remote" is a validation error. No duplicate targets; target and kind
-// required; epoch only on fake.
-// Validate checks the manifest: layer defaults to "remote" when absent (a
-// user-authored manifest without layer is valid); a non-empty layer other
-// than "remote" is a validation error. No duplicate targets; target and kind
 // required and protocol-valid (opaque grammar); fake requires a valid epoch;
 // epoch only on fake.
 func Validate(f File) error {
@@ -518,13 +514,13 @@ func validHex64(s string) bool {
 	return true
 }
 
-// validRelayURL mirrors internal/relay.ValidateURL (kept here so the
-// manifest package stays dependency-free): wss://, or ws:// to loopback,
-// never userinfo.
 // ValidSocketURL accepts wss://, and ws:// only to a loopback host, with no
 // userinfo: the rule for every socket the endpoint dials.
 func ValidSocketURL(raw string) error { return validRelayURL(raw) }
 
+// validRelayURL mirrors internal/relay.ValidateURL (kept here so the
+// manifest package stays dependency-free): wss://, or ws:// to loopback,
+// never userinfo.
 func validRelayURL(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -547,10 +543,6 @@ func validRelayURL(raw string) error {
 	}
 }
 
-// Write persists the manifest, filling the passive-manifest layer field
-// ("remote", per the extensions/remote ownership) when unset. It creates the
-// parent directory. serve writes the merged (file + flag) set here so the
-// manifest is the single source of truth and `amq doctor` can diagnose it.
 // withUnknownKeys encodes f, carrying over every top-level key of the file
 // at path that this binary does not know. A newer binary may have written
 // such a key (as `links` once was), and a rewrite must not drop it. Keys
@@ -580,6 +572,10 @@ func withUnknownKeys(path string, f File) ([]byte, error) {
 // knownTopLevel lists the manifest keys this binary reads.
 var knownTopLevel = map[string]bool{"schema_version": true, "layer": true, "adapters": true, "relay": true, "links": true}
 
+// Write persists the manifest, filling the passive-manifest layer field
+// ("remote", per the extensions/remote ownership) when unset. It creates the
+// parent directory. serve writes the merged (file + flag) set here so the
+// manifest is the single source of truth and `amq doctor` can diagnose it.
 func Write(path string, f File) error {
 	if f.SchemaVersion == 0 {
 		f.SchemaVersion = SchemaVersion

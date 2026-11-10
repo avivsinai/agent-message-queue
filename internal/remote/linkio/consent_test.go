@@ -1,17 +1,22 @@
 package linkio
 
 import (
+	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -337,5 +342,74 @@ func TestRevokedKeyStaysRevokedPastAStaleKeyRead(t *testing.T) {
 	}
 	if c.ConsentLive(key.CredentialID) {
 		t.Error("the revoked key is live again after the stale read was stored")
+	}
+}
+
+// A burst of key removals larger than any queue reaches the revoke worker
+// in full, so no removed key verifies again after a restart (audit 2026-11-10).
+func TestEveryKeyRemovalReachesTheRevokeWorker(t *testing.T) {
+	dk, err := MintDeviceKey(t.TempDir(), "example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	dropped := map[string]bool{}
+	all := make(chan struct{})
+	const n = 100
+	c, err := New(Config{
+		Name: "example", Pin: Pin{URL: "wss://link.example.test/link", ServerID: testServerID}, StoreID: "st_example", Key: dk,
+		ConsentKeyRevoked: func(id string) {
+			mu.Lock()
+			defer mu.Unlock()
+			dropped[id] = true
+			if len(dropped) == n {
+				close(all)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range n { // the reader runs before the worker drains anything
+		body, _ := json.Marshal(keyRevokedBody{Schema: SchemaKeyRevoked, CredentialID: fmt.Sprintf("cred_%d", i)})
+		c.handleRequest(&session{}, Frame{Schema: SchemaFrame, ID: fmt.Sprintf("m_%d", i), Body: body})
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.revokeWorker(ctx)
+	select {
+	case <-all:
+	case <-time.After(3 * time.Second):
+		mu.Lock()
+		defer mu.Unlock()
+		t.Fatalf("revoke worker dropped %d of %d keys", len(dropped), n)
+	}
+}
+
+// A consent key stored with no origin accepts no assertion, even one whose
+// origin is empty too (audit 2026-11-10).
+func TestConsentKeyWithoutOriginAcceptsNoAssertion(t *testing.T) {
+	a := newLocalAuthenticator()
+	challenge := []byte("registration challenge 32 bytes!")
+	cd, att := a.register(challenge, "http://localhost:51234")
+	key, err := VerifyLocalRegistration(challenge, "http://localhost:51234", cd, att)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key.Origin = ""
+	doc := []byte("any document")
+	docSum := sha256.Sum256(doc)
+	clientData := []byte(`{"type":"webauthn.get","challenge":"` + b64.EncodeToString(docSum[:]) + `","origin":"","crossOrigin":false}`)
+	rp := sha256.Sum256([]byte(LocalRPID))
+	authData := binary.BigEndian.AppendUint32(append(rp[:], webauthnFlagUP|webauthnFlagUV), 0)
+	clientSum := sha256.Sum256(clientData)
+	sig := ed25519.Sign(a.priv, append(append([]byte{}, authData...), clientSum[:]...))
+	view := &ConsentView{Keys: map[string]ConsentKey{key.CredentialID: key}}
+	_, _, _, _, err = verifySignedSubmit(view, SignedSubmit{
+		DocumentB64: b64.EncodeToString(doc), CredentialID: key.CredentialID,
+		AuthenticatorData: b64.EncodeToString(authData), ClientDataJSON: b64.EncodeToString(clientData), Signature: b64.EncodeToString(sig),
+	}, time.Now())
+	if err == nil || !strings.Contains(err.Error(), "another origin") {
+		t.Fatalf("err = %v, want the origin refusal", err)
 	}
 }

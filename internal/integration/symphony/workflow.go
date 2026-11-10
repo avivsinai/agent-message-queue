@@ -26,9 +26,7 @@ type HooksConfig struct {
 }
 
 var (
-	ErrNoFrontmatter    = errors.New("WORKFLOW.md has no YAML frontmatter")
 	ErrInvalidYAML      = errors.New("WORKFLOW.md frontmatter is not valid YAML")
-	ErrNotAMap          = errors.New("WORKFLOW.md frontmatter must be a YAML map")
 	ErrWorkflowNotFound = errors.New("WORKFLOW.md not found")
 )
 
@@ -145,9 +143,13 @@ func (w *Workflow) GetHooks() HooksConfig {
 	return hooks
 }
 
-// SetHooks writes the hooks section back into the workflow config map.
+// SetHooks writes the hooks section back into the workflow config map. Keys
+// under hooks other than the four AMQ hook events are kept as they are.
 func (w *Workflow) SetHooks(hooks HooksConfig) {
-	hooksMap := map[string]interface{}{}
+	hooksMap, ok := w.Config["hooks"].(map[string]interface{})
+	if !ok {
+		hooksMap = map[string]interface{}{}
+	}
 	if hooks.AfterCreate != "" {
 		hooksMap["after_create"] = hooks.AfterCreate
 	}

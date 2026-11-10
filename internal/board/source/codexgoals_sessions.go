@@ -130,8 +130,8 @@ func codexGoalSessions(ctx context.Context, env board.Env, home string, owners m
 		return nil
 	})
 
-	if coverage.Skipped > 0 || coverage.Unresolved > 0 {
-		coverage.Detail = fmt.Sprintf("%d skipped rollouts; %d incomplete or unreadable session headers", coverage.Skipped, coverage.Unresolved)
+	if coverage.Unresolved > 0 {
+		coverage.Detail = fmt.Sprintf("%d incomplete or unreadable session headers", coverage.Unresolved)
 	}
 	return eligible, coverage, err
 }

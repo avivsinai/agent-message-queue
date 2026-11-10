@@ -41,8 +41,6 @@ func NewOffer(page uint32, entries []Signed) (Offer, error) {
 	return offer, nil
 }
 
-func (o Offer) Page() uint32 { return o.page }
-
 func (o Offer) Entries() []Signed {
 	return append([]Signed(nil), o.entries...)
 }

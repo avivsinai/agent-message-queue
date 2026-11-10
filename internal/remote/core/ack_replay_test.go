@@ -2,9 +2,11 @@ package core_test
 
 import (
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
@@ -437,5 +439,30 @@ func TestPreUpgradeRecordConvergesOnHistoryShape(t *testing.T) {
 	}
 	if stub.acks != 1 {
 		t.Fatalf("history ack ran %d time(s), want 1", stub.acks)
+	}
+}
+
+// An over-long result is cut on a rune boundary: a cut inside a rune is
+// stored as a U+FFFD that pushes the text past its bound (audit 2026-11-10).
+func TestOverlongResultIsCutOnARuneBoundary(t *testing.T) {
+	store, now := openStore(t)
+	rt := fake.New("fake", "e_1")
+	ep := core.New(core.Config{Store: store, Now: now})
+	ep.Register(rt)
+	t.Cleanup(func() { _ = ep.Close() })
+
+	id := "11111111-1111-4111-8111-1111111111c9"
+	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	rt.Complete(id, strings.Repeat("x", protocol.MaxResultBytes-1)+"é")
+
+	rec, ok, err := store.Get(requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id})
+	if err != nil || !ok || rec.Result == nil {
+		t.Fatalf("record: ok=%v err=%v", ok, err)
+	}
+	text := rec.Result.Text
+	if len(text) > protocol.MaxResultBytes || strings.ContainsRune(text, utf8.RuneError) || !rec.Result.Truncated {
+		t.Fatalf("result len=%d replacement=%v truncated=%v", len(text), strings.ContainsRune(text, utf8.RuneError), rec.Result.Truncated)
 	}
 }

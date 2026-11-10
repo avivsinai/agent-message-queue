@@ -459,3 +459,15 @@ func TestClaimTask_PerFileLayout(t *testing.T) {
 		t.Fatalf("per-file claim result = %#v, want in_progress assigned to codex", tasks)
 	}
 }
+
+// A dot-file task, which ListTasks hides, cannot be claimed (audit 2026-11-10).
+func TestClaimTask_IgnoresDotFileTask(t *testing.T) {
+	_, dir := setupTasksDir(t, "team-dot")
+	writeTaskFile(t, dir, ".hidden.json", map[string]any{
+		"id": "h1", "title": "Hidden task", "status": "pending",
+	})
+
+	if err := ClaimTask("team-dot", "h1", "codex"); err == nil {
+		t.Fatal("ClaimTask claimed a task that ListTasks does not list")
+	}
+}

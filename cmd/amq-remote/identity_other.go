@@ -1,4 +1,4 @@
-//go:build !unix
+//go:build !linux && !darwin && !dragonfly && !freebsd && !netbsd && !openbsd
 
 package main
 
@@ -12,17 +12,17 @@ import (
 // purpose.
 const staleACPSupportedOS = false
 
-// listACPProcessesOS is unix-only; no process listing on Windows.
+// listACPProcessesOS lists nothing: process listing is Linux and BSD only.
 func listACPProcessesOS(ctx context.Context) ([]acpProcess, error) {
 	return nil, nil
 }
 
-// installedIdentityOS is unix-only; no stat identity on Windows.
+// installedIdentityOS has no stat identity outside Linux and the BSDs.
 func installedIdentityOS() (execIdentity, error) {
 	return execIdentity{}, errors.New("unsupported on this platform")
 }
 
-// processIdentityOS is unix-only; no identity on Windows.
+// processIdentityOS has no process identity outside Linux and the BSDs.
 func processIdentityOS(ctx context.Context, pid int) (execIdentity, error) {
 	return execIdentity{}, errors.New("unsupported on this platform")
 }

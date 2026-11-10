@@ -109,12 +109,12 @@ func runApplyFile(args []string) error {
 		return fmt.Errorf("transfer %s is uncertain in the transfer ledger: %s", env.TransferID, applyOutcome.Evidence)
 	}
 	if applyOutcome.State != bridge.LedgerCommitted {
+		if applyOutcome.Reason == bridge.LedgerReasonConflict {
+			// A same-key/different-digest arrival: the committed winner is
+			// immutable and this copy is refused without touching receipts.
+			return fmt.Errorf("transfer %s refused: transfer_conflict (committed result for this key belongs to a different payload)", env.TransferID)
+		}
 		return fmt.Errorf("transfer %s ended in ledger state %q (reason %q)", env.TransferID, applyOutcome.State, applyOutcome.Reason)
-	}
-	if applyOutcome.Reason == bridge.LedgerReasonConflict {
-		// A same-key/different-digest arrival: the committed winner is
-		// immutable and this copy is refused without touching receipts.
-		return fmt.Errorf("transfer %s refused: transfer_conflict (committed result for this key belongs to a different payload)", env.TransferID)
 	}
 	receipt := Receipt{
 		Stage:           ReceiptDestinationMaildirCommit,

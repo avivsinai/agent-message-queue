@@ -747,13 +747,11 @@ func doConfirmPrompt(prompt string, defaultYes bool) (bool, error) {
 
 	reader := bufio.NewReader(os.Stdin)
 	line, err := reader.ReadString('\n')
-	if err != nil {
-		if errors.Is(err, io.EOF) {
-			return defaultYes, nil
-		}
+	if err != nil && !errors.Is(err, io.EOF) {
 		return false, err
 	}
 
+	// An answer typed without a final newline still counts.
 	line = strings.TrimSpace(strings.ToLower(line))
 	if line == "" {
 		return defaultYes, nil

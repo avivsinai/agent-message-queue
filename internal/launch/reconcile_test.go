@@ -59,9 +59,8 @@ type reconcileAdapter struct {
 	preSpawnAcquire    bool
 }
 
-func (a reconcileAdapter) Name() string               { return a.name }
-func (a reconcileAdapter) Mode() AdapterMode          { return a.mode }
-func (a reconcileAdapter) CommittedEnvKeys() []string { return nil }
+func (a reconcileAdapter) Name() string      { return a.name }
+func (a reconcileAdapter) Mode() AdapterMode { return a.mode }
 func (a reconcileAdapter) Capabilities(context.Context) AdapterCapabilities {
 	provider := a.name
 	if a.capabilityProvider != "" {

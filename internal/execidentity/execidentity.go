@@ -122,7 +122,7 @@ func List() ([]Entry, error) {
 		}
 		entry := Entry{Record: r, RecordedAt: info.ModTime()}
 		var cur currentRecord
-		if _, err := readStrict(filepath.Join(dir, "current", currentKey(r)+".json"), &cur); err == nil {
+		if err := readCurrent(dir, r, &cur); err == nil {
 			entry.Current = cur.Process == key
 		}
 		entries = append(entries, entry)
@@ -163,6 +163,18 @@ func processKey(r Record) string {
 func currentKey(r Record) string {
 	sum := sha256.Sum256([]byte(fsq.PersistedTreeKey(r.Root, r.RootID) + "\x00" + r.Me))
 	return hex.EncodeToString(sum[:16])
+}
+
+// readCurrent reads the current-process record of r's handle, or the one an
+// earlier AMQ named by the raw root token while no record has the new name.
+func readCurrent(dir string, r Record, cur *currentRecord) error {
+	_, err := readStrict(filepath.Join(dir, "current", currentKey(r)+".json"), cur)
+	if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	sum := sha256.Sum256([]byte(r.RootID + "\x00" + r.Me))
+	_, err = readStrict(filepath.Join(dir, "current", hex.EncodeToString(sum[:16])+".json"), cur)
+	return err
 }
 
 const storeName = "exec-records"

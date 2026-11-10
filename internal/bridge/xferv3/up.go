@@ -119,6 +119,7 @@ func Discard(root string, peer Host, id ID) error {
 			return err
 		}
 		_ = os.Remove(path + ".no")
+		_ = os.Remove(backoffPath(root, peer, id))
 		return nil
 	})
 }

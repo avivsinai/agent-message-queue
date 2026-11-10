@@ -59,7 +59,6 @@ const (
 	maxAcked            = 4096
 	minBusyRetry        = time.Second
 	codeConflict        = "conflict"
-	revokeQueue         = 64
 	handshakeTimeout    = 15 * time.Second
 	writeTimeout        = 15 * time.Second
 	controlQueue        = 256
@@ -141,7 +140,8 @@ type Carrier struct {
 	conflicts  map[string]int64                // request_ref -> a revision the server holds with another digest
 	frameLimit int                             // the smaller of MaxFrameBytes and the server's limit
 	oversize   map[string]int64                // request_ref -> a revision already logged as over the frame limit
-	revokes    chan string                     // consent keys the server removed, for the revoke worker
+	revokes    map[string]bool                 // consent keys the server removed, waiting for the revoke worker
+	revokeWake chan struct{}                   // wakes the revoke worker; holds at most one signal
 	liveKeys   atomic.Pointer[map[string]bool] // consent credential ids accepted now
 	revoked    atomic.Pointer[map[string]bool] // consent credential ids the server removed in this process
 	held       held                            // signed tasks waiting for the local confirmation
@@ -192,17 +192,18 @@ func New(cfg Config) (*Carrier, error) {
 		cfg.RestartDelay = DefaultRestartDelay
 	}
 	c := &Carrier{
-		cfg:       cfg,
-		host:      cfg.Key.Host(),
-		acked:     map[string]int64{},
-		offers:    map[string]map[int64]*offer{},
-		byFrame:   map[string]*offer{},
-		owed:      map[string]int64{},
-		conflicts: map[string]int64{},
-		oversize:  map[string]int64{},
-		revokes:   make(chan string, revokeQueue),
-		status:    Status{State: "offline"},
-		waiters:   map[string]waiter{},
+		cfg:        cfg,
+		host:       cfg.Key.Host(),
+		acked:      map[string]int64{},
+		offers:     map[string]map[int64]*offer{},
+		byFrame:    map[string]*offer{},
+		owed:       map[string]int64{},
+		conflicts:  map[string]int64{},
+		oversize:   map[string]int64{},
+		revokes:    map[string]bool{},
+		revokeWake: make(chan struct{}, 1),
+		status:     Status{State: "offline"},
+		waiters:    map[string]waiter{},
 	}
 	c.held.tasks = map[string]*HeldTask{}
 	c.held.confirmed = map[string]time.Time{}
@@ -811,18 +812,35 @@ func (c *Carrier) handleReply(f Frame) {
 }
 
 // revokeWorker drops the consent keys the server removed, one at a time, off
-// the reader.
+// the reader. Every removal the reader recorded is drained; none is dropped.
 func (c *Carrier) revokeWorker(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case id := <-c.revokes:
-			if c.cfg.ConsentKeyRevoked != nil {
-				c.cfg.ConsentKeyRevoked(id)
+		case <-c.revokeWake:
+			for {
+				id, ok := c.nextRevoke()
+				if !ok {
+					break
+				}
+				if c.cfg.ConsentKeyRevoked != nil {
+					c.cfg.ConsentKeyRevoked(id)
+				}
 			}
 		}
 	}
+}
+
+// nextRevoke takes one pending consent-key removal.
+func (c *Carrier) nextRevoke() (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for id := range c.revokes {
+		delete(c.revokes, id)
+		return id, true
+	}
+	return "", false
 }
 
 // handleRequest answers a frame the server sends. key_revoked stops the key
@@ -839,10 +857,12 @@ func (c *Carrier) handleRequest(sess *session, f Frame) {
 			// The key stops counting now, before any later frame is read; the
 			// disk write follows on the revoke worker.
 			c.markRevoked(b.CredentialID)
+			c.mu.Lock()
+			c.revokes[b.CredentialID] = true // the revoke worker does the disk work
+			c.mu.Unlock()
 			select {
-			case c.revokes <- b.CredentialID: // the revoke worker does the disk work
-			default:
-				c.cfg.Logf("link %s: too many key removals at once; dropped %s until the next one", c.cfg.Name, b.CredentialID)
+			case c.revokeWake <- struct{}{}:
+			default: // a wake is already pending
 			}
 		}
 		return

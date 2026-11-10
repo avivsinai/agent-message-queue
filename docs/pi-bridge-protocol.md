@@ -79,7 +79,8 @@ Every receipt, event line, and liveness record carries
 `"protocol": "amq:pi-bridge:v1"`. A reader refuses a record with a different
 non-empty protocol string instead of guessing its meaning:
 
-- a foreign liveness record reads as "no live bridge";
+- a liveness record without this protocol string, or with another one, reads
+  as "no live bridge";
 - a foreign receipt is an error for that ref, never admission evidence;
 - one foreign event line refuses the whole event stream for that ref. The
   refusal holds until a present stream validates as v1 end to end; an absent

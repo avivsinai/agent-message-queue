@@ -10,18 +10,6 @@ import (
 
 const envWakePrivateStopFD = "AMQ_WAKE_PRIVATE_STOP_FD"
 
-type wakeOwnerChildCapabilityUnsupportedError struct {
-	Err error
-}
-
-func (err *wakeOwnerChildCapabilityUnsupportedError) Error() string {
-	return err.Err.Error()
-}
-
-func (err *wakeOwnerChildCapabilityUnsupportedError) Unwrap() error {
-	return err.Err
-}
-
 type authoritativeWakeChildCapability struct {
 	bind  func(*os.Process) error
 	stop  func() error

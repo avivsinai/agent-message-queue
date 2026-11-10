@@ -1,6 +1,8 @@
 package core_test
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -111,5 +113,47 @@ func TestSteerCapabilityMaskedInSessionProjection(t *testing.T) {
 	}
 	if sessions[0].Capabilities.Steer {
 		t.Fatal("session.list advertises Steer:true (D1 gate refuses it — must be masked)")
+	}
+}
+
+// A deferred record stored with a disabled mode is refused with the same
+// reason a fresh submit gets, never an empty one (audit 2026-11-10).
+func TestDeferredDisabledModeRecordsTheReason(t *testing.T) {
+	store, now := openStore(t)
+	rt := fake.New("fake", "e_1")
+	rt.SetOffline(true)
+	ep := core.New(core.Config{Store: store, Now: now})
+	t.Cleanup(func() { _ = ep.Close() })
+	ep.Register(rt)
+
+	id := "11111111-1111-4111-8111-1111111111f2"
+	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
+		t.Fatalf("offline submit: %v", err)
+	}
+	// The record an older build stored with deliver=steer.
+	path := filepath.Join(store.Dir(), "requests", "local", "fake__"+id+".json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	steer := strings.Replace(string(raw), `"input":{"text":"x"}`, `"input":{"text":"x","deliver":"steer"}`, 1)
+	if steer == string(raw) {
+		t.Fatalf("record input not found to rewrite: %s", raw)
+	}
+	if err := os.WriteFile(path, []byte(steer), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rt.SetOffline(false)
+	ep.Register(rt)
+	if err := ep.Tick(); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	rec, ok, err := store.Get(requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id})
+	if err != nil || !ok {
+		t.Fatalf("record: ok=%v err=%v", ok, err)
+	}
+	if rec.State != protocol.StateRejected || !strings.Contains(rec.RefusalReason, "deliver=steer") {
+		t.Fatalf("state=%s reason=%q, want rejected naming deliver=steer", rec.State, rec.RefusalReason)
 	}
 }

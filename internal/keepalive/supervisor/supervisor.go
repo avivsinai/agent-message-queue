@@ -68,16 +68,6 @@ func (r Reconciler) Reconcile(ctx context.Context, entry registry.Entry) (regist
 	return r.ensureWake(ctx, entry, now)
 }
 
-func (r Reconciler) StartFresh(ctx context.Context, entry registry.Entry) (registry.Entry, Result) {
-	now := r.now()
-
-	if blocked, result, ok := r.checkLocalReadiness(ctx, entry, now); ok {
-		return blocked, result
-	}
-
-	return r.ensureWake(ctx, entry, now)
-}
-
 func (r Reconciler) checkLocalReadiness(ctx context.Context, entry registry.Entry, now time.Time) (registry.Entry, Result, bool) {
 	original := entry
 	if err := ctx.Err(); err != nil {

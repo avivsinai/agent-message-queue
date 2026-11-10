@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
@@ -166,8 +167,15 @@ func decodeStrict(raw json.RawMessage, schema string, v any) error {
 	return nil
 }
 
+// bodyKeyRe is the spelling of every body key: ASCII lowercase letters,
+// digits and underscores.
+var bodyKeyRe = regexp.MustCompile(`^[a-z0-9_]+$`)
+
 // noDuplicateKeys walks the JSON tokens and refuses an object that repeats
-// a key: encoding/json would silently keep the last one.
+// a key: encoding/json would silently keep the last one. It also refuses a
+// key outside bodyKeyRe, because encoding/json matches keys to fields with
+// Unicode case folding, so "CREDENTIAL_ID" beside "credential_id" would be
+// a duplicate the key set cannot see.
 func noDuplicateKeys(raw []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
@@ -204,6 +212,9 @@ func noDuplicateKeys(raw []byte) error {
 			if top != nil && top.object && top.key {
 				if top.keys[t] {
 					return fmt.Errorf("duplicate key %q", t)
+				}
+				if !bodyKeyRe.MatchString(t) {
+					return fmt.Errorf("key %q: body keys are [a-z0-9_]", t)
 				}
 				top.keys[t] = true
 				top.key = false

@@ -150,7 +150,7 @@ func runTrace(args []string) error {
 		messageID = strings.TrimSpace(args[0])
 		flagArgs = args[1:]
 	}
-	if handled, err := parseFlags(fs, flagArgs, usage); err != nil {
+	if handled, err := parseFlagsAllowPositionals(fs, flagArgs, usage); err != nil {
 		return err
 	} else if handled {
 		return nil
@@ -295,8 +295,9 @@ func (c *traceCollector) result() traceResult {
 	status := "found"
 	hasEvidence := false
 	hasErrors := false
-	for _, leg := range c.legs {
-		if len(leg.Evidence) > 0 {
+	for name, leg := range c.legs {
+		// A notification attempt never proves the message exists.
+		if name != "notification" && len(leg.Evidence) > 0 {
 			hasEvidence = true
 		}
 		if leg.Status == "error" {
@@ -563,10 +564,8 @@ func (c *traceCollector) notificationAttemptLedgerPresent(agent string) (bool, e
 	return false, nil
 }
 
-func notificationAttemptTraceState(ledgerPresent, recordPresent, supported bool) string {
+func notificationAttemptTraceState(ledgerPresent, supported bool) string {
 	switch {
-	case recordPresent:
-		return traceNotificationRecordPresent
 	case ledgerPresent:
 		return traceNotificationLedgerPresentNoRecord
 	case !supported:
@@ -794,7 +793,6 @@ func (c *traceCollector) finishLegs() {
 			if name == "notification" {
 				leg.State = notificationAttemptTraceState(
 					c.notificationLedgerPresent,
-					false,
 					notificationattempt.LedgerSupported,
 				)
 				switch leg.State {

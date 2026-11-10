@@ -147,28 +147,9 @@ func runEnv(args []string) error {
 	if err != nil {
 		return err
 	}
-	if contextExplicit {
-		decision := sessionguard.Decide(sessionguard.Input{
-			Kind: sessionguard.KindEnv,
-			Pin:  sessionguard.PinAbsent, Relation: sessionguard.TargetUnbound,
-			Flags: sessionguard.Flags{ExplicitContext: true},
-		})
-		if decision.Verdict != sessionguard.Allow {
-			return ContextMismatchError("refusing env: explicit context replacement was not authorized")
-		}
-	} else {
+	if !contextExplicit {
 		pin, pinErr := loadSessionPin()
 		if pinErr != nil {
-			decision := sessionGuardDecisionForContext(
-				sessionguard.KindEnv,
-				sessionguard.ChannelExit5,
-				sessionguard.PinInvalid,
-				&SessionContextError{Message: pinErr.Error()},
-				sessionguard.Flags{},
-			)
-			if decision.Verdict == sessionguard.Allow {
-				return nil
-			}
 			return pinErr
 		}
 		mismatch, checkErr := sessionPinMismatchWithPin(root, pin)
@@ -426,7 +407,7 @@ func resolveEnvConfigWithProvenance(rootFlag, meFlag string) (string, rootSource
 		if insideGit {
 			return "", "", "", "", noEligibleRootInGitError(gitTop)
 		}
-		return "", "", "", "", fmt.Errorf("cannot determine root: no .amqrc found, no .agent-mail/ directory, AM_ROOT not set, and no global config (~/.amqrc or AMQ_GLOBAL_ROOT); from your terminal, run 'amq setup --project-root \"$PWD\"' to configure this project; for an existing queue, set AMQ_GLOBAL_ROOT to its path")
+		return "", "", "", "", fmt.Errorf(noRootConfiguredPrefix + "no .amqrc found, no .agent-mail/ directory, AM_ROOT not set, and no global config (~/.amqrc or AMQ_GLOBAL_ROOT); from your terminal, run 'amq setup --project-root \"$PWD\"' to configure this project; for an existing queue, set AMQ_GLOBAL_ROOT to its path")
 	}
 
 	// Canonicalize the winning root before pin validation, JSON/shell output,
@@ -519,7 +500,7 @@ func resolveDiscoveredBaseRootForBootstrap() (string, bool, error) {
 
 func noEligibleRootInGitError(top string) error {
 	return ContextMismatchError(
-		"cannot determine an eligible AMQ root while cwd is inside Git worktree or bare repository %s: no project .amqrc, repo-local .agent-mail, or explicit root was found; implicit ~/.amqrc is ineligible here; --session selects a session but does not authorize a base root; run 'amq coop init' (or 'amq coop exec <agent>') in this repository to create its queue; for a bare repository, cd into a worktree or pass --root explicitly; alternatively configure this repository, set AMQ_GLOBAL_ROOT or AM_ROOT, or pass --root explicitly%s",
+		noEligibleRootInGitPrefix+" %s: no project .amqrc, repo-local .agent-mail, or explicit root was found; implicit ~/.amqrc is ineligible here; --session selects a session but does not authorize a base root; run 'amq coop init' (or 'amq coop exec <agent>') in this repository to create its queue; for a bare repository, cd into a worktree or pass --root explicitly; alternatively configure this repository, set AMQ_GLOBAL_ROOT or AM_ROOT, or pass --root explicitly%s",
 		top, codexLostIdentityHint(),
 	)
 }
@@ -844,3 +825,11 @@ func resolveProject(root string) string {
 	}
 	return result.Project()
 }
+
+// noRootConfiguredPrefix starts the error for a machine with no queue root
+// configured anywhere, which doctor reports as a warning, not a defect.
+const noRootConfiguredPrefix = "cannot determine root: "
+
+// noEligibleRootInGitPrefix starts the same condition inside a Git
+// repository that has no queue of its own yet.
+const noEligibleRootInGitPrefix = "cannot determine an eligible AMQ root while cwd is inside Git worktree or bare repository"

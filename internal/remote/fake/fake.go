@@ -182,10 +182,8 @@ func (r *Runtime) Submit(req core.BoundRequest) (core.Admission, error) {
 		return core.Admission{Admitted: true, RunID: existing.id}, nil
 	}
 	if r.busy {
-		if req.Input.Busy != protocol.BusyQueue {
-			r.mu.Unlock()
-			return core.Admission{Code: protocol.CodeBusy, Message: "a run is active"}, nil
-		}
+		r.mu.Unlock()
+		return core.Admission{Code: protocol.CodeBusy, Message: "a run is active"}, nil
 	}
 	for _, rn := range r.runsByKey {
 		if rn.state.Terminal() && !rn.acknowledged {
@@ -763,8 +761,9 @@ func (r *Runtime) SetOffline(offline bool) {
 	} else {
 		r.attachment = "live"
 	}
+	attachment := r.attachment
 	r.mu.Unlock()
-	r.emit(core.NativeEvent{Type: core.EventStatus, Attachment: r.attachment})
+	r.emit(core.NativeEvent{Type: core.EventStatus, Attachment: attachment})
 }
 
 // Counters exposes what the corpus asserts about the harness side.

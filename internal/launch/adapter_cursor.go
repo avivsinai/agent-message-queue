@@ -22,10 +22,6 @@ func NewCursorAdapter(executable string) *CursorAdapter {
 func (adapter *CursorAdapter) Name() string      { return CursorProvider }
 func (adapter *CursorAdapter) Mode() AdapterMode { return AdapterModeCapture }
 
-func (adapter *CursorAdapter) CommittedEnvKeys() []string {
-	return committedEnvKeys(cursorEnvRules())
-}
-
 func (adapter *CursorAdapter) ValidateCommittedConfig(request CommittedConfigRequest) error {
 	if err := validateCursorBypassArgs(request.Args, true); err != nil {
 		return err

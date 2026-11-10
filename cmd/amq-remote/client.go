@@ -10,8 +10,8 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
-func clientSimple(args []string, op protocol.Op, positional string, probe ...*jsonProbe) (any, int, error) {
-	fs := flag.NewFlagSet(string(op), flag.ContinueOnError)
+func clientSimple(args []string, name string, op protocol.Op, positional string, probe ...*jsonProbe) (any, int, error) {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	c := addCommon(fs, probe...)
 	pos, err := parseInterleaved(fs, args)

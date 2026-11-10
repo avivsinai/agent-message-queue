@@ -18,7 +18,6 @@ import (
 type coopNamedMode = harness.NamingMode
 
 const (
-	coopNamedModeOff     = harness.NamingOff
 	coopNamedModeArgv    = harness.NamingArgv
 	coopNamedModeTUI     = harness.NamingTUI
 	coopNamedModeUnknown = harness.NamingUnknown
@@ -234,7 +233,7 @@ var codexSubcommands = map[string]bool{
 	"agents": true, "exec": true, "e": true, "review": true, "login": true, "logout": true, "mcp": true,
 	"plugin": true, "app-server": true, "remote-control": true, "app": true, "completion": true,
 	"update": true, "doctor": true, "sandbox": true, "debug": true, "apply": true, "a": true,
-	"resume": true, "queue": true, "archive": true, "delete": true, "migrate-rollouts": true,
+	"resume": true, "queue": true, "archive": true, "delete": true, "migrate-rollouts": true, "migrate-nfs-db": true,
 	"unarchive": true, "fork": true, "cloud": true, "cloud-tasks": true, "exec-server": true, "features": true,
 	"help": true, "stdio-to-uds": true, "responses-api-proxy": true, "tcp-tunnel": true, "execpolicy": true,
 }

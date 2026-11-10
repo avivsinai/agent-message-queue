@@ -17,6 +17,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
+	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
 // PermissionRequest hook. Claude Code runs it for every tool permission
@@ -40,8 +41,8 @@ const permissionHookType = "PermissionRequest"
 // harnessClaude names the harness in the request.
 const harnessClaude = "claude"
 
-// maxDialogText bounds the dialog body Buzz shows; the options still apply
-// to the whole call the terminal shows.
+// maxDialogText bounds the dialog body Buzz shows, in bytes cut on a UTF-8
+// boundary; the options still apply to the whole call the terminal shows.
 const maxDialogText = 3500
 
 // permissionInput is the subset of the PermissionRequest stdin the hook
@@ -543,7 +544,11 @@ func dialogText(tool string, input json.RawMessage) string {
 			b.Write(input)
 		}
 	}
-	return truncateRunes(b.String(), maxDialogText)
+	text := strings.TrimRight(b.String(), "\n")
+	if t, cut := protocol.TruncateText(text, maxDialogText); cut {
+		text = t + "\n… full text in the terminal"
+	}
+	return text
 }
 
 // writeDiff writes old and new as removed and added lines.

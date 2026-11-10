@@ -312,7 +312,7 @@ func (b *TmuxBackend) Reclaim(req ReclaimRequest) (ReclaimResult, error) {
 	}
 	if req.Journal.RootPhysical != "" {
 		physical, physicalErr := fsq.StableTreeIdentityInfo(req.Root.FileInfo())
-		if physicalErr != nil || physical != req.Journal.RootPhysical {
+		if physicalErr != nil || !fsq.SamePersistedTreeIdentity(req.Journal.RootPhysical, physical) {
 			return ReclaimResult{Status: ReclaimForeign, Evidence: "journal session root identity changed"}, nil
 		}
 	}

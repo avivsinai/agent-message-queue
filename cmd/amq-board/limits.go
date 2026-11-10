@@ -17,7 +17,7 @@ import (
 // every board run and panel. Each deadline bounds the whole pass:
 // `codex --version`, the app-server run, and the app-server's exit after
 // its reply; reaping a child killed at the deadline adds at most 0.2 s.
-// A one-shot face uses the short deadline, serve the longer one.
+// A one-shot sync uses the short deadline, sync --watch the longer one.
 const (
 	limitsInterval        = 5 * time.Minute
 	oneShotLimitsDeadline = 3 * time.Second
@@ -62,8 +62,8 @@ func oneShotLimits(ctx context.Context, homes []string) usagefacts.Result {
 	return r
 }
 
-// serveLimits runs one collection pass per serve refresh and keeps the
-// pass's memory for the next.
+// serveLimits runs one collection pass per sync --watch acquisition and
+// keeps the pass's memory for the next.
 type serveLimits struct {
 	mu  sync.Mutex
 	mem collect.Memory

@@ -285,7 +285,7 @@ func runCleanup(args []string) error {
 
 	removed := 0
 	for _, path := range tmpCandidates {
-		if err := os.Remove(path); err != nil {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 		removed++

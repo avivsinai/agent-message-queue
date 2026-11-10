@@ -892,7 +892,7 @@ func (c *coopExecRun) superviseWakeHelper(wakeCmd *exec.Cmd, readyPath string) e
 						cleanupErr,
 					)
 				}
-				_ = writeStderr("%s\n", wakeReadyMessage(c.root, c.agentHandle, current.PID))
+				_ = writeStderr("Using existing amq wake (pid %d)\n", current.PID)
 				c.wakeProc = nil
 				c.wakeWaiter = nil
 				c.wakeChildCapability = nil

@@ -16,6 +16,31 @@ func TestDarwinWakeRepairChildControlStopsOnExplicitStop(t *testing.T) {
 	assertDarwinWakeRepairChildControl(t, wakeRepairChildControlStop, true)
 }
 
+// A restart re-exec copies os.Environ, so an ingested control fd must not stay named there (audit 2026-11-10).
+func TestDarwinWakeRepairChildControlClearsEnvAfterIngestion(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = writer.Close() }()
+	childFD, err := unix.Dup(int(reader.Fd()))
+	_ = reader.Close()
+	if err != nil {
+		t.Fatalf("duplicate child control fd: %v", err)
+	}
+	t.Setenv(envWakeRepairChildControlFD, strconv.Itoa(childFD))
+
+	_, cleanup, err := wakeRepairChildStopFromEnv()
+	if err != nil {
+		_ = unix.Close(childFD)
+		t.Fatalf("start child control watcher: %v", err)
+	}
+	defer cleanup()
+	if value, ok := os.LookupEnv(envWakeRepairChildControlFD); ok {
+		t.Fatalf("%s=%q survived ingestion", envWakeRepairChildControlFD, value)
+	}
+}
+
 func TestDarwinWakeRepairChildCleanupInterruptsBlockingControlRead(t *testing.T) {
 	reader, writer, err := os.Pipe()
 	if err != nil {

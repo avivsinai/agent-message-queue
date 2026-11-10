@@ -534,3 +534,13 @@ func TestOfflineKeyIgnoresEphemeralAddress(t *testing.T) {
 		t.Fatal("refused and timeout share a key")
 	}
 }
+
+// A body that spells one key twice in different case is refused, as
+// encoding/json would fold both onto one field (audit 2026-11-10).
+func TestStrictBodyRefusesACaseVariantKey(t *testing.T) {
+	raw := json.RawMessage(`{"schema":"` + SchemaKeyRevoked + `","credential_id":"a","CREDENTIAL_ID":"b"}`)
+	var b keyRevokedBody
+	if err := decodeStrict(raw, SchemaKeyRevoked, &b); err == nil {
+		t.Fatalf("case-variant key accepted; credential_id=%q", b.CredentialID)
+	}
+}

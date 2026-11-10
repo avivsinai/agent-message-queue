@@ -127,34 +127,34 @@ func TestProcessBridgeMessageIgnoresUnknownTypes(t *testing.T) {
 }
 
 func TestValidateBridgeConfig(t *testing.T) {
-	err := validateBridgeConfig(BridgeConfig{
+	err := ValidateBridgeConfig(BridgeConfig{
 		AgentHandle:    "codex",
 		AMQRoot:        "/tmp/root",
 		URL:            "http://127.0.0.1:3484/api/runtime/ws",
 		ReconnectDelay: time.Second,
 	})
 	if err == nil || !strings.Contains(err.Error(), "invalid websocket URL scheme") {
-		t.Fatalf("validateBridgeConfig error = %v", err)
+		t.Fatalf("ValidateBridgeConfig error = %v", err)
 	}
 
-	err = validateBridgeConfig(BridgeConfig{
+	err = ValidateBridgeConfig(BridgeConfig{
 		AgentHandle:    "codex",
 		AMQRoot:        "/tmp/root",
 		URL:            "ws://127.0.0.1:3484/api/runtime/ws",
 		ReconnectDelay: 0,
 	})
 	if err == nil || !strings.Contains(err.Error(), "reconnect delay") {
-		t.Fatalf("validateBridgeConfig reconnect error = %v", err)
+		t.Fatalf("ValidateBridgeConfig reconnect error = %v", err)
 	}
 
-	err = validateBridgeConfig(BridgeConfig{
+	err = ValidateBridgeConfig(BridgeConfig{
 		AgentHandle:    "codex",
 		AMQRoot:        "/tmp/root",
 		URL:            "ws://127.0.0.1:3484/api/runtime/ws",
 		ReconnectDelay: time.Second,
 	})
 	if err != nil {
-		t.Fatalf("validateBridgeConfig valid config error = %v", err)
+		t.Fatalf("ValidateBridgeConfig valid config error = %v", err)
 	}
 }
 

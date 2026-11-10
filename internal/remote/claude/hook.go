@@ -251,14 +251,9 @@ func hookState(path string, spec hookfile.Spec) (string, error) {
 	return HookPresent, nil
 }
 
-// HooksDisabled reports whether the user settings file under home sets
+// HooksDisabledAt reports whether the settings file at path sets
 // disableAllHooks, so Claude Code runs none of its hooks unless a project
 // or managed setting turns them on again.
-func HooksDisabled(home string) (bool, error) {
-	return HooksDisabledAt(SettingsPath(home))
-}
-
-// HooksDisabledAt is HooksDisabled for the settings file at path.
 func HooksDisabledAt(path string) (bool, error) {
 	raw, err := hookfile.ReadBounded(path)
 	if errors.Is(err, os.ErrNotExist) {

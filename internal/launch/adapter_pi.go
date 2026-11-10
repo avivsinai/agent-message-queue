@@ -29,10 +29,6 @@ func NewPiAdapter(executable string) *PiAdapter {
 func (adapter *PiAdapter) Name() string      { return PiProvider }
 func (adapter *PiAdapter) Mode() AdapterMode { return AdapterModeMint }
 
-func (adapter *PiAdapter) CommittedEnvKeys() []string {
-	return committedEnvKeys(piEnvRules())
-}
-
 func (adapter *PiAdapter) ValidateCommittedConfig(request CommittedConfigRequest) error {
 	return validateCommittedConfig(request, piEnvRules(), piArgRules())
 }
@@ -50,7 +46,7 @@ func (adapter *PiAdapter) Capabilities(ctx context.Context) AdapterCapabilities 
 		return result
 	}
 	result.ProviderVersion = strings.TrimSpace(string(version))
-	if !piVersionSupported(result.ProviderVersion) {
+	if !releaseAtLeast(result.ProviderVersion, piMinimumVersion) {
 		result.Reason = "provider_version_unsupported"
 		return result
 	}
@@ -146,20 +142,3 @@ func piEnvRules() map[string]valueRule { return commonCommittedEnvRules() }
 func piArgRules() map[string]argumentRule { return map[string]argumentRule{} }
 
 func piBypassArgs() map[string]struct{} { return map[string]struct{}{} }
-
-func piVersionSupported(version string) bool {
-	got, ok := parseReleaseVersion(version)
-	if !ok {
-		return false
-	}
-	floor, ok := parseReleaseVersion(piMinimumVersion)
-	if !ok {
-		return false
-	}
-	for i := range got {
-		if got[i] != floor[i] {
-			return got[i] > floor[i]
-		}
-	}
-	return true
-}

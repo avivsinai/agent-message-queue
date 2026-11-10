@@ -3,7 +3,10 @@
 # An existing pre-push hook is left in place unless it is already this
 # script's hook, or the caller passes --force.
 
-HOOK_DIR="$(git rev-parse --git-dir)/hooks"
+# The common dir holds the hooks for the main checkout and every linked
+# worktree. core.hooksPath is not followed: it may name a directory that
+# other repositories share.
+HOOK_DIR="$(git rev-parse --git-common-dir)/hooks" || exit 1
 HOOK="$HOOK_DIR/pre-push"
 force=0
 if [ "${1:-}" = "--force" ]; then
@@ -49,6 +52,7 @@ if [ -e "$HOOK" ] || [ -L "$HOOK" ]; then
   fi
 fi
 
-hook_body > "$HOOK"
-chmod +x "$HOOK"
+mkdir -p "$HOOK_DIR" || exit 1
+hook_body > "$HOOK" || exit 1
+chmod +x "$HOOK" || exit 1
 echo "✓ Installed pre-push hook"

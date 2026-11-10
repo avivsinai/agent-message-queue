@@ -28,11 +28,10 @@ import (
 // already had the event array round-trips byte for byte.
 
 // jsonSpan is one container value in the raw bytes: open is the index of
-// its '{' or '[', close the index of the matching '}' or ']'. keyStart is
-// the index of the member key's opening quote, or -1 when unknown.
+// its '{' or '[', close the index of the matching '}' or ']'.
 type jsonSpan struct {
-	keyStart, open, close int
-	empty                 bool
+	open, close int
+	empty       bool
 }
 
 // settingsLoc is where the root object, hooks object and the event's array
@@ -47,9 +46,7 @@ type settingsLoc struct {
 type locFrame struct {
 	isObj, wantKey bool
 	path, key      string
-	keyStart       int // opening quote of the current key (objects)
 	open           int // index of this container's '{' or '['
-	ownKeyStart    int // opening quote of this container's key in its parent
 	members        int
 }
 
@@ -114,7 +111,7 @@ func locateSettings(raw []byte, event string) (settingsLoc, error) {
 		if d, ok := tok.(json.Delim); ok && (d == '}' || d == ']') {
 			f := top()
 			stack = stack[:len(stack)-1]
-			sp := jsonSpan{keyStart: f.ownKeyStart, open: f.open, close: off - 1, empty: f.members == 0}
+			sp := jsonSpan{open: f.open, close: off - 1, empty: f.members == 0}
 			switch f.path {
 			case "$":
 				loc.root = sp
@@ -128,15 +125,7 @@ func locateSettings(raw []byte, event string) (settingsLoc, error) {
 		}
 		if s, ok := tok.(string); ok {
 			if f := top(); f != nil && f.isObj && f.wantKey {
-				f.key, f.wantKey, f.keyStart = s, false, -1
-				// The key token ends at off. Its opening quote is found by
-				// re-encoding the decoded key; a key spelled with escapes
-				// does not match and keeps keyStart -1, which only disables
-				// empty-member removal (the element itself is still cut).
-				enc, _ := json.Marshal(s)
-				if st := off - len(enc); st >= 0 && bytes.Equal(raw[st:off], enc) {
-					f.keyStart = st
-				}
+				f.key, f.wantKey = s, false
 				continue
 			}
 		}
@@ -155,11 +144,7 @@ func locateSettings(raw []byte, event string) (settingsLoc, error) {
 		if (path == hooksPath && loc.hooks != nil) || (path == stopPath && loc.stop != nil) {
 			return loc, fmt.Errorf("settings has a duplicate %s key; refusing to edit", strings.TrimPrefix(path, "$/"))
 		}
-		ownKey := -1
-		if f := top(); f != nil && f.isObj {
-			ownKey = f.keyStart
-		}
-		stack = append(stack, &locFrame{isObj: d == '{', wantKey: d == '{', path: path, open: off - 1, ownKeyStart: ownKey})
+		stack = append(stack, &locFrame{isObj: d == '{', wantKey: d == '{', path: path, open: off - 1})
 	}
 	if len(stack) != 0 || loc.root.close == 0 {
 		return loc, errors.New("settings is not a complete JSON object; refusing")
@@ -221,7 +206,7 @@ func groupHooksArray(raw []byte, obj [2]int) (jsonSpan, bool) {
 		if start >= end || seg[start] != '[' {
 			return jsonSpan{}, false
 		}
-		return jsonSpan{keyStart: -1, open: obj[0] + start, close: obj[0] + end - 1, empty: len(bytes.TrimSpace(v[1:len(v)-1])) == 0}, true
+		return jsonSpan{open: obj[0] + start, close: obj[0] + end - 1, empty: len(bytes.TrimSpace(v[1:len(v)-1])) == 0}, true
 	}
 	return jsonSpan{}, false
 }

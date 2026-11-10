@@ -33,3 +33,24 @@ func TestEnqueueCountsClaimedCommands(t *testing.T) {
 		t.Fatalf("enqueue beyond %d unanswered commands: err = %v, want ErrFull", MaxPending, err)
 	}
 }
+
+// A request that failed to write does not hold its event key, so a
+// redelivery of the event is admitted (audit 2026-11-10).
+func TestEnqueueFailedWriteFreesKey(t *testing.T) {
+	agentDir := t.TempDir()
+	now := time.Now()
+	req := Request{Target: "t", Text: "/compact", Event: []byte("{}")}
+	blocker := filepath.Join(Dir(agentDir), fmt.Sprintf("%020d-k", now.UnixNano())+ReqSuffix)
+	if err := os.MkdirAll(filepath.Join(blocker, "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Enqueue(agentDir, "k", req, now); err == nil {
+		t.Fatal("enqueue over a directory: err = nil, want a write error")
+	}
+	if err := os.RemoveAll(blocker); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Enqueue(agentDir, "k", req, now); err != nil {
+		t.Fatalf("enqueue after a failed write: err = %v, want nil", err)
+	}
+}

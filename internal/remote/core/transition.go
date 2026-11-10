@@ -206,9 +206,8 @@ func boundResult(r *protocol.Result) *protocol.Result {
 		return nil
 	}
 	out := *r
-	if len(out.Text) > protocol.MaxResultBytes {
-		out.Text = out.Text[:protocol.MaxResultBytes]
-		out.Truncated = true
+	if text, cut := protocol.TruncateText(out.Text, protocol.MaxResultBytes); cut {
+		out.Text, out.Truncated = text, true
 	}
 	return &out
 }

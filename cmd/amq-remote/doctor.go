@@ -35,6 +35,9 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 	if err := fs.Parse(args); err != nil {
 		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
+	if fs.NArg() > 0 {
+		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "doctor takes no positional arguments (got %q)", fs.Arg(0))
+	}
 	if err := fsq.ValidateHandle(*me); err != nil {
 		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "invalid handle %q: %v", *me, err)
 	}
@@ -163,7 +166,7 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 	// Relay connections, as serve last reported them. Each state
 	// is distinct: auth_pending is not authenticated, and authenticated is
 	// not proof the relay materialized ownership.
-	doctorRelay(stateDir, report, fail, note)
+	doctorRelay(c.root, stateDir, report, fail, note)
 	noteNoService(note, c.root, stateDir)
 	if len(notes) > 0 {
 		report["notes"] = notes
@@ -195,14 +198,15 @@ func doctorNativeCapability(stateDir string, sessions []protocol.Session, report
 		state     func(string) (string, error)
 		form      func(home, settings string) (string, error)
 		key       string
+		kind      string // the opt-in kind the owner can remove
 		installer string
 		missing   func(protocol.Session) string
 	}
 	rows := []hookRow{
-		{claude.StopHookStateAt, claude.StopHookForm, "claude_stop_hook", "install-stop-hook", func(protocol.Session) string {
+		{claude.StopHookStateAt, claude.StopHookForm, "claude_stop_hook", claude.HookStop, "install-stop-hook", func(protocol.Session) string {
 			return "the Claude Stop hook is not installed, so requests are admitted but never complete"
 		}},
-		{claude.PermissionHookState, claude.PermissionHookForm, "claude_approval_hook", "install-approval-hook", func(s protocol.Session) string {
+		{claude.PermissionHookState, claude.PermissionHookForm, "claude_approval_hook", claude.HookApproval, "install-approval-hook", func(s protocol.Session) string {
 			if !s.Capabilities.ApproveTool {
 				return "the PermissionRequest hook is not installed, so a shared source never sees a tool approval"
 			}
@@ -228,9 +232,18 @@ func doctorNativeCapability(stateDir string, sessions []protocol.Session, report
 			if err == nil {
 				state, err = row.state(settings)
 			}
+			removed := false
+			if err == nil && state == claude.HookMissing {
+				// The owner's own removal is a choice, not a fault; the
+				// hooks rows note it.
+				optIn, oerr := claude.ReadHookOptIn(settings)
+				removed = oerr == nil && optIn.Removed(row.kind)
+			}
 			switch {
 			case err != nil:
 				fail("native_capability", s.TargetID, "cannot read the Claude user settings.json: "+err.Error(), "repair "+settings)
+			case removed:
+				report[row.key] = settings + " has no hook: the owner removed it with uninstall-" + strings.TrimPrefix(row.installer, "install-")
 			case state == claude.HookMissing:
 				fail("native_capability", s.TargetID, row.missing(s), "run `amq-remote claude "+row.installer+"`")
 			case state == claude.HookDisabled:
@@ -305,7 +318,7 @@ func doctorBodyKeys(root string, report map[string]any, fail func(boundary, subj
 			info, _ := bodyKeys[name].(map[string]any)
 			remedy, _ := info["remedy"].(string)
 			if remedy == "" {
-				remedy = "run `amq-remote share --session " + name + "` and follow its output"
+				remedy = "run `" + shareCommand(root, name, "") + "` and follow its output"
 			}
 			for _, key := range []string{"attestation_error", "key_error", "body_pub_error", "staged_error"} {
 				if msg, ok := info[key].(string); ok {
@@ -317,9 +330,9 @@ func doctorBodyKeys(root string, report map[string]any, fail func(boundary, subj
 			if att, ok := info["attestation"].(string); ok {
 				switch {
 				case strings.HasPrefix(att, "missing"):
-					fail("body_key", name, "no owner-signed generation is enrolled", "run `amq-remote share --session "+name+"` and have the owner sign the printed preimages")
+					fail("body_key", name, "no owner-signed generation is enrolled", "run `"+shareCommand(root, name, "")+"` and have the owner sign the printed preimages")
 				case strings.HasPrefix(att, "pending"):
-					fail("body_key", name, att, "have the owner sign the printed preimages, then run `amq-remote share --session "+name+"`")
+					fail("body_key", name, att, "have the owner sign the printed preimages, then run `"+shareCommand(root, name, "")+"`")
 				}
 			}
 			if msg, ok := info["expiry_warning"].(string); ok && strings.HasPrefix(msg, "expired") {
@@ -331,13 +344,13 @@ func doctorBodyKeys(root string, report map[string]any, fail func(boundary, subj
 
 // doctorRelay reports the relay connections and fails each share whose
 // relay, DM, publication, presence, activity or discovery boundary is broken.
-func doctorRelay(stateDir string, report map[string]any, fail, note func(boundary, subject, detail, remedy string)) {
+func doctorRelay(root, stateDir string, report map[string]any, fail, note func(boundary, subject, detail, remedy string)) {
 	switch rs, rerr := loadRelayStatus(stateDir); {
 	case rerr == nil:
 		report["relay"] = rs
 		for _, sh := range rs.Shares {
 			if sh.State != string(relay.StateAuthenticated) {
-				fail("relay_auth", sh.Session, sh.State+errSuffix(sh.Error), "check the relay URL and the share's enrollment (`amq-remote share --session "+sh.Session+"`)")
+				fail("relay_auth", sh.Session, sh.State+errSuffix(sh.Error), "check the relay URL and the share's enrollment (`"+shareCommand(root, sh.Session, "")+"`)")
 			}
 			// A commands share also needs its DM surface open.
 			switch {
@@ -350,7 +363,7 @@ func doctorRelay(stateDir string, report map[string]any, fail, note func(boundar
 			// A presence share needs a published status and the owner's
 			// 30177 policy, or Desktop cannot list the body as owned.
 			if sh.Presence != "" && sh.Presence != "online" && sh.Presence != "away" {
-				fail("presence", sh.Session, sh.Presence, "enroll the profile kind with `amq-remote share --session "+sh.Session+" --enable buzz-profile`")
+				fail("presence", sh.Session, sh.Presence, "enroll the profile kind with `"+shareCommand(root, sh.Session, "--enable buzz-profile")+"`")
 			}
 			if sh.Activity != "" && sh.Activity != "exporting" {
 				fail("activity", sh.Session, sh.Activity, "check the native_session_id pin and that the target is an attached Codex thread")
@@ -476,6 +489,11 @@ func printDoctor(w io.Writer, r doctorReport) {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
+		// These are reported as FAIL and NOTE lines above, or only in JSON.
+		switch k {
+		case "failing", "notes", "fixed", "hooks", "machine_agent", "channels", "mailboxes":
+			continue
+		}
 		switch v := r[k].(type) {
 		case string:
 			say(w, "INFO %s: %s", k, v)
@@ -489,10 +507,6 @@ func printDoctor(w io.Writer, r doctorReport) {
 				say(w, "INFO %s %s: %s", k, s, v[s])
 			}
 		default:
-			switch k {
-			case "failing", "notes", "fixed", "hooks", "machine_agent", "channels", "mailboxes":
-				continue
-			}
 			if raw, err := json.Marshal(v); err == nil {
 				say(w, "INFO %s: %s", k, raw)
 			}

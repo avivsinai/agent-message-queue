@@ -1299,8 +1299,3 @@ func sameStrings(left, right []string) bool {
 	}
 	return true
 }
-
-// ErrNoJournal is returned by helpers that need to distinguish "the journal
-// does not exist" from "the journal exists but is empty". List does not use
-// it (empty = no evidence), but trace may when deciding leg wording.
-var ErrNoJournal = errors.New("notification attempt journal does not exist")

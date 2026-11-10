@@ -35,5 +35,9 @@ func withExclusiveDLQEnvelopeLock(file *os.File, fn func() error) error {
 // kernel-released on close or process crash; there is no stale sentinel to
 // clean up.
 func WithExclusiveFileLock(file *os.File, fn func() error) error {
-	return withExclusiveDLQEnvelopeLock(file, fn)
+	if err := lock.Lock(file); err != nil {
+		return fmt.Errorf("acquire file lock: %w", err)
+	}
+	defer func() { _ = lock.Unlock(file) }()
+	return fn()
 }

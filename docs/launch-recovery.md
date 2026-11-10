@@ -40,9 +40,8 @@ leaves that window for manual close; AMQ never treats the gap as proven absence
 and never creates a duplicate.
 
 Cmux Create uses `--focus false` and restores the previously selected workspace
-after Create, including on failure cleanup. Close restores the workspace that
-was selected at Close time, skipping the workspace being closed. Focus then
-Close can leave a neighbor workspace selected.
+after Create, including on failure cleanup. Focus then Close can leave a
+neighbor workspace selected.
 
 If an operator chooses to abandon recovery evidence, first inspect the exact
 target without mutation:

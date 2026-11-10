@@ -41,5 +41,9 @@ func ProcessArgs(pid int) ([]string, error) {
 			args = append(args, part)
 		}
 	}
+	if len(args) == 0 {
+		// A zombie or kernel thread has an empty cmdline.
+		return nil, fmt.Errorf("process %d has no arguments", pid)
+	}
 	return args, nil
 }

@@ -224,7 +224,7 @@ func (record LaunchJournal) Validate() error {
 		return fmt.Errorf("created journal must not retain candidate binding")
 	}
 	if record.Binding == nil {
-		return fmt.Errorf("created journal requires a candidate binding")
+		return fmt.Errorf("created journal requires a binding")
 	}
 	if err := record.Binding.Validate(); err != nil {
 		return fmt.Errorf("created journal binding: %w", err)
@@ -300,8 +300,8 @@ func (record LaunchJournal) ValidateRequest(request ReconcileRequest) error {
 	if err != nil {
 		return fmt.Errorf("resolve session root physical identity: %w", err)
 	}
-	if (record.ProjectPhysical != "" && !fsq.SamePersistedTreeIdentity(record.ProjectPhysical, projectPhysical)) ||
-		(record.RootPhysical != "" && !fsq.SamePersistedTreeIdentity(record.RootPhysical, rootPhysical)) {
+	if !fsq.SamePersistedTreeIdentity(record.ProjectPhysical, projectPhysical) ||
+		!fsq.SamePersistedTreeIdentity(record.RootPhysical, rootPhysical) {
 		return fmt.Errorf("launch journal physical project or session root changed")
 	}
 	if record.RosterDigest != rosterDigest {

@@ -144,9 +144,10 @@ func (r *DeliveryRoot) syncDirPlatform(dir string) error {
 	return flushDirHandle(handle, dir)
 }
 
-// syncDirPlatformAmbient is the ambient-path form used by the package-level
-// WriteFileAtomic (which holds no DeliveryRoot); it opens by absolute path —
-// the only form available there. No DeliveryRoot path reaches it.
+// syncDirPlatformAmbient is the ambient-path form behind the package-level
+// SyncDir, whose callers hold no DeliveryRoot; it opens by absolute path —
+// the only form available there. No DeliveryRoot path reaches it. A missing
+// directory is not an error here, unlike the pinned form and the Unix SyncDir.
 func syncDirPlatformAmbient(dir string) error {
 	namePtr, err := windows.UTF16PtrFromString(dir)
 	if err != nil {

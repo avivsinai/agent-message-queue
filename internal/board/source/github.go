@@ -83,8 +83,7 @@ func (g GitHub) Read(ctx context.Context, env board.Env) board.Result {
 		return board.Result{Status: board.StatusUnavailable, Detail: "no github.com origin remote and no forges.github.repos"}
 	}
 	if len(repos) > maxGitHubRepos {
-		res := board.Result{Status: board.StatusDegraded, Detail: fmt.Sprintf("%d repos configured; at most %d", len(repos), maxGitHubRepos)}
-		return res
+		return board.Result{Status: board.StatusDegraded, Detail: fmt.Sprintf("%d repos configured; at most %d", len(repos), maxGitHubRepos), ObservedAt: env.Now(), Feeds: githubFeeds}
 	}
 	key := CacheKey{Host: "github.com", Repos: repos, Schema: GitHubQuerySchema}
 	if g.Cache == nil {

@@ -71,6 +71,19 @@ func TestSendFromSessionPreBootCrossSession(t *testing.T) {
 	}
 }
 
+// A missing --from-session source keeps the not-found exit code (audit 2026-11-10).
+func TestSendFromSessionMissingSourceExitsNotFound(t *testing.T) {
+	baseRoot := filepath.Join(t.TempDir(), ".agent-mail")
+	if err := fsq.EnsureRootDirs(baseRoot); err != nil {
+		t.Fatal(err)
+	}
+	ensureSendSessionAgent(t, filepath.Join(baseRoot, "qa"), "bob")
+	err := runSend([]string{"--me", "alice", "--root", baseRoot, "--from-session", "ghost", "--session", "qa", "--to", "bob", "--body", "x"})
+	if GetExitCode(err) != ExitNotFound {
+		t.Fatalf("exit=%d err=%v, want not found", GetExitCode(err), err)
+	}
+}
+
 func TestSendCrossProjectSessionSymlinkToForeignRefused(t *testing.T) {
 	peer := t.TempDir()
 	foreign := t.TempDir()

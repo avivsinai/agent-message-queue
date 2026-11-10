@@ -154,6 +154,11 @@ func wakeRepairChildStopFromEnv() (<-chan struct{}, func(), error) {
 	if raw == "" {
 		return nil, func() {}, nil
 	}
+	// The fd is close-on-exec once ingested, so a re-exec that inherits this
+	// variable would name a closed or unrelated descriptor.
+	if err := os.Unsetenv(envWakeRepairChildControlFD); err != nil {
+		return nil, nil, fmt.Errorf("clear %s after ingestion: %w", envWakeRepairChildControlFD, err)
+	}
 	fd, err := strconv.Atoi(raw)
 	if err != nil || fd < 3 {
 		return nil, nil, fmt.Errorf("%s is invalid", envWakeRepairChildControlFD)

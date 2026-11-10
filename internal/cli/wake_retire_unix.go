@@ -255,9 +255,6 @@ func retireWakeIfGeneration(root, me string, requested wakeTarget, ifGeneration 
 			if err != nil {
 				return err
 			}
-			if err := requireExistingWakeTargetMatchesAt(dirfd, scopedAgentDir, current, requested); err != nil {
-				return err
-			}
 			commit = removeWakeLockIfUnchangedGuardedAtOutcome(
 				scope,
 				current,
@@ -391,11 +388,6 @@ func removeWakeRetireArtifactsAt(
 	}
 	if err := validateWakeRetireCleanupSnapshotAt(
 		dirfd, agentDir, retired, expected, "after retirement",
-	); err != nil {
-		return preserveWakeRetireArtifacts(expected, err)
-	}
-	if err := validateWakeRetireCleanupSnapshotAt(
-		dirfd, agentDir, retired, expected, "during retired artifact cleanup",
 	); err != nil {
 		return preserveWakeRetireArtifacts(expected, err)
 	}

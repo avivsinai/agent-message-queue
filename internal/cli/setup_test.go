@@ -29,9 +29,8 @@ func (a setupValidatingFixtureAdapter) ValidateCommittedConfig(request launch.Co
 	return a.validator.ValidateCommittedConfig(request)
 }
 
-func (a setupFixtureAdapter) Name() string               { return a.name }
-func (a setupFixtureAdapter) Mode() launch.AdapterMode   { return launch.AdapterModeMint }
-func (a setupFixtureAdapter) CommittedEnvKeys() []string { return nil }
+func (a setupFixtureAdapter) Name() string             { return a.name }
+func (a setupFixtureAdapter) Mode() launch.AdapterMode { return launch.AdapterModeMint }
 func (a setupFixtureAdapter) Capabilities(context.Context) launch.AdapterCapabilities {
 	return launch.AdapterCapabilities{
 		Provider: a.name, Mode: a.Mode(), Available: true, Executable: "/outside/" + a.name,

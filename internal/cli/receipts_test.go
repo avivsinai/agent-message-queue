@@ -77,6 +77,18 @@ func TestReceiptsListAfterDrain(t *testing.T) {
 	}
 }
 
+// receipts wait refuses a --msg-id that would join a path outside the receipts dir (audit 2026-11-10).
+func TestReceiptsWaitRefusesPathMsgID(t *testing.T) {
+	root := setupReceiptsTestRoot(t)
+	err := runReceiptsWait([]string{
+		"--me", "alice", "--root", root,
+		"--msg-id", "../../x", "--timeout", "10ms",
+	})
+	if GetExitCode(err) != ExitUsage {
+		t.Fatalf("exit=%d err=%v, want usage", GetExitCode(err), err)
+	}
+}
+
 func TestReceiptsWaitImmediate(t *testing.T) {
 	root := setupReceiptsTestRoot(t)
 

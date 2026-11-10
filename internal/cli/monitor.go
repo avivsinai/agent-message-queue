@@ -326,6 +326,15 @@ func monitorWithFsnotifyProbe(
 				if err := revalidateContext(); err != nil {
 					return "", err
 				}
+				// A Rename also fires when a message leaves inbox/new (a
+				// concurrent drain), so keep waiting while none is there.
+				found, err := hasMessages()
+				if err != nil {
+					return "", err
+				}
+				if !found {
+					continue
+				}
 				return "new_message", nil
 			}
 		case err, ok := <-watcher.Errors:

@@ -86,3 +86,15 @@ func seedUpdateCache(t *testing.T, latest string) {
 		t.Fatal(err)
 	}
 }
+
+// --no-update-check is not taken from after "--", and an explicit false keeps the check on (audit 2026-11-10).
+func TestStripNoUpdateCheckArgsHonorsDashDashAndFalse(t *testing.T) {
+	got, noCheck := stripNoUpdateCheckArgs([]string{"coop", "exec", "--no-update-check=false", "claude", "--", "--no-update-check"})
+	want := []string{"coop", "exec", "claude", "--", "--no-update-check"}
+	if noCheck || strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("args=%q noCheck=%v, want %q false", got, noCheck, want)
+	}
+	if _, noCheck := stripNoUpdateCheckArgs([]string{"send", "--no-update-check"}); !noCheck {
+		t.Fatal("--no-update-check after the subcommand must disable the check")
+	}
+}

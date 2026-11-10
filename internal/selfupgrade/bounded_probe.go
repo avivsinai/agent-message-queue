@@ -55,15 +55,13 @@ func RunBoundedProbe(
 	pid := command.Process.Pid
 	waitErr := command.Wait()
 	cleanupErr := cleanupBoundedProbeProcessGroup(pid)
+	errStderrOverflow := fmt.Errorf("bounded probe stderr exceeds %d bytes", boundedProbeMaxOutput)
 	wrapProbeError := func(probeErr error) error {
 		if probeErr == nil {
 			return nil
 		}
-		if stderr.overflow {
-			probeErr = errors.Join(
-				probeErr,
-				fmt.Errorf("bounded probe stderr exceeds %d bytes", boundedProbeMaxOutput),
-			)
+		if stderr.overflow && !errors.Is(probeErr, errStderrOverflow) {
+			probeErr = errors.Join(probeErr, errStderrOverflow)
 		}
 		if diagnostic := strings.TrimSpace(stderr.buffer.String()); diagnostic != "" {
 			probeErr = fmt.Errorf("%w; stderr: %s", probeErr, diagnostic)
@@ -86,7 +84,7 @@ func RunBoundedProbe(
 		return nil, wrapProbeError(fmt.Errorf("bounded probe output exceeds %d bytes", boundedProbeMaxOutput))
 	}
 	if stderr.overflow {
-		return nil, wrapProbeError(fmt.Errorf("bounded probe stderr exceeds %d bytes", boundedProbeMaxOutput))
+		return nil, wrapProbeError(errStderrOverflow)
 	}
 	return append([]byte(nil), output.buffer.Bytes()...), nil
 }

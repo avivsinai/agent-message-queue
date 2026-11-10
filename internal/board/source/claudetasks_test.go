@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -88,6 +89,39 @@ func TestClaudeNativeTasksSkipAnEmptyUnboundList(t *testing.T) {
 	// written where no degraded line reads. Empty lists are no tasks.
 	if result.Status != board.StatusOK || result.Coverage.Partial() {
 		t.Fatalf("empty lists: status %s, coverage %+v; want ok and complete", result.Status, result.Coverage)
+	}
+}
+
+// A worktree directory deleted without `git worktree remove` stays listed as
+// prunable; it must not fail the project scope (audit 2026-11-10).
+func TestProjectWorktreesSkipRemovedWorktree(t *testing.T) {
+	project, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone := filepath.Join(project, "removed")
+	listing := "worktree " + project + "\x00\x00worktree " + gone + "\x00prunable gitdir file points to non-existent location\x00\x00"
+	env := board.Env{Dir: project, Run: captureRunner{"git worktree list --porcelain -z": []byte(listing)}}
+	got, err := projectWorktrees(context.Background(), env)
+	if err != nil || len(got) != 1 || !got[project] {
+		t.Fatalf("worktrees = %v, %v; want only %s", got, err, project)
+	}
+}
+
+// Outside Git, git's filesystem-boundary message scopes the board to the
+// project directory as the plain not-a-repository message does (audit 2026-11-10).
+func TestProjectWorktreesOutsideGitAtFilesystemBoundary(t *testing.T) {
+	project, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lastLine := "git: Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set)."
+	env := board.Env{Dir: project, Run: claudePermRunner(func([]string) ([]byte, error) {
+		return nil, errors.New(lastLine)
+	})}
+	got, err := projectWorktrees(context.Background(), env)
+	if err != nil || len(got) != 1 || !got[project] {
+		t.Fatalf("worktrees = %v, %v; want only %s", got, err, project)
 	}
 }
 

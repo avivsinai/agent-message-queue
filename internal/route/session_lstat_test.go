@@ -79,3 +79,13 @@ func TestEnoentSessionLstatIsStillNotFound(t *testing.T) {
 		t.Fatalf("expected exitcode.ExitNotFound, got %T: %v", err, err)
 	}
 }
+
+// A malformed --session or one with no session context is a usage error (audit 2026-11-10).
+func TestPlanDeliveryBadSessionIsUsageError(t *testing.T) {
+	for _, session := range []string{"Bad Name", "ok"} {
+		_, err := Walker{}.PlanDelivery(t.TempDir(), "", session, DeliveryOptions{})
+		if code := exitcode.GetExitCode(err); code != exitcode.ExitUsage {
+			t.Fatalf("session %q: exit=%d err=%v, want usage", session, code, err)
+		}
+	}
+}

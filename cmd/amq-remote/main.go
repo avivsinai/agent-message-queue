@@ -53,8 +53,8 @@ Commands:
   channel reset NAME       Give up session NAME's Buzz channel; the machine
                            agent makes a new one
   mirror on|off|status --self|--name N
-                           Show or stop each finished turn of a Claude
-                           session in its Buzz channel
+                           Show or stop each finished turn of a Claude,
+                           Codex or pi session in its Buzz channel
   statusline [--session ID] [--plain]
                            Print one status-line segment while the session
                            is bound to Buzz, else nothing
@@ -262,9 +262,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		code, err = up(rest, stdout, stderr, newExecSpawner)
 		return finish(stdout, stderr, nil, false, code, err)
 	case "sessions":
-		out, code, err = clientSimple(rest, protocol.OpSessionList, "", probe)
+		out, code, err = clientSimple(rest, "sessions", protocol.OpSessionList, "", probe)
 	case "inspect":
-		out, code, err = clientSimple(rest, protocol.OpSessionInspect, "TARGET", probe)
+		out, code, err = clientSimple(rest, "inspect", protocol.OpSessionInspect, "TARGET", probe)
 	case "submit":
 		out, code, err = submit(rest, stdin, probe)
 	case "status":

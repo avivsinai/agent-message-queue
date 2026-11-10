@@ -273,18 +273,23 @@ func admit(dir, key string, raw []byte, now time.Time) (string, error) {
 	if count >= MaxPending || total > MaxPendingBytes {
 		return "", ErrFull
 	}
-	f, err := os.OpenFile(filepath.Join(dir, key+keySuffix), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	keyPath := filepath.Join(dir, key+keySuffix)
+	f, err := os.OpenFile(keyPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if errors.Is(err, os.ErrExist) {
 		return "", ErrDuplicate
 	}
 	if err != nil {
 		return "", err
 	}
+	// The key stands only for a written request: without one, a redelivery
+	// of the event must be admitted.
 	if err := f.Close(); err != nil {
+		_ = os.Remove(keyPath)
 		return "", err
 	}
 	id := fmt.Sprintf("%020d-%s", now.UnixNano(), key)
 	if err := writeAtomic(dir, id+ReqSuffix, raw); err != nil {
+		_ = os.Remove(keyPath)
 		return "", err
 	}
 	return id, nil

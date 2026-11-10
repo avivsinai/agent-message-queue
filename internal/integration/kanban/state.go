@@ -7,7 +7,6 @@ const (
 	kanbanEventTaskReadyForReview    = "task_ready_for_review"
 	kanbanEventTaskChatMessage       = "task_chat_message"
 
-	sessionStateIdle           = "idle"
 	sessionStateRunning        = "running"
 	sessionStateAwaitingReview = "awaiting_review"
 	sessionStateFailed         = "failed"

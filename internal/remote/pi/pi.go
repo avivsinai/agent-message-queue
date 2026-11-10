@@ -91,10 +91,6 @@ type run struct {
 	// Unlike an unreadable log it is surfaced by Lookup: a refused stream
 	// is never "no events" (never confirmed-running).
 	eventsRefused error
-
-	// gen is the session generation of the ref's receipt: the only
-	// generation in which the extension can apply an answer for it.
-	gen string
 }
 
 // Attachment implements core.Attachment over the pi-bridge file seam. It
@@ -125,10 +121,7 @@ type Attachment struct {
 	// resolution read in one pass reach the endpoint in that order.
 	emitq    []core.NativeEvent
 	emitting bool
-	// live is the latest liveness read, taken outside a.mu by consume. It
-	// decides whether a remote answer can apply to an open approval.
-	live livenessState
-	now  func() time.Time
+	now      func() time.Time
 	// submitWait bounds the post-publication receipt poll in Submit. The
 	// extension writes the receipt when it delivers (protocol: receipts); a poll window
 	// that expires with a live bridge leaves the record UNCERTAIN, never
@@ -357,7 +350,6 @@ func (a *Attachment) recover() {
 		rc := sd.rc
 		r := a.bindRunLocked(sd.key, "") // recovered history: epoch wildcard
 		r.confirmed = true
-		r.gen = rc.SessionGeneration
 		a.observeGenerationLocked(rc.SessionGeneration, rc.PID)
 		if sd.evErr != nil {
 			// A refused event stream (foreign protocol) is never "no
@@ -413,7 +405,6 @@ func (a *Attachment) lateBindLocked(key requests.Key, rc *receipt, rcErr error, 
 	case rc != nil:
 		r := a.bindRunLocked(key, "") // recovered history: epoch wildcard
 		r.confirmed = true
-		r.gen = rc.SessionGeneration
 		a.observeGenerationLocked(rc.SessionGeneration, rc.PID)
 		if evErr != nil {
 			// A refused event stream (foreign protocol) is never "no
@@ -535,7 +526,6 @@ func (a *Attachment) consume() {
 		readRc bool
 	}
 	var queue []pending
-	needLive := false // an open approval's projection depends on liveness
 	for _, k := range a.order {
 		r, ok := a.runs[k]
 		if !ok || r.acked {
@@ -558,9 +548,6 @@ func (a *Attachment) consume() {
 	a.mu.Unlock()
 
 	if len(queue) == 0 {
-		if needLive {
-			a.refreshLive()
-		}
 		return
 	}
 	obs := make(map[string]*seamObservation, len(queue))
@@ -576,10 +563,6 @@ func (a *Attachment) consume() {
 		}
 		obs[p.r.ref] = o
 	}
-	if needLive {
-		a.refreshLive()
-	}
-
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, p := range queue {
@@ -589,16 +572,6 @@ func (a *Attachment) consume() {
 		}
 		a.applyObservationLocked(r, obs[p.r.ref])
 	}
-}
-
-// refreshLive reads liveness outside a.mu and keeps it for the approval
-// projection.
-func (a *Attachment) refreshLive() livenessState {
-	live := a.dir.liveness(a.now()) // 9a: FS read, no lock
-	a.mu.Lock()
-	a.live = live
-	a.mu.Unlock()
-	return live
 }
 
 // applyObservationLocked applies a seam observation to a run under a.mu.
@@ -619,7 +592,6 @@ func (a *Attachment) applyObservationLocked(r *run, o *seamObservation) {
 			// other's protocol. A protocol-string refusal recorded before the receipt
 			// landed (events-first ordering) must survive the receipt: only
 			// a present, validated stream (the events branch below) lifts it.
-			r.gen = o.receipt.SessionGeneration
 			a.observeGenerationLocked(o.receipt.SessionGeneration, o.receipt.PID)
 		case o.rcErr != nil && !r.confirmed:
 			// Unreadable or foreign-protocol: never consume it as evidence.
@@ -777,17 +749,25 @@ func refusalCodeFor(reason string) protocol.Code {
 }
 
 // prune bounds the retained run map: terminal+acked runs are dropped FIFO.
+// Every other run keeps its place in order, which consume reads, so a run
+// that is still open is never dropped from the refresh.
 func (a *Attachment) pruneLocked() {
 	if len(a.runs) <= maxRetained {
 		return
 	}
-	for len(a.runs) > maxRetained && len(a.order) > 0 {
-		oldest := a.order[0]
-		a.order = a.order[1:]
-		if r, ok := a.runs[oldest]; ok && r.state.Terminal() && r.acked {
-			delete(a.runs, oldest)
+	kept := a.order[:0]
+	for _, k := range a.order {
+		r, ok := a.runs[k]
+		if !ok {
+			continue
 		}
+		if len(a.runs) > maxRetained && r.state.Terminal() && r.acked {
+			delete(a.runs, k)
+			continue
+		}
+		kept = append(kept, k)
 	}
+	a.order = kept
 }
 
 // emitLocked queues one event for subscribers. Callers hold a.mu. Delivery

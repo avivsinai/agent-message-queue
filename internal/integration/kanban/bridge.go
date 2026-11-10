@@ -21,7 +21,7 @@ type BridgeConfig struct {
 }
 
 func RunBridge(ctx context.Context, cfg BridgeConfig) error {
-	if err := validateBridgeConfig(cfg); err != nil {
+	if err := ValidateBridgeConfig(cfg); err != nil {
 		return err
 	}
 	if err := fsq.EnsureAgentDirs(cfg.AMQRoot, cfg.AgentHandle); err != nil {
@@ -118,7 +118,8 @@ func processBridgeMessage(data []byte, state *bridgeState) ([]bridgeNotification
 	}
 }
 
-func validateBridgeConfig(cfg BridgeConfig) error {
+// ValidateBridgeConfig reports why cfg cannot start a bridge, or nil.
+func ValidateBridgeConfig(cfg BridgeConfig) error {
 	if cfg.AgentHandle == "" {
 		return fmt.Errorf("agent handle is required")
 	}

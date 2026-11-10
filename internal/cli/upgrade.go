@@ -179,7 +179,6 @@ func runUpgrade(args []string, currentVersion string) error {
 				ctx,
 				client,
 				latestTag,
-				latest,
 				path,
 				destPath,
 				homebrewPrefixes,
@@ -203,7 +202,6 @@ func runUpgrade(args []string, currentVersion string) error {
 		client,
 		update.BinaryName,
 		latestTag,
-		latest,
 		destPath,
 		homebrewPrefixes,
 		scoopRoots,
@@ -223,7 +221,6 @@ func runUpgrade(args []string, currentVersion string) error {
 			ctx,
 			client,
 			latestTag,
-			latest,
 			path,
 			destPath,
 			homebrewPrefixes,
@@ -238,7 +235,7 @@ func runUpgrade(args []string, currentVersion string) error {
 func runManagedUpgradeWithManager(kind update.InstallKind, managerPath string, yes, all bool) error {
 	argvs, remedy := delegateUpgradeCommandWithManager(kind, managerPath)
 	if all {
-		if err := writeStdoutLine("--all: companions are direct-installed; upgrade them with 'amq upgrade --all' from a direct amq install."); err != nil {
+		if err := writeStdoutLine("--all: the package manager upgrades the companions it installed with amq; upgrade a direct-installed companion (always amq-keepalive) with 'amq upgrade --all' from a direct amq install."); err != nil {
 			return err
 		}
 	}
@@ -404,7 +401,7 @@ func replacePreparedUpgrade(binaryName string, prepared preparedUpgrade) (direct
 func runDirectUpgradeWithScoopRoots(
 	ctx context.Context,
 	client *http.Client,
-	binaryName, latestTag, latest, destPath string,
+	binaryName, latestTag, destPath string,
 	homebrewPrefixes []string,
 	scoopRoots []update.ScoopInstallRoot,
 ) (directUpgradeResult, error) {
@@ -433,7 +430,7 @@ func runDirectUpgradeWithScoopRoots(
 func upgradeCompanionsWithScoopRoots(
 	ctx context.Context,
 	client *http.Client,
-	latestTag, latest, rawAMQPath, amqDest string,
+	latestTag, rawAMQPath, amqDest string,
 	homebrewPrefixes []string,
 	scoopRoots []update.ScoopInstallRoot,
 ) error {

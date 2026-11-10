@@ -59,10 +59,15 @@ amq-keepalive reattach --adapter cmux
 ```
 
 `attach` adds a registration. `reattach` replaces registrations for the same
-root and agent only after discovery, target validation, and wake readiness
-succeed. A matching live wake is reused only when its injector and fixed target
-arguments match. A differing, ambiguous, or unavailable target leaves the old
-registration unchanged.
+root and agent. Discovery and target validation run first: a differing,
+ambiguous, or unavailable target leaves the old registration unchanged. Then
+the new registration replaces the old ones as an inactive reservation, and
+`reattach` waits for wake readiness. A matching live wake is reused only when
+its injector and fixed target arguments match. When the wake fails to become
+ready, the old registration is restored. When readiness is uncertain, the old
+registration stays removed and the new reservation is kept for the supervisor
+to converge. With `--no-start`, the new registration replaces the old one and
+no readiness check runs.
 
 Common identity flags are `--adapter`, `--target`, `--root`, `--base-root`,
 `--session`, `--me`, `--amq`, `--self`, `--wake-ready-timeout`, and `--no-start`.
@@ -161,8 +166,9 @@ amq-keepalive install-hook --agent both
 amq-keepalive install-hook --agent both --dry-run
 ```
 
-The installer backs up configuration before modifying it and keeps exactly
-one SessionStart registration per script: a rerun changes nothing when the
+The installer edits configuration in place under a lock and writes it
+atomically, keeping all other content, and keeps exactly one SessionStart
+registration per script: a rerun changes nothing when the
 entry is current and replaces an older or duplicated entry. `amq doctor`
 reports an older form or a duplicate with this command as the remedy.
 

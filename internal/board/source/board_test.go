@@ -349,6 +349,17 @@ func TestBoardSourceDefects(t *testing.T) {
 				}
 			},
 		},
+		{
+			// A partial read names the obligations it rejected (audit 2026-11-10).
+			name: "rejected obligation is named in the coverage detail",
+			edit: map[string]func(string) string{"amq thread open --all-sessions --json": replace(
+				`"key": "s1/2026-10-22T10-30-00.000Z_pid104_a1b2c3d4/beta"`, `"key": ""`)},
+			check: func(t *testing.T, m board.Model) {
+				if s := source_(m, "amq"); !s.Partial || !strings.Contains(s.Coverage.Detail, "1 obligations with an invalid key or handle") {
+					t.Errorf("amq source partial=%v %q", s.Partial, s.Coverage.Detail)
+				}
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := runBoard(t, fakeRunner{t: t, outputs: outputs("thread-open.json"), edit: tc.edit, fail: tc.fail}, true)

@@ -9,6 +9,19 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
+// dlq read and dlq retry --id exit 3 for a missing message (audit 2026-11-10).
+func TestDLQReadAndRetryMissingIDExitNotFound(t *testing.T) {
+	root := initializedSendMailboxRoot(t, "alice", "bob")
+	for name, run := range map[string]func([]string) error{"read": runDLQRead, "retry": runDLQRetry} {
+		_, _, err := captureEnvOutput(t, func() error {
+			return run([]string{"--root", root, "--me", "alice", "--id", "missing-id"})
+		})
+		if GetExitCode(err) != ExitNotFound {
+			t.Fatalf("dlq %s missing id: exit=%d err=%v, want not found", name, GetExitCode(err), err)
+		}
+	}
+}
+
 func TestDLQListAndReadExposeTerminalRetryState(t *testing.T) {
 	root := initializedSendMailboxRoot(t, "alice", "bob")
 	dlqPath := moveInvalidFixtureToDLQForRetryAll(t, root, "alice", "terminal-state")

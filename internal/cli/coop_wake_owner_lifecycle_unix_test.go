@@ -106,11 +106,9 @@ func TestCoopWakeOwnerMetadataFailureNeverStartsOwnerlessWake(t *testing.T) {
 			ownerEnv: `{"pid":`,
 		},
 		{
-			name:     "unsupported exact owner observer",
-			ownerEnv: mustEncodedCurrentOwnerForCoopWakeTest(t),
-			observeErr: &wakeOwnerChildCapabilityUnsupportedError{
-				Err: syscall.ENOSYS,
-			},
+			name:       "unsupported exact owner observer",
+			ownerEnv:   mustEncodedCurrentOwnerForCoopWakeTest(t),
+			observeErr: fmt.Errorf("pidfd_open owner process: %w", syscall.ENOSYS),
 		},
 	}
 
@@ -125,9 +123,8 @@ func TestCoopWakeOwnerMetadataFailureNeverStartsOwnerlessWake(t *testing.T) {
 				oldObserve := observeAuthoritativeWakeOwner
 				observeAuthoritativeWakeOwner = func(wakeOwner) (wakeOwnerObservation, error) {
 					return wakeOwnerObservation{
-						State:                 wakeOwnerUnknown,
-						Reason:                "test observer unavailable",
-						CapabilityUnsupported: true,
+						State:  wakeOwnerUnknown,
+						Reason: "test observer unavailable",
 					}, test.observeErr
 				}
 				t.Cleanup(func() { observeAuthoritativeWakeOwner = oldObserve })

@@ -61,6 +61,15 @@ func TestLaunchIntentRejectsAMQOwnedFields(t *testing.T) {
 	}
 }
 
+// An explicit null wrapper is refused, as the published schema requires an
+// object (audit 2026-11-10).
+func TestLaunchIntentRejectsNullWrapper(t *testing.T) {
+	raw := `{"intent_version":1,"participants":[{"handle":"codex","runnable":true,"wrapper":null,"executable":"codex","cwd":{"kind":"relative","path":"."},"resume_policy":"fresh","execution":{"require_wake":false,"no_gitignore":false,"wake":{"mode":"enabled"}}}]}`
+	if _, err := DecodeLaunchIntentV1([]byte(raw)); err == nil || !strings.Contains(err.Error(), "wrapper must not be null") {
+		t.Fatalf("DecodeLaunchIntentV1(wrapper null) error = %v, want a null refusal", err)
+	}
+}
+
 func TestLaunchIntentV1AcceptsSiblingWorktreeAndZeroRunnable(t *testing.T) {
 	intent, err := DecodeLaunchIntentV1([]byte(validIntentJSON(t)))
 	if err != nil {

@@ -15,9 +15,7 @@ func inspectWakeProcessPlatform(pid int) wakeProcessInfo {
 	}
 	info.Running = true
 
-	if bootID, err := os.ReadFile("/proc/sys/kernel/random/boot_id"); err == nil {
-		info.BootID = strings.TrimSpace(string(bootID))
-	}
+	info.BootID = readWakeBootIDPlatform()
 
 	statPath := fmt.Sprintf("/proc/%d/stat", pid)
 	if data, err := os.ReadFile(statPath); err == nil {

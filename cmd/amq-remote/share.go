@@ -390,7 +390,7 @@ func renewalWindow(st *shareState, days int, daysExplicit bool, enable []uint16)
 	}
 	var maxEnrolled int64
 	if st.Enrolled.Gen != nil {
-		maxEnrolled = maxEnrolledBound(st.Enrolled.Gen.Tags)
+		maxEnrolled = maxPendingBound(st.Enrolled.Gen.Tags)
 	}
 	// An EXPLICIT --days is never silently overridden by the bump. If the
 	// requested window would not clear the
@@ -1255,48 +1255,31 @@ func removeStateLeaf(path string) error {
 // stagedName is the accumulation file for signed-but-unpublished tags.
 const stagedName = "share.staged.json"
 
-// reconcileStagedState heals or refuses leftovers, inside share, enroll
-// and renew — explicit operator actions on exactly that state (doctor is
-// REPORT-ONLY; it never deletes or rewrites anything, per the "cleanup is
-// explicit" constraint):
-//   - a complete new generation with pending/staged still on disk (crash
-//     between publication and cleanup) is reconciled by removing them —
-//     the publication is already the committed state;
-//   - staged entries whose conditions do not match the current pending
-//     window (superseded by a later --renew) are dropped;
-//   - a corrupt staged file is refused with the file named and the
-//     remedy (remove it, re-sign) instead of an unrecoverable error.
-//
-// Doctor uses reportStagedState below: same detection, zero mutation.
-func reconcileStagedState(session, keyDir string, st *shareState) error {
-	return reconcileStagedStateMutating(session, keyDir, st)
-}
-
 // reportStagedState is doctor's read-only view of the same leftovers:
 // it detects what reconcileStagedState would heal or refuse and returns
 // the row text ("" when nothing is stale), but NEVER writes, deletes or
 // renames anything (doctor reports the leftover with the remedy "run
 // amq-remote share to reconcile"). It consumes the loader snapshot; the
 // staged outcome is typed, never substring-matched from prose.
-func reportStagedState(session, keyDir string, st *shareState) string {
+func reportStagedState(root, session, keyDir string, st *shareState) string {
 	stagedPath := filepath.Join(keyDir, stagedName)
 	switch st.Staged.State {
 	case leafConfined:
 		// The remedy must be EXECUTABLE and derives from the typed
 		// outcome, not a hardcoded shape.
-		return st.Staged.Confinement.Error() + "; " + confinedLeafRemedy(st.Staged.leafRead) + ", then run `amq-remote share --session " + session + "` to reconcile"
+		return st.Staged.Confinement.Error() + "; " + confinedLeafRemedy(st.Staged.leafRead) + ", then run `" + shareCommand(root, session, "") + "` to reconcile"
 	case leafUnreadable:
-		return "staged state at " + stagedPath + " is invalid (" + st.Staged.Err.Error() + "); remedy: remove " + stagedPath + " and re-sign the pending preimages (`amq-remote share --session " + session + "` reprints them)"
+		return "staged state at " + stagedPath + " is invalid (" + st.Staged.Err.Error() + "); remedy: remove " + stagedPath + " and re-sign the pending preimages (`" + shareCommand(root, session, "") + "` reprints them)"
 	}
 	raw := stagedTags(st)
-	if st.Enrolled.Gen != nil && st.Pending.readable() && genCoversPendingWindow(st.Enrolled.Gen, st.Pending.Tags, nil) {
+	if st.Enrolled.Gen != nil && st.Pending.readable() && genCoversPendingWindow(st.Enrolled.Gen, st.Pending.Tags) {
 		leftover := st.Staged.State == leafOK
 		pendingPath, _ := sharePaths(keyDir)
 		if pendingExists(pendingPath) {
 			leftover = true
 		}
 		if leftover {
-			return "published generation already covers the pending window; stale pending/staged leftovers remain; remedy: run `amq-remote share --session " + session + "` to reconcile"
+			return "published generation already covers the pending window; stale pending/staged leftovers remain; remedy: run `" + shareCommand(root, session, "") + "` to reconcile"
 		}
 		return ""
 	}
@@ -1313,7 +1296,7 @@ func reportStagedState(session, keyDir string, st *shareState) string {
 			}
 		}
 		if stale > 0 {
-			return fmt.Sprintf("%d staged entr%s superseded by the current window; remedy: run `amq-remote share --session %s` to reconcile", stale, pluralYIes(stale), session)
+			return fmt.Sprintf("%d staged entr%s superseded by the current window; remedy: run `%s` to reconcile", stale, pluralYIes(stale), shareCommand(root, session, ""))
 		}
 	}
 	return ""
@@ -1358,8 +1341,8 @@ func pendingExists(path string) bool {
 	return err == nil
 }
 
-func genCoversPendingWindow(gen *enrolledGeneration, pending []shareTagFile, pendingErr error) bool {
-	return pendingErr == nil && gen != nil && len(gen.Tags) > 0 &&
+func genCoversPendingWindow(gen *enrolledGeneration, pending []shareTagFile) bool {
+	return gen != nil && len(gen.Tags) > 0 &&
 		func() bool {
 			byKind := map[uint16]string{}
 			for _, t := range gen.Tags {
@@ -1377,7 +1360,20 @@ func genCoversPendingWindow(gen *enrolledGeneration, pending []shareTagFile, pen
 		}()
 }
 
-func reconcileStagedStateMutating(session, keyDir string, st *shareState) error {
+// reconcileStagedState heals or refuses leftovers, inside share, enroll
+// and renew — explicit operator actions on exactly that state (doctor is
+// REPORT-ONLY; it never deletes or rewrites anything, per the "cleanup is
+// explicit" constraint):
+//   - a complete new generation with pending/staged still on disk (crash
+//     between publication and cleanup) is reconciled by removing them —
+//     the publication is already the committed state;
+//   - staged entries whose conditions do not match the current pending
+//     window (superseded by a later --renew) are dropped;
+//   - a corrupt staged file is refused with the file named and the
+//     remedy (remove it, re-sign) instead of an unrecoverable error.
+//
+// Doctor uses reportStagedState: same detection, zero mutation.
+func reconcileStagedState(session, keyDir string, st *shareState) error {
 	if st.Pending.Err != nil {
 		return st.Pending.Err // malformed pending: refuse everywhere
 	}
@@ -1386,7 +1382,7 @@ func reconcileStagedStateMutating(session, keyDir string, st *shareState) error 
 		pending = st.Pending.Tags
 	}
 	gen := st.Enrolled.Gen
-	genCoversPending := st.Pending.readable() && genCoversPendingWindow(gen, pending, nil)
+	genCoversPending := st.Pending.readable() && genCoversPendingWindow(gen, pending)
 	stagedPath := filepath.Join(keyDir, stagedName)
 	if st.Staged.Err != nil {
 		return stagedCorruptRefusal(session, st.Staged.leafRead)
@@ -1499,8 +1495,8 @@ func outstandingPending(pending []shareTagFile, staged map[uint16]shareTagFile, 
 	return out
 }
 
-// maxPendingBound returns the largest created_at< bound across the pending
-// windows.
+// maxPendingBound returns the largest created_at< bound across tags, pending
+// or enrolled.
 func maxPendingBound(tags []shareTagFile) int64 {
 	var max int64
 	for _, t := range tags {
@@ -1509,12 +1505,6 @@ func maxPendingBound(tags []shareTagFile) int64 {
 		}
 	}
 	return max
-}
-
-// maxEnrolledBound returns the largest created_at< bound across enrolled
-// tags.
-func maxEnrolledBound(tags []shareTagFile) int64 {
-	return maxPendingBound(tags)
 }
 
 func pendingTagForKind(pending []shareTagFile, kind uint16) *shareTagFile {
@@ -1617,6 +1607,17 @@ func printShareDryRun(w io.Writer, session string, k *bodykey.BodyKey, days int,
 	}
 }
 
+// shareCommand is the share command a doctor remedy names, with the root
+// doctor checked: doctor also runs in a shell without AM_ROOT, where a
+// command without --root would fail.
+func shareCommand(root, session, extra string) string {
+	cmd := "amq-remote share --session " + session
+	if extra != "" {
+		cmd += " " + extra
+	}
+	return cmd + " --root " + shQuote(root)
+}
+
 // doctorShareInspection is the doctor surface for body identity: it reports
 // mint/enrolled/expiry state per session key dir and warns 7 days before
 // the signed window expires. Expiry comes from the signed conditions, so a
@@ -1655,7 +1656,7 @@ func doctorShareInspection(root string) map[string]any {
 			if strings.HasSuffix(l.Path, stagedName) {
 				// Staged confinement keeps its own row + executable remedy
 				// and still completes the diagnostic.
-				info["staged_error"] = l.Confinement.Error() + "; " + confinedLeafRemedy(l) + ", then run `amq-remote share --session " + e.Name() + "` to reconcile"
+				info["staged_error"] = l.Confinement.Error() + "; " + confinedLeafRemedy(l) + ", then run `" + shareCommand(root, e.Name(), "") + "` to reconcile"
 				progressKnownLater = false
 				continue
 			}
@@ -1684,9 +1685,9 @@ func doctorShareInspection(root string) map[string]any {
 				if _, confined := info["body_pub_error"]; confined {
 					// Mint would refuse (exit 6) until the leaf is repaired:
 					// keep the remedy executable.
-					info["remedy"] = confinedLeafRemedy(st.BodyPub) + ", then run `amq-remote share --session " + e.Name() + "` to mint the key"
+					info["remedy"] = confinedLeafRemedy(st.BodyPub) + ", then run `" + shareCommand(root, e.Name(), "") + "` to mint the key"
 				} else {
-					info["remedy"] = "run `amq-remote share --session " + e.Name() + "` to mint one"
+					info["remedy"] = "run `" + shareCommand(root, e.Name(), "") + "` to mint one"
 				}
 			} else {
 				// Corrupt/unusable key: never point at --renew — a new
@@ -1738,7 +1739,7 @@ func doctorShareInspection(root string) map[string]any {
 		// emitted (an expired generation with leftovers must still say
 		// expired). Only a genuine corrupt-staged refusal continues early,
 		// and even that keeps the rows computed so far.
-		leftoverRow := reportStagedState(e.Name(), keyDir, st)
+		leftoverRow := reportStagedState(root, e.Name(), keyDir, st)
 		stagedUnusable := st.Staged.State == leafUnreadable || st.Staged.State == leafConfined || !progressKnownLater
 		if stagedUnusable {
 			// Corrupt or confined staged: surface the refusal and still
@@ -1755,7 +1756,7 @@ func doctorShareInspection(root string) map[string]any {
 			outstanding = len(outstandingPending(pendingTags, st.Staged.Tags, gen))
 		}
 		if gen != nil && len(gen.Tags) > 0 {
-			reportEnrolledGeneration(info, e.Name(), gen, pendingTags, outstanding, progressKnown)
+			reportEnrolledGeneration(info, root, e.Name(), gen, pendingTags, outstanding, progressKnown)
 			out[e.Name()] = info
 			continue
 		}
@@ -1769,10 +1770,10 @@ func doctorShareInspection(root string) map[string]any {
 			// progress — the warning survives even when the count is
 			// unknown; only a fabricated count is forbidden.
 			if len(pendingTags) > 0 {
-				info["warning"] = "renewal in progress: preimage count unknown (staged state unreadable); run `amq-remote share --session " + e.Name() + "` to reprint the preimages (do NOT renew: renewing rotates the window and the still-unsigned preimages)"
+				info["warning"] = "renewal in progress: preimage count unknown (staged state unreadable); run `" + shareCommand(root, e.Name(), "") + "` to reprint the preimages (do NOT renew: renewing rotates the window and the still-unsigned preimages)"
 			}
 		} else {
-			info["attestation"] = "missing: run `amq-remote share --session " + e.Name() + "`"
+			info["attestation"] = "missing: run `" + shareCommand(root, e.Name(), "") + "`"
 		}
 		// A refusal at the staged leaf (corrupt or symlinked) is an ERROR
 		// row, not an attestation state — it must never overwrite the
@@ -1788,7 +1789,7 @@ func doctorShareInspection(root string) map[string]any {
 
 // reportEnrolledGeneration adds the attestation, per-kind expiry and expiry
 // warning rows of an enrolled generation to info.
-func reportEnrolledGeneration(info map[string]any, session string, gen *enrolledGeneration, pendingTags []shareTagFile, outstanding int, progressKnown bool) {
+func reportEnrolledGeneration(info map[string]any, root, session string, gen *enrolledGeneration, pendingTags []shareTagFile, outstanding int, progressKnown bool) {
 	const warnHorizon = 7 * 24 * time.Hour
 	perKind := map[string]any{}
 	earliest := time.Time{}
@@ -1806,7 +1807,7 @@ func reportEnrolledGeneration(info map[string]any, session string, gen *enrolled
 	renewalInProgress := len(pendingTags) > 0
 	if renewalInProgress && progressKnown && outstanding > 0 {
 		info["attestation"] = fmt.Sprintf("enrolled, renewal in progress: %d of %d kinds signed (staged)", len(pendingTags)-outstanding, len(pendingTags))
-		info["warning"] = fmt.Sprintf("renewal in progress: %d preimage(s) still unsigned; run `amq-remote share --session %s` to reprint them (do NOT renew: renewing rotates the window and the still-unsigned preimages)", outstanding, session)
+		info["warning"] = fmt.Sprintf("renewal in progress: %d preimage(s) still unsigned; run `%s` to reprint them (do NOT renew: renewing rotates the window and the still-unsigned preimages)", outstanding, shareCommand(root, session, ""))
 	} else if renewalInProgress && !progressKnown {
 		// Whether a renewal is in progress is knowable from
 		// the pending window ALONE; only the COUNT needs the staged
@@ -1814,7 +1815,7 @@ func reportEnrolledGeneration(info map[string]any, session string, gen *enrolled
 		// fabricated, and the do-NOT-renew warning survives.
 		info["attestation"] = "enrolled"
 		info["progress"] = "unknown: staged state unreadable (see staged_error)"
-		info["warning"] = "renewal in progress: preimage count unknown (staged state unreadable); run `amq-remote share --session " + session + "` to reprint the preimages (do NOT renew: renewing rotates the window and the still-unsigned preimages)"
+		info["warning"] = "renewal in progress: preimage count unknown (staged state unreadable); run `" + shareCommand(root, session, "") + "` to reprint the preimages (do NOT renew: renewing rotates the window and the still-unsigned preimages)"
 	} else {
 		info["attestation"] = "enrolled"
 	}
@@ -1829,15 +1830,15 @@ func reportEnrolledGeneration(info map[string]any, session string, gen *enrolled
 		// never `--renew` (rotating the window would strand the
 		// still-unsigned preimages).
 		remaining := time.Until(earliest)
-		shareRemedy := "run `amq-remote share --session " + session + " --renew`"
+		shareRemedy := "run `" + shareCommand(root, session, "--renew") + "`"
 		if renewalOutstanding {
-			shareRemedy = "run `amq-remote share --session " + session + "` to complete the in-progress renewal"
+			shareRemedy = "run `" + shareCommand(root, session, "") + "` to complete the in-progress renewal"
 		} else if !progressKnown {
 			// While progress is unknown the renew remedy is
 			// suppressed — an unreadable staged leaf may be an
 			// in-progress renewal; renewing would rotate the window
 			// and strand preimages the owner may already be signing.
-			shareRemedy = "run `amq-remote share --session " + session + "` (renewal state unreadable; do NOT renew until the staged leaf is repaired)"
+			shareRemedy = "run `" + shareCommand(root, session, "") + "` (renewal state unreadable; do NOT renew until the staged leaf is repaired)"
 		}
 		switch {
 		case remaining <= 0:

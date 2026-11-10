@@ -208,7 +208,7 @@ func runOpsChecksWithSchema(
 		})
 	}
 	result.OperatorGate = checkOperatorGate(root, now)
-	companions, companionHints := checkCompanions(root, now)
+	companions, companionHints := checkCompanions(root)
 	result.Companions = companions
 	result.Hints = append(result.Hints, companionHints...)
 	result.Hints = append(result.Hints, checkLinkedWorktreeLocalHint(root, rootSource)...)
@@ -514,7 +514,7 @@ func opsAgentRows(root string, scope agentInventoryScope) []inventoryAgent {
 	return rows
 }
 
-// opsMailboxCount counts the entries of one mailbox directory and the age of
+// opsMailboxCount counts the messages of one mailbox directory and the age of
 // the oldest. A missing directory of a missing mailbox counts zero; any other
 // failure returns an error string, so the zero is never mistaken for empty.
 func opsMailboxCount(dir string, mailboxPresent bool, now time.Time) (int, float64, string) {
@@ -525,15 +525,26 @@ func opsMailboxCount(dir string, mailboxPresent bool, now time.Time) (int, float
 		}
 		return 0, 0, err.Error()
 	}
-	oldest := 0.0
+	count, oldest := 0, 0.0
 	for _, e := range entries {
+		if !opsMessageEntry(e) {
+			continue
+		}
+		count++
 		if info, err := e.Info(); err == nil {
 			if age := now.Sub(info.ModTime()).Seconds(); age > oldest {
 				oldest = age
 			}
 		}
 	}
-	return len(entries), oldest, ""
+	return count, oldest, ""
+}
+
+// opsMessageEntry reports whether a mailbox entry is a message file: a
+// regular, non-hidden .md file, as amq list counts them.
+func opsMessageEntry(e os.DirEntry) bool {
+	name := e.Name()
+	return e.Type().IsRegular() && !strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".md")
 }
 
 // checkSiblingBacklogHints reports pending messages in every sibling
@@ -584,7 +595,7 @@ func checkBaseBacklogHints(root string) []opsHint {
 // companion-supervised entries (adapter "remote", registered by amq-remote
 // up) for this root. A registry read error is surfaced as a hint, never a
 // doctor failure: companion visibility is diagnostic, not a gate.
-func checkCompanions(root string, now time.Time) ([]opsCompanion, []opsHint) {
+func checkCompanions(root string) ([]opsCompanion, []opsHint) {
 	regPath, err := registry.DefaultPath()
 	if err != nil {
 		// A refused keepalive home (for example, both homes exist) is
@@ -665,7 +676,7 @@ func checkOperatorGate(root string, now time.Time) *opsOperatorGate {
 	}
 	gate := &opsOperatorGate{}
 	for _, entry := range entries {
-		if entry.IsDir() {
+		if !opsMessageEntry(entry) {
 			continue
 		}
 		gate.OpenCount++

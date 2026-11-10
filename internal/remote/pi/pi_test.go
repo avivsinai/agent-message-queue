@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -415,6 +416,31 @@ func TestAcknowledgeReleasesResult(t *testing.T) {
 	a.AcknowledgeResult(key, "gen-1", protocol.EvidenceDigest(ev.Result))
 	if ev3, _ := a.Lookup(key, "gen-1"); ev3.Class != core.EvidenceNone {
 		t.Fatalf("evidence after ack = %q, want none", ev3.Class)
+	}
+}
+
+// A prune over more than maxRetained recovered runs keeps every unacked run
+// in the refresh order, so a running request still completes (audit 2026-11-10).
+func TestPruneKeepsUnackedRunsRefreshed(t *testing.T) {
+	dir := newExtDir(t)
+	for i := 0; i < maxRetained; i++ {
+		writeReceipt(t, dir, clientRef(testKey(fmt.Sprintf("bulk%d", i))), "gen-1", fixedNow)
+	}
+	live, done := testKey("live"), testKey("done")
+	liveRef, doneRef := clientRef(live), clientRef(done)
+	writeReceipt(t, dir, liveRef, "gen-1", fixedNow)
+	writeReceipt(t, dir, doneRef, "gen-1", fixedNow)
+	appendEvents(t, dir, doneRef, fmt.Sprintf(`{"protocol":%q,"ref":%q,"event":"completed","text":"done"}`, ProtocolV1, doneRef))
+	a := mustAttach(t, dir)
+	ev, err := a.Lookup(done, "gen-1")
+	if err != nil || ev.Result == nil {
+		t.Fatalf("done = %+v, %v; want a retained result", ev, err)
+	}
+	a.AcknowledgeResult(done, "gen-1", protocol.EvidenceDigest(ev.Result)) // prunes
+	appendEvents(t, dir, liveRef, fmt.Sprintf(`{"protocol":%q,"ref":%q,"event":"completed","text":"late"}`, ProtocolV1, liveRef))
+	ev, err = a.Lookup(live, "gen-1")
+	if err != nil || ev.State != protocol.StateCompleted {
+		t.Fatalf("live after prune = %+v, %v; want completed", ev, err)
 	}
 }
 
@@ -847,6 +873,26 @@ func TestRecoveryToleratesRotatedLogAndPartialLine(t *testing.T) {
 	}
 }
 
+// An event's text and error are both cut to the 256 KiB cap on a UTF-8
+// boundary (audit 2026-11-10).
+func TestReadEventsCapsTextAndErrorOnRuneBoundary(t *testing.T) {
+	a, dir := newTestAttachment(t)
+	ref := clientRef(testKey("cap"))
+	text := strings.Repeat("€", maxEventText/3+1) // 3-byte runes; the byte cap splits one
+	errText := strings.Repeat("x", maxEventText+10)
+	appendEvents(t, dir, ref, fmt.Sprintf(`{"protocol":%q,"ref":%q,"event":"failed","text":%q,"error":%q}`, ProtocolV1, ref, text, errText))
+	evs, err := a.dir.readEvents(ref)
+	if err != nil || len(evs) != 1 {
+		t.Fatalf("readEvents = %d events, %v; want 1", len(evs), err)
+	}
+	if got := evs[0].Text; len(got) > maxEventText || !utf8.ValidString(got) {
+		t.Fatalf("text: %d bytes, valid UTF-8 %v; want at most %d valid bytes", len(got), utf8.ValidString(got), maxEventText)
+	}
+	if got := evs[0].Error; len(got) > maxEventText {
+		t.Fatalf("error: %d bytes; want at most %d", len(got), maxEventText)
+	}
+}
+
 // --- Protocol-string refusal ----------------------------------------------------
 
 // TestForeignProtocolReceiptRefused pins that a receipt carrying an unknown
@@ -872,15 +918,19 @@ func TestForeignProtocolReceiptRefused(t *testing.T) {
 // the pre-gate refuses with attachment_lost and NO request file is written
 // into the foreign seam.
 func TestForeignProtocolLivenessNotLive(t *testing.T) {
-	a, dir := newTestAttachment(t)
-	stampLivenessWithProtocol(t, dir, fixedNow, "amq:pi-bridge:v9")
-	adm, err := a.Submit(submitReq(testKey("fp9"), "hello"))
-	if err != nil || adm.Admitted || adm.Code != protocol.CodeAttachmentLost {
-		t.Fatalf("Submit = %+v, %v; want positive attachment_lost refusal (foreign protocol)", adm, err)
-	}
-	entries, rerr := os.ReadDir(filepath.Join(dir, "requests"))
-	if rerr != nil || len(entries) != 0 {
-		t.Fatalf("requests dir = %v (%d entries), want empty (no write into a foreign seam)", rerr, len(entries))
+	// The empty protocol row: a record without the protocol field is not
+	// live either (audit 2026-11-10).
+	for _, proto := range []string{"amq:pi-bridge:v9", ""} {
+		a, dir := newTestAttachment(t)
+		stampLivenessWithProtocol(t, dir, fixedNow, proto)
+		adm, err := a.Submit(submitReq(testKey("fp9"), "hello"))
+		if err != nil || adm.Admitted || adm.Code != protocol.CodeAttachmentLost {
+			t.Fatalf("protocol %q: Submit = %+v, %v; want positive attachment_lost refusal (foreign protocol)", proto, adm, err)
+		}
+		entries, rerr := os.ReadDir(filepath.Join(dir, "requests"))
+		if rerr != nil || len(entries) != 0 {
+			t.Fatalf("protocol %q: requests dir = %v (%d entries), want empty (no write into a foreign seam)", proto, rerr, len(entries))
+		}
 	}
 }
 
