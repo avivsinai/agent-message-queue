@@ -909,6 +909,11 @@ func snapshotText(s protocol.Snapshot, reason string) string {
 		// A settled DM never runs again, so a new message is the only retry.
 		b.WriteString("\nNothing ran; send the message again when the session is free.")
 	}
+	if s.Code == protocol.CodeReleasedByOwner {
+		// A release stops nothing natively; the owner must know the prompt
+		// may still run.
+		b.WriteString("\nReleased on the machine. It may still run in the session, and no reply will come here.")
+	}
 	if s.Result != nil && s.Result.Text != "" {
 		text := s.Result.Text
 		if len(text) > maxRowText || s.Result.Truncated {

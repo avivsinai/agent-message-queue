@@ -202,6 +202,83 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 	return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel}}, nil
 }
 
+// Release ends one uncertain record failed with released_by_owner, so its
+// target admits new work. Only the local socket reaches it: it is the owner's
+// action on the machine, for a record of any origin. It stops nothing
+// natively. Its attachment first disowns the run, so a late delivery of the
+// request's input runs as work no request owns and never completes this
+// record or a newer one. Any other state, an absent attachment, or an
+// adapter that cannot disown a run is refused and changes nothing.
+func (e *Endpoint) Release(ref string) (protocol.Reply, error) {
+	host, targetID, requestID, err := protocol.DecodeRef(ref)
+	if err != nil {
+		return protocol.Reply{}, err
+	}
+	key := requests.Key{CreatorHost: host, TargetID: targetID, RequestID: requestID}
+	e.mu.Lock()
+	if e.state != stateAccepting {
+		e.mu.Unlock()
+		return protocol.Reply{}, protocol.Refuse(protocol.CodeDraining, "endpoint is shutting down; retry the command after restart")
+	}
+	e.inFlight++
+	e.mu.Unlock()
+	defer e.releaseInFlight()
+
+	e.mu.Lock()
+	rec, t, err := e.releasableLocked(key)
+	e.mu.Unlock()
+	if err != nil {
+		return protocol.Reply{}, err
+	}
+	releaser, ok := t.att.(UncertainReleaser)
+	if !ok {
+		return protocol.Reply{}, protocol.Refuse(protocol.CodeUnsupported, "the %s adapter cannot disown a run, so request %s stays uncertain", t.att.Inspect().Harness, rec.RequestID)
+	}
+	if err := releaser.ReleaseUncertain(key); err != nil {
+		return protocol.Reply{}, err
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	// Native evidence may have resolved the record while the lock was free;
+	// that outcome stands.
+	rec, cur, err := e.releasableLocked(key)
+	if err != nil {
+		return protocol.Reply{}, err
+	}
+	if cur != t {
+		// A new attachment replaced the one that disowned the run, and it
+		// was never asked to.
+		return protocol.Reply{}, protocol.Refuse(protocol.CodeAttachmentLost, "target %s attached again during the release; run it again", key.TargetID)
+	}
+	e.transitionLocked(rec, causeReleased, nativeEvidence{})
+	if _, err := e.commitLocked(rec, t); err != nil {
+		return protocol.Reply{}, err
+	}
+	e.publishLocked(rec)
+	return protocol.Reply{Snapshot: rec.Snapshot}, nil
+}
+
+// releasableLocked returns the uncertain record for key and its attached
+// target, or the refusal that keeps it as it is. The caller holds e.mu.
+func (e *Endpoint) releasableLocked(key requests.Key) (*requests.Record, *target, error) {
+	rec, ok, err := e.store.Get(key)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !ok {
+		return nil, nil, noRecord()
+	}
+	if rec.State != protocol.StateUncertain {
+		return nil, nil, protocol.Refuse(protocol.CodeUnsupported, "request %s is %s; only an uncertain request can be released", rec.RequestID, rec.State)
+	}
+	t := e.targets[key.TargetID]
+	if t == nil {
+		return nil, nil, protocol.Refuse(protocol.CodeAttachmentLost, "target %s is not attached; only its attachment can disown the run", key.TargetID)
+	}
+	return rec, t, nil
+}
+
 // buzzHostPrefix starts every creator host the Buzz carrier derives.
 const buzzHostPrefix = "buzz-"
 

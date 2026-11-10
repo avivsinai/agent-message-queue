@@ -503,12 +503,6 @@ func InspectHolder(h HolderIdentity) (LeaseState, string) {
 // handful of processes deep.
 const maxProcessAncestry = 64
 
-// runsUnderProcess reports whether holder is this process or one of its
-// ancestors. The holder's start token must match, so a reused pid does not.
-func runsUnderProcess(holder HolderIdentity) bool {
-	return RunsUnderProcess(holder)
-}
-
 // RunsUnderProcess reports whether this process is holder's process or
 // descends from it within maxProcessAncestry ancestors, with holder's start
 // token matching, so a reused pid does not count. Every parent edge of the

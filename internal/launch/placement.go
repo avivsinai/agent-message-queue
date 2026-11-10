@@ -161,14 +161,7 @@ func tmuxSplitFlag(layout string) string {
 	return "-h"
 }
 
-func cmuxSplitDirection(layout string) string {
-	if layout == PlacementLayoutRows {
-		return "down"
-	}
-	return "right"
-}
-
-func ghosttySplitDirection(layout string) string {
+func paneSplitDirection(layout string) string {
 	if layout == PlacementLayoutRows {
 		return "down"
 	}

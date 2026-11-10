@@ -26,7 +26,7 @@ func runCleanup(args []string) error {
 	wakeQuarantineOlderFlag := fs.String(
 		"wake-quarantine-older-than",
 		"",
-		"Remove preserved wake quarantine artifacts older than this duration",
+		"Remove preserved wake quarantine artifacts and stopped wakes' reload sockets (.wr.*) older than this duration",
 	)
 	launchJournalFlag := fs.Bool(
 		"launch-journal",
@@ -291,10 +291,13 @@ func runCleanup(args []string) error {
 		removed++
 	}
 	for _, candidate := range wakeQuarantineCandidates {
-		if err := removeWakeQuarantineCandidate(root, candidate); err != nil {
+		done, err := removeWakeQuarantineCandidate(root, candidate)
+		if err != nil {
 			return err
 		}
-		removed++
+		if done {
+			removed++
+		}
 	}
 	for _, candidate := range historyCandidates {
 		if err := os.Remove(candidate.Path); err != nil && !os.IsNotExist(err) {

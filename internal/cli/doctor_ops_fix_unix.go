@@ -8,7 +8,7 @@ func fixStaleWakeLockForDoctor(
 	inspection *wakeLockInspection,
 	lock *opsWakeLock,
 ) error {
-	agentDir, err := openWakeAgentDir(root, agent)
+	agentDir, err := openExistingWakeAgentDir(root, agent)
 	if err != nil {
 		return err
 	}

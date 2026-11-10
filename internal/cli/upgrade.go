@@ -22,7 +22,6 @@ import (
 var (
 	executablePathForUpgrade              = update.ExecutablePath
 	fetchLatestTagForUpgrade              = update.FetchLatestTag
-	detectHomebrewPrefixForUpgrade        = detectHomebrewPrefix
 	detectHomebrewInstallationsForUpgrade = detectHomebrewInstallations
 	runBrewPrefixForHomebrewUpgrade       = runBrewPrefix
 	homebrewBrewExistsForUpgrade          = homebrewBrewExists
@@ -122,7 +121,7 @@ func runUpgrade(args []string, currentVersion string) error {
 	}
 	scoopRoots := update.ScoopInstallRoots()
 
-	homebrewInstallations := homebrewInstallationsForUpgrade()
+	homebrewInstallations := detectHomebrewInstallationsForUpgrade()
 	homebrewInstallations, err = addDerivedHomebrewInstallations(path, resolved, homebrewInstallations)
 	if err != nil {
 		return err
@@ -919,24 +918,6 @@ func homebrewPrefixesFromInstallations(installations []homebrewInstallation) []s
 	return prefixes
 }
 
-func homebrewInstallationsForUpgrade() []homebrewInstallation {
-	installations := detectHomebrewInstallationsForUpgrade()
-	legacyPrefix := cleanHomebrewPrefix(detectHomebrewPrefixForUpgrade())
-	if legacyPrefix == "" {
-		return installations
-	}
-	canonical := canonicalHomebrewPrefix(legacyPrefix)
-	for _, installation := range installations {
-		if canonicalHomebrewPrefix(installation.prefix) == canonical {
-			return installations
-		}
-	}
-	return append(installations, homebrewInstallation{
-		prefix:     canonical,
-		executable: filepath.Join(legacyPrefix, "bin", "brew"),
-	})
-}
-
 func addDerivedHomebrewInstallations(path, resolved string, installations []homebrewInstallation) ([]homebrewInstallation, error) {
 	derived := derivedHomebrewPrefixes(path, resolved)
 	if len(derived) == 0 {
@@ -1192,40 +1173,6 @@ func isUnderProtectedRoot(path string, homebrewPrefixes []string, scoopRoots []u
 		}
 	}
 	return update.IsScoopShapedPath(path) || update.IsScoopShapedPath(canonical)
-}
-
-func detectHomebrewPrefix() string {
-	if prefix := cleanHomebrewPrefix(os.Getenv("HOMEBREW_PREFIX")); prefix != "" {
-		return prefix
-	}
-
-	if brewPath, err := exec.LookPath("brew"); err == nil {
-		ctx, cancel := context.WithTimeout(context.Background(), homebrewDetectionTimeout)
-		output, runErr := runBrewPrefixForHomebrewUpgrade(ctx, brewPath)
-		cancel()
-		if runErr == nil {
-			if prefix := cleanHomebrewPrefix(strings.TrimSpace(string(output))); prefix != "" {
-				return prefix
-			}
-		}
-	}
-
-	for _, prefix := range wellKnownHomebrewPrefixes {
-		brewPath := filepath.Join(prefix, "bin", "brew")
-		if homebrewBrewExistsForUpgrade(brewPath) || homebrewCellarExists(filepath.Join(prefix, "Cellar")) {
-			return filepath.Clean(prefix)
-		}
-	}
-	// User-local Linuxbrew installs under ~/.linuxbrew (not a fixed absolute
-	// path, so it is checked separately from the well-known prefix list).
-	if home, err := homeDirForUpgrade(); err == nil {
-		userLinuxbrew := filepath.Join(home, ".linuxbrew")
-		brewPath := filepath.Join(userLinuxbrew, "bin", "brew")
-		if homebrewBrewExistsForUpgrade(brewPath) || homebrewCellarExists(filepath.Join(userLinuxbrew, "Cellar")) {
-			return userLinuxbrew
-		}
-	}
-	return ""
 }
 
 func runBrewPrefix(ctx context.Context, brewPath string) ([]byte, error) {

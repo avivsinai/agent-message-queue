@@ -335,6 +335,7 @@ func writeWakeDialogEntryAt(dirfd int, agentDir *wakeAgentDir, name string, data
 		if !entries {
 			return writeWakeDialogSingleMarkerAt(dirfd, legacy, data)
 		}
+		removeStaleWakeDialogTempDirsAt(dirfd)
 		temp, err := wakeDialogTempName("dir")
 		if err != nil {
 			return err
@@ -407,6 +408,30 @@ func writeWakeDialogSingleMarkerAt(dirfd int, current, data []byte) error {
 		return nil
 	}
 	return writeWakeDialogEntryFileAt(dirfd, wakeDialogFileName, data, time.Time{})
+}
+
+// removeStaleWakeDialogTempDirsAt removes the temp entries directories a
+// crashed installer left in dirfd, best effort. The caller holds the marker
+// lock, which every installer holds from its mkdir to its rename, so a
+// directory under this name was never installed and no reader opens it. Only
+// real directories match; a symlink or file of that name is left alone.
+func removeStaleWakeDialogTempDirsAt(dirfd int) {
+	fd, err := unix.Openat(dirfd, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return
+	}
+	agent := os.NewFile(uintptr(fd), "wake agent directory")
+	defer func() { _ = agent.Close() }()
+	names, err := agent.Readdirnames(-1)
+	if err != nil {
+		return
+	}
+	prefix := "." + strings.TrimLeft(wakeDialogFileName, ".") + ".dir.tmp."
+	for _, name := range names {
+		if strings.HasPrefix(name, prefix) {
+			_ = removeWakeDialogTempDirAt(dirfd, name)
+		}
+	}
 }
 
 // removeWakeDialogTempDirAt removes a temp entries directory that was never

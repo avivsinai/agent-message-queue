@@ -40,7 +40,7 @@ func captureImageEvidenceFromOpenFile(
 	if before.Mode().Perm()&0o111 == 0 {
 		return ImageEvidence{}, fmt.Errorf("wake image is not executable")
 	}
-	if err := validateImagePathOwnership("wake image", executionPath, before); err != nil {
+	if err := ValidatePathOwnership("wake image", executionPath, before); err != nil {
 		return ImageEvidence{}, err
 	}
 	identity, ok := captureImageFileIdentity(before)

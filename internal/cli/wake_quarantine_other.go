@@ -19,6 +19,6 @@ func findWakeQuarantineOlderThan(string, time.Time) ([]wakeQuarantineCleanupCand
 	return nil, fmt.Errorf("wake quarantine cleanup is unsupported on this platform")
 }
 
-func removeWakeQuarantineCandidate(string, wakeQuarantineCleanupCandidate) error {
-	return fmt.Errorf("wake quarantine cleanup is unsupported on this platform")
+func removeWakeQuarantineCandidate(string, wakeQuarantineCleanupCandidate) (bool, error) {
+	return false, fmt.Errorf("wake quarantine cleanup is unsupported on this platform")
 }
