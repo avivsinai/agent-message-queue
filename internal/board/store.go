@@ -1358,9 +1358,6 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 		card := Card{Inferred: task.Inferred, Cancelled: task.Cancelled, ID: id, Title: task.Title, Column: col, Reason: it.Reason, ReasonSource: it.Source, Items: []Item{it}, Owners: []Owner{}, WaitsOn: it.WaitsOn, Marks: []string{}, Actions: []Action{}, Refs: []Ref{}, UpdatedAt: it.UpdatedAt, Aliases: task.Aliases}
 		card.SourceObservedAt = task.ObservedAt
 		card.Summary = cardSummary(card.Items)
-		if card.Summary == "" && it.Obligation != nil {
-			card.Summary = s.openerSummary(*it.Obligation)
-		}
 		card.Authority = task.Authority
 		card.current = !task.Cancelled && !task.SourceMissing
 		for _, alias := range task.Aliases {
@@ -1471,17 +1468,6 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 	buildFlow(&m, forge, input, observed)
 	buildFloor(&m, observed["amq"], cfg, now)
 	return m
-}
-
-// openerSummary is the first sentence of the request a thread obligation
-// answers, or empty when the snapshot does not hold that message.
-func (s Snapshot) openerSummary(o ObligationFacts) string {
-	for _, m := range s.Messages {
-		if m.ID == o.OpenerID && m.Thread == o.Thread {
-			return Sentence(m.Body)
-		}
-	}
-	return ""
 }
 
 // relateAsks adds one related token to each current card per request that
