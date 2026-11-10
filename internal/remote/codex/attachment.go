@@ -170,6 +170,12 @@ type Attachment struct {
 	// the diff. At most maxFileChanges, oldest dropped first.
 	fileChanges     map[string]string
 	fileChangeOrder []string
+	// history is the last thread/read reply readHistory reuses: read at
+	// historyAt on historyClient; historyOK once one read succeeded.
+	history       []historyTurn
+	historyAt     time.Time
+	historyClient *Client
+	historyOK     bool
 }
 
 // maxIDs bounds an idSet.
@@ -792,29 +798,58 @@ func (a *Attachment) Lookup(key requests.Key, epoch string) (core.Evidence, erro
 	return a.lookupHistory(key, epoch)
 }
 
-func (a *Attachment) lookupHistory(key requests.Key, epoch string) (core.Evidence, error) {
+// historyTurn is one turn of a thread/read includeTurns reply.
+type historyTurn struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+	Error  *struct {
+		Message string `json:"message"`
+	} `json:"error"`
+	Items []struct {
+		Type     string `json:"type"`
+		ClientID string `json:"clientId"`
+		Text     string `json:"text"`
+	} `json:"items"`
+}
+
+// historyReuse is how long one thread/read reply answers every history
+// lookup: the reconcile tick asks for each record it cannot resolve, and a
+// full read per record per tick re-reads the whole transcript.
+const historyReuse = 5 * time.Second
+
+// readHistory returns the thread's turns, from the last read while it is
+// younger than historyReuse on the same client.
+func (a *Attachment) readHistory() ([]historyTurn, error) {
+	client := a.client.Load()
+	a.mu.Lock()
+	if a.historyOK && a.historyClient == client && a.now().Sub(a.historyAt) < historyReuse {
+		turns := a.history
+		a.mu.Unlock()
+		return turns, nil
+	}
+	a.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	var res struct {
 		Thread struct {
-			Turns []struct {
-				ID     string `json:"id"`
-				Status string `json:"status"`
-				Error  *struct {
-					Message string `json:"message"`
-				} `json:"error"`
-				Items []struct {
-					Type     string `json:"type"`
-					ClientID string `json:"clientId"`
-					Text     string `json:"text"`
-				} `json:"items"`
-			} `json:"turns"`
+			Turns []historyTurn `json:"turns"`
 		} `json:"thread"`
 	}
-	if err := a.client.Load().Call(ctx, "thread/read", map[string]any{"threadId": a.threadID, "includeTurns": true}, &res); err != nil {
+	if err := client.Call(ctx, "thread/read", map[string]any{"threadId": a.threadID, "includeTurns": true}, &res); err != nil {
+		return nil, err
+	}
+	a.mu.Lock()
+	a.history, a.historyAt, a.historyClient, a.historyOK = res.Thread.Turns, a.now(), client, true
+	a.mu.Unlock()
+	return res.Thread.Turns, nil
+}
+
+func (a *Attachment) lookupHistory(key requests.Key, epoch string) (core.Evidence, error) {
+	turns, err := a.readHistory()
+	if err != nil {
 		return core.Evidence{}, err
 	}
-	for _, t := range res.Thread.Turns {
+	for _, t := range turns {
 		mine := false
 		var text strings.Builder
 		for _, it := range t.Items {
