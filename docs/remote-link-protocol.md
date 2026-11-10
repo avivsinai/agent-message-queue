@@ -104,7 +104,8 @@ signed submit is refused before admission with one of:
 | `busy` | The harness is busy and `input.busy` is `reject`. No `retry_after_ms`: sending again is a new request and a new signature |
 
 `interaction.respond` and `session.events` from a link are always refused
-with `unsupported`.
+with `unsupported`. A request whose reply would exceed the frame limit is
+answered `too_large`, never with an oversize frame.
 
 A signed submit on a binding whose `consent` is `local` that passes every
 check is held on the machine, not admitted. The reply is

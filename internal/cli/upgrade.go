@@ -34,6 +34,7 @@ var (
 	fetchChecksumsForUpgrade              = update.FetchChecksums
 	extractBinaryForUpgrade               = extractBinaryFromArchive
 	readBuildInfoForUpgrade               = debugbuildinfo.ReadFile
+	readEmbeddedVersionForUpgrade         = selfupgrade.ReadEmbeddedVersion
 	replaceBinaryForUpgrade               = update.ReplaceBinary
 	updateVerifySHA256ForUpgrade          = update.VerifySHA256
 	saveUpgradeCacheForUpgrade            = saveUpgradeCache
@@ -166,6 +167,8 @@ func runUpgrade(args []string, currentVersion string) error {
 		return fmt.Errorf("invalid latest version: %q", latestTag)
 	}
 
+	checksums := checksumsOnce(ctx, client, latestTag)
+
 	if cmp, ok := update.CompareVersions(currentVersion, latest); ok && cmp >= 0 {
 		if err := writeStdoutLine(fmt.Sprintf("amq is already up to date (%s)", latest)); err != nil {
 			return err
@@ -179,6 +182,7 @@ func runUpgrade(args []string, currentVersion string) error {
 				ctx,
 				client,
 				latestTag,
+				checksums,
 				path,
 				destPath,
 				homebrewPrefixes,
@@ -202,6 +206,7 @@ func runUpgrade(args []string, currentVersion string) error {
 		client,
 		update.BinaryName,
 		latestTag,
+		checksums,
 		destPath,
 		homebrewPrefixes,
 		scoopRoots,
@@ -221,6 +226,7 @@ func runUpgrade(args []string, currentVersion string) error {
 			ctx,
 			client,
 			latestTag,
+			checksums,
 			path,
 			destPath,
 			homebrewPrefixes,
@@ -251,7 +257,7 @@ func runManagedUpgradeWithManager(kind update.InstallKind, managerPath string, y
 				return err
 			}
 		}
-		return nil
+		return reportStaleWakesAfterUpgrade()
 	}
 	return fmt.Errorf("%s", remedy)
 }
@@ -335,7 +341,9 @@ func validateUpgradeCachePath() error {
 func prepareDirectUpgradeWithScoopRoots(
 	ctx context.Context,
 	client *http.Client,
-	binaryName, latestTag, destPath string,
+	binaryName, latestTag string,
+	checksumsFor func() (map[string]string, error),
+	destPath string,
 	homebrewPrefixes []string,
 	scoopRoots []update.ScoopInstallRoot,
 	tmpDir string,
@@ -350,7 +358,7 @@ func prepareDirectUpgradeWithScoopRoots(
 		return preparedUpgrade{}, err
 	}
 
-	checksums, err := fetchChecksumsForUpgrade(ctx, client, latestTag)
+	checksums, err := checksumsFor()
 	if err != nil {
 		return preparedUpgrade{}, err
 	}
@@ -381,6 +389,22 @@ func prepareDirectUpgradeWithScoopRoots(
 	return preparedUpgrade{binaryPath: binaryPath, destPath: destPath}, nil
 }
 
+// checksumsOnce fetches a tag's checksums at most once per upgrade run.
+func checksumsOnce(ctx context.Context, client *http.Client, tag string) func() (map[string]string, error) {
+	var (
+		sums map[string]string
+		err  error
+		done bool
+	)
+	return func() (map[string]string, error) {
+		if !done {
+			sums, err = fetchChecksumsForUpgrade(ctx, client, tag)
+			done = true
+		}
+		return sums, err
+	}
+}
+
 func replacePreparedUpgrade(binaryName string, prepared preparedUpgrade) (directUpgradeResult, error) {
 	scheduled, err := replaceBinaryForUpgrade(prepared.binaryPath, prepared.destPath)
 	if err != nil {
@@ -401,7 +425,9 @@ func replacePreparedUpgrade(binaryName string, prepared preparedUpgrade) (direct
 func runDirectUpgradeWithScoopRoots(
 	ctx context.Context,
 	client *http.Client,
-	binaryName, latestTag, destPath string,
+	binaryName, latestTag string,
+	checksumsFor func() (map[string]string, error),
+	destPath string,
 	homebrewPrefixes []string,
 	scoopRoots []update.ScoopInstallRoot,
 ) (directUpgradeResult, error) {
@@ -416,6 +442,7 @@ func runDirectUpgradeWithScoopRoots(
 		client,
 		binaryName,
 		latestTag,
+		checksumsFor,
 		destPath,
 		homebrewPrefixes,
 		scoopRoots,
@@ -430,7 +457,9 @@ func runDirectUpgradeWithScoopRoots(
 func upgradeCompanionsWithScoopRoots(
 	ctx context.Context,
 	client *http.Client,
-	latestTag, rawAMQPath, amqDest string,
+	latestTag string,
+	checksumsFor func() (map[string]string, error),
+	rawAMQPath, amqDest string,
 	homebrewPrefixes []string,
 	scoopRoots []update.ScoopInstallRoot,
 ) error {
@@ -471,11 +500,20 @@ func upgradeCompanionsWithScoopRoots(
 		if !ok {
 			continue
 		}
+		if current, readErr := readEmbeddedVersionForUpgrade(target.target); readErr == nil &&
+			update.NormalizeVersion(current) == update.NormalizeVersion(latestTag) {
+			if err := writeStdoutLine(fmt.Sprintf("%s is already %s", name, current)); err != nil {
+				return err
+			}
+			delete(plan, name)
+			continue
+		}
 		item, err := prepareDirectUpgradeWithScoopRoots(
 			ctx,
 			client,
 			name,
 			latestTag,
+			checksumsFor,
 			target.target,
 			homebrewPrefixes,
 			scoopRoots,

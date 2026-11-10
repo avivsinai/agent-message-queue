@@ -599,8 +599,8 @@ func TestAdapterRejectsProjectTrackedProviderSymlinkBeforeSentinelExec(t *testin
 		_ = exec.Command(plan.Argv[0]).Run()
 		t.Fatal("project-tracked provider symlink was accepted")
 	}
-	if !strings.Contains(err.Error(), providerProjectContainedCode) {
-		t.Fatalf("project-tracked provider error = %v, want %s", err, providerProjectContainedCode)
+	if !strings.Contains(err.Error(), ProviderProjectContainedCode) {
+		t.Fatalf("project-tracked provider error = %v, want %s", err, ProviderProjectContainedCode)
 	}
 	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
 		t.Fatalf("provider sentinel was executed: %v", statErr)

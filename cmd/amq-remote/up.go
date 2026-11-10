@@ -143,6 +143,9 @@ func up(args []string, stdout, stderr io.Writer, newSpawner func(self string) sp
 	if len(fs.Args()) > 0 {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "up takes no positional arguments (got %q)", fs.Args()[0])
 	}
+	if *sf.poll <= 0 {
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--poll must be positive (got %s)", *sf.poll)
+	}
 	if *sf.discover {
 		// Discovery never supervises: it returns before the registry dir,
 		// the lifetime lock and phantom reclaim, so it works while another
@@ -414,10 +417,12 @@ func lockFilePath(regPath, entryID string) string {
 // the delay only binds when it ignores SIGTERM.
 const upWaitDelay = 10 * time.Second
 
-// upUsageExitCode is the exit class that terminates supervision: serve
-// refused its own arguments. Respawning a usage error loops
-// forever - observed 'respawning in 1m0s' for a child exiting 2.
-const upUsageExitCode = 2
+// upStopExitCode is the exit class that terminates supervision: serve
+// refused its configuration (action required), and a respawn would replay
+// the same refusal. It is not 2: the Go runtime exits 2 on an unrecovered
+// panic, and a crashed serve is respawned. up parses serve's flags itself,
+// so a flag refusal never reaches the child.
+const upStopExitCode = protocol.ExitActionRequired
 
 // upHealthyUptime is the runtime after which a child counts as having run
 // healthily: the failure counter resets so the next crash
@@ -440,7 +445,7 @@ type upConfig struct {
 }
 
 // runUpLoop is the supervision loop: spawn, respawn on non-zero exit with
-// exponential backoff (reusing keepalive's constants), stop on clean exit 0.
+// keepalive's failure backoff, stop on clean exit 0.
 // The spawner interface lets tests inject a fake (no real process). The
 // supervisor's log lines go to stderr.
 func runUpLoop(ctx context.Context, cfg upConfig, sp spawner, stderr io.Writer) (int, error) {
@@ -474,11 +479,10 @@ func runUpLoop(ctx context.Context, cfg upConfig, sp spawner, stderr io.Writer) 
 				say(stderr, "amq-remote up: serve exited cleanly (0)")
 				return 0, nil
 			}
-			if code == upUsageExitCode {
-				// serve refused its arguments. Respawning
-				// replays the same refusal forever - observed 'respawning in
-				// 1m0s' for a child exiting 2. Propagate the code; up ends.
-				say(stderr, "amq-remote up: serve exited %d (usage error); not respawning", code)
+			if code == upStopExitCode {
+				// serve refused its configuration. Respawning replays the
+				// same refusal forever. Propagate the code; up ends.
+				say(stderr, "amq-remote up: serve exited %d (action required); not respawning", code)
 				return code, nil
 			}
 			uptime := now().Sub(start)
@@ -498,10 +502,9 @@ func runUpLoop(ctx context.Context, cfg upConfig, sp spawner, stderr io.Writer) 
 			say(stderr, "amq-remote up: max-restarts (%d) exceeded", cfg.maxRestarts)
 			return 1, fmt.Errorf("max-restarts exceeded")
 		}
-		// Backoff: reuse keepalive's failure-backoff constants (exponential,
-		// capped). Do not invent a second table. The index (restart), not
-		// the budget, drives escalation.
-		delay := backoff(restart, cfg.backoffBase, cfg.backoffMax)
+		// Backoff: keepalive's failure backoff step (exponential, capped).
+		// The index (restart), not the budget, drives escalation.
+		delay := supervisor.BackoffStep(restart, cfg.backoffBase, cfg.backoffMax)
 		say(stderr, "amq-remote up: respawning in %s (attempt %d)", delay, restart)
 		select {
 		case <-ctx.Done():
@@ -509,25 +512,6 @@ func runUpLoop(ctx context.Context, cfg upConfig, sp spawner, stderr io.Writer) 
 		case <-time.After(delay):
 		}
 	}
-}
-
-// backoff computes an exponential backoff capped at maxDelay, matching
-// keepalive's Reconciler.backoff / exponentialBackoff policy.
-func backoff(failureCount int, base, maxDelay time.Duration) time.Duration {
-	if failureCount < 1 {
-		failureCount = 1
-	}
-	delay := base
-	for i := 1; i < failureCount; i++ {
-		delay *= 2
-		if delay >= maxDelay {
-			return maxDelay
-		}
-	}
-	if delay > maxDelay {
-		return maxDelay
-	}
-	return delay
 }
 
 // buildServeArgs constructs the args to pass to serve, forwarding --root and

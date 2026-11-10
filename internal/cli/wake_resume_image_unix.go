@@ -34,18 +34,17 @@ func captureCurrentWakeImageEvidenceDefault() (wakeImageEvidenceV1, error) {
 }
 
 func captureWakeImageEvidence(path, embeddedVersion string) (wakeImageEvidenceV1, error) {
-	return selfupgrade.CaptureImageEvidenceWithMutator(path, embeddedVersion, nil)
+	return selfupgrade.CaptureImageEvidence(path, embeddedVersion)
 }
 
 func captureWakeImageEvidenceFromOpenFile(
 	file *os.File,
 	executionPath, embeddedVersion, method string,
 ) (wakeImageEvidenceV1, error) {
-	return selfupgrade.CaptureImageEvidenceFromOpenFileWithMutator(
+	return selfupgrade.CaptureImageEvidenceFromOpenFile(
 		file,
 		executionPath,
 		embeddedVersion,
 		method,
-		nil,
 	)
 }

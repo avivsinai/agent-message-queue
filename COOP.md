@@ -107,7 +107,8 @@ pin. See [session routing and safety](docs/session-routing.md).
 `amq coop init` provisions a queue for scripts and direct flows. Direct
 `coop exec` remains available for deliberate launches and scripts; it
 is not a second project-onboarding flow. Without an eligible root, it can create
-`.amqrc` and `.agent-mail` in the worktree; `--no-init` turns that into an error.
+`.amqrc` and `.agent-mail` in the worktree after it asks; `-y` answers yes for a
+caller with no terminal, and `--no-init` turns that into an error.
 
 Provider arguments follow `--`. Permission-bypass arguments are operator-only
 and are rejected from committed `.amq/launch.json`; use the committed safe

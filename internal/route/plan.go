@@ -230,16 +230,24 @@ func (w Walker) requireFederationSourceProject(result AmqrcFile, sourceRoot stri
 	}
 	sourceRoot = absPath(w.ResolveRoot(sourceRoot))
 	configuredBase = absPath(w.ResolveRoot(configuredBase))
-	if sourceRoot != configuredBase {
-		if filepath.Dir(sourceRoot) != configuredBase {
+	if !w.sameTreeOrPath(sourceRoot, configuredBase) {
+		if !w.sameTreeOrPath(filepath.Dir(sourceRoot), configuredBase) {
 			return "", federationSourceOwnershipError(result, sourceRoot, configuredBase)
 		}
 		ownedSession, err := w.ResolveSessionRoot(configuredBase, filepath.Base(sourceRoot))
-		if err != nil || ownedSession != sourceRoot {
+		if err != nil || !w.sameTreeOrPath(ownedSession, sourceRoot) {
 			return "", federationSourceOwnershipError(result, sourceRoot, configuredBase)
 		}
 	}
 	return project, nil
+}
+
+// sameTreeOrPath reports whether a and b are the same cleaned path or name the
+// same directory tree. An unresolvable path is never accepted on identity
+// alone; only the exact string match holds for a directory that does not
+// exist yet.
+func (w Walker) sameTreeOrPath(a, b string) bool {
+	return a == b || w.RelateTrees(a, b) == TreeRelationSame
 }
 
 func federationSourceProjectError(sourceRoot string) error {

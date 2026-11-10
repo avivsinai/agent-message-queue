@@ -392,32 +392,6 @@ type ApplyResultV1 struct {
 	CallerContext     map[string]string          `json:"caller_context,omitempty"`
 }
 
-type InspectRequestV1 struct {
-	RequestVersion int      `json:"request_version"`
-	Target         TargetV1 `json:"target"`
-}
-
-type FocusRequestV1 = InspectRequestV1
-type CloseRequestV1 = InspectRequestV1
-
-type LifecycleResultV1 struct {
-	ResultVersion     int                        `json:"result_version"`
-	Outcome           string                     `json:"outcome"`
-	ReasonCode        string                     `json:"reason_code,omitempty"`
-	Backend           string                     `json:"backend"`
-	Profile           string                     `json:"profile"`
-	Disposition       MutationDispositionV1      `json:"disposition"`
-	BindingGeneration string                     `json:"binding_generation,omitempty"`
-	State             string                     `json:"state"`
-	Observations      []ParticipantObservationV1 `json:"observations"`
-	Evidence          []EvidenceRefV1            `json:"evidence,omitempty"`
-	CallerContext     map[string]string          `json:"caller_context,omitempty"`
-}
-
-type InspectResultV1 = LifecycleResultV1
-type FocusResultV1 = LifecycleResultV1
-type CloseResultV1 = LifecycleResultV1
-
 type CompatibilityV1 struct {
 	ContractSemver string   `json:"contract_semver"`
 	IntentVersions []int    `json:"intent_versions"`

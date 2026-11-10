@@ -18,7 +18,7 @@ func TestCaptureImageEvidenceAcceptsSiblingHardLinkDuringHash(t *testing.T) {
 		t.Fatal(err)
 	}
 	sibling := filepath.Join(dir, "amq-stage")
-	_, err := CaptureImageEvidenceWithMutator(path, "1.2.3", func() {
+	_, err := captureImageEvidence(path, "1.2.3", func() {
 		if linkErr := os.Link(path, sibling); linkErr != nil {
 			t.Errorf("link sibling: %v", linkErr)
 		}
@@ -27,6 +27,6 @@ func TestCaptureImageEvidenceAcceptsSiblingHardLinkDuringHash(t *testing.T) {
 		}
 	})
 	if err != nil {
-		t.Fatalf("CaptureImageEvidenceWithMutator: %v", err)
+		t.Fatalf("captureImageEvidence: %v", err)
 	}
 }

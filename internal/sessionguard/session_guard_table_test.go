@@ -232,28 +232,28 @@ type sessionGuardSiteMapping struct {
 
 // R1 has 19 decision-site mappings plus one evaluator-only diagnostic.
 // Revalidation callbacks and both send branches are textual consumers of
-// existing rows; doctor:437 intentionally maps to no decision row.
+// existing rows; doctor.go:runDoctor/diagnostic intentionally maps to no decision row.
 var sessionGuardSiteMappings = []sessionGuardSiteMapping{
-	{site: "internal/cli/read.go:50", kind: KindMailbox, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR03MailboxRouted, RowR04IgnorePin, RowR08MismatchExit5, RowR09InvalidExit5}, phase: "entry"},
-	{site: "internal/cli/drain.go:51", kind: KindMailbox, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR03MailboxRouted, RowR04IgnorePin, RowR08MismatchExit5, RowR09InvalidExit5}, phase: "entry"},
-	{site: "internal/cli/watch.go:73", kind: KindMailbox, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR03MailboxRouted, RowR04IgnorePin, RowR08MismatchExit5, RowR09InvalidExit5}, phase: "entry"},
-	{site: "internal/cli/watch.go:101", kind: KindMailbox, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR03MailboxRouted, RowR04IgnorePin, RowR08MismatchExit5, RowR09InvalidExit5}, phase: "revalidation"},
-	{site: "internal/cli/monitor.go:72", kind: KindMailbox, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR03MailboxRouted, RowR04IgnorePin, RowR08MismatchExit5, RowR09InvalidExit5}, phase: "entry"},
-	{site: "internal/cli/monitor.go:99", kind: KindMailbox, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR03MailboxRouted, RowR04IgnorePin, RowR08MismatchExit5, RowR09InvalidExit5}, phase: "revalidation"},
-	{site: "internal/cli/list.go:86", kind: KindList, rows: []string{RowR10ListMismatchWarn}, phase: "cwd warning"},
-	{site: "internal/cli/list.go:102", kind: KindList, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR06ListOwnBase, RowR10ListMismatchWarn, RowR11ListInvalidWarn}, phase: "warning"},
-	{site: "internal/cli/dlq.go:101", kind: KindMailbox, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR03MailboxRouted, RowR04IgnorePin, RowR08MismatchExit5, RowR09InvalidExit5}, phase: "entry"},
-	{site: "internal/cli/dlq.go:288", kind: KindMailbox, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR03MailboxRouted, RowR04IgnorePin, RowR08MismatchExit5, RowR09InvalidExit5}, phase: "entry"},
-	{site: "internal/cli/dlq.go:419", kind: KindMailbox, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR03MailboxRouted, RowR04IgnorePin, RowR08MismatchExit5, RowR09InvalidExit5}, phase: "entry"},
-	{site: "internal/cli/dlq.go:601", kind: KindMailbox, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR03MailboxRouted, RowR04IgnorePin, RowR08MismatchExit5, RowR09InvalidExit5}, phase: "entry"},
-	{site: "internal/cli/send.go:171", kind: KindSource, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR04IgnorePin, RowR05SourceFromSession, RowR08MismatchExit5, RowR09InvalidExit5}, phase: "identity-pin branch"},
-	{site: "internal/cli/send.go:187", kind: KindSource, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR04IgnorePin, RowR05SourceFromSession, RowR08MismatchExit5, RowR09InvalidExit5}, phase: "legacy branch"},
-	{site: "internal/cli/reply.go:60", kind: KindSource, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR04IgnorePin, RowR08MismatchExit5, RowR09InvalidExit5}, phase: "entry"},
-	{site: "internal/cli/route.go:147", kind: KindSource, channel: ChannelJSON, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR14RouteMismatchJSON, RowR15RouteInvalidJSON}, phase: "json probe"},
-	{site: "internal/cli/env.go:162", kind: KindEnv, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR08MismatchExit5, RowR09InvalidExit5}, phase: "ambient resolution"},
-	{site: "internal/cli/doctor.go:176", kind: KindDoctorRepair, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR04IgnorePin, RowR07DoctorOwnBase, RowR12DoctorMismatchErr, RowR13DoctorInvalidErr}, phase: "wake-lock repair"},
-	{site: "internal/cli/doctor.go:437", rows: nil, phase: "evaluator-only diagnostic", evaluatorOnly: true},
-	{site: "internal/cli/doctor.go:561", kind: KindDoctorRepair, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR04IgnorePin, RowR07DoctorOwnBase, RowR12DoctorMismatchErr, RowR13DoctorInvalidErr}, phase: "mailbox repair"},
+	{site: "internal/cli/read.go:runRead", kind: KindMailbox, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR03MailboxRouted, RowR04IgnorePin, RowR08MismatchExit5, RowR09InvalidExit5}, phase: "entry"},
+	{site: "internal/cli/drain.go:runDrain", kind: KindMailbox, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR03MailboxRouted, RowR04IgnorePin, RowR08MismatchExit5, RowR09InvalidExit5}, phase: "entry"},
+	{site: "internal/cli/watch.go:runWatch/entry", kind: KindMailbox, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR03MailboxRouted, RowR04IgnorePin, RowR08MismatchExit5, RowR09InvalidExit5}, phase: "entry"},
+	{site: "internal/cli/watch.go:runWatch/revalidation", kind: KindMailbox, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR03MailboxRouted, RowR04IgnorePin, RowR08MismatchExit5, RowR09InvalidExit5}, phase: "revalidation"},
+	{site: "internal/cli/monitor.go:runMonitor/entry", kind: KindMailbox, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR03MailboxRouted, RowR04IgnorePin, RowR08MismatchExit5, RowR09InvalidExit5}, phase: "entry"},
+	{site: "internal/cli/monitor.go:runMonitor/revalidation", kind: KindMailbox, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR03MailboxRouted, RowR04IgnorePin, RowR08MismatchExit5, RowR09InvalidExit5}, phase: "revalidation"},
+	{site: "internal/cli/list.go:runList/cwd warning", kind: KindList, rows: []string{RowR10ListMismatchWarn}, phase: "cwd warning"},
+	{site: "internal/cli/list.go:runList/warning", kind: KindList, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR06ListOwnBase, RowR10ListMismatchWarn, RowR11ListInvalidWarn}, phase: "warning"},
+	{site: "internal/cli/dlq.go:runDLQList", kind: KindMailbox, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR03MailboxRouted, RowR04IgnorePin, RowR08MismatchExit5, RowR09InvalidExit5}, phase: "entry"},
+	{site: "internal/cli/dlq.go:runDLQRead", kind: KindMailbox, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR03MailboxRouted, RowR04IgnorePin, RowR08MismatchExit5, RowR09InvalidExit5}, phase: "entry"},
+	{site: "internal/cli/dlq.go:runDLQRetry", kind: KindMailbox, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR03MailboxRouted, RowR04IgnorePin, RowR08MismatchExit5, RowR09InvalidExit5}, phase: "entry"},
+	{site: "internal/cli/dlq.go:runDLQPurge", kind: KindMailbox, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR03MailboxRouted, RowR04IgnorePin, RowR08MismatchExit5, RowR09InvalidExit5}, phase: "entry"},
+	{site: "internal/cli/send.go:runSendWithAfterBodyRead/identity-pin", kind: KindSource, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR04IgnorePin, RowR05SourceFromSession, RowR08MismatchExit5, RowR09InvalidExit5}, phase: "identity-pin branch"},
+	{site: "internal/cli/send.go:runSendWithAfterBodyRead/legacy", kind: KindSource, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR04IgnorePin, RowR05SourceFromSession, RowR08MismatchExit5, RowR09InvalidExit5}, phase: "legacy branch"},
+	{site: "internal/cli/reply.go:runReply", kind: KindSource, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR04IgnorePin, RowR08MismatchExit5, RowR09InvalidExit5}, phase: "entry"},
+	{site: "internal/cli/route.go:explainRoute", kind: KindSource, channel: ChannelJSON, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR14RouteMismatchJSON, RowR15RouteInvalidJSON}, phase: "json probe"},
+	{site: "internal/cli/env.go:runEnv", kind: KindEnv, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR08MismatchExit5, RowR09InvalidExit5}, phase: "ambient resolution"},
+	{site: "internal/cli/doctor.go:runDoctor/wake-lock repair", kind: KindDoctorRepair, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR04IgnorePin, RowR07DoctorOwnBase, RowR12DoctorMismatchErr, RowR13DoctorInvalidErr}, phase: "wake-lock repair"},
+	{site: "internal/cli/doctor.go:runDoctor/diagnostic", rows: nil, phase: "evaluator-only diagnostic", evaluatorOnly: true},
+	{site: "internal/cli/doctor.go:inspectDoctorMailboxes", kind: KindDoctorRepair, rows: []string{RowR01UnboundAllow, RowR02MatchAllow, RowR04IgnorePin, RowR07DoctorOwnBase, RowR12DoctorMismatchErr, RowR13DoctorInvalidErr}, phase: "mailbox repair"},
 }
 
 func TestSessionGuardSiteMappingCoversNineteenDecisionSitesPlusDiagnostic(t *testing.T) {
@@ -309,7 +309,7 @@ func TestSessionGuardSiteCasesReplayTheirMappedRows(t *testing.T) {
 }
 
 func TestSessionGuardWatchMonitorMidWaitRepinRefuses(t *testing.T) {
-	for _, site := range []string{"internal/cli/watch.go:101", "internal/cli/monitor.go:99"} {
+	for _, site := range []string{"internal/cli/watch.go:runWatch/revalidation", "internal/cli/monitor.go:runMonitor/revalidation"} {
 		t.Run(site, func(t *testing.T) {
 			entry := Decide(Input{
 				Kind: KindMailbox, Pin: PinIdentity,

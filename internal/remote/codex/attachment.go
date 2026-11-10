@@ -71,7 +71,6 @@ type run struct {
 	// cancelPending records a cancel that arrived while tentative, to be
 	// delivered when the run confirms.
 	cancelPending bool
-	queued        bool
 	// acked records that the endpoint acknowledged this run's terminal
 	// result. The retained payload is released and Lookup reports
 	// EvidenceNone for the key, so reconcile's ack replay converges instead
@@ -171,6 +170,12 @@ type Attachment struct {
 	// the diff. At most maxFileChanges, oldest dropped first.
 	fileChanges     map[string]string
 	fileChangeOrder []string
+	// history is the last thread/read reply readHistory reuses: read at
+	// historyAt on historyClient; historyOK once one read succeeded.
+	history       []historyTurn
+	historyAt     time.Time
+	historyClient *Client
+	historyOK     bool
 }
 
 // maxIDs bounds an idSet.
@@ -441,7 +446,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		return core.Admission{Admitted: true, RunID: id}, nil
 	}
 	busy := a.status == "busy" || a.activeTurn != ""
-	activeTurn, codexHome := a.activeTurn, a.codexHome
+	codexHome := a.codexHome
 	a.mu.Unlock()
 	// A turn sent while the seat's TUI still shows a startup screen would
 	// end the hold that keeps the seat's own doorbell out of that screen.
@@ -460,35 +465,9 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 
 	switch {
 	case req.Input.Deliver == protocol.DeliverSteer:
-		// Steer interleaves into the running turn; expectedTurnId makes the
-		// app-server reject if the active turn changed under us, so no
-		// separate confirmation is needed.
-		if !busy {
-			return core.Admission{Code: protocol.CodeUnsupported, Message: "steer needs an active turn; use deliver=turn"}, nil
-		}
-		if err := a.call(sendBy, "turn/steer", map[string]any{"threadId": a.threadID, "expectedTurnId": activeTurn, "input": input, "clientUserMessageId": clientIDFor(req.Key)}, nil); err != nil {
-			return refusal(err), nil
-		}
-		r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, turnID: activeTurn, confirmed: true, createdAt: a.now()}
-		a.mu.Lock()
-		a.runs[req.Key] = r
-		a.byClientID[clientIDFor(req.Key)] = r
-		a.byTurn[activeTurn] = r
-		a.mu.Unlock()
-		return core.Admission{Admitted: true, RunID: a.runID(r)}, nil
-
-	case busy && req.Input.Busy == protocol.BusyQueue:
-		// Codex's own FIFO queue primitive; acceptance is Codex-native.
-		if err := a.call(sendBy, "thread/queue/add", map[string]any{"threadId": a.threadID, "clientUserMessageId": clientIDFor(req.Key), "input": input}, nil); err != nil {
-			return refusal(err), nil
-		}
-		r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, queued: true, createdAt: a.now()}
-		a.mu.Lock()
-		a.runs[req.Key] = r
-		a.byClientID[clientIDFor(req.Key)] = r
-		a.mu.Unlock()
-		return core.Admission{Admitted: true, RunID: a.runID(r)}, nil
-
+		// The endpoint refuses deliver=steer before it reaches an adapter;
+		// this adapter has no steer ownership model either.
+		return core.Admission{Code: protocol.CodeUnsupported, Message: "deliver=steer is not supported; use deliver=turn", NothingSent: true}, nil
 	case busy:
 		return core.Admission{Code: protocol.CodeBusy, Message: "a turn is active on this thread", NothingSent: true}, nil
 	}
@@ -777,9 +756,8 @@ func (a *Attachment) Lookup(key requests.Key, epoch string) (core.Evidence, erro
 		}
 		ev := core.Evidence{Known: true, RunID: r.runIDLocked(), State: r.state, LocalIntervention: r.local}
 		switch {
-		case r.confirmed || r.queued:
-			// A confirmed running turn, or a Codex-native-accepted queue item:
-			// real admission.
+		case r.confirmed:
+			// A confirmed running turn: real admission.
 			ev.Class = core.EvidenceConfirmed
 			ev.Admitted = true
 			if r.state.Terminal() {
@@ -820,29 +798,58 @@ func (a *Attachment) Lookup(key requests.Key, epoch string) (core.Evidence, erro
 	return a.lookupHistory(key, epoch)
 }
 
-func (a *Attachment) lookupHistory(key requests.Key, epoch string) (core.Evidence, error) {
+// historyTurn is one turn of a thread/read includeTurns reply.
+type historyTurn struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+	Error  *struct {
+		Message string `json:"message"`
+	} `json:"error"`
+	Items []struct {
+		Type     string `json:"type"`
+		ClientID string `json:"clientId"`
+		Text     string `json:"text"`
+	} `json:"items"`
+}
+
+// historyReuse is how long one thread/read reply answers every history
+// lookup: the reconcile tick asks for each record it cannot resolve, and a
+// full read per record per tick re-reads the whole transcript.
+const historyReuse = 5 * time.Second
+
+// readHistory returns the thread's turns, from the last read while it is
+// younger than historyReuse on the same client.
+func (a *Attachment) readHistory() ([]historyTurn, error) {
+	client := a.client.Load()
+	a.mu.Lock()
+	if a.historyOK && a.historyClient == client && a.now().Sub(a.historyAt) < historyReuse {
+		turns := a.history
+		a.mu.Unlock()
+		return turns, nil
+	}
+	a.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	var res struct {
 		Thread struct {
-			Turns []struct {
-				ID     string `json:"id"`
-				Status string `json:"status"`
-				Error  *struct {
-					Message string `json:"message"`
-				} `json:"error"`
-				Items []struct {
-					Type     string `json:"type"`
-					ClientID string `json:"clientId"`
-					Text     string `json:"text"`
-				} `json:"items"`
-			} `json:"turns"`
+			Turns []historyTurn `json:"turns"`
 		} `json:"thread"`
 	}
-	if err := a.client.Load().Call(ctx, "thread/read", map[string]any{"threadId": a.threadID, "includeTurns": true}, &res); err != nil {
+	if err := client.Call(ctx, "thread/read", map[string]any{"threadId": a.threadID, "includeTurns": true}, &res); err != nil {
+		return nil, err
+	}
+	a.mu.Lock()
+	a.history, a.historyAt, a.historyClient, a.historyOK = res.Thread.Turns, a.now(), client, true
+	a.mu.Unlock()
+	return res.Thread.Turns, nil
+}
+
+func (a *Attachment) lookupHistory(key requests.Key, epoch string) (core.Evidence, error) {
+	turns, err := a.readHistory()
+	if err != nil {
 		return core.Evidence{}, err
 	}
-	for _, t := range res.Thread.Turns {
+	for _, t := range turns {
 		mine := false
 		var text strings.Builder
 		for _, it := range t.Items {
@@ -991,27 +998,17 @@ func (a *Attachment) CancelExact(key requests.Key, epoch string) (core.CancelEvi
 		a.mu.Unlock()
 		return core.CancelEvidence{Disposition: protocol.CancelNoopTerminal}, nil
 	}
-	if !r.confirmed && !r.queued {
+	if !r.confirmed {
 		// We do not yet own a turn; interrupting r.turnID could hit a foreign
 		// turn. Record intent; confirmRun delivers it once ownership is proven.
 		r.cancelPending = true
 		a.mu.Unlock()
 		return core.CancelEvidence{Disposition: protocol.CancelRequested, Message: "intent recorded before native ownership"}, nil
 	}
-	turnID, queued := r.turnID, r.queued
+	turnID := r.turnID
 	a.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if queued && turnID == "" {
-		if err := a.client.Load().Call(ctx, "thread/queue/delete", map[string]any{"threadId": a.threadID, "clientUserMessageId": clientIDFor(key)}, nil); err != nil {
-			return core.CancelEvidence{Disposition: protocol.CancelUnsupported, Message: err.Error()}, nil
-		}
-		a.mu.Lock()
-		r.state = protocol.StateCancelled
-		a.mu.Unlock()
-		a.emit(core.NativeEvent{Type: core.EventRunCancelled, Key: key, RunID: a.runID(r)})
-		return core.CancelEvidence{Disposition: protocol.CancelConfirmed}, nil
-	}
 	if err := a.client.Load().Call(ctx, "turn/interrupt", map[string]any{"threadId": a.threadID, "turnId": turnID}, nil); err != nil {
 		return core.CancelEvidence{Disposition: protocol.CancelRequested, Message: err.Error()}, nil
 	}
@@ -1326,7 +1323,6 @@ func (a *Attachment) onItem(n Notification) {
 	switch p.Item.Type {
 	case "userMessage":
 		if r, ok := a.byClientID[p.Item.ClientID]; ok && p.Item.ClientID != "" {
-			r.queued = false
 			// Our text is confirmed in this turn: bind byTurn and mark owned.
 			if a.confirmRun(r, p.TurnID) {
 				go a.deliverPendingCancel(r.turnID)

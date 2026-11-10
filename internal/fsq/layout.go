@@ -207,10 +207,6 @@ func AgentDLQNew(root, agent string) string {
 	return AgentMailboxPath(root, agent, MailboxDLQNew)
 }
 
-func AgentDLQCur(root, agent string) string {
-	return AgentMailboxPath(root, agent, MailboxDLQCur)
-}
-
 func AgentReceipts(root, agent string) string {
 	return AgentMailboxPath(root, agent, MailboxReceipts)
 }
@@ -966,24 +962,7 @@ func mergeCreatedPaths(inventory *MailboxInventory, created []string) {
 	}
 }
 
-func repairMailboxLayoutHandles(root, configRoot *DeliveryRoot, requestedHandles []string, configuredSet bool, hooks mailboxRepairHooks) MailboxRepairResult {
-	authorization, inventory, err := OpenMailboxConfigAuthorization(configRoot)
-	if err != nil {
-		return MailboxRepairResult{
-			Status: "failed",
-			Failure: &MailboxRepairFailure{
-				Code:    "preflight_failed",
-				Stage:   "authorization",
-				Message: inventory.ActiveConfigIssue,
-			},
-			Inventory: inventory,
-		}
-	}
-	defer func() { _ = authorization.Close() }()
-	return repairMailboxLayoutHandlesAuthorized(root, authorization, requestedHandles, configuredSet, hooks)
-}
-
-func repairMailboxLayoutHandlesAuthorized(root *DeliveryRoot, authorization *MailboxConfigAuthorization, requestedHandles []string, configuredSet bool, hooks mailboxRepairHooks) MailboxRepairResult {
+func repairMailboxLayoutHandlesAuthorized(root *DeliveryRoot, authorization *MailboxConfigAuthorization, requestedHandles []string, hooks mailboxRepairHooks) MailboxRepairResult {
 	if authorization == nil || authorization.pin == nil {
 		return MailboxRepairResult{
 			Status:  "failed",
@@ -994,13 +973,12 @@ func repairMailboxLayoutHandlesAuthorized(root *DeliveryRoot, authorization *Mai
 		root,
 		authorization,
 		requestedHandles,
-		configuredSet,
 		authorization.pin.cfg,
 		hooks,
 	)
 }
 
-func repairMailboxLayoutHandlesAuthorizedWithConfig(root *DeliveryRoot, authorization *MailboxConfigAuthorization, requestedHandles []string, configuredSet bool, inspectionConfig mailboxActiveConfig, hooks mailboxRepairHooks) MailboxRepairResult {
+func repairMailboxLayoutHandlesAuthorizedWithConfig(root *DeliveryRoot, authorization *MailboxConfigAuthorization, requestedHandles []string, inspectionConfig mailboxActiveConfig, hooks mailboxRepairHooks) MailboxRepairResult {
 	if authorization == nil || authorization.pin == nil {
 		return MailboxRepairResult{
 			Status:  "failed",
@@ -1032,9 +1010,6 @@ func repairMailboxLayoutHandlesAuthorizedWithConfig(root *DeliveryRoot, authoriz
 		}
 	}
 	repairHandles := requestedHandles
-	if configuredSet {
-		repairHandles = plan.inventory.ConfiguredAgents
-	}
 	if issue, hazard := preflightHazard(plan, repairHandles); hazard {
 		return MailboxRepairResult{
 			Status:    "failed",
@@ -1205,39 +1180,6 @@ func repairMailboxLayoutHandlesAuthorizedWithConfig(root *DeliveryRoot, authoriz
 	}
 }
 
-func repairMailboxLayout(root *DeliveryRoot, hooks mailboxRepairHooks) MailboxRepairResult {
-	return repairMailboxLayoutHandles(root, root, nil, true, hooks)
-}
-
-// RepairMailboxLayout validates the complete configured set before creating
-// any directory and returns exact partial results if creation later fails.
-func RepairMailboxLayout(root *DeliveryRoot) MailboxRepairResult {
-	return repairMailboxLayout(root, mailboxRepairHooks{})
-}
-
-// RepairMailboxLayoutForAgents validates and completes only the requested
-// mailbox layouts using the same no-symlink, identity-pinned repair machinery
-// as RepairMailboxLayout. A valid active config is still required, but the
-// requested handles do not need to be listed in it.
-func RepairMailboxLayoutForAgents(root *DeliveryRoot, agents []string) MailboxRepairResult {
-	return RepairMailboxLayoutForAgentsAuthorized(root, root, agents)
-}
-
-// RepairMailboxLayoutForAgentsAuthorized validates and completes only agents in
-// root while taking initialization and roster authority from configRoot.
-func RepairMailboxLayoutForAgentsAuthorized(root, configRoot *DeliveryRoot, agents []string) MailboxRepairResult {
-	authorization, inventory, err := OpenMailboxConfigAuthorization(configRoot)
-	if err != nil {
-		return MailboxRepairResult{
-			Status:    "failed",
-			Failure:   &MailboxRepairFailure{Code: "preflight_failed", Stage: "authorization", Message: inventory.ActiveConfigIssue},
-			Inventory: inventory,
-		}
-	}
-	defer func() { _ = authorization.Close() }()
-	return RepairMailboxLayoutForAgentsWithAuthorization(root, authorization, agents)
-}
-
 // RepairMailboxLayoutForAgentsWithAuthorization repairs only agents using the
 // exact retained config authorization previously used for roster validation.
 func RepairMailboxLayoutForAgentsWithAuthorization(root *DeliveryRoot, authorization *MailboxConfigAuthorization, agents []string) MailboxRepairResult {
@@ -1255,7 +1197,7 @@ func RepairMailboxLayoutForAgentsWithAuthorization(root *DeliveryRoot, authoriza
 			handles = append(handles, handle)
 		}
 	}
-	return repairMailboxLayoutHandlesAuthorized(root, authorization, handles, false, mailboxRepairHooks{})
+	return repairMailboxLayoutHandlesAuthorized(root, authorization, handles, mailboxRepairHooks{})
 }
 
 // RepairMailboxLayoutForAgentsWithAuthorizationAndWriteGuard is the
@@ -1279,7 +1221,6 @@ func RepairMailboxLayoutForAgentsWithAuthorizationAndWriteGuard(root *DeliveryRo
 		root,
 		authorization,
 		agents,
-		false,
 		authorization.pin.cfg,
 		mailboxRepairHooks{fail: func(stage, _ string) error {
 			switch stage {
@@ -1313,7 +1254,6 @@ func RepairMailboxLayoutForConfiguredAgentsWithAuthorization(root *DeliveryRoot,
 		root,
 		authorization,
 		cfg.Agents,
-		false,
 		cfg,
 		mailboxRepairHooks{},
 	)

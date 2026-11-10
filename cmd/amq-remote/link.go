@@ -1147,15 +1147,20 @@ func linkStatus(args []string, probe *jsonProbe) (any, int, error) {
 				}
 				row.ShareStates[sh.Binding] = linkShareState(root, natives, sh.Binding)
 			}
+			// Only a linked link has a live status: a status.json left behind
+			// never hides a retired or unlinked state.
 			if key, err := linkio.LoadDeviceKey(stateDir, l.Name); err == nil {
 				row.Sink = key.Host()
+				if data, err := os.ReadFile(filepath.Join(linkio.LinkDir(stateDir, l.Name), "status.json")); err == nil {
+					_ = json.Unmarshal(data, &row.Status)
+				}
 			} else if host := retiredHostOf(retiredNames, l.Name); host != "" {
 				row.Sink, row.Status.State = host, "retired"
 			} else {
 				row.Status.State = "not linked"
 			}
-			if data, err := os.ReadFile(filepath.Join(linkio.LinkDir(stateDir, l.Name), "status.json")); err == nil {
-				_ = json.Unmarshal(data, &row.Status)
+			if stopped && (row.Status.State == "online" || row.Status.State == "connecting") {
+				row.Status.State = "offline" // the stored last ping stays
 			}
 			if stopped && (row.Status.State == "online" || row.Status.State == "connecting") {
 				row.Status.State = "offline" // the stored last ping stays

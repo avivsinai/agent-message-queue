@@ -787,7 +787,7 @@ func removeSelectedDLQPurgeCandidate(root *fsq.DeliveryRoot, me string, candidat
 			return removeErr
 		}
 		removed = true
-		return nil
+		return batch.RemoveDLQEnvelopeLock(me, filename)
 	})
 	return removed, err
 }

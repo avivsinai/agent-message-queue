@@ -94,7 +94,7 @@ func TestReceiptsWaitImmediate(t *testing.T) {
 
 	// Pre-emit a receipt so wait finds it immediately.
 	r := receipt.New("msg-w-001", "", "bob", "alice", receipt.StageDrained, "")
-	if err := receipt.Emit(root, r); err != nil {
+	if err := emitReceiptForCLITest(root, r); err != nil {
 		t.Fatal(err)
 	}
 
@@ -191,4 +191,19 @@ func captureOutput(t *testing.T, fn func() error) (string, string) {
 	}
 
 	return string(outBytes), string(errBytes)
+}
+
+// emitReceiptForCLITest writes a receipt through a delivery root opened on
+// rootPath; it returns errors so goroutines can call it.
+func emitReceiptForCLITest(rootPath string, r receipt.Receipt) error {
+	identity, err := fsq.SnapshotDeliveryRoot(rootPath)
+	if err != nil {
+		return err
+	}
+	root, err := fsq.OpenDeliveryRoot(rootPath, identity)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	return receipt.EmitDeliveryRoot(root, r)
 }

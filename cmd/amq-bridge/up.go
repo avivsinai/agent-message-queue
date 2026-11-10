@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -153,12 +152,10 @@ func watchUp(ctx context.Context, root string, interval time.Duration) error {
 				}
 			}
 			_ = printStatus(root)
-			_ = tryWake(root)
 			resetTimer(timer, interval)
 		case <-timer.C:
 			_ = watchTxTree(watcher, tx)
 			_ = printStatus(root)
-			_ = tryWake(root)
 			resetTimer(timer, interval)
 		case err := <-watcher.Errors:
 			if err != nil {
@@ -203,32 +200,4 @@ func jitter(interval time.Duration) time.Duration {
 		return 15 * time.Minute
 	}
 	return interval + time.Duration(os.Getpid()%17)*time.Second
-}
-
-func tryWake(root string) error {
-	amq, err := exec.LookPath("amq")
-	if err != nil {
-		return nil
-	}
-	peers, err := xferv3.ListPeers(root)
-	if err != nil {
-		return err
-	}
-	var last error
-	seen := map[string]struct{}{}
-	for _, peer := range peers {
-		for _, handle := range peer.AllowIn() {
-			name := handle.String()
-			if _, ok := seen[name]; ok {
-				continue
-			}
-			seen[name] = struct{}{}
-			cmd := exec.Command(amq, "wake", "--root", root, "--me", name)
-			cmd.Stderr = os.Stderr
-			if err := cmd.Run(); err != nil {
-				last = err
-			}
-		}
-	}
-	return last
 }

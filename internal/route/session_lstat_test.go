@@ -89,3 +89,30 @@ func TestPlanDeliveryBadSessionIsUsageError(t *testing.T) {
 		}
 	}
 }
+
+// A project whose .amqrc root reaches its queue through a symlink still owns
+// that queue when the source root is given in its physical form
+// (audit 2026-11-10).
+func TestFederationSourceOwnershipAcceptsSymlinkedConfiguredRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs privileges on Windows")
+	}
+	dir := t.TempDir()
+	physical := filepath.Join(dir, "physical")
+	if err := os.MkdirAll(filepath.Join(physical, "collab"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(physical, link); err != nil {
+		t.Fatal(err)
+	}
+	cfg := AmqrcFile{Config: Amqrc{Project: "proj", Root: link}, Dir: dir}
+	for _, source := range []string{physical, filepath.Join(physical, "collab")} {
+		if _, err := (Walker{}).requireFederationSourceProject(cfg, source); err != nil {
+			t.Errorf("source %s refused: %v", source, err)
+		}
+	}
+	if _, err := (Walker{}).requireFederationSourceProject(cfg, dir); err == nil {
+		t.Error("unrelated source root accepted")
+	}
+}

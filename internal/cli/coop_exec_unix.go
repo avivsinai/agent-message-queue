@@ -677,7 +677,7 @@ func (c *coopExecRun) provisionRoot() error {
 					return err
 				}
 				if !ok {
-					return fmt.Errorf("initialization cancelled")
+					return fmt.Errorf("initialization cancelled (not confirmed); pass -y to initialize without a prompt, or run `amq coop init` first")
 				}
 			}
 

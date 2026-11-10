@@ -121,16 +121,6 @@ func File(root string, snap Snapshot, signed Signed, payload []byte, localKey ed
 	return receipt, err
 }
 
-func Recover(root string, snap Snapshot, id ID) (string, error) {
-	var state string
-	err := withIDLock(root, id, func() error {
-		got, recErr := recoverLocked(root, snap, id)
-		state = got
-		return recErr
-	})
-	return state, err
-}
-
 func signStored(local, peer Host, id ID, key ed25519.PrivateKey) (SignedReceipt, error) {
 	r, err := NewReceipt(local, peer, id)
 	if err != nil {

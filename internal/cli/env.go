@@ -410,11 +410,12 @@ func resolveEnvConfigWithProvenance(rootFlag, meFlag string) (string, rootSource
 		return "", "", "", "", fmt.Errorf(noRootConfiguredPrefix + "no .amqrc found, no .agent-mail/ directory, AM_ROOT not set, and no global config (~/.amqrc or AMQ_GLOBAL_ROOT); from your terminal, run 'amq setup --project-root \"$PWD\"' to configure this project; for an existing queue, set AMQ_GLOBAL_ROOT to its path")
 	}
 
-	// Canonicalize the winning root before pin validation, JSON/shell output,
-	// doctor inspection, or route planning. Participating commands use the same
-	// ancestor-aware resolver; returning a raw relative value here could
-	// authorize one existing parent queue but export a different cwd-relative
-	// path.
+	// Make the winning root clean and absolute before pin validation, JSON/shell
+	// output, doctor inspection, or route planning. A root the discovery walk
+	// finds is already physical; an explicit, ambient, .amqrc, or global root
+	// keeps its symlinks. Participating commands use the same ancestor-aware
+	// resolver; returning a raw relative value here could authorize one existing
+	// parent queue but export a different cwd-relative path.
 	root = absPath(resolveRoot(root))
 
 	if me != "" {

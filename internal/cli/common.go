@@ -751,6 +751,12 @@ func doConfirmPrompt(prompt string, defaultYes bool) (bool, error) {
 		return false, err
 	}
 
+	// No input at all (EOF before any byte) is no answer: a prompt nobody can
+	// answer is never answered by its default. An explicit empty line is the
+	// user pressing Enter and takes the default.
+	if err != nil && line == "" {
+		return false, nil
+	}
 	// An answer typed without a final newline still counts.
 	line = strings.TrimSpace(strings.ToLower(line))
 	if line == "" {

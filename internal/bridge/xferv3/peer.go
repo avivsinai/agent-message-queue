@@ -14,9 +14,8 @@ import (
 )
 
 const (
-	MaxTicketBytes = 2048
-	peersDirName   = "peers"
-	txDirName      = "tx"
+	peersDirName = "peers"
+	txDirName    = "tx"
 )
 
 var (
@@ -27,22 +26,20 @@ var (
 type Peer struct {
 	host    Host
 	allow   []Handle
-	ticket  string
 	xPublic [32]byte
 }
 
 type peerFile struct {
-	AllowIn      []string `json:"allow_in"`
-	Ticket       string   `json:"ticket"`
-	X25519Public string   `json:"x25519_public"`
+	AllowIn []string `json:"allow_in"`
+	// Ticket is read and ignored so peer files that carry one still load;
+	// it is never written.
+	Ticket       string `json:"ticket,omitempty"`
+	X25519Public string `json:"x25519_public"`
 }
 
-func NewPeer(host Host, allow []Handle, ticket string, xPublic [32]byte) (Peer, error) {
+func NewPeer(host Host, allow []Handle, xPublic [32]byte) (Peer, error) {
 	if host.s == "" {
 		return Peer{}, ErrName
-	}
-	if strings.ContainsRune(ticket, 0) || len(ticket) > MaxTicketBytes {
-		return Peer{}, ErrLimit
 	}
 	seen := make(map[Handle]struct{}, len(allow))
 	copied := make([]Handle, 0, len(allow))
@@ -56,11 +53,10 @@ func NewPeer(host Host, allow []Handle, ticket string, xPublic [32]byte) (Peer, 
 		seen[handle] = struct{}{}
 		copied = append(copied, handle)
 	}
-	return Peer{host: host, allow: copied, ticket: ticket, xPublic: xPublic}, nil
+	return Peer{host: host, allow: copied, xPublic: xPublic}, nil
 }
 
 func (p Peer) Host() Host             { return p.host }
-func (p Peer) Ticket() string         { return p.ticket }
 func (p Peer) X25519Public() [32]byte { return p.xPublic }
 func (p Peer) AllowIn() []Handle      { return append([]Handle(nil), p.allow...) }
 
@@ -103,7 +99,7 @@ func LoadPeer(root string, host Host) (Peer, error) {
 	}
 	var xPublic [32]byte
 	copy(xPublic[:], raw)
-	return NewPeer(host, allow, wire.Ticket, xPublic)
+	return NewPeer(host, allow, xPublic)
 }
 
 func StorePeer(root string, peer Peer) error {
@@ -116,7 +112,6 @@ func StorePeer(root string, peer Peer) error {
 	}
 	body, err := json.Marshal(peerFile{
 		AllowIn:      allow,
-		Ticket:       peer.ticket,
 		X25519Public: hex.EncodeToString(peer.xPublic[:]),
 	})
 	if err != nil {

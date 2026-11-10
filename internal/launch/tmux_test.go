@@ -198,7 +198,12 @@ func tmuxTestRoot(t *testing.T, handles ...string) *fsq.DeliveryRoot {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = root.Close() })
-	repaired := fsq.RepairMailboxLayoutForAgents(root, handles)
+	authorization, _, err := fsq.OpenMailboxConfigAuthorization(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = authorization.Close() })
+	repaired := fsq.RepairMailboxLayoutForAgentsWithAuthorization(root, authorization, handles)
 	if repaired.Status != "repaired" {
 		t.Fatalf("repair mailbox root: %#v", repaired)
 	}

@@ -35,7 +35,6 @@ func runPeerAdd(args []string) error {
 	fs.SetOutput(os.Stderr)
 	root := fs.String("root", os.Getenv("AM_ROOT"), "local AMQ root")
 	allowIn := fs.String("allow-in", "", "comma-separated inbound handles")
-	ticketFlag := fs.String("ticket", "", "reachability ticket")
 	x25519 := fs.String("x25519", "", "peer's 64-character lowercase X25519 public hex")
 	from := fs.String("from", "", "file holding the peer's identity public output (default: stdin)")
 	fromLine := fs.String("from-line", "", "pairing line from peer line")
@@ -53,7 +52,6 @@ func runPeerAdd(args []string) error {
 	var (
 		data     []byte
 		xPublic  [32]byte
-		ticket   = *ticketFlag
 		lineFP   string
 		lineHost string
 	)
@@ -64,9 +62,6 @@ func runPeerAdd(args []string) error {
 		}
 		data = []byte(parsed.Record)
 		xPublic = parsed.X25519
-		if ticket == "" {
-			ticket = parsed.Ticket
-		}
 		lineFP = parsed.Fingerprint()
 		lineHost = parsed.Host.String()
 	} else {
@@ -93,7 +88,7 @@ func runPeerAdd(args []string) error {
 		return err
 	}
 	if lineFP == "" {
-		encoded, encErr := xferv3.FormatLine(host, strings.TrimSpace(string(data)), ticket, xPublic)
+		encoded, encErr := xferv3.FormatLine(host, strings.TrimSpace(string(data)), "", xPublic)
 		if encErr != nil {
 			return encErr
 		}
@@ -119,7 +114,7 @@ func runPeerAdd(args []string) error {
 			allow = append(allow, handle)
 		}
 	}
-	peer, err := xferv3.NewPeer(host, allow, ticket, xPublic)
+	peer, err := xferv3.NewPeer(host, allow, xPublic)
 	if err != nil {
 		return err
 	}

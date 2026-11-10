@@ -1,6 +1,8 @@
 package codex
 
 import (
+	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -103,6 +105,38 @@ func TestLookupHistoryReadsRunUnderLock(t *testing.T) {
 	}
 	close(stop)
 	<-done
+}
+
+// History lookups for records the thread cannot resolve share one
+// thread/read instead of one per lookup (audit 2026-11-10).
+func TestHistoryLookupsShareOneThreadRead(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	att, err := Attach(sock, "t1")
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+	go func() {
+		for range srv.calls {
+		}
+	}()
+	var reads atomic.Int32
+	srv.setThreadReadHandler(func() string {
+		reads.Add(1)
+		return `{"thread":{"turns":[]}}`
+	})
+	s := att.Inspect()
+	for i := range 4 {
+		key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: fmt.Sprintf("11111111-1111-4111-8111-11111111110%d", i)}
+		if ev, err := att.Lookup(key, s.Epoch); err != nil || ev.Class != core.EvidenceUnknown {
+			t.Fatalf("Lookup = %+v, %v; want unknown", ev, err)
+		}
+	}
+	if n := reads.Load(); n != 1 {
+		t.Fatalf("thread/read calls = %d, want 1", n)
+	}
 }
 
 // Regression for agent-message-queue-611.68 (deep review finding 12): Submit

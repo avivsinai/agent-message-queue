@@ -103,6 +103,9 @@ func runReceiptsList(args []string) error {
 		return UsageError("--stage: %v", err)
 	}
 	root := resolveRoot(common.Root)
+	if err := validateKnownHandles(root, common.Strict, me); err != nil {
+		return err
+	}
 
 	receipts, err := receipt.List(root, me, receipt.ListFilter{
 		MsgID: *msgID,
@@ -208,6 +211,9 @@ func runReceiptsWait(args []string) error {
 		return UsageError("--poll-interval must be > 0")
 	}
 	root := resolveRoot(common.Root)
+	if err := validateKnownHandles(root, common.Strict, me); err != nil {
+		return err
+	}
 
 	r, err := receipt.WaitFor(root, *msgID, me, *stage, *timeoutFlag, *pollInterval)
 	if errors.Is(err, os.ErrDeadlineExceeded) {

@@ -52,11 +52,3 @@ func TestPublicRequestCodecsRejectUnknownAndMalformedAuthority(t *testing.T) {
 		t.Fatalf("hostile placement error = %v", err)
 	}
 }
-
-func TestDecodeInspectRequestV1RejectsInvalidUTF8(t *testing.T) {
-	raw := append([]byte(`{"request_version":1,"target":{"project_root":"`), 0xff)
-	raw = append(raw, []byte(`","base_root":"","session_root":"/tmp/session","session":"collab"}}`)...)
-	if _, err := DecodeInspectRequestV1(raw); err == nil || !strings.Contains(err.Error(), "invalid UTF-8") {
-		t.Fatalf("DecodeInspectRequestV1 error = %v", err)
-	}
-}

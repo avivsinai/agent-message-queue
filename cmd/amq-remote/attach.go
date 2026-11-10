@@ -9,10 +9,8 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -749,7 +747,7 @@ func currentHarness(codexes *codexView, root, handle string) harnessSession {
 				return h
 			}
 		}
-		ancestors, err := ancestorPIDs(os.Getpid())
+		ancestors, err := ancestorPIDs()
 		if err != nil {
 			return h
 		}
@@ -782,7 +780,7 @@ func currentHarness(codexes *codexView, root, handle string) harnessSession {
 		}
 		return h
 	}
-	ancestors, _ := ancestorPIDs(os.Getpid())
+	ancestors, _ := ancestorPIDs()
 	for _, pid := range ancestors {
 		if s, err := claudeSession(pid); err == nil {
 			return harnessSession{Kind: "claude", PID: pid, Cwd: s.Cwd, Transcript: s.Transcript}
@@ -1217,7 +1215,7 @@ func selfCandidate(root, stateDir string) (registry.Candidate, error) {
 		}
 		return registry.Candidate{}, fmt.Errorf("codex thread %s is not loaded in the app-server daemon; start Codex with `codex --remote unix://`", thread)
 	}
-	ancestors, err := ancestorPIDs(os.Getpid())
+	ancestors, err := ancestorPIDs()
 	if err != nil {
 		return registry.Candidate{}, err
 	}
@@ -1337,23 +1335,16 @@ func selfNativeSession(cand registry.Candidate) (string, error) {
 	return "", fmt.Errorf("cannot verify a %s session", cand.Kind)
 }
 
-// ancestorPIDs lists the parent chain of pid, nearest first. It runs ps, so
-// it is a variable that tests replace.
-var ancestorPIDs = psAncestorPIDs
+// ancestorPIDs lists this process's parent chain, nearest first. It is a
+// variable that tests replace.
+var ancestorPIDs = selfAncestorPIDs
 
-func psAncestorPIDs(pid int) ([]int, error) {
+// selfAncestorPIDs reads the chain from the kernel, with each parent's
+// identity checked so a reused pid ends the chain instead of joining it.
+func selfAncestorPIDs() ([]int, error) {
 	var out []int
-	for i := 0; i < 64 && pid > 1; i++ {
-		raw, err := exec.Command("ps", "-o", "ppid=", "-p", strconv.Itoa(pid)).Output()
-		if err != nil {
-			return out, nil
-		}
-		parent, err := strconv.Atoi(strings.TrimSpace(string(raw)))
-		if err != nil || parent <= 1 {
-			return out, nil
-		}
-		out = append(out, parent)
-		pid = parent
+	for _, h := range launch.Ancestors() {
+		out = append(out, h.PID)
 	}
 	return out, nil
 }

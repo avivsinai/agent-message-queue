@@ -52,7 +52,7 @@ func TestReplyWaitForDrained(t *testing.T) {
 			if err == nil && len(entries) == 1 {
 				msgID := strings.TrimSuffix(entries[0].Name(), ".md")
 				r := receipt.New(msgID, "", "alice", "bob", receipt.StageDrained, "")
-				_ = receipt.Emit(root, r)
+				_ = emitReceiptForCLITest(root, r)
 				return
 			}
 			time.Sleep(25 * time.Millisecond)

@@ -16,10 +16,10 @@ func CaptureImageEvidenceFromOpenFile(
 	file *os.File,
 	executionPath, embeddedVersion, method string,
 ) (ImageEvidence, error) {
-	return CaptureImageEvidenceFromOpenFileWithMutator(file, executionPath, embeddedVersion, method, nil)
+	return captureImageEvidenceFromOpenFile(file, executionPath, embeddedVersion, method, nil)
 }
 
-func CaptureImageEvidenceFromOpenFileWithMutator(
+func captureImageEvidenceFromOpenFile(
 	file *os.File,
 	executionPath, embeddedVersion, method string,
 	mutator func(),

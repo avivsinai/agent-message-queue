@@ -296,6 +296,15 @@ func decodePayloadB64(encoded string) ([]byte, error) {
 	return payload, nil
 }
 
+// ValidateHost reports whether host follows the bridge identifier grammar.
+func ValidateHost(host string) error {
+	return validateBridgeIdentifier("host", host)
+}
+
+// validateBridgeIdentifier is the bridge identifier grammar: 1 to 63 bytes
+// of [a-z0-9._-], first byte [a-z0-9_], so a name never starts like a flag
+// or a hidden path. xferv3 names and scripts/amq-bridge-bot-enqueue.sh apply
+// the same grammar.
 func validateBridgeIdentifier(name, value string) error {
 	if len(value) == 0 {
 		return fmt.Errorf("%s is invalid", name)
@@ -306,7 +315,7 @@ func validateBridgeIdentifier(name, value string) error {
 	for i := 0; i < len(value); i++ {
 		b := value[i]
 		if i == 0 {
-			if !isLowerASCII(b) && !isASCIIDigit(b) {
+			if !isLowerASCII(b) && !isASCIIDigit(b) && b != '_' {
 				return fmt.Errorf("%s is invalid", name)
 			}
 			continue

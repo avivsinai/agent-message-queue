@@ -14,13 +14,13 @@ import (
 // could not find the chat. The chat runs its tools as children of the pi
 // process its bridge names in bridge.liveness, so the process ancestry
 // identifies it, with the chat's own session id, and a live chat that is not
-// an ancestor is never chosen. Process ancestry is read with ps: the
+// an ancestor is never chosen. Process ancestry is read from the kernel: the
 // boundary of the defect.
 func TestSelfCandidateFindsThePiChatItRunsIn(t *testing.T) {
 	t.Setenv("CODEX_THREAD_ID", "")
 	saved := ancestorPIDs
 	t.Cleanup(func() { ancestorPIDs = saved })
-	ancestorPIDs = psAncestorPIDs
+	ancestorPIDs = selfAncestorPIDs
 	root := t.TempDir()
 	stateDir := filepath.Join(root, stateDirName)
 	dir := filepath.Join(root, "agents", "chat-1", "extensions", "pi-bridge")

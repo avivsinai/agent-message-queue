@@ -59,7 +59,7 @@ func init() {
 	// The real helpers run ps, read ~/.claude or other processes, or dial the
 	// Codex app-server daemon.
 	detectHarness = func(*codexView, string, string) harnessSession { return harnessSession{} }
-	ancestorPIDs = func(int) ([]int, error) { return nil, nil }
+	ancestorPIDs = func() ([]int, error) { return nil, nil }
 	claudeSession = func(int) (claude.Session, error) {
 		return claude.Session{}, errors.New("tests read no Claude registry")
 	}
@@ -1659,9 +1659,8 @@ func ownedStartup(t *testing.T, stateDir, root, manifestFile string, sugar []man
 // TestManifestBytesUnchangedAfterFlag (611.13 r3, r4/r5 rewrite) pins through
 // the production startup path that serve NEVER writes to the user's manifest
 // path. A codex-only manifest, started with --fake sugar, must have
-// byte-identical manifest.json after the flag append; the merged set lives in
-// adapters.json (generated state). RED if the production path ever calls
-// manifest.Write.
+// byte-identical manifest.json after the flag append. RED if the production
+// path ever calls manifest.Write.
 func TestManifestBytesUnchangedAfterFlag(t *testing.T) {
 	root, err := os.MkdirTemp("", "amqrnowr")
 	if err != nil {
@@ -1706,34 +1705,16 @@ func TestManifestBytesUnchangedAfterFlag(t *testing.T) {
 	if !bytes.Equal(before, after) {
 		t.Fatalf("manifest.json was modified by the flag-append path\nbefore: %s\nafter:  %s", before, after)
 	}
-	// The merged set (file + flag sugar) is generated state: both targets in
-	// adapters.json, never in the user's file. An attached entry advertises
-	// its manifest kind (review-824-r1 P1-2: an empty "kind" was the
-	// review-b7 defect).
-	adaptersData, err := os.ReadFile(filepath.Join(stateDir, "adapters.json"))
-	if err != nil {
-		t.Fatalf("adapters.json not published: %v", err)
-	}
-	var effective []struct{ Kind, Target, State string }
-	if err := json.Unmarshal(adaptersData, &effective); err != nil {
-		t.Fatalf("adapters.json: %v", err)
-	}
-	got := map[string]string{}
-	for _, e := range effective {
-		got[e.Target] = e.Kind + "/" + e.State
-	}
-	if got["fake"] != "fake/attached" || got["codex-abc123"] != "codex/refused" || len(got) != 2 {
-		t.Fatalf("adapters.json = %s, want fake attached (kind fake) and codex-abc123 refused", adaptersData)
-	}
 }
 
-// TestValidationFailuresExitTwo (611.13 r3, r4 rewrite) pins through the
-// REAL serve error return that every manifest validation failure maps to
-// exit 2 (ExitUsage), not exit 1: one row per validation error type, since
+// TestValidationFailuresExitActionRequired (611.13 r3, r4 rewrite) pins
+// through the REAL serve error return that every manifest validation failure
+// maps to exit 6 (ExitActionRequired), not exit 1 or 2 (2 is a Go panic, which
+// up respawns): one row per validation error type, since
 // each type opts into IsValidation on its own. RED when IsValidation uses
 // errors.Is (always false) instead of errors.As, and when a serve path skips
 // Validate.
-func TestValidationFailuresExitTwo(t *testing.T) {
+func TestValidationFailuresExitActionRequired(t *testing.T) {
 	cases := []struct {
 		name     string
 		f        manifest.File
@@ -1835,7 +1816,7 @@ func TestValidationFailuresExitTwo(t *testing.T) {
 	tableDeadline := time.Now().Add(30 * time.Second)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// The real serve error return is exit 2. Serve refuses before
+			// The real serve error return is exit 6. Serve refuses before
 			// any startup side effect.
 			root := t.TempDir()
 			stateDir := filepath.Join(root, "extensions", "remote")
@@ -1879,8 +1860,8 @@ func TestValidationFailuresExitTwo(t *testing.T) {
 				// regression costs one bound, not one per subtest.
 				t.Fatalf("serve did not refuse the invalid manifest within the shared 30s table deadline (mutation bound; it must exit before any startup side effect); serve goroutine still running and owns the capture buffers")
 			}
-			if code != protocol.ExitUsage {
-				t.Fatalf("serve exit=%d, want %d (ExitUsage)\nstderr=%s", code, protocol.ExitUsage, errBuf.String())
+			if code != protocol.ExitActionRequired {
+				t.Fatalf("serve exit=%d, want %d (ExitActionRequired)\nstderr=%s", code, protocol.ExitActionRequired, errBuf.String())
 			}
 			if !strings.Contains(errBuf.String(), tc.wantErr) {
 				t.Fatalf("stderr %q missing expected diagnostic %q", errBuf.String(), tc.wantErr)

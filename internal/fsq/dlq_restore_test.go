@@ -71,7 +71,7 @@ func TestMoveToDLQRecoversOneShotCommittedClaimSyncFailure(t *testing.T) {
 	if faults != 1 {
 		t.Fatalf("injected claim sync faults = %d, want 1", faults)
 	}
-	env, body, err := ReadDLQEnvelopePath(dlqPath)
+	env, body, err := readDLQEnvelopeForTest(t, dlqPath)
 	if err != nil {
 		t.Fatalf("read recovered DLQ envelope: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestRetryFromDLQPendingRetainedTmpCompletesAfterByteCompare(t *testing.T) {
 	const filename = "retained-tmp.md"
 	content := []byte("original body")
 	dlqPath := createDLQMessage(t, rootPath, "alice", filename, content)
-	env, body, err := ReadDLQEnvelopePath(dlqPath)
+	env, body, err := readDLQEnvelopeForTest(t, dlqPath)
 	if err != nil {
 		t.Fatalf("read envelope: %v", err)
 	}

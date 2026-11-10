@@ -122,6 +122,80 @@ func TestEnqueueWritesExactBytesToBridgeSpool(t *testing.T) {
 	}
 }
 
+// A retry after a crash left only the .dest sidecar publishes the message;
+// a sidecar naming another destination still refuses (audit 2026-11-10).
+func TestEnqueueRetryAfterCrashBetweenSidecarAndMessage(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	cfg := EnqueueConfig{
+		Root:               root,
+		SourceHost:         "grok-host",
+		SourceHandle:       "codex",
+		AllowedDestAliases: []string{"mac/claude", "mac/cursor"},
+	}
+	spool := filepath.Join(root, "bridge", "outbox", "codex", "new")
+	if err := os.MkdirAll(spool, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(spool, "msg-retry.dest"), []byte("mac/claude\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	message := testBridgeMessage(t, "msg-retry", "thread-retry", "codex", "hello again")
+	if _, err := Enqueue(cfg, "mac/cursor", message); err == nil {
+		t.Fatal("Enqueue accepted a sidecar that names another destination")
+	}
+	if _, err := os.Lstat(filepath.Join(spool, "msg-retry.md")); !os.IsNotExist(err) {
+		t.Fatalf("message published under another destination's sidecar: %v", err)
+	}
+	if _, err := Enqueue(cfg, "mac/claude", message); err != nil {
+		t.Fatalf("retry Enqueue: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(spool, "msg-retry.md"))
+	if err != nil || string(got) != string(message) {
+		t.Fatalf("spool message = %q, %v; want the enqueued bytes", got, err)
+	}
+	if _, err := Enqueue(cfg, "mac/claude", message); err == nil {
+		t.Fatal("Enqueue accepted a second copy of a published message")
+	}
+}
+
+// A sidecar left after the courier archived its message to sent/ is not a
+// retry: the enqueue refuses instead of sending the message twice
+// (audit 2026-11-10).
+func TestEnqueueRetryRefusesAMessageAlreadySent(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	cfg := EnqueueConfig{
+		Root:               root,
+		SourceHost:         "grok-host",
+		SourceHandle:       "codex",
+		AllowedDestAliases: []string{"mac/claude"},
+	}
+	message := testBridgeMessage(t, "msg-sent", "thread-sent", "codex", "sent once")
+	outbox := filepath.Join(root, "bridge", "outbox", "codex")
+	for _, dir := range []string{"new", "sent"} {
+		if err := os.MkdirAll(filepath.Join(outbox, dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(outbox, "sent", "msg-sent.md"), message, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outbox, "new", "msg-sent.dest"), []byte("mac/claude\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Enqueue(cfg, "mac/claude", message); err == nil || !strings.Contains(err.Error(), "already sent") {
+		t.Fatalf("Enqueue = %v, want an already-sent refusal", err)
+	}
+	if _, err := os.Lstat(filepath.Join(outbox, "new", "msg-sent.md")); !os.IsNotExist(err) {
+		t.Fatalf("sent message was published again: %v", err)
+	}
+}
+
 func TestEnqueueRejectsDestAllowlistAndSenderMismatch(t *testing.T) {
 	root := t.TempDir()
 	cfg := EnqueueConfig{

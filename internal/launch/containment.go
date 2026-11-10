@@ -6,12 +6,6 @@ import (
 	"path/filepath"
 )
 
-const (
-	providerProjectContainedCode = ProviderProjectContainedCode
-	wrapperProjectContainedCode  = WrapperProjectContainedCode
-	amqProjectContainedCode      = AMQProjectContainedCode
-)
-
 // rejectProjectContained refuses both the path presented by the caller and
 // its physical target. Checking only the latter lets a project-tracked
 // symlink point at an external executable while retaining a project-writable

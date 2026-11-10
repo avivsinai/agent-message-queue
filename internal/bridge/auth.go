@@ -144,16 +144,6 @@ func parseHostID(path string, data []byte) (string, error) {
 	return host, nil
 }
 
-func WriteHostID(root, host string) error {
-	if err := validateBridgeIdentifier("host-id", host); err != nil {
-		return fmt.Errorf("bridge host-id: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Join(root, "bridge"), 0o700); err != nil {
-		return fmt.Errorf("create bridge directory: %w", err)
-	}
-	return writePrivateFile(HostIDPath(root), []byte(host+"\n"))
-}
-
 func LoadIdentity(root string) (HostKey, error) {
 	fields, err := readKeyFields(IdentityPath(root), "seed")
 	if err != nil {

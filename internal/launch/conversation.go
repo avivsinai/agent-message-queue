@@ -251,7 +251,3 @@ func planResume(adapter HarnessAdapter, root *fsq.DeliveryRoot, base PlanRequest
 	}
 	return adapter.PlanResume(ResumeRequest{PlanRequest: base, Conversation: conversation.Identity, Capture: capture})
 }
-
-func ConversationPath(sessionRoot, handle string) string {
-	return filepath.Join(sessionRoot, conversationDir, handle+".json")
-}

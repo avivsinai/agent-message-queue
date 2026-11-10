@@ -142,6 +142,12 @@ func reconcileLiveSeats(request ReconcileRequest, binding BindingRecord) ([]Seat
 	if detect.InstanceIdentity != "" && binding.InstanceIdentity != detect.InstanceIdentity {
 		foreign = true
 	}
+	if inspection.Status == InspectAbsent && !foreign {
+		// Nothing is live: the absent-binding path recreates the session. A
+		// binding another host or instance owns inspects as absent here and
+		// keeps the refusal.
+		return nil, false, ""
+	}
 	participants := make([]PrepareParticipant, 0, len(request.Config.Agents))
 	for _, cfg := range request.Config.Agents {
 		participants = append(participants, PrepareParticipant{

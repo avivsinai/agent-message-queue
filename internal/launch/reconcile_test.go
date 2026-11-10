@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -886,5 +887,176 @@ func TestReconcileCreateFailureClassificationControlsJournalClear(t *testing.T) 
 				t.Fatalf("uncertain create failure lost execution ticket: %v", ticketErr)
 			}
 		})
+	}
+}
+
+// seedJoinJournal leaves the state a journaled tmux join reaches once its
+// intent is durable: claude is a kept seat on a published tmux binding and
+// codex is the seat the join adds.
+func seedJoinJournal(t *testing.T) (ReconcileRequest, *reconcileBackend, ConversationRecord) {
+	t.Helper()
+	backend := &reconcileBackend{name: LauncherTMux, inspect: InspectPresent}
+	req := reconcileFixture(t, backend)
+	req.Config.Agents[0].ResumePolicy = ResumeFresh
+	req.Config.Agents = append(req.Config.Agents, ProjectAgentConfig{
+		Handle: "codex", Adapter: "claude", Command: []string{"claude"}, ResumePolicy: ResumeFresh,
+	})
+	crash := errors.New("injected crash")
+	req.CrashHook = func(stage string) error {
+		if stage == "journal_written" {
+			return crash
+		}
+		return nil
+	}
+	if _, err := Reconcile(req); !errors.Is(err, crash) {
+		t.Fatalf("seed crash = %v", err)
+	}
+	req.CrashHook = nil
+	journal, err := LoadJournal(req.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionName, err := tmuxSessionName(journal.ProjectIdentity, journal.Session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	join := BindingRecord{
+		Version: BindingVersion, Backend: LauncherTMux, HostIdentity: "host:test", InstanceIdentity: "instance:test",
+		Profile: journal.Profile, LaunchNonce: testLaunchNonce,
+		Resources: ResourceIdentitySet{Version: ResourceSetVersion, Resources: []ResourceIdentity{
+			{OpaqueID: tmuxSessionResource("$1", sessionName)},
+			{OpaqueID: tmuxPaneResource("%1"), Agent: "claude"},
+		}},
+	}
+	journal.JoinBinding, journal.JoinKept = &join, []string{"claude"}
+	kept := ConversationRecord{
+		Version: ConversationVersion, Handle: "claude", State: CapturePending,
+		LaunchNonce: "0192a3c4-0000-7000-8000-000000000001",
+	}
+	lease, err := AcquireLease(req.Root, testLaunchNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.LockHandles("claude"); err != nil {
+		t.Fatal(err)
+	}
+	for _, write := range []error{
+		WriteBinding(req.Root, lease, join), WriteJournal(req.Root, lease, journal), WriteConversation(req.Root, lease, kept),
+	} {
+		if write != nil {
+			t.Fatal(write)
+		}
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	return req, backend, kept
+}
+
+// A replayed tmux join leaves the seats it kept untouched: no new execution
+// ticket and no overwritten conversation record (audit 2026-11-10).
+func TestReconcileJoinReplayLeavesKeptSeatUntouched(t *testing.T) {
+	req, backend, kept := seedJoinJournal(t)
+	result, err := Reconcile(req)
+	if err != nil || result.AggregateCode != 0 || result.Outcome != OutcomeCreated {
+		t.Fatalf("replay result=%#v err=%v", result, err)
+	}
+	if !backend.joined || !slices.Equal(backend.planHandles, []string{"codex"}) {
+		t.Fatalf("replay created %v joined=%v, want only codex", backend.planHandles, backend.joined)
+	}
+	if _, err := LoadExecutionTicket(req.Root, "claude"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("kept seat got an execution ticket: %v", err)
+	}
+	record, err := LoadConversation(req.Root, "claude")
+	if err != nil || !reflect.DeepEqual(record, kept) {
+		t.Fatalf("kept seat conversation = %#v err=%v, want %#v", record, err, kept)
+	}
+}
+
+// A crash after the join's binding is written must not wedge the next launch
+// with launch_journal_binding_conflict (audit 2026-11-10).
+func TestReconcileJoinCrashAfterBindingWrittenRecovers(t *testing.T) {
+	req, backend, kept := seedJoinJournal(t)
+	crash := errors.New("injected crash")
+	req.CrashHook = func(stage string) error {
+		if stage == "binding_written" {
+			return crash
+		}
+		return nil
+	}
+	if _, err := Reconcile(req); !errors.Is(err, crash) {
+		t.Fatalf("crash error = %v", err)
+	}
+	req.CrashHook = nil
+	result, err := Reconcile(req)
+	if err != nil || result.AggregateCode != 0 || result.Outcome != OutcomeCreated || result.Reason != "" {
+		t.Fatalf("recovery result=%#v err=%v", result, err)
+	}
+	if backend.creates != 1 {
+		t.Fatalf("backend creates=%d, want exactly one", backend.creates)
+	}
+	if _, err := LoadJournal(req.Root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("journal after recovery: %v", err)
+	}
+	if record, err := LoadConversation(req.Root, "claude"); err != nil || !reflect.DeepEqual(record, kept) {
+		t.Fatalf("kept seat conversation = %#v err=%v", record, err)
+	}
+}
+
+// on_live keep with a bound session that no longer exists relaunches like any
+// other absent binding instead of refusing a seat that is not live (audit 2026-11-10).
+func TestReconcileOnLiveKeepRelaunchesAbsentBoundSession(t *testing.T) {
+	backend := &reconcileBackend{name: LauncherTMux, inspect: InspectAbsent}
+	req := reconcileFixture(t, backend)
+	req.OnLive = map[string]string{"claude": OnLiveKeep}
+	lease, err := AcquireLease(req.Root, testLaunchNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := BindingRecord{
+		Version: BindingVersion, Backend: LauncherTMux, HostIdentity: "host:test", InstanceIdentity: "instance:test",
+		Profile: backend.Detect().Profile.Identity(), LaunchNonce: testLaunchNonce,
+		Resources: ResourceIdentitySet{Version: ResourceSetVersion, Resources: []ResourceIdentity{
+			{OpaqueID: "resource:claude", Agent: "claude"},
+		}},
+	}
+	if err := WriteBinding(req.Root, lease, binding); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Reconcile(req)
+	if err != nil || result.AggregateCode != 0 || result.Outcome != OutcomeCreated || backend.creates != 1 {
+		t.Fatalf("result=%#v err=%v creates=%d, want a relaunch", result, err, backend.creates)
+	}
+}
+
+// An absent binding owned by another host is not ours to relaunch over: on_live
+// keep still refuses (audit 2026-11-10).
+func TestReconcileOnLiveKeepRefusesAbsentForeignBinding(t *testing.T) {
+	backend := &reconcileBackend{name: LauncherTMux, inspect: InspectAbsent}
+	req := reconcileFixture(t, backend)
+	req.OnLive = map[string]string{"claude": OnLiveKeep}
+	lease, err := AcquireLease(req.Root, testLaunchNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := BindingRecord{
+		Version: BindingVersion, Backend: LauncherTMux, HostIdentity: "host:other", InstanceIdentity: "instance:test",
+		Profile: backend.Detect().Profile.Identity(), LaunchNonce: testLaunchNonce,
+		Resources: ResourceIdentitySet{Version: ResourceSetVersion, Resources: []ResourceIdentity{
+			{OpaqueID: "resource:claude", Agent: "claude"},
+		}},
+	}
+	if err := WriteBinding(req.Root, lease, binding); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Reconcile(req)
+	if err != nil || result.Reason != ReasonLiveParticipantRefused || backend.creates != 0 {
+		t.Fatalf("result=%#v err=%v creates=%d, want live_participant_refused", result, err, backend.creates)
 	}
 }

@@ -12,10 +12,11 @@ const (
 	FingerprintLen = 26
 )
 
+// Line is a parsed pairing line. A pipe ticket in the line is for the
+// operator who sets up the pipe; parsing accepts it and keeps nothing.
 type Line struct {
 	Host   Host
 	Record string
-	Ticket string
 	X25519 [32]byte
 }
 
@@ -53,7 +54,6 @@ func ParseLine(raw string) (Line, error) {
 		return Line{}, ErrName
 	}
 	record := parts[0]
-	var ticket string
 	var xRaw []byte
 	for _, part := range parts[1:] {
 		key, value, cut := strings.Cut(part, "=")
@@ -62,7 +62,6 @@ func ParseLine(raw string) (Line, error) {
 		}
 		switch key {
 		case "pipe":
-			ticket = value
 		case "x25519":
 			xRaw, err = hex.DecodeString(value)
 			if err != nil || len(xRaw) != 32 || value != hex.EncodeToString(xRaw) {
@@ -77,7 +76,7 @@ func ParseLine(raw string) (Line, error) {
 	}
 	var xPublic [32]byte
 	copy(xPublic[:], xRaw)
-	return Line{Host: host, Record: record, Ticket: ticket, X25519: xPublic}, nil
+	return Line{Host: host, Record: record, X25519: xPublic}, nil
 }
 
 func (l Line) Fingerprint() string {

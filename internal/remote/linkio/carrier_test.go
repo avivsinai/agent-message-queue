@@ -544,3 +544,16 @@ func TestStrictBodyRefusesACaseVariantKey(t *testing.T) {
 		t.Fatalf("case-variant key accepted; credential_id=%q", b.CredentialID)
 	}
 }
+
+// A reply over the link's frame limit is answered with too_large instead of
+// an oversize frame that takes the link down (audit 2026-11-10).
+func TestOversizeReplyIsAnsweredTooLarge(t *testing.T) {
+	sess := &session{gen: 1, data: make(chan []byte, 1), frameLimit: 512}
+	answer(context.Background(), sess, "m_1", map[string]string{"text": strings.Repeat("a", 4096)}, nil)
+	frame := <-sess.data
+	var f Frame
+	var r errorReply
+	if err := json.Unmarshal(frame, &f); err != nil || len(frame) > 512 || f.Re != "m_1" || decodeStrict(f.Body, "", &r) != nil || r.Error.Code != "too_large" {
+		t.Fatalf("reply %s (%d bytes): want a too_large error under the limit", frame, len(frame))
+	}
+}

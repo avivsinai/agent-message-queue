@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 
@@ -129,4 +130,25 @@ func runListJSON(t *testing.T, root, agent string, limit, offset int) []listItem
 		t.Fatalf("unmarshal: %v (output: %s)", err, buf.String())
 	}
 	return items
+}
+
+// list --session <typo> under a session pin refuses with a context mismatch
+// instead of listing the pinned inbox (audit 2026-11-10).
+func TestListSessionTypoUnderPinIsRefused(t *testing.T) {
+	base := initializedSendMailboxRoot(t, "alice")
+	pinned := filepath.Join(base, "collab")
+	if err := fsq.EnsureRootDirs(pinned); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(pinned, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	pinSendSessionForTest(t, base, pinned, "collab")
+
+	out, err := captureEnvStdout(t, func() error {
+		return runList([]string{"--me", "alice", "--session", "typo", "--json"})
+	})
+	if err == nil || GetExitCode(err) != ExitContextMismatch {
+		t.Fatalf("list --session typo: err=%v out=%q, want exit %d", err, out, ExitContextMismatch)
+	}
 }
