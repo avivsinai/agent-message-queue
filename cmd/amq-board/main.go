@@ -94,7 +94,7 @@ func run(args []string) int {
 	asPaneJSON := flags.Bool("pane-json", false, "print the bounded native-pane projection as JSON")
 	asJSON := flags.Bool("json", false, "print the board model as JSON")
 	showVersion := flags.Bool("version", false, "print the version")
-	refresh := flags.Bool("refresh", false, "ignore the GitHub cache and fetch once")
+	refresh := flags.Bool("refresh", false, "accepted for compatibility; reads sources only through amq-board sync")
 	asHTML := flags.Bool("html", false, "print the board as one static HTML page")
 	out := flags.String("out", "", "with --html, write the page to this file")
 	if err := flags.Parse(args); err != nil {
