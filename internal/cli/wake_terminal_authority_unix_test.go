@@ -121,10 +121,11 @@ func TestRunWakeLoopTerminatesOnTerminalAuthorityLoss(t *testing.T) {
 	terminalWriteCalled := false
 	attentionWrites := 0
 	err = runWakeLoop(wakeConfig{
-		root:        root,
-		me:          "codex",
-		injectMode:  wakeInjectModeRaw,
-		controlStop: make(chan struct{}),
+		root:          root,
+		me:            "codex",
+		retainedAgent: retainedWakeAgentDirForTest(t, root, "codex"),
+		injectMode:    wakeInjectModeRaw,
+		controlStop:   make(chan struct{}),
 		attentionIsTTY: func() bool {
 			return false
 		},

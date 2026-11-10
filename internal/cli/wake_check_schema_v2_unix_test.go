@@ -50,6 +50,12 @@ func TestWakeCheckJSONSchemaV2DirectStartUsesExplicitNullsAndArgv(t *testing.T) 
 		wake["generation"] != nil || wake["target_digest"] != nil {
 		t.Fatalf("wake = %#v", wake)
 	}
+	// Schema 2 carries started_at and baseline_at as explicit nulls (audit 2026-11-10).
+	for _, key := range []string{"started_at", "baseline_at"} {
+		if value, present := wake[key]; !present || value != nil {
+			t.Fatalf("wake.%s = %#v (present=%v), want explicit null", key, value, present)
+		}
+	}
 	image := requireJSONObject(t, got, "image")
 	running := requireJSONObject(t, image, "running")
 	if running["path"] != nil || running["version"] != nil || image["status"] != wakeImageUnknown {

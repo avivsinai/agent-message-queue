@@ -918,3 +918,30 @@ func TestDoctorReportsStaleOrBrokenDialogHook(t *testing.T) {
 		}
 	}
 }
+
+// A hook that died between its temp create and the rename must not keep .wake.dialog/ forever (audit 2026-11-10).
+func TestRemoveEmptyWakeDialogEntriesClearsStaleTempFile(t *testing.T) {
+	agent := t.TempDir()
+	dir := filepath.Join(agent, wakeDialogFileName)
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	temp, err := wakeDialogTempName("entry")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, temp), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := unix.Open(agent, unix.O_RDONLY|unix.O_DIRECTORY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.Close(fd) }()
+	if err := removeEmptyWakeDialogEntriesAt(fd); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(dir); !os.IsNotExist(err) {
+		t.Fatalf(".wake.dialog survived a stale temp file: %v", err)
+	}
+}

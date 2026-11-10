@@ -458,10 +458,16 @@ func loadOpsAgents(root string, fixWakeLocks bool, explicitBaseRoot ...string) (
 		return nil, err
 	}
 
+	// Under fix the base is the classified one, never a display guess.
+	base := ""
 	if fixWakeLocks {
-		return nil, err
+		base = classifyRoot(root)
+		if base == "" {
+			return nil, err
+		}
+	} else {
+		base = baseRootOfForDisplay(root)
 	}
-	base := baseRootOfForDisplay(root)
 	if absPath(resolveRoot(base)) == absPath(resolveRoot(root)) {
 		return nil, err
 	}

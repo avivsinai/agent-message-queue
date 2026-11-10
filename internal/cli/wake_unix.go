@@ -1908,9 +1908,8 @@ type wakeStart struct {
 
 	// cleanup releases the acquired lock. The deferred stage cleanup reads it
 	// when runWakeWithLoop returns, after acquireLock has set it.
-	cleanup                 func()
-	resumeEligible          bool
-	reloadTransportEligible bool
+	cleanup        func()
+	resumeEligible bool
 	// The lock options hold this field's address and onBaselineReady writes
 	// through it, so the generation cleanup sees the published floor.
 	repairFloorAuthority wakeRepairFloorAuthority
@@ -2272,14 +2271,6 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		defer func() { returnErr = errors.Join(returnErr, cfg.native.Close()) }()
 	}
 
-	stopReloadTransport, err := s.startReloadTransport()
-	if err != nil {
-		return err
-	}
-	if stopReloadTransport != nil {
-		defer stopReloadTransport()
-	}
-
 	defer func() {
 		_ = setWakeDoorbellStatusInDir(s.activeAgentDir, s.me, false, 0)
 	}()
@@ -2590,7 +2581,6 @@ func (s *wakeStart) acquireLock() (bool, error) {
 		s.interruptKey,
 		lockWakeMode,
 	)
-	s.reloadTransportEligible = s.resumeEligible && s.target == nil
 	for {
 		if s.requestedOwner != nil {
 			select {
@@ -3141,46 +3131,14 @@ func (s *wakeStart) publishRepairFloor(
 	return writeWakeRepairFloorInDir(s.activeAgentDir, root, floor)
 }
 
-// startReloadTransport returns the transport's stop function, or nil when
-// the transport is ineligible or unavailable. Reload transport is additive
-// capability. If this process cannot confirm the freshly published lock
-// identity, keep the ordinary notifier running without opening the
-// unadvertised endpoint.
-func (s *wakeStart) startReloadTransport() (func(), error) {
-	if !s.reloadTransportEligible || !s.currentWake.IdentityConfirmed ||
-		s.currentWake.Lock.ResumeSignal == wakeResumeSignalUSR1 {
-		return nil, nil
+// validWakeReloadTransportGeneration accepts only the lowercase hex encoding
+// of exactly 16 bytes.
+func validWakeReloadTransportGeneration(generation string) bool {
+	if len(generation) != 32 || generation != strings.ToLower(generation) {
+		return false
 	}
-	if s.requestedOwner == nil {
-		return nil, fmt.Errorf("wake reload transport requires an exact owner")
-	}
-	select {
-	case <-s.ownerObservation.Done():
-		return nil, fmt.Errorf("requested wake owner observation ended before reload transport startup")
-	default:
-	}
-	stopReloadTransport, startErr := startWakeReloadTransportInDir(
-		s.activeAgentDir,
-		s.root,
-		s.me,
-		s.currentWake,
-		*s.requestedOwner,
-	)
-	if startErr != nil {
-		var unavailable *wakeReloadTransportUnavailableError
-		if !errors.As(startErr, &unavailable) {
-			return nil, startErr
-		}
-		_ = writeWakeLogLine(
-			"amq wake: reload transport unavailable: %v; continuing without reload transport\n",
-			startErr,
-		)
-		return nil, nil
-	}
-	if stopReloadTransport == nil {
-		return nil, fmt.Errorf("wake reload transport returned no cleanup")
-	}
-	return stopReloadTransport, nil
+	decoded, err := hex.DecodeString(generation)
+	return err == nil && len(decoded) == 16
 }
 
 func (s *wakeStart) recordStartupSelfUpgrade(cfg *wakeConfig) {

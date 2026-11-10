@@ -94,6 +94,10 @@ func wakeRenameNoReplaceAt(fromDirFD int, from string, toDirFD int, to string) e
 	return lease.RenameNoReplaceAt(fromDirFD, from, toDirFD, to)
 }
 
+func renameWakeNoReplaceAt(fromDirFD int, from string, toDirFD int, to string) error {
+	return wakeRenameNoReplaceAt(fromDirFD, from, toDirFD, to)
+}
+
 func wakeRenameExchangeAt(fromDirFD int, from string, toDirFD int, to string) error {
 	lease := wakemutation.New(nil)
 	defer func() { _ = lease.Close() }()
@@ -188,16 +192,6 @@ func (scope *wakeMutationScope) unlinkWakeLockForCleanup() error {
 		return err
 	}
 	return scope.unlinkAt(wakeLockFileName, 0)
-}
-
-func (scope *wakeMutationScope) unlinkWakeLockForRetire() error {
-	if _, _, err := scope.location(); err != nil {
-		return err
-	}
-	if err := scope.requireCanonical(); err != nil {
-		return err
-	}
-	return scope.unlinkAtWith(wakeUnlinkAt, wakeLockFileName, 0)
 }
 
 func assertNotWakeLockName(name string) error {

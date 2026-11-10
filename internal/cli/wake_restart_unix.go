@@ -203,7 +203,7 @@ func requestWakeRestart(root, me string) (result wakeRestartResult, returnErr er
 	}
 	record.StagePath = stagePath
 
-	agentDir, err := openWakeAgentDir(root, me)
+	agentDir, err := openExistingWakeAgentDir(root, me)
 	if err != nil {
 		result.Reason = err.Error()
 		return result, err
@@ -886,7 +886,7 @@ func observeWakeRestartReadiness(
 	root, me string,
 	expected wakeLockInspection,
 ) (wakeRestartReadiness, error) {
-	agentDir, err := openWakeAgentDir(root, me)
+	agentDir, err := openExistingWakeAgentDir(root, me)
 	if err != nil {
 		return wakeRestartReadiness{}, err
 	}
@@ -1500,7 +1500,7 @@ func persistWakeRestartBoundImage(
 	if record.StagePath == "" {
 		return record, nil
 	}
-	agentDir, err := openWakeAgentDir(record.Root, record.Agent)
+	agentDir, err := openExistingWakeAgentDir(record.Root, record.Agent)
 	if err != nil {
 		return wakeRestartRecord{}, err
 	}
@@ -1690,7 +1690,6 @@ func classifyWakeRestartAtLoopBoundary(
 	terminalRetry, scanRetry bool,
 ) wakeResumeQuiescenceDecision {
 	state := wakeResumeQuiescence{
-		Lifecycle:             wakeResumeLifecycleAdmitted,
 		Delivery:              cfg.inputDelivery,
 		RecoveryRequired:      cfg.inputRecoveryRequired,
 		RepairLineage:         cfg.baselineInherited,
@@ -1700,10 +1699,8 @@ func classifyWakeRestartAtLoopBoundary(
 		TerminalSuffixRetry:   terminalRetry,
 		ScanRetry:             scanRetry,
 		WatcherArmed:          watcher != nil,
-		ControlListenerReady:  true,
 		OwnerObservation:      wakeResumeAuthorityExact,
 		GenerationObservation: wakeResumeAuthorityExact,
-		LockTargetObservation: wakeResumeAuthorityExact,
 		CanonicalDirs:         true,
 		FinalScan:             wakeResumeScanComplete,
 		PendingDoorbell:       cfg.doorbell.pendingInput(),
@@ -1835,6 +1832,9 @@ func handleWakeRestartAtLoopBoundary(
 			return
 		}
 		reason := wakeRestartReasonWithRemedy(decision.Reason, cfg.root, cfg.me)
+		if decision.Disposition == wakeResumeDefer {
+			reason += "; this state is transient, run the command again"
+		}
 		_ = refuseWakeRestartRecord(
 			agentDir,
 			record,

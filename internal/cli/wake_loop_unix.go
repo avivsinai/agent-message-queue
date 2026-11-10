@@ -27,7 +27,6 @@ type wakeLoop struct {
 
 	ordinaryRecoverable    bool
 	ordinaryAgentDir       *wakeAgentDir
-	ownsOrdinaryAgentDir   bool
 	ordinaryInboxDir       *wakeInboxDir
 	startupBaselineWatcher wakeEventWatcher
 	watcher                wakeEventWatcher
@@ -51,6 +50,10 @@ type wakeLoop struct {
 }
 
 func runWakeLoop(cfg wakeConfig) error {
+	retainedAgent, ok := cfg.retainedAgent.(*wakeAgentDir)
+	if !ok || retainedAgent == nil {
+		return fmt.Errorf("wake loop requires a retained agent directory capability")
+	}
 	// Register shutdown handling before any watcher setup, baseline work, or
 	// readiness callback so an early parent death cannot be lost.
 	signal.Ignore(syscall.SIGTTOU, syscall.SIGTSTP, syscall.SIGTTIN)
@@ -78,9 +81,7 @@ func runWakeLoop(cfg wakeConfig) error {
 		restartCh:           restartCh,
 		inboxNew:            fsq.AgentInboxNew(cfg.root, cfg.me),
 		ordinaryRecoverable: cfg.retainedInbox == nil,
-	}
-	if retained, ok := l.cfg.retainedAgent.(*wakeAgentDir); ok {
-		l.ordinaryAgentDir = retained
+		ordinaryAgentDir:    retainedAgent,
 	}
 	defer l.closeWatchers()
 	if err := l.provisionAgentDir(); err != nil {
@@ -157,9 +158,6 @@ func (l *wakeLoop) closeWatchers() {
 		_ = l.watcher.Close()
 	}
 	_ = l.ordinaryInboxDir.Close()
-	if l.ownsOrdinaryAgentDir && l.ordinaryAgentDir != nil {
-		_ = l.ordinaryAgentDir.Close()
-	}
 }
 
 func (l *wakeLoop) stopTimers() {
@@ -184,19 +182,7 @@ func (l *wakeLoop) touchPresence() {
 
 func (l *wakeLoop) provisionAgentDir() error {
 	if l.ordinaryRecoverable {
-		if l.ordinaryAgentDir == nil {
-			// Direct loop tests and legacy in-process callers do not acquire the
-			// wake lock first. Provision only for those unowned invocations.
-			if err := os.MkdirAll(l.inboxNew, 0o700); err != nil {
-				return err
-			}
-			var err error
-			l.ordinaryAgentDir, err = openWakeAgentDir(l.cfg.root, l.cfg.me)
-			if err != nil {
-				return err
-			}
-			l.ownsOrdinaryAgentDir = true
-		} else if err := validateCanonicalWakeAgentDir(l.ordinaryAgentDir); err != nil {
+		if err := validateCanonicalWakeAgentDir(l.ordinaryAgentDir); err != nil {
 			return fmt.Errorf("validate acquired wake agent authority: %w", err)
 		}
 		if l.cfg.touchPresence == nil {
@@ -205,9 +191,7 @@ func (l *wakeLoop) provisionAgentDir() error {
 			}
 		}
 	} else if _, ok := l.cfg.retainedInbox.(*wakeInboxDir); !ok {
-		if err := os.MkdirAll(l.inboxNew, 0o700); err != nil {
-			return err
-		}
+		return fmt.Errorf("wake loop requires a retained inbox capability")
 	}
 	return nil
 }
@@ -240,29 +224,25 @@ func (l *wakeLoop) openMainWatcher() error {
 		l.cfg.retainedInboxRebindable = true
 		return nil
 	}
-	if retained, ok := l.cfg.retainedInbox.(*wakeInboxDir); ok {
-		nextWatcher, err := newWakeInboxEventWatcher(retained)
-		if err != nil {
-			if validateErr := retained.ValidateCanonical(); validateErr != nil {
-				return errors.Join(
-					err,
-					fmt.Errorf(
-						"validate retained wake inbox authority after watcher failure: %w",
-						validateErr,
-					),
-				)
-			}
-			return err
+	retained, ok := l.cfg.retainedInbox.(*wakeInboxDir)
+	if !ok {
+		return fmt.Errorf("wake loop requires a retained inbox capability")
+	}
+	nextWatcher, err := newWakeInboxEventWatcher(retained)
+	if err != nil {
+		if validateErr := retained.ValidateCanonical(); validateErr != nil {
+			return errors.Join(
+				err,
+				fmt.Errorf(
+					"validate retained wake inbox authority after watcher failure: %w",
+					validateErr,
+				),
+			)
 		}
-		l.watcher = nextWatcher
-		return nil
+		return err
 	}
-
-	nextWatcher, err := newWakePathEventWatcher(l.inboxNew)
-	if err == nil {
-		l.watcher = nextWatcher
-	}
-	return err
+	l.watcher = nextWatcher
+	return nil
 }
 
 // armMainWatcher returns false with a nil error when a stop arrives during
@@ -620,30 +600,21 @@ func (l *wakeLoop) rebindWatcher() (bool, error) {
 		return true, nil
 	}
 
-	if retained, ok := l.cfg.retainedInbox.(*wakeInboxDir); ok {
-		if err := retained.ValidateCanonical(); err != nil {
-			return false, failWakeOnWatcherError(
-				&l.cfg,
-				"retained wake inbox authority changed while rearming watcher",
-				err,
-			)
-		}
-		nextWatcher, err := newWakeInboxEventWatcher(retained)
-		if err != nil {
-			l.scheduleWatcherRebindFailure(
-				"retained wake inbox watcher is unavailable while rearming",
-				err,
-			)
-			return false, nil
-		}
-		l.watcher = nextWatcher
-		return true, nil
+	retained, ok := l.cfg.retainedInbox.(*wakeInboxDir)
+	if !ok {
+		return false, fmt.Errorf("wake loop requires a retained inbox capability")
 	}
-
-	nextWatcher, err := newWakePathEventWatcher(l.inboxNew)
+	if err := retained.ValidateCanonical(); err != nil {
+		return false, failWakeOnWatcherError(
+			&l.cfg,
+			"retained wake inbox authority changed while rearming watcher",
+			err,
+		)
+	}
+	nextWatcher, err := newWakeInboxEventWatcher(retained)
 	if err != nil {
 		l.scheduleWatcherRebindFailure(
-			"wake inbox watcher is unavailable while rearming",
+			"retained wake inbox watcher is unavailable while rearming",
 			err,
 		)
 		return false, nil

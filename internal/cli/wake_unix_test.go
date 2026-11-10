@@ -47,6 +47,24 @@ func (reader wakeScriptedInboxReader) ReadHeader(name string) (format.Header, er
 	return reader.readHeader(name)
 }
 
+type idleWakeEventWatcher struct{}
+
+func (idleWakeEventWatcher) Events() <-chan fsnotify.Event { return nil }
+func (idleWakeEventWatcher) Errors() <-chan error          { return nil }
+func (idleWakeEventWatcher) Close() error                  { return nil }
+
+// retainedWakeAgentDirForTest opens the agent directory capability that wake
+// startup retains before it runs the loop.
+func retainedWakeAgentDirForTest(t *testing.T, root, me string) *wakeAgentDir {
+	t.Helper()
+	agentDir, err := openWakeAgentDir(root, me)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = agentDir.Close() })
+	return agentDir
+}
+
 func awaitWakeScan(t *testing.T, scans <-chan time.Time, done <-chan error) time.Time {
 	t.Helper()
 	select {
@@ -968,11 +986,13 @@ func TestRunWakeLoopOwnerlessStartupScanAndQueuedEventEmitOnce(t *testing.T) {
 		return 0, true, nil
 	})
 	stubRawInjectSleep(t)
+	agentDir := retainedWakeAgentDirForTest(t, root, "codex")
 	go func() {
 		done <- runWakeLoop(wakeConfig{
 			root:               root,
 			me:                 "codex",
 			session:            "session1",
+			retainedAgent:      agentDir,
 			settings:           wakeSettings{debounce: 5 * time.Millisecond},
 			injectMode:         wakeInjectModeRaw,
 			controlStop:        stop,
@@ -1053,15 +1073,17 @@ func TestRunWakeLoopRearmsOrdinaryInboxWatcher(t *testing.T) {
 			attention := make(chan string, 8)
 			stop := make(chan struct{})
 			done := make(chan error, 1)
+			agentDir := retainedWakeAgentDirForTest(t, root, "codex")
 			go func() {
 				done <- runWakeLoop(wakeConfig{
-					root:        root,
-					me:          "codex",
-					session:     "session1",
-					wakeOwner:   &wakeOwner{},
-					settings:    wakeSettings{debounce: 5 * time.Millisecond, previewLen: 80},
-					injectMode:  wakeInjectModeNone,
-					controlStop: stop,
+					root:          root,
+					me:            "codex",
+					session:       "session1",
+					retainedAgent: agentDir,
+					wakeOwner:     &wakeOwner{},
+					settings:      wakeSettings{debounce: 5 * time.Millisecond, previewLen: 80},
+					injectMode:    wakeInjectModeNone,
+					controlStop:   stop,
 					onPrepared: func(wakeAdmissionWatcher) error {
 						close(ready)
 						return nil
@@ -1202,16 +1224,18 @@ func TestRunWakeLoopRetriesPendingDoorbellWithSubmitOnlyNudge(t *testing.T) {
 	doorbellPayloads := 0
 	submitKeys := 0
 	preludeLFs := 0
+	agentDir := retainedWakeAgentDirForTest(t, root, "codex")
 
 	go func() {
 		defer close(loopDone)
 		done <- runWakeLoop(wakeConfig{
-			root:        root,
-			me:          "codex",
-			session:     "session1",
-			wakeOwner:   &wakeOwner{},
-			injectMode:  wakeInjectModeRaw,
-			controlStop: stop,
+			root:          root,
+			me:            "codex",
+			session:       "session1",
+			retainedAgent: agentDir,
+			wakeOwner:     &wakeOwner{},
+			injectMode:    wakeInjectModeRaw,
+			controlStop:   stop,
 			preconditionCheck: func(*wakeConfig) error {
 				return nil
 			},
@@ -1374,15 +1398,17 @@ func TestRunWakeLoopCoalescesAdditionThenRearmsAfterDrain(t *testing.T) {
 	baselineReady := make(chan struct{})
 	stop := make(chan struct{})
 	done := make(chan error, 1)
+	agentDir := retainedWakeAgentDirForTest(t, root, "codex")
 	go func() {
 		done <- runWakeLoop(wakeConfig{
-			root:        root,
-			me:          "codex",
-			session:     "session1",
-			wakeOwner:   &wakeOwner{},
-			injectMode:  wakeInjectModeRaw,
-			controlStop: stop,
-			settings:    wakeSettings{debounce: 10 * time.Millisecond},
+			root:          root,
+			me:            "codex",
+			session:       "session1",
+			retainedAgent: agentDir,
+			wakeOwner:     &wakeOwner{},
+			injectMode:    wakeInjectModeRaw,
+			controlStop:   stop,
+			settings:      wakeSettings{debounce: 10 * time.Millisecond},
 			doorbell: wakeDoorbellState{
 				phase:                wakeDoorbellRetrying,
 				cohort:               snapshotWakeFileIdentities(map[string]os.FileInfo{"a.md": aInfo}),
@@ -1478,7 +1504,7 @@ func TestRunWakeLoopCoalescesAdditionThenRearmsAfterDrain(t *testing.T) {
 	}
 }
 
-func TestRunWakeLoopPacesPersistentInboxScanErrors(t *testing.T) {
+func TestWakeLoopPacesPersistentInboxScanErrors(t *testing.T) {
 	root := secureTempDirForTest(t)
 	ensureCoopWakeMailboxForTest(t, root, "codex")
 
@@ -1506,8 +1532,8 @@ func TestRunWakeLoopPacesPersistentInboxScanErrors(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	stop := make(chan struct{})
 	done := make(chan error, 1)
-	go func() {
-		done <- runWakeLoop(wakeConfig{
+	l := &wakeLoop{
+		cfg: wakeConfig{
 			root:          root,
 			me:            "codex",
 			session:       "session1",
@@ -1522,9 +1548,19 @@ func TestRunWakeLoopPacesPersistentInboxScanErrors(t *testing.T) {
 				attempts:    1,
 				nextAttempt: now.Add(-time.Second),
 			},
-			preconditionCheck: func(*wakeConfig) error { return nil },
-			attentionIsTTY:    func() bool { return false },
-		})
+			attentionIsTTY: func() bool { return false },
+		},
+		inboxNew:          fsq.AgentInboxNew(root, "codex"),
+		watcher:           idleWakeEventWatcher{},
+		preconditionCheck: func(*wakeConfig) error { return nil },
+	}
+	t.Cleanup(l.stopTimers)
+	go func() {
+		err := l.attemptNotification()
+		if err == nil {
+			err = l.run(nil, nil)
+		}
+		done <- err
 	}()
 	t.Cleanup(func() {
 		close(stop)
@@ -1595,12 +1631,14 @@ func TestRunWakeLoopMaintenanceDemotionTransfersDormantDoorbellRetry(t *testing.
 	}
 	defer stopLoop()
 	done := make(chan error, 1)
+	agentDir := retainedWakeAgentDirForTest(t, root, "codex")
 
 	go func() {
 		done <- runWakeLoop(wakeConfig{
 			root:             root,
 			me:               "codex",
 			session:          "session1",
+			retainedAgent:    agentDir,
 			wakeOwner:        &wakeOwner{},
 			injectMode:       wakeInjectModePaste,
 			controlStop:      stop,
@@ -3210,5 +3248,64 @@ func TestWakeInjectionPreconditionCheckSurfacesLegacyCapabilityChangeWithoutInje
 	}
 	if legacyReads != 2 {
 		t.Fatalf("legacy capability reads = %d, want 2 through blocked demotion", legacyReads)
+	}
+}
+
+// A failed interrupt-key injector is terminal for an unchanged cohort; a new
+// message is a new cohort (audit 2026-11-10).
+func TestNotifyNewMessagesFailedInterruptKeyInjectorRunsOncePerCohort(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	deliver := func(id string) {
+		t.Helper()
+		msg := format.Message{Header: format.Header{
+			Schema: 1, ID: id, From: "peer", To: []string{"alice"},
+			Thread: "p2p/alice__peer", Subject: id, Created: "2026-11-10T00:00:00Z",
+			Priority: "urgent", Labels: []string{"interrupt"},
+		}}
+		data, err := msg.Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := deliverToInboxForTest(t, root, "alice", id+".md", data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logPath := filepath.Join(root, "inject.log")
+	script := filepath.Join(root, "inject.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' \"$1\" >> "+logPath+"\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	keyRuns := func() int {
+		t.Helper()
+		data, _ := os.ReadFile(logPath)
+		return strings.Count(string(data), "KEY\n")
+	}
+	cfg := &wakeConfig{
+		me: "alice", root: root, injectVia: script, interruptKey: "KEY",
+		settings: wakeSettings{
+			previewLen: 48, interrupt: true,
+			interruptPriority: "urgent", interruptLabel: "interrupt",
+		},
+		attentionIsTTY:  func() bool { return false },
+		recordAttention: func(wakeAttentionEmission) error { return nil },
+	}
+
+	deliver("first")
+	for i := 0; i < 2; i++ {
+		_ = captureWakeStderr(t, func() { _ = notifyNewMessages(cfg) })
+	}
+	if got := keyRuns(); got != 1 {
+		t.Fatalf("key injector ran %d times for an unchanged cohort, want 1", got)
+	}
+	deliver("second")
+	_ = captureWakeStderr(t, func() { _ = notifyNewMessages(cfg) })
+	if got := keyRuns(); got != 2 {
+		t.Fatalf("key injector ran %d times after a new message, want 2", got)
 	}
 }

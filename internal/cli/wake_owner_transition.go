@@ -28,11 +28,9 @@ type wakeOwnerTransitionAction uint8
 const (
 	wakeOwnerActionRefuse wakeOwnerTransitionAction = iota
 	wakeOwnerActionLegacy
-	wakeOwnerActionPublish
 	wakeOwnerActionReuse
 	wakeOwnerActionRelease
 	wakeOwnerActionStopAndRelease
-	wakeOwnerActionCleanOrphan
 )
 
 type wakeOwnerTransitionEvidence struct {
@@ -63,8 +61,6 @@ func decideOwnerLifecycleTransition(e wakeOwnerTransitionEvidence) wakeOwnerTran
 			return wakeOwnerActionRefuse
 		}
 		switch e.Claim {
-		case wakeClaimAbsent:
-			return wakeOwnerActionPublish
 		case wakeClaimAuthoritative:
 			switch e.PersistedState {
 			case wakeOwnerSame:
@@ -83,8 +79,6 @@ func decideOwnerLifecycleTransition(e wakeOwnerTransitionEvidence) wakeOwnerTran
 
 	case wakeOwnerRequestRecover:
 		switch e.Claim {
-		case wakeClaimAbsent:
-			return wakeOwnerActionCleanOrphan
 		case wakeClaimAuthoritative:
 			if e.PersistedState == wakeOwnerDead ||
 				(e.PersistedState == wakeOwnerSame && e.Authenticated) {

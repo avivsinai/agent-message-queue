@@ -8,13 +8,10 @@ import (
 
 func readyWakeResumeQuiescenceForTest() wakeResumeQuiescence {
 	return wakeResumeQuiescence{
-		Lifecycle:                   wakeResumeLifecycleAdmitted,
 		WatcherArmed:                true,
-		ControlListenerReady:        true,
 		OwnerObservation:            wakeResumeAuthorityExact,
 		TerminalIdentityObservation: wakeResumeAuthorityExact,
 		GenerationObservation:       wakeResumeAuthorityExact,
-		LockTargetObservation:       wakeResumeAuthorityExact,
 		CanonicalDirs:               true,
 		FinalScan:                   wakeResumeScanComplete,
 		FinalScanMessages:           3,
