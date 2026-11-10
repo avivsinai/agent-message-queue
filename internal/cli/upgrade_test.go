@@ -196,6 +196,8 @@ func TestRunUpgradeHomebrewDelegatesWithYes(t *testing.T) {
 	}
 }
 
+// --all leaves a companion that already carries the target version alone and
+// fetches checksums once per run (audit 2026-11-10).
 func TestRunUpgradeAllReplacesPresentCompanionsSkipsMissing(t *testing.T) {
 	stubExpectedCompanionBuildInfo(t)
 	binDir := t.TempDir()
@@ -229,6 +231,22 @@ func TestRunUpgradeAllReplacesPresentCompanionsSkipsMissing(t *testing.T) {
 	fetchLatestTagForUpgrade = func(context.Context, *http.Client) (string, error) { return "v0.0.0-test", nil }
 	t.Cleanup(func() { fetchLatestTagForUpgrade = oldFetch })
 	replaced := stubUpgradeNetwork(t)
+	// amq-bridge already carries the target version: it is not replaced.
+	oldReadVersion := readEmbeddedVersionForUpgrade
+	readEmbeddedVersionForUpgrade = func(path string) (string, error) {
+		if filepath.Base(path) == "amq-bridge" {
+			return "0.0.0-test", nil
+		}
+		return "", errors.New("not a release build")
+	}
+	t.Cleanup(func() { readEmbeddedVersionForUpgrade = oldReadVersion })
+	checksumFetches := 0
+	fetchChecksums := fetchChecksumsForUpgrade
+	fetchChecksumsForUpgrade = func(ctx context.Context, c *http.Client, tag string) (map[string]string, error) {
+		checksumFetches++
+		return fetchChecksums(ctx, c, tag)
+	}
+	t.Cleanup(func() { fetchChecksumsForUpgrade = fetchChecksums })
 
 	stdout, _, err := captureEnvOutput(t, func() error {
 		return runUpgrade([]string{"--all"}, "dev")
@@ -236,9 +254,15 @@ func TestRunUpgradeAllReplacesPresentCompanionsSkipsMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runUpgrade --all: %v", err)
 	}
-	// amq + present companions replaced; amq-acp skipped.
+	if checksumFetches != 1 {
+		t.Fatalf("checksums fetched %d times, want once per run", checksumFetches)
+	}
+	if !strings.Contains(stdout, "amq-bridge is already 0.0.0-test") {
+		t.Fatalf("output missing current-companion line:\n%s", stdout)
+	}
+	// amq + present non-current companions replaced; amq-acp skipped.
 	want := map[string]bool{amqBin: false}
-	for _, path := range []string{keepalive, bridge, remote, ownerSign, board} {
+	for _, path := range []string{keepalive, remote, ownerSign, board} {
 		canonical, err := filepath.EvalSymlinks(path)
 		if err != nil {
 			t.Fatal(err)
@@ -253,6 +277,11 @@ func TestRunUpgradeAllReplacesPresentCompanionsSkipsMissing(t *testing.T) {
 	for p, seen := range want {
 		if !seen {
 			t.Fatalf("companion %s not replaced; replaced=%#v", p, *replaced)
+		}
+	}
+	for _, p := range *replaced {
+		if filepath.Base(p) == "amq-bridge" {
+			t.Fatalf("current companion replaced: %s", p)
 		}
 	}
 	if !strings.Contains(stdout, "amq-acp not found; skipping.") {
