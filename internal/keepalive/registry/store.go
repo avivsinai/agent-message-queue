@@ -383,15 +383,6 @@ func (s *Store) loadUnlocked() (File, error) {
 	return file, nil
 }
 
-func (s *Store) Save(file File) error {
-	if s.Path == "" {
-		return errors.New("registry path is required")
-	}
-	return s.withLock(func() error {
-		return s.saveUnlocked(file)
-	})
-}
-
 func (s *Store) saveUnlocked(file File) error {
 	file.SchemaVersion = SchemaVersion
 	if err := validateFileIdentities(file); err != nil {

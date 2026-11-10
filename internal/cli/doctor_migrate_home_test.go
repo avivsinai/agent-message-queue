@@ -192,7 +192,12 @@ func TestDoctorMigrateHomeMovesKeepaliveHome(t *testing.T) {
 
 	// A process that still held the legacy path created it again with only
 	// lock files and an empty registry. A rerun removes it and finishes.
-	if err := registry.New(filepath.Join(old, "registry.json")).Save(registry.File{}); err != nil {
+	legacyRegistry := registry.New(filepath.Join(old, "registry.json"))
+	row, err := legacyRegistry.Upsert(registry.Entry{Root: old, Agent: "codex", Adapter: "file", Target: filepath.Join(old, "target")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacyRegistry.Forget(row.ID); err != nil {
 		t.Fatal(err)
 	}
 	migrate(migrateHomeFinished)

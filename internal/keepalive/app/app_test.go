@@ -1447,7 +1447,13 @@ func TestRetireSessionMatchesRootAdapterAndAgentTogether(t *testing.T) {
 		ID: registry.EntryID(root, "claude", "boundary", "wrong-agent"), Root: root, Agent: "claude", Adapter: "boundary", Target: "wrong-agent",
 	}
 	registryPath := testRegistryPath(t, dir)
-	if err := registry.New(registryPath).Save(registry.File{Entries: []registry.Entry{correct, wrongAdapter, wrongAgent}}); err != nil {
+	// Upsert refuses a second row for one root and agent, which is the shape
+	// this test needs, so the file is written as a registry would hold it.
+	seed, err := json.Marshal(registry.File{SchemaVersion: registry.SchemaVersion, Entries: []registry.Entry{correct, wrongAdapter, wrongAgent}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(registryPath, seed, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	fakeAMQ := filepath.Join(dir, "amq")
