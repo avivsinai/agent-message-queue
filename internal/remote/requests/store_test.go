@@ -790,3 +790,22 @@ func TestAmbiguousTerminalWriteReleasesItsReservation(t *testing.T) {
 		t.Fatalf("next create: %v", err)
 	}
 }
+
+// A target id may start with a dot, and its record is as visible to the
+// list as to Open and Get (audit 2026-11-10).
+func TestListWithPoisonListsADotTarget(t *testing.T) {
+	s, err := Open(t.TempDir(), WithClock(fixedClock))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	rec := newRecord("11111111-1111-4111-8111-111111111401")
+	rec.TargetID = ".t_dot"
+	if err := s.Create(rec); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	recs, poison, err := s.ListWithPoison()
+	if err != nil || len(poison) != 0 || len(recs) != 1 || recs[0].TargetID != ".t_dot" {
+		t.Fatalf("list = %d records, %d poison, %v; want the dot target's record", len(recs), len(poison), err)
+	}
+}

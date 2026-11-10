@@ -634,7 +634,7 @@ func (s *Store) ListWithPoison() ([]*Record, []Poison, error) {
 			return nil, nil, fmt.Errorf("list %s: %w", h.Name(), err)
 		}
 		for _, f := range files {
-			if f.IsDir() || !strings.HasSuffix(f.Name(), recordSuffix) || strings.HasPrefix(f.Name(), ".") {
+			if f.IsDir() || !strings.HasSuffix(f.Name(), recordSuffix) {
 				continue
 			}
 			path := filepath.Join(hostDir, f.Name())
