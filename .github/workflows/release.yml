@@ -275,7 +275,7 @@ jobs:
           node-version: '24'
 
       - name: Install skild
-        run: npm install -g skild
+        run: npm install -g skild@0.13.1
 
       - name: Configure skild auth
         env:
