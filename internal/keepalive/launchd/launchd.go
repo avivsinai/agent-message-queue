@@ -272,8 +272,10 @@ func Uninstall(ctx context.Context, label string, plistPath string, unload bool)
 		}
 	}
 	if unload {
-		if err := runLaunchctl(ctx, "bootout", ServiceTarget(label)); err != nil {
-			return err
+		if serviceLoaded(ctx, label) {
+			if err := runLaunchctl(ctx, "bootout", ServiceTarget(label)); err != nil {
+				return err
+			}
 		}
 	}
 	err := os.Remove(plistPath)
@@ -508,6 +510,19 @@ func nextPlistStart(dec *xml.Decoder) (xml.StartElement, error) {
 			return xml.StartElement{}, fmt.Errorf("plist value missing")
 		}
 	}
+}
+
+// launchctlNotFound is the exit code of `launchctl print` for a service that
+// is not loaded.
+const launchctlNotFound = 113
+
+// serviceLoaded reports false only when launchd says the job is not loaded.
+// Any other print failure counts as loaded, so bootout runs and reports its
+// own error.
+func serviceLoaded(ctx context.Context, label string) bool {
+	var exit *exec.ExitError
+	err := runLaunchctl(ctx, "print", ServiceTarget(label))
+	return !(errors.As(err, &exit) && exit.ExitCode() == launchctlNotFound)
 }
 
 func runLaunchctl(ctx context.Context, args ...string) error {
