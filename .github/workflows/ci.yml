@@ -58,6 +58,10 @@ jobs:
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.13.1
+      # A workflow GitHub cannot parse fails with zero jobs and cannot be
+      # retried; a release tag then never gets created.
+      - name: Workflow syntax
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck= -pyflakes=
       - name: Cross-platform build
         run: |
           GOOS=windows GOARCH=amd64 go vet ./...
