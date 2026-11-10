@@ -99,8 +99,11 @@ func (d *Drainer) Drain(_ context.Context) (int, error) {
 			if err := d.spool.MarkExpired(k); err != nil {
 				errs = append(errs, err)
 			}
-		case isTransientCode(code):
+		case isTransientCode(code), code == protocol.CodeAttachmentLost && herr != nil:
 			// Busy / draining / unreachable / storage_full: retry next tick.
+			// An attachment_lost refusal returned as an error recorded
+			// nothing: the endpoint could not decide the target's
+			// reservation (an unreadable record), which a repair ends.
 			if err := d.spool.MarkAttempt(k, string(code)); err != nil {
 				errs = append(errs, err)
 			}

@@ -478,6 +478,26 @@ func TestSenderTransientRefusalRetriesNextTick(t *testing.T) {
 			makeUnbusy: func(r *drainRig) { r.start() },
 		},
 		{
+			// An unreadable record of the target makes its reservation
+			// undeterminable; the endpoint refuses and records nothing, so
+			// the envelope waits for the repair (audit 2026-11-10).
+			name: "unreadable record of the target",
+			code: protocol.CodeAttachmentLost,
+			makeBusy: func(r *drainRig, _ string) {
+				if err := os.MkdirAll(filepath.Dir(r.recordPath(validUUID(1))), 0o700); err != nil {
+					r.t.Fatalf("mkdir: %v", err)
+				}
+				if err := os.WriteFile(r.recordPath(validUUID(1)), []byte("{not json"), 0o600); err != nil {
+					r.t.Fatalf("poison record: %v", err)
+				}
+			},
+			makeUnbusy: func(r *drainRig) {
+				if err := os.Remove(r.recordPath(validUUID(1))); err != nil {
+					r.t.Fatalf("repair record: %v", err)
+				}
+			},
+		},
+		{
 			// A store read that fails without a typed refusal is the
 			// endpoint being unreachable for now, not a refusal of the
 			// request.
