@@ -306,13 +306,37 @@ func (s *Server) Serve(in io.Reader, out io.Writer) error {
 		errMu.Unlock()
 	}
 
+	// steerTail closes when the last mailbox steer handed off the reader is
+	// done, so steers keep their arrival order.
+	var steerTail chan struct{}
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
 		if len(line) == 0 {
 			continue
 		}
 		lineCopy := append([]byte(nil), line...)
-		if requestMethod(lineCopy) == "session/prompt" {
+		method := requestMethod(lineCopy)
+		if s.cfg.RemoteBinding && method == "_session/steering" {
+			// A mailbox steer waits on its event's post lock, which a status
+			// post holds across its Buzz call: it runs apart from the reader,
+			// one steer at a time, so later lines such as session/cancel are
+			// still read.
+			prev, done := steerTail, make(chan struct{})
+			steerTail = done
+			pending.Add(1)
+			go func() {
+				defer pending.Done()
+				defer close(done)
+				if prev != nil {
+					<-prev
+				}
+				if resp, ok := s.handle(lineCopy); ok {
+					recordWriteErr(writer.write(resp))
+				}
+			}()
+			continue
+		}
+		if method == "session/prompt" {
 			// Validate and reserve the turn here, on the reader, before any
 			// later line is handled; only delivery and the wait run apart.
 			resp, run, ok := s.beginPromptLine(lineCopy)

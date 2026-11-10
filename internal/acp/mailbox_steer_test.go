@@ -1,7 +1,9 @@
 package acp
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 )
 
@@ -52,8 +55,13 @@ func runSteeredTurn(t *testing.T, s *Server, sid, event, root string, steer func
 
 // steerEvent sends a follow-up DM as _session/steering for a Nostr event.
 func steerEvent(s *Server, sid, text, event string) response {
-	resp, _ := s.handle([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":9,"method":"_session/steering","params":{"sessionId":%q,"prompt":%q,"_meta":{"nostr":{"eventId":%q}}}}`, sid, text, event)))
+	resp, _ := s.handle([]byte(steerEventLine(9, sid, text, event)))
 	return resp
+}
+
+// steerEventLine is the _session/steering request line of a follow-up DM.
+func steerEventLine(id int, sid, text, event string) string {
+	return fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"_session/steering","params":{"sessionId":%q,"prompt":%q,"_meta":{"nostr":{"eventId":%q}}}}`, id, sid, text, event)
 }
 
 // A follow-up DM during an open mailbox turn
@@ -166,5 +174,52 @@ func TestCommittedSteerIsADeliveryWithoutTheJournal(t *testing.T) {
 	}
 	if n := len(inboxPrompts(t, root)); n != 2 {
 		t.Fatalf("inbox holds %d messages; want the prompt and one steer", n)
+	}
+}
+
+// A steer waiting on its event's post lock, which a status post holds across
+// its Buzz call, held the ACP reader, so a line sent after it (such as
+// session/cancel) waited up to the post timeout (audit 2026-11-10).
+func TestSteerWaitingOnThePostLockLeavesTheReaderFree(t *testing.T) {
+	s, root := mailboxServer(t)
+	event := strings.Repeat("1", 64)
+	thread := cockpitThread("session/s")
+	turn := newTurn()
+	turn.mailboxSteer = &mailboxSteerTarget{binding: binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}, thread: thread, prompt: "p", event: event}
+	s.sessions["s"] = &sessionState{ID: "s", Thread: thread, turn: turn}
+	if err := os.MkdirAll(s.eventDir(event), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	release, ok, err := lock.TryExclusive(filepath.Join(s.eventDir(event), event+".post.lock"))
+	if err != nil || !ok {
+		t.Fatalf("hold the post lock: %v %v", ok, err)
+	}
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		err := s.Serve(inR, outW)
+		_ = outW.Close()
+		done <- err
+	}()
+	live := &liveServer{t: t, in: inW, out: bufio.NewReader(outR), done: done, server: s}
+	t.Cleanup(func() {
+		release()
+		go func() { _, _ = io.Copy(io.Discard, live.out) }()
+		_ = inW.Close()
+		<-done
+	})
+	// A held reader blocks the write of the second line, so both go from
+	// their own goroutine.
+	go func() {
+		_, _ = fmt.Fprintln(inW, steerEventLine(7, "s", "smaller design", strings.Repeat("e", 64)))
+		_, _ = fmt.Fprintln(inW, `{"jsonrpc":"2.0","id":8,"method":"no/such/method"}`)
+	}()
+	if got := live.read(); got["id"] != float64(8) {
+		t.Fatalf("first response = %v; want the later line's, while the steer waits", got)
+	}
+	release()
+	if got := live.read(); got["id"] != float64(7) {
+		t.Fatalf("second response = %v; want the steer's", got)
 	}
 }
