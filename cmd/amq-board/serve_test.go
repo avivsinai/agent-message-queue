@@ -115,3 +115,23 @@ func TestServeFileIsWrittenPrivateAndRemovedOnShutdown(t *testing.T) {
 		t.Fatalf("serve.json still there after shutdown: %v", err)
 	}
 }
+
+// Stopping the serve that serve.json names leaves the record of another
+// running serve in place (audit 2026-11-10).
+func TestStoppingOneServeKeepsAnotherDiscoverable(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	first := serveRecord{URL: "http://127.0.0.1:1", Token: "a", PID: os.Getpid(), StartedAt: time.Date(2026, 10, 25, 9, 0, 0, 0, time.UTC)}
+	second := serveRecord{URL: "http://127.0.0.1:2", Token: "b", PID: os.Getpid() + 1, StartedAt: first.StartedAt.Add(time.Minute)}
+	for _, r := range []serveRecord{first, second} {
+		if err := writeServeFile(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removeServeFile(second.PID)
+	got, ok := readServeRecord(filepath.Join(home, ".amq", "board", "serve.json"))
+	if !ok || got != first {
+		t.Fatalf("serve.json = %+v (%v), want %+v", got, ok, first)
+	}
+}
