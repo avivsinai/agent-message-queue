@@ -1031,3 +1031,32 @@ func TestReconcileOnLiveKeepRelaunchesAbsentBoundSession(t *testing.T) {
 		t.Fatalf("result=%#v err=%v creates=%d, want a relaunch", result, err, backend.creates)
 	}
 }
+
+// An absent binding owned by another host is not ours to relaunch over: on_live
+// keep still refuses (audit 2026-11-10).
+func TestReconcileOnLiveKeepRefusesAbsentForeignBinding(t *testing.T) {
+	backend := &reconcileBackend{name: LauncherTMux, inspect: InspectAbsent}
+	req := reconcileFixture(t, backend)
+	req.OnLive = map[string]string{"claude": OnLiveKeep}
+	lease, err := AcquireLease(req.Root, testLaunchNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := BindingRecord{
+		Version: BindingVersion, Backend: LauncherTMux, HostIdentity: "host:other", InstanceIdentity: "instance:test",
+		Profile: backend.Detect().Profile.Identity(), LaunchNonce: testLaunchNonce,
+		Resources: ResourceIdentitySet{Version: ResourceSetVersion, Resources: []ResourceIdentity{
+			{OpaqueID: "resource:claude", Agent: "claude"},
+		}},
+	}
+	if err := WriteBinding(req.Root, lease, binding); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Reconcile(req)
+	if err != nil || result.Reason != ReasonLiveParticipantRefused || backend.creates != 0 {
+		t.Fatalf("result=%#v err=%v creates=%d, want live_participant_refused", result, err, backend.creates)
+	}
+}
