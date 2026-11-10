@@ -79,7 +79,7 @@ if [[ -z "$root" || -z "$host_id" || -z "$agents" ]]; then
 fi
 
 if [[ ! "$host_id" =~ ^[a-z0-9_][a-z0-9._-]{0,62}$ ]]; then
-  printf 'amq-host-bootstrap: invalid --host-id %q; want lowercase [a-z0-9_-]+\n' "$host_id" >&2
+  printf 'amq-host-bootstrap: invalid --host-id %q; want 1-63 of lowercase [a-z0-9._-], not starting with . or -\n' "$host_id" >&2
   exit 2
 fi
 
