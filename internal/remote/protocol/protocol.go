@@ -259,6 +259,10 @@ const (
 	// CodeConsentInvalid: the consent that authorized a request is no longer
 	// accepted (its key was removed) when the task would be handed off.
 	CodeConsentInvalid Code = "consent_invalid"
+	// CodeReleasedByOwner (a record code, never a refusal): the owner on the
+	// machine ended an uncertain record so its target admits new work.
+	// Whether its native run happened stays unknown.
+	CodeReleasedByOwner Code = "released_by_owner"
 	// CodePendingLocal (an Outcome code, never a record code): a signed task
 	// on a local binding waits for the user's confirmation on the machine.
 	CodePendingLocal Code = "pending_local"

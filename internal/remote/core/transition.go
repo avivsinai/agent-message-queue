@@ -231,6 +231,7 @@ const (
 	causeAttachmentLost           cause = "attachment_lost"            // uncertain
 	causeRefused                  cause = "refused"                    // rejected: unshared/expired/stale_epoch/native_error
 	causeBusyTombstone            cause = "busy_tombstone"             // rejected+busy reservation refusal (dedup + re-admit)
+	causeReleased                 cause = "released"                   // failed: the owner released an uncertain record
 )
 
 // nativeEvidence carries the evidence a transition derives fields from. Zero
@@ -273,7 +274,8 @@ type nativeEvidence struct {
 //     discard it) updates Result WITHOUT changing State (the cancel stands, the
 //     result is acknowledged).
 //  5. rec.NativeRun: set from ev.runID whenever evidence carries one. Cleared
-//     only on a fresh causeDispatching with no run, or causeBusyTombstone.
+//     only on a fresh causeDispatching with no run, causeBusyTombstone, or
+//     causeReleased.
 //  6. memoAckIntentLocked is called by the CALLER (not here) when a terminal
 //     result is retained — transitionLocked only sets the fields.
 func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvidence) {
@@ -451,6 +453,15 @@ func (e *Endpoint) applyTransitionLocked(rec *requests.Record, c cause, ev nativ
 		rec.NativeRun = nil
 		rec.Interaction = nil
 		rec.NativeDispatches = 0
+	case causeReleased:
+		// The owner disowned the run: the record binds no run, so no sweep
+		// asks the attachment for a result the released key can never
+		// carry, also after a restart.
+		rec.State = protocol.StateFailed
+		rec.Code = protocol.CodeReleasedByOwner
+		rec.RefusalReason = ""
+		rec.NativeRun = nil
+		rec.Interaction = nil
 	}
 	// Cancel rule: Cancel is written iff ev.cancel != nil or the
 	// cause is a cancelled_* cause (handled in-case above). Non-cancel causes

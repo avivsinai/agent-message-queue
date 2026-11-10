@@ -65,6 +65,15 @@ type Request struct {
 	// Activity streams the native activity of one running request. Local-only
 	// and read-only: see ActivityRequest.
 	Activity *ActivityRequest `json:"activity,omitempty"`
+	// Release ends one uncertain request failed with released_by_owner, so
+	// its target admits new work. Local-only: it is the owner's action on
+	// the machine and never enters the command wire.
+	Release *ReleaseRequest `json:"release,omitempty"`
+}
+
+// ReleaseRequest names the uncertain request to release.
+type ReleaseRequest struct {
+	RequestRef string `json:"request_ref"`
 }
 
 // ActivityRequest asks for the native activity of one request while it runs:
@@ -290,8 +299,13 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	_ = conn.SetReadDeadline(time.Time{})
 	// An activity record carries no other operation: checkPin fences the
 	// activity ref, so another operation must not ride on that check.
-	if req.Activity != nil && (req.Command != nil || req.Wait != nil || req.Native != nil || req.Register != nil || req.Link != nil || req.Features) {
+	if req.Activity != nil && (req.Command != nil || req.Wait != nil || req.Native != nil || req.Register != nil || req.Link != nil || req.Features || req.Release != nil) {
 		writeRecord(conn, Response{Error: &ErrorBody{Code: string(protocol.CodeInvalid), Message: "activity request carries another operation"}})
+		return
+	}
+	// The same holds for a release: checkPin fences its ref only.
+	if req.Release != nil && (req.Command != nil || req.Wait != nil || req.Native != nil || req.Register != nil || req.Link != nil || req.Features) {
+		writeRecord(conn, Response{Error: &ErrorBody{Code: string(protocol.CodeInvalid), Message: "release request carries another operation"}})
 		return
 	}
 	if err := s.checkPin(req); err != nil {
@@ -377,6 +391,13 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 			return
 		}
 		writeRecord(conn, Response{Reply: mustJSON(reply)})
+	case req.Release != nil:
+		reply, err := s.ep.Release(req.Release.RequestRef)
+		if err != nil {
+			writeRecord(conn, errorResponse(err))
+			return
+		}
+		writeRecord(conn, Response{Reply: mustJSON(reply)})
 	default:
 		writeRecord(conn, Response{Error: &ErrorBody{Code: string(protocol.CodeInvalid), Message: "request carries neither command nor wait"}})
 	}
@@ -384,7 +405,8 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 
 // checkPin refuses a pinned request whose target is not attached to the
 // pinned native session. The target comes from the command, or from the
-// request reference for get and wait, so reads are fenced too.
+// request reference for get, wait, activity and release, so reads are fenced
+// too.
 func (s *Server) checkPin(req *Request) error {
 	if req.NativeSession == "" {
 		return nil
@@ -396,6 +418,8 @@ func (s *Server) checkPin(req *Request) error {
 		ref = req.Wait.RequestRef
 	case req.Activity != nil:
 		ref = req.Activity.RequestRef
+	case req.Release != nil:
+		ref = req.Release.RequestRef
 	case req.Command != nil && req.Command.TargetID != "":
 		target = req.Command.TargetID
 	case req.Command != nil:

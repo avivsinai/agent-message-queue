@@ -49,6 +49,7 @@ amq-remote status REQUEST_REF
 amq-remote wait REQUEST_REF
 amq-remote cancel REQUEST_REF
 amq-remote requests
+amq-remote requests release REQUEST_REF [--yes]
 amq-remote share --session ID
 amq-remote attach --self [--native | --link NAME]
 amq-remote detach --self | --name NAME | --all
@@ -82,8 +83,8 @@ is. A refusal that may pass, such as `storage_full`, `store_closed` or
 same root exits 6 (`endpoint_already_running`) while the first supervisor
 holds the lifetime lock.
 
-`sessions`, `inspect`, `submit`, `status`, `wait`, `cancel`, and `doctor`
-talk to a running endpoint. `status` also reads the local sender spool when
+`sessions`, `inspect`, `submit`, `status`, `wait`, `cancel`,
+`requests release`, and `doctor` talk to a running endpoint. `status` also reads the local sender spool when
 the endpoint has no record yet. `requests` does not use that socket: it reads
 the local request store and the sender spool directly, including while the
 endpoint is down.
@@ -525,7 +526,7 @@ flag list; the `share` flags are in the table below.
 | Flag | Default | Commands |
 | --- | --- | --- |
 | `--root DIR` | `AM_ROOT`; link commands and `mcp`: the link's root; `service`: the machine root | every command except `version`, `pi bridge-path`, `claude install-stop-hook`, `claude uninstall-stop-hook`, and `claude uninstall-approval-hook` |
-| `--json` | false | `sessions`, `inspect`, `submit`, `status`, `wait`, `cancel`, `requests`, `attach`, `detach`, `bindings`, `channel reset`, `mirror`, the `link` commands, `service`, `doctor`, and `mcp` (errors only; `mcp` always speaks JSON-RPC on stdout) |
+| `--json` | false | `sessions`, `inspect`, `submit`, `status`, `wait`, `cancel`, `requests`, `requests release`, `attach`, `detach`, `bindings`, `channel reset`, `mirror`, the `link` commands, `service`, `doctor`, and `mcp` (errors only; `mcp` always speaks JSON-RPC on stdout) |
 
 ### `serve` and `up`
 
@@ -596,6 +597,37 @@ accepts a bare request id that is still in the sender spool.
 | `--limit N` | `requests` | `20` | Most recent request-store records to show. |
 
 `wait` interrupted by SIGINT exits 130. The request keeps running.
+
+### `requests release`
+
+An `uncertain` request keeps its target busy: every new submit to that
+target is refused `busy` (exit 6), also after a restart. A Claude Code
+request becomes `uncertain` (code `attachment_lost`) when no turn of it
+started within its window: its frame never showed in the session, or the
+session showed it and then moved on, for example to a new prompt or
+`/clear`. Either can still run later and must not mix with a newer run. `cancel` cannot end it when the harness has no interrupt.
+`requests release REQUEST_REF` is the owner's way out on this machine. It
+ends the record `failed` with code `released_by_owner`, and the target
+admits new work again. It stops nothing in the session: before it acts it
+prints a warning that the request's input may still arrive and run there as
+a turn that no request owns. The adapter forgets the run first, so such a
+late turn never completes the released request or a newer one, and later
+native evidence never reopens the record.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--yes` | false | Release without asking. Required when stdin is not a terminal; with a terminal, the command asks once. |
+
+The command goes through the running endpoint, like `cancel`; with no
+endpoint it exits 6 (`endpoint_unreachable`) and changes nothing. A request
+that is not `uncertain` is refused with exit 6 and stays as it is, and so is
+one whose target is not attached. Only the Claude Code adapter can forget a
+run, so only Claude Code targets support it; Codex, pi and every other
+adapter refuse it with `unsupported`. It acts on a request of any origin, a Buzz or link
+request included. Buzz has no release command; `/cancel` stays as it is. A
+released Buzz request's result row reads `failed (released_by_owner)` and
+says that the prompt may still run in the session with no reply. A
+successful release exits 0.
 
 ### `attach`, `detach`, `bindings`, `channel reset`
 
