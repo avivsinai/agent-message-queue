@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -189,5 +190,34 @@ func TestTraceFollowKeepsARecipientFailureToThatRecipient(t *testing.T) {
 	}
 	if got["bob"].Delivery != "unknown" || got["bob"].Detail == "" || got["carol"].Delivery != "new" {
 		t.Fatalf("recipients = %+v, want bob unknown with detail and carol new", result.Follow.Recipients)
+	}
+}
+
+// A reply_project sender whose .amqrc lists no peers searched no root, so the
+// follow status is unknown and names the empty peer list, not not_found
+// (audit 2026-11-10).
+func TestTraceFollowIsUnknownWhenThePeerListIsEmpty(t *testing.T) {
+	tmp := t.TempDir()
+	rootOf := func(project string) string { return filepath.Join(tmp, project, ".agent-mail") }
+	ensureSendSessionAgent(t, rootOf("project-a"), "alice")
+	ensureSendSessionAgent(t, rootOf("project-b"), "user")
+	writeRouteAmqrc(t, filepath.Join(tmp, "project-a"), map[string]any{
+		"root": ".agent-mail", "project": "project-a", "peers": map[string]string{"project-b": rootOf("project-b")},
+	})
+	t.Setenv(envRoot, "")
+	t.Setenv(envGlobalRoot, "")
+	t.Chdir(tmp)
+	resetAmqrcCache()
+	t.Cleanup(resetAmqrcCache)
+
+	sent := runSendJSONForTest(t, "--me", "alice", "--root", rootOf("project-a"), "--to", "user",
+		"--project", "project-b", "--kind", "question", "--body", "ship it?", "--json")
+	id := sent["id"].(string)
+	writeRouteAmqrc(t, filepath.Join(tmp, "project-a"), map[string]any{"root": ".agent-mail", "project": "project-a"})
+	resetAmqrcCache()
+
+	follow := runTraceFollowJSON(t, id, "--root", rootOf("project-a")).Follow
+	if follow.Status != "unknown" || !strings.Contains(follow.Detail, "no peer") {
+		t.Fatalf("follow = %+v", follow)
 	}
 }

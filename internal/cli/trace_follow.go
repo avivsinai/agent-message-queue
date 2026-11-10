@@ -456,6 +456,10 @@ func (f *follower) candidateRoots(msg followedMessage) followCandidates {
 				cands.roots = append(cands.roots, projectRoots(edge.BaseRoot, edge.Name)...)
 			}
 		}
+		if len(cands.roots) == 0 {
+			cands.roots = nil
+			cands.detail = fmt.Sprintf("%s lists no peer projects, so no root was searched", source.Root)
+		}
 	}
 	f.candidates[key] = cands
 	cands.roots = append([]followRoot(nil), cands.roots...)
