@@ -73,7 +73,10 @@ func TestWindowsNoReplaceDLQMovePreservesCollision(t *testing.T) {
 		}
 	}
 	t.Cleanup(func() { beforeMoveDLQNewToCurRenameForTest = oldHook })
-	_, _, _, err := InspectDLQEnvelope(root, "alice", filename)
+	// The move itself is under test, so the fixture need not be an envelope.
+	err := root.WithDLQEnvelopeLock("alice", filename, func(batch *DeliveryRoot) error {
+		return moveDLQNewToCurLocked(batch, "alice", filename)
+	})
 	if !errors.Is(err, os.ErrExist) {
 		t.Fatalf("DLQ no-replace move error = %T %v, want os.ErrExist", err, err)
 	}
