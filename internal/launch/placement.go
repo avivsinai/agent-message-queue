@@ -168,13 +168,6 @@ func cmuxSplitDirection(layout string) string {
 	return "right"
 }
 
-func ghosttySplitDirection(layout string) string {
-	if layout == PlacementLayoutRows {
-		return "down"
-	}
-	return "right"
-}
-
 func placementError(reason string) error {
 	return fmt.Errorf("%s", reason)
 }

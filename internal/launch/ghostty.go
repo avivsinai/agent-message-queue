@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -144,7 +145,7 @@ func (b *GhosttyBackend) Create(req CreateRequest) (CreateResult, error) {
 			return CreateResult{}, b.reconcileCreateFailure(before, windowID, false, fmt.Errorf("snapshot ghostty windows before split: %w", snapErr))
 		}
 		splitCtx, splitCancel := b.createCallContext()
-		splitRaw, splitErr := b.run(splitCtx, "split", terminalIDs[len(terminalIDs)-1], req.ProjectRoot, ghosttySplitDirection(preview.Effective.Layout))
+		splitRaw, splitErr := b.run(splitCtx, "split", terminalIDs[len(terminalIDs)-1], req.ProjectRoot, cmuxSplitDirection(preview.Effective.Layout))
 		splitCancel()
 		if splitErr != nil {
 			return CreateResult{}, b.reconcileCreateFailure(splitBefore, windowID, false, fmt.Errorf("create ghostty split for %s: %w", agent.Handle, splitErr))
@@ -174,7 +175,7 @@ func (b *GhosttyBackend) Create(req CreateRequest) (CreateResult, error) {
 		}
 	}
 	resources := ghosttyBindingResources(windowID, tabID, nonce, req.Plan, terminalIDs)
-	if issues := ghosttyInventoryIssues(resources, req.Plan); len(issues) != 0 {
+	if issues := agentInventoryIssues(resources, req.Plan); len(issues) != 0 {
 		return CreateResult{}, fmt.Errorf("created ghostty inventory differs from plan: %s", strings.Join(issues, ","))
 	}
 	binding := BindingRecord{
@@ -213,7 +214,7 @@ func (b *GhosttyBackend) reconcileCreateFailure(before []string, knownWindowID s
 		}
 		return fmt.Errorf("%w (unacknowledged ghostty windows %s; unknown, never guessed)", cause, strings.Join(newIDs, ","))
 	}
-	if !containsString(listed, knownWindowID) {
+	if !slices.Contains(listed, knownWindowID) {
 		return fmt.Errorf("%w (acknowledged ghostty window %s is absent)", cause, knownWindowID)
 	}
 	if _, closeErr := b.run(ctx, "close-window", knownWindowID); closeErr != nil {
@@ -234,7 +235,7 @@ func (b *GhosttyBackend) reconcileCreateFailure(before []string, knownWindowID s
 func ghosttyIDsNotIn(listed, before []string) []string {
 	out := make([]string, 0)
 	for _, id := range listed {
-		if !containsString(before, id) {
+		if !slices.Contains(before, id) {
 			out = append(out, id)
 		}
 	}
@@ -317,7 +318,7 @@ func (b *GhosttyBackend) Reclaim(req ReclaimRequest) (ReclaimResult, error) {
 	if err != nil {
 		return ReclaimResult{Status: ReclaimUnknown, Evidence: err.Error()}, nil
 	}
-	if windowID != "" && !containsString(listed, windowID) {
+	if windowID != "" && !slices.Contains(listed, windowID) {
 		live, liveErr := b.countLiveTerminals(ctx, want)
 		if liveErr != nil {
 			return ReclaimResult{Status: ReclaimUnknown, Evidence: liveErr.Error()}, nil
@@ -335,16 +336,13 @@ func (b *GhosttyBackend) Reclaim(req ReclaimRequest) (ReclaimResult, error) {
 		return ReclaimResult{Status: ReclaimUnknown, Evidence: err.Error()}, nil
 	}
 	if !sameStringSet(live, want) {
-		if len(live) == 0 && !containsString(listed, windowID) {
-			return ReclaimResult{Status: ReclaimAbsent, Evidence: "journaled ghostty window is absent"}, nil
-		}
 		return ReclaimResult{
 			Status: ReclaimIncomplete, Evidence: "ghostty terminal inventory differs from journal",
 			Resources: ghosttyBindingResources(windowID, "", req.Journal.LaunchNonce, req.Journal.Plan, live),
 		}, nil
 	}
 	resources := ghosttyBindingResources(windowID, ghosttyJournalTab(req.Journal), req.Journal.LaunchNonce, req.Journal.Plan, live)
-	issues := ghosttyInventoryIssues(resources, req.Journal.Plan)
+	issues := agentInventoryIssues(resources, req.Journal.Plan)
 	if len(issues) != 0 {
 		return ReclaimResult{
 			Status: ReclaimIncomplete, Evidence: "ghostty window inventory differs from plan: " + strings.Join(issues, ","),
@@ -388,7 +386,7 @@ func (b *GhosttyBackend) inspect(ctx context.Context, binding BindingRecord) (In
 	if err != nil {
 		return InspectResult{}, err
 	}
-	if !containsString(listed, windowID) {
+	if !slices.Contains(listed, windowID) {
 		return InspectResult{Status: InspectAbsent, Evidence: "ghostty window is absent"}, nil
 	}
 	live, err := b.windowTerminals(ctx, windowID)
@@ -786,29 +784,6 @@ func ghosttyJournalTab(journal LaunchJournal) string {
 	return ""
 }
 
-func ghosttyInventoryIssues(resources []ResourceIdentity, plan Plan) []string {
-	expected := make(map[string]bool, len(plan.Agents))
-	for _, agent := range plan.Agents {
-		expected[agent.Handle] = true
-	}
-	live := make(map[string]int, len(resources))
-	issues := make([]string, 0)
-	for _, resource := range resources {
-		if resource.Agent != "" {
-			live[resource.Agent]++
-			if !expected[resource.Agent] {
-				issues = append(issues, "unexpected:"+resource.Agent)
-			}
-		}
-	}
-	for _, agent := range plan.Agents {
-		if live[agent.Handle] != 1 {
-			issues = append(issues, "missing:"+agent.Handle)
-		}
-	}
-	return issues
-}
-
 var ghosttyVersionPattern = regexp.MustCompile(`(\d+)\.(\d+)(?:\.(\d+))?`)
 
 func supportedGhosttyVersion(raw string) bool {
@@ -834,15 +809,6 @@ func splitGhosttyIDs(raw string) []string {
 		}
 	}
 	return ids
-}
-
-func containsString(ids []string, want string) bool {
-	for _, id := range ids {
-		if id == want {
-			return true
-		}
-	}
-	return false
 }
 
 func ghosttyTargetMissing(err error) bool {
@@ -898,7 +864,7 @@ func (b *GhosttyBackend) generationWindow(ctx context.Context, nonce string) (st
 	if err != nil {
 		return "", err
 	}
-	if containsString(listed, windowID) {
+	if slices.Contains(listed, windowID) {
 		return windowID, nil
 	}
 	b.forgetGeneration(nonce, windowID)

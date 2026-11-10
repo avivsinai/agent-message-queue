@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -227,7 +228,7 @@ func (b *CmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 		}
 	}
 	resources := cmuxBindingResources(workspaceID, windowID, nonce, req.Plan, surfaceIDs)
-	if issues := cmuxInventoryIssues(resources, req.Plan); len(issues) != 0 {
+	if issues := agentInventoryIssues(resources, req.Plan); len(issues) != 0 {
 		return CreateResult{}, fmt.Errorf("created cmux inventory differs from plan: %s", strings.Join(issues, ","))
 	}
 	binding := BindingRecord{
@@ -257,7 +258,7 @@ func (b *CmuxBackend) restoreSelectedWorkspace(previousSelected, skipID string) 
 	if err != nil {
 		return
 	}
-	if !cmuxContainsID(cmuxWorkspaceIDs(records), previousSelected) {
+	if !slices.Contains(cmuxWorkspaceIDs(records), previousSelected) {
 		return
 	}
 	if cmuxSelectedWorkspaceID(records) == previousSelected {
@@ -280,7 +281,7 @@ func (b *CmuxBackend) reconcileCreateFailure(knownWorkspaceID string, inputSent 
 		return fmt.Errorf("%w (orphan workspace reconciliation failed: %v)", cause, err)
 	}
 	id := strings.ToLower(knownWorkspaceID)
-	if !cmuxContainsID(cmuxWorkspaceIDs(records), id) {
+	if !slices.Contains(cmuxWorkspaceIDs(records), id) {
 		return fmt.Errorf("%w (acknowledged cmux workspace %s is absent)", cause, id)
 	}
 	if _, closeErr := b.run(ctx, "close-workspace", "--workspace", id); closeErr != nil {
@@ -388,7 +389,7 @@ func (b *CmuxBackend) Reclaim(req ReclaimRequest) (ReclaimResult, error) {
 		return ReclaimResult{Status: ReclaimUnknown, Evidence: err.Error()}, nil
 	}
 	resources := cmuxBindingResources(workspace.ID, workspace.WindowID, req.Journal.LaunchNonce, req.Journal.Plan, surfaceIDs)
-	issues := cmuxInventoryIssues(resources, req.Journal.Plan)
+	issues := agentInventoryIssues(resources, req.Journal.Plan)
 	if len(issues) != 0 {
 		return ReclaimResult{
 			Status: ReclaimIncomplete, Evidence: "cmux workspace inventory differs from plan: " + strings.Join(issues, ","),
@@ -428,7 +429,7 @@ func (b *CmuxBackend) inspect(ctx context.Context, binding BindingRecord) (Inspe
 	if err != nil {
 		return InspectResult{}, err
 	}
-	if !cmuxContainsID(listed, workspaceID) {
+	if !slices.Contains(listed, workspaceID) {
 		return InspectResult{Status: InspectAbsent, Evidence: "cmux workspace is absent"}, nil
 	}
 	live, err := b.workspaceSurfaces(ctx, workspaceID)
@@ -987,7 +988,7 @@ func (b *CmuxBackend) ownedCmuxSurfacesStillLive(ctx context.Context, workspaceI
 	if err != nil {
 		return nil, err
 	}
-	if !cmuxContainsID(listed, workspaceID) {
+	if !slices.Contains(listed, workspaceID) {
 		return nil, nil
 	}
 	live, err := b.workspaceSurfaces(ctx, workspaceID)
@@ -1038,16 +1039,9 @@ func cmuxWindowID(binding BindingRecord) string {
 	return ""
 }
 
-func cmuxContainsID(ids []string, want string) bool {
-	for _, id := range ids {
-		if id == want {
-			return true
-		}
-	}
-	return false
-}
-
-func cmuxInventoryIssues(resources []ResourceIdentity, plan Plan) []string {
+// agentInventoryIssues compares the live per-agent surfaces with the plan:
+// zero surfaces is missing, more than one is duplicate.
+func agentInventoryIssues(resources []ResourceIdentity, plan Plan) []string {
 	expected := make(map[string]bool, len(plan.Agents))
 	for _, agent := range plan.Agents {
 		expected[agent.Handle] = true

@@ -190,7 +190,7 @@ func (b *TmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 	if err != nil {
 		return CreateResult{}, fmt.Errorf("revalidate created tmux session: %w", err)
 	}
-	if issues := tmuxInventoryIssues(resources, req.Plan); len(issues) != 0 {
+	if issues := tmuxAgentInventoryIssues(resources, req.Plan, 1); len(issues) != 0 {
 		return CreateResult{}, fmt.Errorf("created tmux inventory differs from plan: %s", strings.Join(issues, ","))
 	}
 	if resources[0].OpaqueID != tmuxSessionResource(sessionID, name) {
@@ -348,7 +348,7 @@ func (b *TmuxBackend) Reclaim(req ReclaimRequest) (ReclaimResult, error) {
 	if err != nil {
 		return ReclaimResult{Status: ReclaimUnknown, Evidence: err.Error()}, nil
 	}
-	issues := tmuxInventoryIssues(resources, req.Journal.Plan)
+	issues := tmuxAgentInventoryIssues(resources, req.Journal.Plan, 1)
 	if len(issues) != 0 {
 		return ReclaimResult{
 			Status: ReclaimIncomplete, Evidence: "tmux session inventory differs from plan: " + strings.Join(issues, ","),

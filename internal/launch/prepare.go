@@ -739,11 +739,12 @@ func prepareAtTarget(ctx context.Context, request PrepareRequest, dependencies P
 		}
 	}
 
+	inputUnsupported := firstInitialInputUnsupported(result.Observations)
 	switch {
 	case placementUnsupported:
 		result.Outcome, result.Reason = PrepareOutcomeUnsupported, PlacementUnsupportedReason
-	case firstInitialInputUnsupported(result.Observations) != "":
-		result.Outcome, result.Reason = PrepareOutcomeUnsupported, firstInitialInputUnsupported(result.Observations)
+	case inputUnsupported != "":
+		result.Outcome, result.Reason = PrepareOutcomeUnsupported, inputUnsupported
 	case len(result.RequiredActions) > 0:
 		result.Outcome, result.Reason = PrepareOutcomeActionRequired, result.RequiredActions[0].ReasonCode
 	case !detect.Available:

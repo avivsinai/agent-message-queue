@@ -1119,7 +1119,7 @@ func bindCaptureTicket(root *fsq.DeliveryRoot, lease *Lease, handle, provider, n
 	if ticket.State != ExecutionSpawnAttempted && ticket.State != ExecutionAcknowledged {
 		return ticket, fmt.Errorf("%s capture execution ticket state is %q", provider, ticket.State)
 	}
-	if ticket.ProviderProcess == nil || !runsUnderProcess(*ticket.ProviderProcess) {
+	if ticket.ProviderProcess == nil || !RunsUnderProcess(*ticket.ProviderProcess) {
 		return ticket, fmt.Errorf("%s capture receiver does not run under the seat's provider process", provider)
 	}
 	return ticket, nil

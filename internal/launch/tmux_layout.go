@@ -243,7 +243,7 @@ func (b *TmuxBackend) createSessionLayout(req CreateRequest, detect DetectResult
 		return CreateResult{}, fmt.Errorf("select tmux layout: %w", err)
 	}
 	resources := append([]ResourceIdentity{{OpaqueID: tmuxSessionResource(sessionID, name)}}, panes...)
-	if issues := tmuxInventoryIssues(resources, req.Plan); len(issues) != 0 {
+	if issues := tmuxAgentInventoryIssues(resources, req.Plan, 1); len(issues) != 0 {
 		return CreateResult{}, fmt.Errorf("created tmux inventory differs from plan: %s", strings.Join(issues, ","))
 	}
 	return b.createdBinding(detect, first.LaunchNonce, resources, preview)
