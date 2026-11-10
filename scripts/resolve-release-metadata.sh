@@ -25,13 +25,6 @@ push_release_subject() {
 
   if [[ "$commit_subject" =~ ^chore\(release\):\ v ]]; then
     printf '%s\n' "$commit_subject"
-    return 0
-  fi
-
-  if [[ "$commit_subject" == Merge\ pull\ request* ]] &&
-    git rev-parse -q --verify "${github_sha}^1" >/dev/null 2>&1; then
-    git log --format='%s' --no-merges "${github_sha}^1..${github_sha}" |
-      awk 'found == 0 && /^chore\(release\): v/ { print; found = 1 }'
   fi
 }
 
@@ -100,15 +93,9 @@ case "$event_name" in
     ;;
 esac
 
-prerelease=false
-if [[ "$tag" == *-* ]]; then
-  prerelease=true
-fi
-
 {
   echo "tag=${tag}"
   echo "version=${version}"
   echo "release_ref=${release_ref}"
   echo "release_sha=${release_sha}"
-  echo "prerelease=${prerelease}"
 } >>"$github_output"
