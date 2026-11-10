@@ -620,3 +620,46 @@ func TestApplyExplainsChangedCodexDaemonPlan(t *testing.T) {
 		})
 	}
 }
+
+// A lease-release failure after a committed launch keeps the Apply result as
+// action required instead of dropping it (audit 2026-11-10).
+func TestReleaseApplyLeaseKeepsCommittedResult(t *testing.T) {
+	bodyErr := errors.New("body failed")
+	for _, tt := range []struct {
+		name        string
+		failRelease bool
+		bodyErr     error
+		disposition MutationDisposition
+		wantErr     bool
+		wantReason  string
+	}{
+		{name: "release ok", disposition: MutationCommitted},
+		{name: "release fails with body error", failRelease: true, bodyErr: bodyErr, disposition: MutationCommitted, wantErr: true},
+		{name: "release fails not applied", failRelease: true, disposition: MutationNotApplied, wantErr: true},
+		{name: "release fails committed", failRelease: true, disposition: MutationCommitted, wantReason: "lease_release_failed"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, root := openTestRoot(t)
+			lease := mustAcquireLease(t, root)
+			if tt.failRelease {
+				lease.nonce = "other-nonce"
+			}
+			result := ApplyResult{Outcome: "applied", Disposition: tt.disposition, BindingGeneration: "gen-1"}
+			returnErr := tt.bodyErr
+			releaseApplyLease(lease, &result, &returnErr)
+			if (returnErr != nil) != tt.wantErr {
+				t.Fatalf("returnErr = %v, want error %v", returnErr, tt.wantErr)
+			}
+			if tt.wantReason == "" {
+				if result.ReasonCode != "" || result.Outcome != "applied" {
+					t.Fatalf("result changed: %+v", result)
+				}
+				return
+			}
+			if result.Outcome != ApplyOutcomeActionRequired || result.ReasonCode != tt.wantReason ||
+				result.FailureDetail == "" || result.Disposition != MutationCommitted || result.BindingGeneration != "gen-1" {
+				t.Fatalf("result = %+v", result)
+			}
+		})
+	}
+}
