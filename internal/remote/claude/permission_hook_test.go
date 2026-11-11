@@ -467,8 +467,8 @@ func TestPermissionHookClosesTheDialogOfAStoppedSubagent(t *testing.T) {
 	if out := wait(); out != "" {
 		t.Fatalf("a stopped agent's dialog printed %q", out)
 	}
-	if r, ok, _ := dialog.ReadResolved(dir, req.ID); !ok || r.Outcome != dialog.OutcomeExpired {
-		t.Fatalf("resolved = %+v, %v; want expired", r, ok)
+	if r, ok, _ := dialog.ReadResolved(dir, req.ID); !ok || r.Outcome != dialog.OutcomeExpired || r.Label != "the asking agent ended" {
+		t.Fatalf("resolved = %+v, %v; want expired because the agent ended", r, ok)
 	}
 }
 
@@ -480,25 +480,32 @@ func TestPermissionHookExpiresABackgroundSubagentDialogAfterAnHour(t *testing.T)
 	if out := wait(); out != "" {
 		t.Fatalf("an expired dialog printed %q", out)
 	}
-	if r, ok, _ := dialog.ReadResolved(dir, req.ID); !ok || r.Outcome != dialog.OutcomeExpired {
-		t.Fatalf("resolved = %+v, %v; want expired", r, ok)
+	if r, ok, _ := dialog.ReadResolved(dir, req.ID); !ok || r.Outcome != dialog.OutcomeExpired || r.Label != "no answer in 1 h (background agent)" {
+		t.Fatalf("resolved = %+v, %v; want expired after an hour", r, ok)
 	}
 }
 
-// A subagent whose meta cannot be read keeps the day-long hold: an hour
-// later its dialog still waits, and a Buzz answer still decides.
-func TestPermissionHookKeepsASubagentDialogWithoutMetaOpen(t *testing.T) {
-	_, dir, wait := subagentHook(t, "", hourLater())
-	req := openRequest(t, dir)
-	time.Sleep(50 * time.Millisecond)
-	if r, ok, _ := dialog.ReadResolved(dir, req.ID); ok {
-		t.Fatalf("resolved %+v with nobody answering", r)
-	}
-	if _, err := dialog.WriteAnswer(dir, dialog.Answer{ID: req.ID, Option: 1, By: dialog.ByBuzz}); err != nil {
-		t.Fatal(err)
-	}
-	if d := decisionOf(t, wait()); d["behavior"] != "allow" {
-		t.Fatalf("decision = %v; want the Buzz answer", d)
+// A subagent whose meta cannot be read, or a foreground subagent with its
+// owner at the terminal, keeps the day-long hold: an hour later its dialog
+// still waits, and a Buzz answer still decides. The foreground row is the
+// lead's review of the 1 h rule, which first also took a foreground meta
+// with requestNonInteractive.
+func TestPermissionHookKeepsASubagentDialogOpenPastAnHour(t *testing.T) {
+	for _, meta := range []string{"", `{"agentType":"general-purpose","requestShape":"foreground","requestNonInteractive":true}`} {
+		t.Run(meta, func(t *testing.T) {
+			_, dir, wait := subagentHook(t, meta, hourLater())
+			req := openRequest(t, dir)
+			time.Sleep(50 * time.Millisecond)
+			if r, ok, _ := dialog.ReadResolved(dir, req.ID); ok {
+				t.Fatalf("resolved %+v with nobody answering", r)
+			}
+			if _, err := dialog.WriteAnswer(dir, dialog.Answer{ID: req.ID, Option: 1, By: dialog.ByBuzz}); err != nil {
+				t.Fatal(err)
+			}
+			if d := decisionOf(t, wait()); d["behavior"] != "allow" {
+				t.Fatalf("decision = %v; want the Buzz answer", d)
+			}
+		})
 	}
 }
 

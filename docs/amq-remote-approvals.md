@@ -57,7 +57,9 @@ terminal"; the options are still offered. A dialog that asks for text adds
 the terminal."
 
 When the dialog closes, the message is edited with one more line:
-`→ <option label> (Buzz)`, `→ Answered in the terminal`, or `→ Expired`.
+`→ <option label> (Buzz)`, `→ Answered in the terminal`, or `→ Expired`
+(`→ Expired: <reason>` when the hook closed a Claude subagent's dialog
+before the one-day timeout).
 
 ## Answers
 
@@ -109,12 +111,13 @@ The first answer wins, in Buzz or in the terminal; a later typed answer gets
   writes beside the subagent's transcript, because Claude Code ends no hook
   when it stops a subagent. When an Agent-tool subagent's meta changes to
   `finished` or `stoppedByUser` after the dialog opened, the Buzz message
-  shows `→ Expired`. An in-process teammate's meta never records a stop, so a
-  subagent whose meta says `requestNonInteractive` or `requestShape`
-  `background` gets a deadline of one hour, not one day. After that hour
-  only the terminal dialog answers, even when the agent still runs. The reason goes to
-  the hook's stderr only. A missing or unreadable meta keeps the one-day
-  deadline, as does Windows, where the hook cannot open it safely.
+  shows `→ Expired: the asking agent ended`. An in-process teammate's meta
+  never records a stop, so a subagent whose meta says `requestShape`
+  `background` gets a deadline of one hour, not one day, and the message
+  shows `→ Expired: no answer in 1 h (background agent)`. After that hour
+  only the terminal dialog answers, even when the agent still runs. A
+  foreground subagent, a missing or unreadable meta, and Windows (where the
+  hook cannot open the meta safely) keep the one-day deadline.
 - **Codex:** only a session on the app-server (`codex app-server daemon
   start`, then `codex --remote unix://`). Every approval shows Codex's own
   `availableDecisions`; a user-input or elicitation request takes the

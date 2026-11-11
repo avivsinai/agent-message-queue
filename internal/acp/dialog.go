@@ -824,12 +824,16 @@ func dialogText(label string, req dialog.Request) string {
 	return b.String()
 }
 
-// outcomeLine is the line a resolved dialog's post gains.
+// outcomeLine is the line a resolved dialog's post gains. An expired
+// dialog's label, when set, says why it expired before its deadline.
 func outcomeLine(r dialog.Resolved) string {
 	switch {
 	case r.By == dialog.ByTerminal || r.Outcome == dialog.OutcomeTerminal:
 		return "→ Answered in the terminal"
 	case r.By == dialog.ByTimeout || r.Outcome == dialog.OutcomeExpired:
+		if r.Label != "" {
+			return "→ Expired: " + r.Label
+		}
 		return "→ Expired"
 	}
 	label := r.Label
