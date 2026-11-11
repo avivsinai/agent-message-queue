@@ -14,7 +14,6 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
-	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/update"
 )
@@ -41,7 +40,7 @@ const (
 	// coopWaitLockFile is held by the one waiter of an agent that may ring.
 	coopWaitLockFile = ".rewake-hook.lock"
 	// coopWaitPoll is how often the waiter looks at the inbox, its owner
-	// file, its binding, and the wake settings.
+	// file and its binding. It reads the wake settings when mail is unread.
 	coopWaitPoll = time.Second
 )
 
@@ -204,8 +203,8 @@ func readCoopWaitState(path, claudeSession string) coopWaitState {
 }
 
 // coopWaitSettings is the wake policy for (root, me): the defaults, the
-// machine file, then the agent file. The waiter reads it at every poll, so
-// a change applies while it waits. last is the previous result's layers: a
+// machine file, then the agent file. The waiter reads it at every poll that
+// finds unread mail, so a change applies while it waits. last is the previous result's layers: a
 // file refused now keeps its last good value, and a file refused at the
 // first read is left out, as at a wake start.
 func coopWaitSettings(root, me string, last wakeSettingsLayers) (wakeSettings, wakeSettingsLayers) {
@@ -230,24 +229,16 @@ func coopWaitSettings(root, me string, last wakeSettingsLayers) (wakeSettings, w
 // CLAUDE_CODE_SESSION_ID, an entrypoint AMQ has not seen background the
 // hook, or a version below the one it was seen on.
 func coopWaitRunsInBackground() bool {
-	session := os.Getenv("CLAUDE_CODE_SESSION_ID")
-	home, err := os.UserHomeDir()
-	if session == "" || err != nil {
+	session, configDir, ok := claudeSessionKey()
+	if !ok {
 		return false
 	}
-	dir := harness.ClaudeConfigDir(home)
-	if !filepath.IsAbs(dir) {
+	record, ok := ancestorClaudeSessionRecord(configDir, session)
+	if !ok {
 		return false
 	}
-	for _, ancestor := range launch.Ancestors() {
-		record, err := readClaudeSessionRecord(dir, ancestor.PID)
-		if err != nil || record.SessionID != session {
-			continue
-		}
-		cmp, ok := update.CompareVersions(harness.ClaudeRewakeMinVersion, record.Version)
-		return ok && cmp <= 0 && slices.Contains(harness.ClaudeRewakeEntrypoints, record.Entrypoint)
-	}
-	return false
+	cmp, ok := update.CompareVersions(harness.ClaudeRewakeMinVersion, record.Version)
+	return ok && cmp <= 0 && slices.Contains(harness.ClaudeRewakeEntrypoints, record.Entrypoint)
 }
 
 // errCoopWaitRing is the waiter's ring. Its text is the doorbell, which
