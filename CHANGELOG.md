@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.140.0](https://github.com/avivsinai/agent-message-queue/compare/v0.139.0...v0.140.0) (2026-11-11)
+
+
+### Bug Fixes
+
+* **board:** Codex windows align to the reported reset; last audit items ([#1458](https://github.com/avivsinai/agent-message-queue/issues/1458)) ([a70ec1b](https://github.com/avivsinai/agent-message-queue/commit/a70ec1b59f2add5fb051bc4c5fe2eba8ea2b7922))
+* **remote:** a stopped or unanswered Claude subagent's Buzz dialog closes ([#1456](https://github.com/avivsinai/agent-message-queue/issues/1456)) ([bc54d42](https://github.com/avivsinai/agent-message-queue/commit/bc54d42feac1401dab71315924bfa59a1753a0bf))
+
 ## [0.139.0](https://github.com/avivsinai/agent-message-queue/compare/v0.138.0...v0.139.0) (2026-11-10)
 
 
