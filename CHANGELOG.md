@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.141.0](https://github.com/avivsinai/agent-message-queue/compare/v0.140.1...v0.141.0) (2026-11-11)
+
+
+### Features
+
+* **coop:** a wait hook wakes a session that no wake rings ([#1465](https://github.com/avivsinai/agent-message-queue/issues/1465)) ([ad516df](https://github.com/avivsinai/agent-message-queue/commit/ad516df1e0d196c6251b13cbaffe1c5e692ef8ac))
+* **coop:** join binds a Claude Code session to a handle ([#1464](https://github.com/avivsinai/agent-message-queue/issues/1464)) ([a24a09b](https://github.com/avivsinai/agent-message-queue/commit/a24a09bd227cefc868c4d60649fc7df653d5b354))
+
 ## [0.140.1](https://github.com/avivsinai/agent-message-queue/compare/v0.140.0...v0.140.1) (2026-11-11)
 
 
