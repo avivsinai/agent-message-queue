@@ -278,7 +278,8 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 			resolve(dialog.OutcomeTerminal, "", dialog.ByTerminal)
 			return 0
 		}
-		if in.AgentID != "" && watch.found() {
+		// answered() already looked for the transcript on this tick.
+		if in.AgentID != "" && watch.path != "" {
 			if m, ok := readSubagentMeta(watch.path, in.AgentID); ok {
 				if m.background() && opened.Add(backgroundAgentTimeout).Before(deadline) {
 					deadline, reason = opened.Add(backgroundAgentTimeout), "no answer in 1 h (background agent)"

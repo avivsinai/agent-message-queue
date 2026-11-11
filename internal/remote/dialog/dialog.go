@@ -87,7 +87,7 @@ const (
 type Resolved struct {
 	ID      string    `json:"id"`
 	Outcome string    `json:"outcome"`         // OutcomeAllowed, OutcomeDenied, OutcomeAnswered, OutcomeTerminal or OutcomeExpired
-	Label   string    `json:"label,omitempty"` // chosen option label, for the Buzz edit
+	Label   string    `json:"label,omitempty"` // chosen option label, or why an expired dialog expired, for the Buzz edit
 	By      string    `json:"by"`              // ByBuzz, ByTerminal or ByTimeout
 	At      time.Time `json:"at"`
 }
