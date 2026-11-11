@@ -49,7 +49,7 @@ amq coop exec --no-wake claude
 amq coop install-hooks
 ```
 
-This adds two hooks to `$CLAUDE_CONFIG_DIR/settings.json` (default
+This adds three hooks to `$CLAUDE_CONFIG_DIR/settings.json` (default
 `~/.claude/settings.json`):
 
 - **SessionStart.** On startup, resume, `/clear`, and compaction it gives the
@@ -61,6 +61,8 @@ This adds two hooks to `$CLAUDE_CONFIG_DIR/settings.json` (default
   mail that the wake will not ring for (see
   [Wake operations](docs/wake-operations.md)). After 5 blocks in one chain it
   allows the stop with a notice.
+- **Wait** (on SessionStart and Stop). It is the doorbell of a session that no
+  wake rings; see [Claude Code desktop app](#claude-code-desktop-app).
 
 The hooks run `amq` only in sessions that take part: sessions with `AM_ME`
 set, which `amq coop exec` and `amq launch` do, and sessions bound with
@@ -75,23 +77,44 @@ entries so you can remove them.
 ### Claude Code desktop app
 
 A session of the Claude Code desktop app is not started by `amq coop exec`,
-so it has no `AM_ME`. It takes part after one command, which the agent can
-run through its shell tool:
+so it has no `AM_ME` and no wake. It takes part in two steps, and the agent
+can run both through its shell tool:
 
 ```sh
+amq coop install-hooks        # once per user and machine
 amq coop join --me reviewer   # once per session, inside the session
 ```
 
-`amq coop join` binds the session's id (`CLAUDE_CODE_SESSION_ID`) to one
-handle in `~/.amq/claude-sessions/`. After it, `amq` commands and the co-op
-hooks of that session use the handle with no `--me`. Two sessions in one
-project join with two handles. The binding survives a resume; a new or
-forked session joins again. `amq coop leave` releases the handle. `join`
-refuses a handle that another Claude session holds or that has a running
-wake, and a session that has `AM_*` variables.
+- **Identity is per session.** `amq coop join` binds the session's id
+  (`CLAUDE_CODE_SESSION_ID`) to one handle in `~/.amq/claude-sessions/`. After
+  it, `amq` commands and the co-op hooks of that session use the handle with
+  no `--me`. Two sessions in one project join with two handles. The binding
+  survives a resume; a new or forked session joins again. `amq coop leave`
+  releases the handle. `join` refuses a handle that another Claude session
+  holds or that has a running wake, and a session that has `AM_*` variables.
+- **The wait hook is the doorbell.** Claude Code keeps it in the background
+  (`asyncRewake`). When mail arrives it prints the doorbell and the session
+  starts a turn, also when the session is idle or not on screen. It rings
+  once per message, and the Stop guard still reports that message once if it
+  is unread at the next turn end, so a ring is an attempt, not proof that the
+  agent read anything.
+- **Policy is the wake settings.** The wait hook obeys `hold_normal`,
+  `hold_low` and `debounce` from `~/.amq/wake.settings` and the agent's
+  `.wake.settings` (`amq wake config`), and applies a change while it waits.
+  The doorbell carries no sender or subject, so `preview_len` does not apply.
+- **Permission is yours.** Add the rule `Bash(amq:*)` to the Claude settings
+  so that a doorbell's `amq drain` does not stop at a permission dialog.
 
-No wake rings a joined session: it drains between tasks, and the Stop hook
-reports unread mail at a turn end.
+Limits:
+
+- The wait hook runs only in desktop-app sessions (entrypoint
+  `claude-desktop`) on Claude Code 2.1.321 or later. In other sessions it
+  exits at once: plain `claude -p` would hold each turn end until the hook
+  exits.
+- Claude Code ends the hook after its timeout of 7 days. A session with no
+  turn for 7 days has no doorbell until its next turn.
+- The `amq` on the session's `PATH` and the `amq` in the hook entries must
+  both have `coop join`. `join` reports a hook entry of another binary.
 
 ### Multiple pairs (isolated sessions)
 

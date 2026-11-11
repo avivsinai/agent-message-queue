@@ -38,14 +38,34 @@ type claudeNativeReady struct {
 	Launch    launch.HolderIdentity `json:"launch"`
 }
 
+// claudeNativeRegistry is the part of Claude Code's per-process session
+// record (sessions/<pid>.json in its config dir) that AMQ reads.
 type claudeNativeRegistry struct {
-	PID       int    `json:"pid"`
-	SessionID string `json:"sessionId"`
-	Cwd       string `json:"cwd"`
-	Version   string `json:"version"`
-	Protocol  int    `json:"peerProtocol"`
-	Kind      string `json:"kind"`
-	Socket    string `json:"messagingSocketPath"`
+	PID        int    `json:"pid"`
+	SessionID  string `json:"sessionId"`
+	Cwd        string `json:"cwd"`
+	Version    string `json:"version"`
+	Protocol   int    `json:"peerProtocol"`
+	Kind       string `json:"kind"`
+	Entrypoint string `json:"entrypoint"`
+	Socket     string `json:"messagingSocketPath"`
+}
+
+// readClaudeSessionRecord reads the session record Claude Code process pid
+// keeps under config dir dir. The record must name pid.
+func readClaudeSessionRecord(dir string, pid int) (claudeNativeRegistry, error) {
+	raw, err := fsq.ReadRegularNoFollowBounded(filepath.Join(dir, "sessions", strconv.Itoa(pid)+".json"), claudeNativeMetadataLimit)
+	if err != nil {
+		return claudeNativeRegistry{}, err
+	}
+	var reg claudeNativeRegistry
+	if err := json.Unmarshal(raw, &reg); err != nil {
+		return reg, err
+	}
+	if reg.PID != pid {
+		return reg, errClaudeNativeRegistryMismatch
+	}
+	return reg, nil
 }
 
 func prepareClaudeNativeLaunch(ticket *launch.ExecutionTicket) (*claudeNativeLaunch, error) {
@@ -89,16 +109,11 @@ func readClaudeNativeLaunch() (*claudeNativeLaunch, error) {
 }
 
 func readClaudeNativeRegistry(binding claudeNativeLaunch) (claudeNativeRegistry, error) {
-	path := filepath.Join(binding.Home, "sessions", strconv.Itoa(binding.Launch.PID)+".json")
-	raw, err := fsq.ReadRegularNoFollowBounded(path, claudeNativeMetadataLimit)
+	reg, err := readClaudeSessionRecord(binding.Home, binding.Launch.PID)
 	if err != nil {
-		return claudeNativeRegistry{}, err
-	}
-	var reg claudeNativeRegistry
-	if err := json.Unmarshal(raw, &reg); err != nil {
 		return reg, err
 	}
-	if reg.PID != binding.Launch.PID || reg.SessionID != binding.SessionID || reg.Cwd != binding.Cwd ||
+	if reg.SessionID != binding.SessionID || reg.Cwd != binding.Cwd ||
 		reg.Version != launch.ClaudeNativeVersion || reg.Protocol != 1 || reg.Kind != "interactive" || !filepath.IsAbs(reg.Socket) {
 		return reg, errClaudeNativeRegistryMismatch
 	}

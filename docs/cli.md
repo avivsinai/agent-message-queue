@@ -1849,8 +1849,8 @@ handle that another Claude session holds (run amq coop leave there), and a
 handle with a running wake. Joining again with the same handle changes
 nothing; another handle replaces the first.
 
-It prints the unread count. No wake rings the session: run amq drain
---include-body between tasks.
+It prints the unread count and whether a hook wakes the session for new mail
+(see amq coop install-hooks).
 
 Options:
   -me string
@@ -1885,6 +1885,10 @@ Install the co-op hooks in $CLAUDE_CONFIG_DIR/settings.json (default
 SessionStart (startup, resume, clear, compact) gives the agent its co-op
 preamble: handle, session, peers, unread count, and what announces new mail.
 Stop blocks a stop once for unread mail that no wake doorbell will announce.
+The wait hook, on SessionStart and Stop, is the doorbell of a session that no
+wake rings, such as a session of the Claude Code desktop app: it runs in the
+background (asyncRewake) and wakes the session when mail arrives. It stops
+after 7 days without a turn; the next turn starts it again.
 
 The hooks run only in sessions that take part: sessions with AM_ME set, which
 amq coop exec and amq launch set, and sessions bound with amq coop join.
@@ -1916,7 +1920,7 @@ Other settings and hooks are not changed.
 ```text
 $ amq coop hook --help
 Usage:
-  amq coop hook session-start|stop
+  amq coop hook session-start|stop|wait
 
 Claude Code hook receivers for the co-op hooks; amq coop install-hooks installs them.
 They read AM_ME, AM_ROOT and the session pin from the environment, or the
@@ -1935,6 +1939,14 @@ live wake it counts only mail created at or before the wake's startup
 baseline, because the wake rings for later mail. It allows the stop after
 5 blocks in one chain, and prints a systemMessage when the context conflicts
 or the mailbox cannot be read.
+
+wait is the doorbell of a session that no wake rings, such as a session of
+the Claude Code desktop app. It runs as an asyncRewake hook: it waits for
+unread mail that is due under the wake settings hold_normal, hold_low and
+debounce and that no hook has announced, then prints the doorbell on stderr
+and exits 10, which the installed command turns into the exit code 2 that
+wakes the session. It exits 0 at once when a wake rings the agent, another
+wait runs for the agent, or the session would hold its turn end on the hook.
 ```
 
 ## amq swarm list

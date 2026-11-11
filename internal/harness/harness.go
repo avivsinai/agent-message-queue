@@ -31,6 +31,26 @@ const (
 // this exact text.
 const Doorbell = ": AMQ doorbell run amq drain --include-body then act on it"
 
+// Claude Code runs a command hook marked asyncRewake in the background and,
+// when the hook exits with code 2, starts a turn with the hook's stderr. It
+// does so only in some sessions; in the others (plain claude -p) the hook
+// holds its event until it exits. These are the sessions AMQ has seen keep
+// the hook in the background.
+const (
+	// ClaudeRewakeMinVersion is the oldest Claude Code version AMQ accepts
+	// for an asyncRewake hook.
+	ClaudeRewakeMinVersion = "2.1.321"
+	// ClaudeRewakeRingExit is the exit code of an AMQ hook receiver that
+	// rings. The installed hook command turns only this code into 2: AMQ's
+	// own exit code 2 is a usage error and must not wake a session.
+	ClaudeRewakeRingExit = 10
+)
+
+// ClaudeRewakeEntrypoints are the entrypoints, as Claude Code's session
+// record names them, of the sessions that keep an asyncRewake hook in the
+// background.
+var ClaudeRewakeEntrypoints = []string{"claude-desktop"}
+
 // ResumeSyntax is how a harness's argv asks to resume a conversation.
 type ResumeSyntax uint8
 

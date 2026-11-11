@@ -5,8 +5,9 @@ package cli
 // session or unread count, or prints anything but the hook JSON. The stop
 // tests break if new mail does not block once, a repeat in the chain blocks
 // again, or a live wake's doorbell mail blocks. The installer test breaks if
-// an entry loses its participant gate or matcher, or if old project entries
-// that run the co-op scripts go unreported.
+// an entry loses its participant gate or matcher, if the waiter entries are
+// missing or replace the others, or if old project entries that run the
+// co-op scripts go unreported.
 
 import (
 	"bytes"
@@ -113,7 +114,9 @@ func TestCoopInstallHooksWritesTheGatedEntryAndListsOldOnes(t *testing.T) {
 		Hooks map[string][]struct {
 			Matcher string `json:"matcher"`
 			Hooks   []struct {
-				Command string `json:"command"`
+				Command     string `json:"command"`
+				Timeout     int    `json:"timeout"`
+				AsyncRewake bool   `json:"asyncRewake"`
 			} `json:"hooks"`
 		} `json:"hooks"`
 	}
@@ -124,14 +127,38 @@ func TestCoopInstallHooksWritesTheGatedEntryAndListsOldOnes(t *testing.T) {
 	// with no AM_ME and no binding file for its Claude session.
 	gate := coopHookMarker + `[ -n "${AM_ME-}" ] || [ -e '` + filepath.Join(home, ".amq", "claude-sessions", "sessions") + `/'"${CLAUDE_CODE_SESSION_ID-}".json ] || exit 0; `
 	amq := "'" + mustExecutable(t) + "' --no-update-check coop hook "
-	groups := settings.Hooks["SessionStart"]
-	if len(groups) != 1 || groups[0].Matcher != coopSessionStartSources || len(groups[0].Hooks) != 1 ||
-		groups[0].Hooks[0].Command != gate+"exec "+amq+"session-start" {
-		t.Fatalf("SessionStart = %+v, want one gated co-op entry", groups)
+	for _, want := range []struct {
+		event, matcher, command string
+		rewake                  bool
+	}{
+		{"SessionStart", coopSessionStartSources, gate + "exec " + amq + "session-start", false},
+		{"Stop", "", gate + amq + "stop || true", false},
+		// The waiter rings with exit 10; only that becomes the 2 that wakes
+		// the session, so a usage error of an older amq never rings.
+		{"SessionStart", coopSessionStartSources, gate + amq + "wait; [ $? -ne 10 ] || exit 2", true},
+		{"Stop", "", gate + amq + "wait; [ $? -ne 10 ] || exit 2", true},
+	} {
+		found := 0
+		for _, group := range settings.Hooks[want.event] {
+			if len(group.Hooks) == 1 && group.Hooks[0].Command == want.command {
+				found++
+				if group.Matcher != want.matcher || group.Hooks[0].AsyncRewake != want.rewake ||
+					(want.rewake && group.Hooks[0].Timeout != coopWaitTimeout) {
+					t.Fatalf("%s entry = %+v, want matcher %q asyncRewake %v", want.event, group, want.matcher, want.rewake)
+				}
+			}
+		}
+		if found != 1 || len(settings.Hooks[want.event]) != 2 {
+			t.Fatalf("%s = %+v, want the co-op entry and the waiter entry, with %q once", want.event, settings.Hooks[want.event], want.command)
+		}
 	}
-	stops := settings.Hooks["Stop"]
-	if len(stops) != 1 || len(stops[0].Hooks) != 1 || stops[0].Hooks[0].Command != gate+amq+"stop || true" {
-		t.Fatalf("Stop = %+v, want one gated co-op entry", stops)
+	// A second install converges: the waiter does not replace the guard.
+	if _, err := captureStdout(t, func() error { return runCoopInstallHooks(nil) }); err != nil {
+		t.Fatal(err)
+	}
+	again, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	if err != nil || !bytes.Equal(again, raw) {
+		t.Fatalf("second install changed the settings (%v):\n%s", err, again)
 	}
 }
 

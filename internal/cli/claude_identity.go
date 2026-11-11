@@ -14,6 +14,10 @@ import (
 // its Bash tool the id of the session they run in.
 const envClaudeSession = "CLAUDE_CODE_SESSION_ID"
 
+// adoptedClaudeBinding is the binding adoptClaudeSessionIdentity adopted
+// for this process, or nil.
+var adoptedClaudeBinding *claudeidentity.Record
+
 // claudeSessionKey returns the Claude session this process runs in and its
 // Claude config dir, or ok false outside a Claude Code session.
 func claudeSessionKey() (session, configDir string, ok bool) {
@@ -59,7 +63,23 @@ func adoptClaudeSessionIdentity() error {
 	if err != nil {
 		return err
 	}
-	return adoptIdentity(id, "this Claude session's")
+	if err := adoptIdentity(id, "this Claude session's"); err != nil {
+		return err
+	}
+	rec.Identity = id
+	adoptedClaudeBinding = &rec
+	return nil
+}
+
+// claudeBindingStillHeld reports whether the binding this process adopted
+// is still the session's binding. A process that adopted none holds its
+// identity from the environment and always passes.
+func claudeBindingStillHeld() bool {
+	if adoptedClaudeBinding == nil {
+		return true
+	}
+	rec, err := claudeidentity.Lookup(adoptedClaudeBinding.ClaudeSession, adoptedClaudeBinding.ConfigDir)
+	return err == nil && rec.Root == adoptedClaudeBinding.Root && rec.Me == adoptedClaudeBinding.Me
 }
 
 // managesClaudeBinding reports whether args is amq coop join or leave.
