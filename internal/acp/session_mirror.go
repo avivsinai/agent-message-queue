@@ -1045,6 +1045,9 @@ func readMirrorState(path string) (mirrorFile, []byte, bool) {
 // mirror is on it would post turns from the off period. Only a tick that
 // folds what it may still post is left unsynced.
 func writeMirrorFile(dir string, st *mirrorFile, discard bool) error {
+	// The synced part is compared with what state.json holds on disk, not with
+	// memory: only the file says what survives a crash, and a missing or
+	// unreadable file must force the synced write.
 	if base, _, ok := readMirrorState(filepath.Join(dir, "state.json")); ok && !discard && base.Gen == st.Gen && base.durable().equal(st.durable()) {
 		raw, err := json.Marshal(st)
 		if err != nil {
