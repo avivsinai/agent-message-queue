@@ -205,6 +205,9 @@ type Store struct {
 	// exists, because an earlier process may have created it and died before
 	// the sync. A failed write forgets the host so the next one syncs again.
 	syncedHosts map[string]struct{}
+	// cache holds the decoded record of each file read here, valid only
+	// while the file's stat identity is unchanged.
+	cache recordCache
 }
 
 // Option configures Open.
@@ -783,6 +786,14 @@ func (s *Store) CompactionCandidates() []Key {
 // for this record, never a block and never a
 // missing record, so ListWithPoison can skip it and continue with the other targets.
 func (s *Store) readRecord(path string) (*Record, bool, error) {
+	// The identity is taken before the read, so a file replaced in between
+	// leaves a stale identity that the next call refuses to match.
+	id, idOK := fileStatIdentity(path)
+	if idOK {
+		if rec := s.cache.get(path, id); rec != nil {
+			return rec, true, nil
+		}
+	}
 	data, err := fsq.ReadRegularNoFollowBounded(path, int64(MaxRecordBytes))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, false, nil
@@ -795,6 +806,9 @@ func (s *Store) readRecord(path string) (*Record, bool, error) {
 		return nil, true, fmt.Errorf("record %s: %w", filepath.Base(path), err)
 	}
 	normalizeRecord(rec)
+	if idOK {
+		s.cache.put(path, id, rec)
+	}
 	return rec, true, nil
 }
 
@@ -1001,6 +1015,8 @@ func (s *Store) writeRecordFile(host, p string, data []byte) error {
 	if err != nil {
 		return err
 	}
+	s.cache.drop(p)
+	defer s.cache.drop(p)
 	if _, err := fsq.WriteStateFile(s.dir, rel, data, fileMode); err != nil {
 		delete(s.syncedHosts, host)
 		return err
