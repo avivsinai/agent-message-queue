@@ -13,7 +13,7 @@ and the existing handlers feed their normalized evaluator facts through it.
   incomplete, stale, or unauthenticated).
 - Relation: `Unbound` (no pin/tree conflict), `Match`, `Mismatch` (pin or CWD
   conflict after evaluator normalization), or `OwnPinnedBase`.
-- Flags: routed mailbox target, ignore pin, explicit root/context,
+- Flags: routed mailbox target, ignore pin, explicit root,
   cross-project source route, and from-session source route. Explicit
   root/cross-project only affect the pre-table CWD check; they never waive a
   pin mismatch.

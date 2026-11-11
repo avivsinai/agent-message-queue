@@ -44,7 +44,6 @@ func TestSessionGuardDecisionRows(t *testing.T) {
 			name: "R01 unbound allows every policy",
 			input: Input{
 				Kind: KindEnv, Relation: TargetUnbound,
-				Flags: Flags{ExplicitContext: true},
 			},
 			row: RowR01UnboundAllow, verdict: Allow,
 		},
@@ -337,7 +336,6 @@ func sessionGuardSiteReplayCase(site sessionGuardSiteMapping, row string) (strin
 	switch row {
 	case RowR01UnboundAllow:
 		input.Pin, input.Relation = PinAbsent, TargetUnbound
-		input.Flags.ExplicitContext = true
 	case RowR02MatchAllow:
 		// Defaults above.
 	case RowR03MailboxRouted:
