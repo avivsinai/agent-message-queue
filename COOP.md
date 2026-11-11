@@ -62,14 +62,38 @@ This adds two hooks to `$CLAUDE_CONFIG_DIR/settings.json` (default
   [Wake operations](docs/wake-operations.md)). After 5 blocks in one chain it
   allows the stop with a notice.
 
-The hooks run `amq` only in sessions with `AM_ME` set, which `amq coop exec`
-and `amq launch` do. A plain `claude` without `AM_ME` gets no preamble and no
+The hooks run `amq` only in sessions that take part: sessions with `AM_ME`
+set, which `amq coop exec` and `amq launch` do, and sessions bound with
+`amq coop join`. A plain `claude` that did neither gets no preamble and no
 Stop guard, and other Claude Code sessions start no `amq`. Running the command
 again replaces the entries in place; `amq coop uninstall-hooks` removes them.
 Project hook entries that run `scripts/claude-session-start.sh`,
 `scripts/amq-stop-hook.sh` or `scripts/claude-amq-user-prompt-submit.py` name
 scripts AMQ does not ship; the install command and `amq doctor` list such
 entries so you can remove them.
+
+### Claude Code desktop app
+
+A session of the Claude Code desktop app is not started by `amq coop exec`,
+so it has no `AM_ME`. It takes part after one command, which the agent can
+run through its shell tool:
+
+```sh
+amq coop join --me reviewer   # once per session, inside the session
+```
+
+`amq coop join` binds the session's id (`CLAUDE_CODE_SESSION_ID`) to one
+handle in `~/.amq/claude-sessions/`. After it, `amq` commands and the co-op
+hooks of that session use the handle with no `--me`. Two sessions in one
+project join with two handles. The binding survives a resume and a
+compaction. `/clear` starts a session with a new id and no handle, as a new
+or forked session does: tell it to join again. `amq coop leave` releases the
+handle. `join` refuses a handle that another running Claude session holds or
+that has a running wake, and a session that has `AM_*` variables. It takes
+the handle of a session that no longer runs, such as the one `/clear` ended.
+
+No wake rings a joined session: it drains between tasks, and the Stop hook
+reports unread mail at a turn end.
 
 ### Multiple pairs (isolated sessions)
 

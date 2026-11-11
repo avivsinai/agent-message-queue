@@ -24,6 +24,10 @@ amq_context="$(amq env --me "<handle>" --export)" && eval "$amq_context" &&
   amq drain --include-body
 ```
 
+In a Claude Code session that `coop exec` did not start (the desktop app has
+no `AM_ME`), run `amq coop join --me "<handle>"` once. Later bare `amq`
+commands in that session use the handle.
+
 For a named session, add `--session <name>` to `amq env`. Treat the evaluated
 context as one terminal bound to one session. Use `--session` or `--project` for
 deliberate routing; do not point a participating command at another queue with a

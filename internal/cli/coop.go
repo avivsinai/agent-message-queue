@@ -39,6 +39,10 @@ func runCoop(args []string) error {
 		return runCoopNamedInject(args[1:])
 	case "hook":
 		return runCoopHook(args[1:])
+	case "join":
+		return runCoopJoin(args[1:])
+	case "leave":
+		return runCoopLeave(args[1:])
 	case "install-hooks":
 		return runCoopInstallHooks(args[1:])
 	case "uninstall-hooks":

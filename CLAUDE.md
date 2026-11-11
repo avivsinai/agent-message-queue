@@ -120,6 +120,7 @@ internal/amqhome/             The per-user AMQ home, ~/.amq
 internal/archtest/            Package layering check on the import graph
 internal/board/               Fleet board items, links, column table, and sources
 internal/bridge/              Envelope, auth, and crash-idempotent local apply
+internal/claudeidentity/      AMQ identity that coop join bound to a Claude Code session
 internal/claudepeer/          Claude Code cross-session socket framing
 internal/cli/                 Command handlers and routing policy
 internal/codexidentity/       AMQ identity of Codex threads on the shared app-server
@@ -256,7 +257,7 @@ exact flags. This table defines the owning workflow for each surface.
 | Health | `doctor`, `cleanup`, `upgrade` | Diagnose, perform explicit safe cleanup (including exact stuck launch journals and one empty agent mailbox), or update the binary. |
 | Wake | `wake`, `wake check`, `wake config`, `wake repair`, `wake restart`, `wake recover-owner`, `wake retire`, `wake dialog`, `wake install-dialog-hook`, `wake uninstall-dialog-hook` | Notify, inspect capability, change live settings, and make identity-safe lifecycle changes; the dialog commands run and install the wake dialog guard hooks. |
 | DLQ | `dlq list`, `dlq read`, `dlq retry`, `dlq purge` | Inspect and explicitly recover or purge corrupt messages. |
-| Low-level provisioning | `init`, `coop init`, `coop exec`, `coop install-hooks`, `coop uninstall-hooks`, `coop hook` | Create raw queues, enter an agent process, or install and run the Claude Code co-op hooks. See [COOP.md](COOP.md). |
+| Low-level provisioning | `init`, `coop init`, `coop exec`, `coop join`, `coop leave`, `coop install-hooks`, `coop uninstall-hooks`, `coop hook` | Create raw queues, enter an agent process, bind a running Claude Code session to a handle, or install and run the Claude Code co-op hooks. See [COOP.md](COOP.md). |
 | Swarm bridge | `swarm list`, `join`, `leave`, `tasks`, `claim`, `complete`, `fail`, `block`, `bridge` | Interoperate with Claude Code Agent Teams. |
 | Integrations | `integration symphony`, `integration kanban` | Convert external lifecycle events into AMQ messages. See [the adapter contract](docs/adapter-contract.md). |
 
