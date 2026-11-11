@@ -80,3 +80,40 @@ func TestSweepReadsOnlyRecordsThatNeedWork(t *testing.T) {
 		t.Fatalf("after publication the sweep reads %v, want running and unacked only", got)
 	}
 }
+
+// A repeated sweep returns equal records, a caller's change to one does not
+// reach the next pass, and a file damaged outside the store is poison again.
+func TestSweepReusesUnchangedRecords(t *testing.T) {
+	s, err := Open(t.TempDir(), withClock(fixedClock))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	rec := newRecord("44444444-4444-4444-8444-000000000001")
+	rec.Origin = map[string]string{"handle": "a"}
+	if err := s.Create(rec); err != nil {
+		t.Fatal(err)
+	}
+	first := s.ListSweep()
+	if len(first) != 1 {
+		t.Fatalf("sweep = %d records, want 1", len(first))
+	}
+	first[0].Origin["handle"] = "changed"
+	second := s.ListSweep()
+	if len(second) != 1 || second[0].Origin["handle"] != "a" {
+		t.Fatalf("second sweep = %+v, want the stored record", second)
+	}
+	p, err := s.path(keyOf(rec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("{not json"), fileMode); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.ListSweep(); len(got) != 0 {
+		t.Fatalf("sweep after damage = %d records, want the poison skipped", len(got))
+	}
+	if _, _, err := s.Get(keyOf(rec)); err == nil {
+		t.Fatal("Get of a damaged file succeeded")
+	}
+}
