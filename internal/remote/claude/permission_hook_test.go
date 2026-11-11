@@ -476,12 +476,28 @@ func TestPermissionHookClosesTheDialogOfAStoppedSubagent(t *testing.T) {
 // after an hour, not a day (stale Buzz dialog open 20 h, 2026-11-11).
 func TestPermissionHookExpiresABackgroundSubagentDialogAfterAnHour(t *testing.T) {
 	_, dir, wait := subagentHook(t, `{"taskKind":"in_process_teammate","requestShape":"background","requestNonInteractive":true}`, hourLater())
-	req := openRequest(t, dir)
+	// The hook expires the dialog on its first ticks - long before a poll
+	// can observe it open - so wait for the resolution, not the open request.
+	var res dialog.Resolved
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		entries, err := os.ReadDir(filepath.Join(dir, "resolved"))
+		if err != nil || len(entries) == 0 {
+			continue
+		}
+		id := strings.TrimSuffix(entries[0].Name(), ".json")
+		if r, ok, _ := dialog.ReadResolved(dir, id); ok {
+			res = r
+			break
+		}
+	}
+	if res.Outcome == "" {
+		t.Fatal("the hook resolved no dialog")
+	}
 	if out := wait(); out != "" {
 		t.Fatalf("an expired dialog printed %q", out)
 	}
-	if r, ok, _ := dialog.ReadResolved(dir, req.ID); !ok || r.Outcome != dialog.OutcomeExpired || r.Label != "no answer in 1 h (background agent)" {
-		t.Fatalf("resolved = %+v, %v; want expired after an hour", r, ok)
+	if res.Outcome != dialog.OutcomeExpired || res.Label != "no answer in 1 h (background agent)" {
+		t.Fatalf("resolved = %+v; want expired after an hour", res)
 	}
 }
 
