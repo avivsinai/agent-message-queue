@@ -396,6 +396,112 @@ func TestPermissionHookEndsWhenItsDialogIsAnsweredInTheTerminal(t *testing.T) {
 	}
 }
 
+// subagentHook opens a dialog for subagent a1 whose meta.json holds meta
+// ("": no meta file), with the hook's clock at now, and returns the meta
+// path, the dialogs directory and the hook's wait.
+func subagentHook(t *testing.T, meta string, now func() time.Time) (string, string, func() string) {
+	t.Helper()
+	dir := boundHookEnv(t)
+	projects := t.TempDir()
+	session := filepath.Join(projects, "s-1.jsonl")
+	transcript := filepath.Join(projects, "s-1", "subagents", "agent-a1.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	call := `{"type":"assistant","isSidechain":true,"message":{"id":"msg_1","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"make"}}]}}` + "\n"
+	for path, body := range map[string]string{session: "", transcript: call} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	metaPath := filepath.Join(filepath.Dir(transcript), "agent-a1.meta.json")
+	if meta != "" {
+		if err := os.WriteFile(metaPath, []byte(meta), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stdin, _ := json.Marshal(map[string]any{
+		"session_id": "s-1", "transcript_path": session, "agent_id": "a1", "hook_event_name": "PermissionRequest",
+		"tool_name": "Bash", "tool_input": map[string]any{"command": "make"},
+	})
+	h := permissionHook{now: now, poll: time.Millisecond}
+	var out bytes.Buffer
+	ended := make(chan struct{})
+	go func() {
+		h.run(bytes.NewReader(stdin), &out, make(chan struct{}))
+		close(ended)
+	}()
+	return metaPath, dir, func() string {
+		select {
+		case <-ended:
+		case <-time.After(3 * time.Second):
+			t.Fatal("the hook did not end")
+		}
+		return out.String()
+	}
+}
+
+// hourLater is a hook clock that reads start once, as the dialog opens,
+// and an hour and a minute later after that.
+func hourLater() func() time.Time {
+	start := time.Now()
+	var calls atomic.Int32
+	return func() time.Time {
+		if calls.Add(1) == 1 {
+			return start
+		}
+		return start.Add(61 * time.Minute)
+	}
+}
+
+// A subagent stopped with TaskStop while its dialog waits: Claude Code
+// writes no transcript line and ends no hook, only stoppedByUser in the
+// agent's meta.json. The dialog closes as expired (stale Buzz dialog open
+// 20 h, 2026-11-11).
+func TestPermissionHookClosesTheDialogOfAStoppedSubagent(t *testing.T) {
+	meta, dir, wait := subagentHook(t, `{"agentType":"general-purpose","requestShape":"foreground"}`, time.Now)
+	req := openRequest(t, dir)
+	if err := os.WriteFile(meta, []byte(`{"agentType":"general-purpose","requestShape":"foreground","stoppedByUser":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out := wait(); out != "" {
+		t.Fatalf("a stopped agent's dialog printed %q", out)
+	}
+	if r, ok, _ := dialog.ReadResolved(dir, req.ID); !ok || r.Outcome != dialog.OutcomeExpired {
+		t.Fatalf("resolved = %+v, %v; want expired", r, ok)
+	}
+}
+
+// A background teammate's meta never records a stop: its dialog expires
+// after an hour, not a day (stale Buzz dialog open 20 h, 2026-11-11).
+func TestPermissionHookExpiresABackgroundSubagentDialogAfterAnHour(t *testing.T) {
+	_, dir, wait := subagentHook(t, `{"taskKind":"in_process_teammate","requestShape":"background","requestNonInteractive":true}`, hourLater())
+	req := openRequest(t, dir)
+	if out := wait(); out != "" {
+		t.Fatalf("an expired dialog printed %q", out)
+	}
+	if r, ok, _ := dialog.ReadResolved(dir, req.ID); !ok || r.Outcome != dialog.OutcomeExpired {
+		t.Fatalf("resolved = %+v, %v; want expired", r, ok)
+	}
+}
+
+// A subagent whose meta cannot be read keeps the day-long hold: an hour
+// later its dialog still waits, and a Buzz answer still decides.
+func TestPermissionHookKeepsASubagentDialogWithoutMetaOpen(t *testing.T) {
+	_, dir, wait := subagentHook(t, "", hourLater())
+	req := openRequest(t, dir)
+	time.Sleep(50 * time.Millisecond)
+	if r, ok, _ := dialog.ReadResolved(dir, req.ID); ok {
+		t.Fatalf("resolved %+v with nobody answering", r)
+	}
+	if _, err := dialog.WriteAnswer(dir, dialog.Answer{ID: req.ID, Option: 1, By: dialog.ByBuzz}); err != nil {
+		t.Fatal(err)
+	}
+	if d := decisionOf(t, wait()); d["behavior"] != "allow" {
+		t.Fatalf("decision = %v; want the Buzz answer", d)
+	}
+}
+
 // Two identical calls in one batch: the terminal approves the first, and its
 // result must not close the second call's dialog, which is still open. Only
 // the turn moving on past the whole batch proves both gone

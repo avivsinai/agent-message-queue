@@ -104,6 +104,17 @@ The first answer wins, in Buzz or in the terminal; a later typed answer gets
   Buzz or the terminal answers, at most the installed hook timeout of one
   day. A terminal answer, or the end of its Claude process, closes the Buzz
   message.
+
+  A subagent's dialog also reads the `agent-<id>.meta.json` that Claude Code
+  writes beside the subagent's transcript, because Claude Code ends no hook
+  when it stops a subagent. When an Agent-tool subagent's meta changes to
+  `finished` or `stoppedByUser` after the dialog opened, the Buzz message
+  shows `→ Expired`. An in-process teammate's meta never records a stop, so a
+  subagent whose meta says `requestNonInteractive` or `requestShape`
+  `background` gets a deadline of one hour, not one day. After that hour
+  only the terminal dialog answers, even when the agent still runs. The reason goes to
+  the hook's stderr only. A missing or unreadable meta keeps the one-day
+  deadline, as does Windows, where the hook cannot open it safely.
 - **Codex:** only a session on the app-server (`codex app-server daemon
   start`, then `codex --remote unix://`). Every approval shows Codex's own
   `availableDecisions`; a user-input or elicitation request takes the
