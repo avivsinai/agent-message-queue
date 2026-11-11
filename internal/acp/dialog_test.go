@@ -132,6 +132,19 @@ func eventMeta(evt nostr.Event) json.RawMessage {
 // old or new, read its reactions every 3 s, oldest first, so stale dialogs
 // spawned a process each and delayed a new one. An old dialog backs off; a
 // fresh one is read at 3 s, and first.
+// A Claude subagent's dialog that the hook closes early says why in Buzz;
+// a plain expiry stays plain (stale Buzz dialog open 20 h, 2026-11-11).
+func TestOutcomeLineShowsWhyADialogExpired(t *testing.T) {
+	for _, row := range []struct{ label, want string }{
+		{"the asking agent ended", "→ Expired: the asking agent ended"},
+		{"", "→ Expired"},
+	} {
+		if got := outcomeLine(dialog.Resolved{Outcome: dialog.OutcomeExpired, Label: row.label, By: dialog.ByTimeout}); got != row.want {
+			t.Fatalf("outcomeLine(label %q) = %q; want %q", row.label, got, row.want)
+		}
+	}
+}
+
 func TestDialogReactionReadsBackOffByAgeNewestFirst(t *testing.T) {
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
 	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha"}); err != nil {

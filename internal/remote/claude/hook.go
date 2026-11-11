@@ -278,9 +278,10 @@ func permissionHookCommand(home, bin string) string {
 }
 
 // permissionHookTimeout is the installed timeout of the PermissionRequest
-// hook, in seconds, and the hook's own deadline. The hook waits until Buzz
-// or the terminal answers, so the timeout only bounds a dialog nobody
-// answers for a day. Claude Code documents no maximum.
+// hook, in seconds, and the hook's own deadline but for a background
+// subagent's dialog (backgroundAgentTimeout). The hook waits until Buzz or
+// the terminal answers, so the timeout only bounds a dialog nobody answers
+// for a day. Claude Code documents no maximum.
 const permissionHookTimeout = 86400
 
 // permissionHookEntry is the PermissionRequest group: no matcher, and the

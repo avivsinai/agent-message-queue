@@ -105,9 +105,11 @@ type Binder func(Seat) (string, error)
 // permissionHook holds the hook's clock and pacing, so tests can drive it,
 // and the writer of a new binding. It ends when Buzz or the terminal
 // answers, when done closes, when the process that started it is gone
-// (parentGone), or at the installed timeout, which Claude enforces too.
-// It polls every poll, doubling the wait after each poll up to maxPoll
-// (zero: no growth), so a dialog nobody answers costs little.
+// (parentGone), when the asking subagent's meta records that it ended after
+// the dialog opened, at backgroundAgentTimeout for a subagent its meta marks
+// background, or at the installed timeout, which Claude enforces too. It
+// polls every poll, doubling the wait after each poll up to maxPoll (zero:
+// no growth), so a dialog nobody answers costs little.
 type permissionHook struct {
 	now        func() time.Time
 	poll       time.Duration
@@ -123,6 +125,56 @@ type permissionHook struct {
 func RunPermissionHook(stdin io.Reader, stdout io.Writer, done <-chan struct{}, bind Binder) int {
 	h := permissionHook{now: time.Now, poll: 250 * time.Millisecond, maxPoll: 2 * time.Second, parentGone: parentWatch(), bind: bind}
 	return h.run(stdin, stdout, done)
+}
+
+// backgroundAgentTimeout is the hook's own deadline for a dialog a
+// background subagent raises: no one may be at a terminal for it, and
+// Claude Code ends no hook when it stops such an agent. The terminal dialog
+// still decides after it.
+const backgroundAgentTimeout = time.Hour
+
+// subagentMeta is what the hook reads from the agent-<id>.meta.json Claude
+// Code writes beside a subagent's transcript. An Agent-tool subagent's meta
+// is rewritten with finished or stoppedByUser when it ends; an in-process
+// teammate's is written once at spawn and records no stop.
+type subagentMeta struct {
+	Finished      bool   `json:"finished"`
+	StoppedByUser bool   `json:"stoppedByUser"`
+	RequestShape  string `json:"requestShape"`
+}
+
+// ended reports that the agent finished or was stopped.
+func (m subagentMeta) ended() bool {
+	return m.Finished || m.StoppedByUser
+}
+
+// background reports an agent that runs while the owner works on: no one
+// may be at a terminal for its dialog. A foreground agent's owner is.
+func (m subagentMeta) background() bool {
+	return m.RequestShape == "background"
+}
+
+// maxSubagentMetaBytes bounds the meta read; Claude writes a few hundred
+// bytes.
+const maxSubagentMetaBytes = 64 << 10
+
+// readSubagentMeta reads the meta of agentID beside its transcript, only
+// when the transcript is that agent's own (agent-<agentID>.jsonl). A missing,
+// unreadable or unparsable file reads as not ok.
+func readSubagentMeta(transcript, agentID string) (subagentMeta, bool) {
+	stem := "agent-" + agentID
+	if !transcriptNameRe.MatchString(agentID) || !filepath.IsAbs(transcript) || filepath.Base(transcript) != stem+".jsonl" {
+		return subagentMeta{}, false
+	}
+	raw, err := readRegularBounded(filepath.Join(filepath.Dir(transcript), stem+".meta.json"), maxSubagentMetaBytes)
+	if err != nil {
+		return subagentMeta{}, false
+	}
+	var m subagentMeta
+	if json.Unmarshal(raw, &m) != nil {
+		return subagentMeta{}, false
+	}
+	return m, true
 }
 
 // parentWatch reports, on each call, whether the process that started the
@@ -175,16 +227,29 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 	// Claude signals no terminal approve: the transcript that records the
 	// call is the proof, so the watch starts before the request is visible.
 	watch := newToolWatch(in.callTranscript, in.AgentID != "", in.ToolName, in.ToolInput)
+	// A stop flag the asking subagent's meta already holds as the dialog
+	// opens proves nothing about this dialog: only a later change to it does.
+	var atOpen subagentMeta
+	metaAtOpen := false
+	if in.AgentID != "" && watch.found() {
+		atOpen, metaAtOpen = readSubagentMeta(watch.path, in.AgentID)
+	}
 	if dialog.Open(dir, req) != nil {
 		return 0
 	}
 	deadline := opened.Add(permissionHookTimeout * time.Second)
+	reason := "" // why the deadline expires, when it is not the installed timeout
 	wait := h.poll
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	resolve := func(outcome, label, by string) bool {
 		won, err := dialog.Resolve(dir, dialog.Resolved{ID: req.ID, Outcome: outcome, Label: label, By: by, At: h.now().UTC()})
 		return won && err == nil
+	}
+	// expire closes the dialog with no decision. why, when set, is the
+	// resolution's label: Buzz shows "→ Expired: <why>".
+	expire := func(why string) {
+		resolve(dialog.OutcomeExpired, why, dialog.ByTimeout)
 	}
 	for {
 		phase, _, a, _, _ := dialog.Lookup(dir, req.ID)
@@ -213,8 +278,24 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 			resolve(dialog.OutcomeTerminal, "", dialog.ByTerminal)
 			return 0
 		}
-		if h.parentGone != nil && h.parentGone() || !h.now().Before(deadline) {
-			resolve(dialog.OutcomeExpired, "", dialog.ByTimeout)
+		// answered() already looked for the transcript on this tick.
+		if in.AgentID != "" && watch.path != "" {
+			if m, ok := readSubagentMeta(watch.path, in.AgentID); ok {
+				if m.background() && opened.Add(backgroundAgentTimeout).Before(deadline) {
+					deadline, reason = opened.Add(backgroundAgentTimeout), "no answer in 1 h (background agent)"
+				}
+				if m.ended() && metaAtOpen && !atOpen.ended() {
+					expire("the asking agent ended")
+					return 0
+				}
+			}
+		}
+		if h.parentGone != nil && h.parentGone() {
+			expire("")
+			return 0
+		}
+		if !h.now().Before(deadline) {
+			expire(reason)
 			return 0
 		}
 		select {
