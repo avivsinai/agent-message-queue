@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.140.1](https://github.com/avivsinai/agent-message-queue/compare/v0.140.0...v0.140.1) (2026-11-11)
+
+
+### Performance Improvements
+
+* **remote:** an idle serve stops re-reading unchanged request records ([#1460](https://github.com/avivsinai/agent-message-queue/issues/1460)) ([f476eec](https://github.com/avivsinai/agent-message-queue/commit/f476eec5dd71049beb74e3ed7d1dfa383eb49d57))
+
 ## [0.140.0](https://github.com/avivsinai/agent-message-queue/compare/v0.139.0...v0.140.0) (2026-11-11)
 
 
