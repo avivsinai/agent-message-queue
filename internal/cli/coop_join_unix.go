@@ -6,10 +6,15 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/claudeidentity"
+	"github.com/avivsinai/agent-message-queue/internal/cli/wakemutation"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
@@ -30,15 +35,17 @@ func runCoopJoin(args []string) error {
 		"",
 		"After a join, amq commands and the co-op hooks of this session use the handle",
 		"with no --me and no AM_* variable: they find the binding by",
-		"CLAUDE_CODE_SESSION_ID. The binding lasts as long as the session id, so it",
-		"survives a resume. A new or forked session joins again.",
+		"CLAUDE_CODE_SESSION_ID. The binding lasts as long as the session id: it",
+		"survives a resume and a compaction. A new or forked session, and a session",
+		"after /clear, has a new id and joins again.",
 		"",
 		"The root comes from the project configuration, as for other commands; the",
 		"session must exist (amq session create). The mailbox of a new handle is",
 		"created. The command refuses a session that has AM_* identity variables, a",
-		"handle that another Claude session holds (run amq coop leave there), and a",
-		"handle with a running wake. Joining again with the same handle changes",
-		"nothing; another handle replaces the first.",
+		"handle that another running Claude session holds (run amq coop leave there),",
+		"and a handle with a running wake. It takes the handle of a session that no",
+		"longer runs, for example one that /clear ended. Joining again with the same",
+		"handle changes nothing; another handle replaces the first.",
 		"",
 		"It prints the unread count. No wake rings the session: run amq drain",
 		"--include-body between tasks.")
@@ -96,10 +103,10 @@ func runCoopJoin(args []string) error {
 	if id, err = validateRecordedIdentity(id, "this Claude session's"); err != nil {
 		return err
 	}
-	err = claudeidentity.Bind(claudeidentity.Record{ClaudeSession: claudeSession, ConfigDir: configDir, Identity: id})
+	err = claudeidentity.Bind(claudeidentity.Record{ClaudeSession: claudeSession, ConfigDir: configDir, Identity: id}, claudeSessionRuns)
 	var held *claudeidentity.HeldError
 	if errors.As(err, &held) {
-		return ActionRequiredError("handle %s in %s is held by Claude session %s; run amq coop leave in that session, or choose another handle", handle, root, held.ClaudeSession)
+		return ActionRequiredError("handle %s in %s is held by the running Claude session %s; run amq coop leave in that session, or choose another handle", handle, root, held.ClaudeSession)
 	}
 	if err != nil {
 		return err
@@ -116,6 +123,45 @@ func runCoopJoin(args []string) error {
 		return writeStdout("Inbox: %d unread. Run amq drain --include-body.\n", unread)
 	}
 	return nil
+}
+
+// claudeSessionRuns reports whether a Claude Code process still runs the
+// session of holder. Claude Code keeps one session record per process and
+// removes it at exit, so the session runs when a record in its config
+// directory names it and that record's process is alive. A session that
+// ended (the conversation was cleared or deleted, or Claude Code crashed)
+// can no longer run amq coop leave. Anything unproven counts as running: a
+// directory that cannot be listed, an unreadable record of a live process,
+// and a record of the session whose pid is of another system.
+func claudeSessionRuns(holder claudeidentity.Record) bool {
+	entries, err := os.ReadDir(filepath.Join(holder.ConfigDir, "sessions"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	for _, entry := range entries {
+		name, isRecord := strings.CutSuffix(entry.Name(), ".json")
+		pid, err := strconv.Atoi(name)
+		if !isRecord || err != nil || pid <= 0 {
+			continue
+		}
+		record, err := readClaudeSessionRecord(holder.ConfigDir, pid)
+		if err != nil {
+			if wakemutation.ProcessAlive(pid) {
+				return true
+			}
+			continue
+		}
+		if record.SessionID != holder.ClaudeSession {
+			continue
+		}
+		if (record.PidDomain != "" && record.PidDomain != runtime.GOOS) || wakemutation.ProcessAlive(pid) {
+			return true
+		}
+	}
+	return false
 }
 
 func runCoopLeave(args []string) error {

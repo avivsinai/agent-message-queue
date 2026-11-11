@@ -85,10 +85,12 @@ amq coop join --me reviewer   # once per session, inside the session
 `amq coop join` binds the session's id (`CLAUDE_CODE_SESSION_ID`) to one
 handle in `~/.amq/claude-sessions/`. After it, `amq` commands and the co-op
 hooks of that session use the handle with no `--me`. Two sessions in one
-project join with two handles. The binding survives a resume; a new or
-forked session joins again. `amq coop leave` releases the handle. `join`
-refuses a handle that another Claude session holds or that has a running
-wake, and a session that has `AM_*` variables.
+project join with two handles. The binding survives a resume and a
+compaction. `/clear` starts a session with a new id and no handle, as a new
+or forked session does: tell it to join again. `amq coop leave` releases the
+handle. `join` refuses a handle that another running Claude session holds or
+that has a running wake, and a session that has `AM_*` variables. It takes
+the handle of a session that no longer runs, such as the one `/clear` ended.
 
 No wake rings a joined session: it drains between tasks, and the Stop hook
 reports unread mail at a turn end.

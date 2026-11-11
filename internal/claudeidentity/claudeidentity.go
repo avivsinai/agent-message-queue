@@ -6,10 +6,10 @@
 // per Claude session under sessions/, and under current/ the session that
 // holds each (root identity, handle). A record whose session is no longer
 // the holder of its handle is not current: another session took the handle
-// after this one released it or rebound to a different handle. A released
-// record stays as a tombstone, so a released or damaged record stays
-// distinguishable from a session AMQ never bound. Records are never deleted
-// by AMQ.
+// after this one released it, rebound to a different handle, or stopped
+// running. A released record stays as a tombstone, so a released or damaged
+// record stays distinguishable from a session AMQ never bound. Records are
+// never deleted by AMQ.
 // The store keeps the owner user's trust boundary; it is no defense against
 // another process running as the same user.
 package claudeidentity
@@ -45,7 +45,7 @@ type Record struct {
 // or it released its binding.
 var ErrNone = errors.New("no AMQ identity is bound to this Claude session")
 
-// HeldError means another, unreleased Claude session holds the handle.
+// HeldError means another Claude session that still runs holds the handle.
 type HeldError struct{ ClaudeSession string }
 
 func (e *HeldError) Error() string {
@@ -66,10 +66,14 @@ func ValidSession(id string) bool { return sessionRe.MatchString(id) }
 // (root identity, handle), under the store lock so the record and its
 // holder marker change together. Both writes are atomic and synced, and the
 // store's directories are synced into their parents first. Bind refuses with
-// *HeldError when another unreleased session still holds the handle and
-// writes nothing. A session that binds a different handle frees its old one.
-// Binding the same session to the same identity again succeeds.
-func Bind(r Record) error {
+// *HeldError and writes nothing when another unreleased session holds the
+// handle and holderRuns reports that the session still runs. A holder that
+// no longer runs cannot release its handle, so r's session replaces it: the
+// holder marker moves, and the old record stays unreleased, so the old
+// session reads as no longer the holder and not as never bound. A session
+// that binds a different handle frees its old one. Binding the same session
+// to the same identity again succeeds.
+func Bind(r Record, holderRuns func(holder Record) bool) error {
 	r.Schema = schema
 	r.Released = false
 	if err := r.check(); err != nil {
@@ -91,7 +95,7 @@ func Bind(r Record) error {
 		if holder != "" && holder != r.ClaudeSession {
 			var other Record
 			if readStrict(sessionPath(dir, holder), &other) == nil && other.check() == nil &&
-				other.ClaudeSession == holder && !other.Released && currentKey(other) == key {
+				other.ClaudeSession == holder && !other.Released && currentKey(other) == key && holderRuns(other) {
 				return &HeldError{ClaudeSession: holder}
 			}
 		}

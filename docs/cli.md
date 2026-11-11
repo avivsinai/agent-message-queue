@@ -1839,15 +1839,17 @@ such as a session of the Claude Code desktop app.
 
 After a join, amq commands and the co-op hooks of this session use the handle
 with no --me and no AM_* variable: they find the binding by
-CLAUDE_CODE_SESSION_ID. The binding lasts as long as the session id, so it
-survives a resume. A new or forked session joins again.
+CLAUDE_CODE_SESSION_ID. The binding lasts as long as the session id: it
+survives a resume and a compaction. A new or forked session, and a session
+after /clear, has a new id and joins again.
 
 The root comes from the project configuration, as for other commands; the
 session must exist (amq session create). The mailbox of a new handle is
 created. The command refuses a session that has AM_* identity variables, a
-handle that another Claude session holds (run amq coop leave there), and a
-handle with a running wake. Joining again with the same handle changes
-nothing; another handle replaces the first.
+handle that another running Claude session holds (run amq coop leave there),
+and a handle with a running wake. It takes the handle of a session that no
+longer runs, for example one that /clear ended. Joining again with the same
+handle changes nothing; another handle replaces the first.
 
 It prints the unread count. No wake rings the session: run amq drain
 --include-body between tasks.

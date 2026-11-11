@@ -3,17 +3,44 @@
 package cli
 
 // Purpose: guards amq coop join and the identity a joined Claude Code
-// session adopts. The test breaks if a joined session does not get its
-// handle and session root with no AM_* variable, if peers cannot send to a
-// handle that only join created, if two sessions can hold one handle, if a join in a session that has AM_* variables succeeds, or
-// if a session that left keeps the identity.
+// session adopts. The first test breaks if a joined session does not get
+// its handle and session root with no AM_* variable, if peers cannot send
+// to a handle that only join created, if two running sessions can hold one
+// handle, if a join in a session that has AM_* variables succeeds, or if a
+// session that left keeps the identity. The second test is the regression
+// test for a defect seen live in the desktop app: /clear ends the session's
+// Claude Code process, the next prompt starts a session with a new id, and
+// that session could not join with its own handle because the ended session
+// held it and nothing could run amq coop leave there.
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+// claudeSessionRecord writes the session record a Claude Code process pid
+// keeps while it runs claudeSession, and returns its path.
+func claudeSessionRecord(t *testing.T, pid int, claudeSession string) string {
+	t.Helper()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(home, ".claude", "sessions")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, fmt.Sprintf("%d.json", pid))
+	record := fmt.Sprintf(`{"pid":%d,"sessionId":%q,"pidDomain":%q}`, pid, claudeSession, runtime.GOOS)
+	if err := os.WriteFile(path, []byte(record), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
 
 func TestCoopJoinBindsTheSessionAndCommandsAdoptIt(t *testing.T) {
 	clearSendMailboxTestEnv(t)
@@ -63,6 +90,9 @@ func TestCoopJoinBindsTheSessionAndCommandsAdoptIt(t *testing.T) {
 	if me, _ := adopted(second); me != "" {
 		t.Fatalf("a session that did not join adopted handle %q", me)
 	}
+	// The first session runs: this test process stands in for its Claude
+	// Code process.
+	claudeSessionRecord(t, os.Getpid(), first)
 	if _, err := join(second, "reviewer"); GetExitCode(err) != ExitActionRequired || !strings.Contains(err.Error(), first) {
 		t.Fatalf("second session took a held handle: %v, want action required naming session %s", err, first)
 	}
@@ -82,5 +112,47 @@ func TestCoopJoinBindsTheSessionAndCommandsAdoptIt(t *testing.T) {
 	}
 	if me, _ := adopted(first); me != "" {
 		t.Fatalf("a session that left still adopts handle %q", me)
+	}
+}
+
+func TestCoopJoinTakesTheHandleOfASessionThatEnded(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Chdir(t.TempDir())
+	if _, err := captureStdout(t, func() error { return runCoopInit([]string{"--agents", "claude,codex", "--no-gitignore"}) }); err != nil {
+		t.Fatal(err)
+	}
+	const ended, next = "7c29e148-77eb-47c0-8984-10c13b4700b1", "7c29e148-77eb-47c0-8984-10c13b4700b2"
+	join := func(claudeSession string) error {
+		t.Helper()
+		t.Setenv(envClaudeSession, claudeSession)
+		_, err := captureStdout(t, func() error { return runCoopJoin([]string{"--me", "reviewer"}) })
+		return err
+	}
+	record := claudeSessionRecord(t, os.Getpid(), ended)
+	if err := join(ended); err != nil {
+		t.Fatal(err)
+	}
+	// The process of the first session exits and Claude Code removes its
+	// record, as at /clear.
+	if err := os.Remove(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := join(next); err != nil {
+		t.Fatalf("join with the handle of an ended session: %v", err)
+	}
+	t.Setenv(envClaudeSession, next)
+	if err := adoptClaudeSessionIdentity(); err != nil || os.Getenv(envMe) != "reviewer" {
+		t.Fatalf("the new session adopted %q, %v; want reviewer", os.Getenv(envMe), err)
+	}
+	for _, key := range identityEnvKeys {
+		_ = os.Unsetenv(key)
+	}
+	// The ended session, if it comes back, must not act under the handle
+	// and must not read as a session that never joined.
+	t.Setenv(envClaudeSession, ended)
+	if err := adoptClaudeSessionIdentity(); GetExitCode(err) != ExitContextMismatch || !strings.Contains(err.Error(), next) {
+		t.Fatalf("the ended session's adoption = %v, want a context mismatch naming session %s", err, next)
 	}
 }
