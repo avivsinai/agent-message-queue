@@ -54,50 +54,57 @@ func adoptCodexThreadIdentity() error {
 	if err != nil {
 		return ContextMismatchError("this Codex thread's AMQ identity cannot be used: %v; start the session again with amq coop exec, or set AM_ROOT and AM_ME explicitly", err)
 	}
-	rec, err = validateRecordedIdentity(rec)
+	id, err := validateRecordedIdentity(launch.Identity{
+		Root: rec.Root, BaseRoot: rec.BaseRoot, Session: rec.Session,
+		Me: rec.Me, RootID: rec.RootID, BaseRootID: rec.BaseRootID,
+	}, "this Codex thread's")
 	if err != nil {
 		return err
 	}
-	values := map[string]string{
-		envRoot: rec.Root, envBaseRoot: rec.BaseRoot, envSession: rec.Session,
-		envMe: rec.Me, envRootID: rec.RootID, envBaseRootID: rec.BaseRootID,
-	}
+	return adoptIdentity(id, "this Codex thread's")
+}
+
+// adoptIdentity makes id this process's identity: it sets every identity
+// variable, or none. whose names the session in the error.
+func adoptIdentity(id launch.Identity, whose string) error {
+	values := id.Env()
 	for _, key := range identityEnvKeys {
 		if err := os.Setenv(key, values[key]); err != nil {
 			for _, k := range identityEnvKeys {
 				_ = os.Unsetenv(k)
 			}
-			return ContextMismatchError("cannot adopt this Codex thread's AMQ identity: %v", err)
+			return ContextMismatchError("cannot adopt %s AMQ identity: %v", whose, err)
 		}
 	}
 	return nil
 }
 
 // validateRecordedIdentity applies the checks an inherited pin gets, before
-// the identity is published: a valid handle and session, absolute roots in
-// the right relation, well-formed tokens, and trees that are still the ones
-// coop exec pinned. The record outlives a reboot, so it returns rec with the
-// current tokens of those same trees for the pins it exports.
-func validateRecordedIdentity(rec codexidentity.Record) (codexidentity.Record, error) {
-	if handle, err := normalizeHandle(rec.Me); err != nil || handle != rec.Me {
-		return rec, ContextMismatchError("this Codex thread's recorded AMQ handle %q is invalid", rec.Me)
+// a recorded identity is adopted: a valid handle and session, absolute roots
+// in the right relation, well-formed tokens, and trees that are still the
+// ones the record pinned. A record outlives a reboot, so it returns id with
+// the current tokens of those same trees for the pins it exports. whose
+// names the session in the errors.
+func validateRecordedIdentity(id launch.Identity, whose string) (launch.Identity, error) {
+	if handle, err := normalizeHandle(id.Me); err != nil || handle != id.Me {
+		return id, ContextMismatchError("%s recorded AMQ handle %q is invalid", whose, id.Me)
 	}
-	want := rec.BaseRoot
-	if rec.Session != "" {
-		if err := validateSessionName(rec.Session); err != nil {
-			return rec, ContextMismatchError("this Codex thread's recorded AMQ session %q is invalid", rec.Session)
+	want := id.BaseRoot
+	if id.Session != "" {
+		if err := validateSessionName(id.Session); err != nil {
+			return id, ContextMismatchError("%s recorded AMQ session %q is invalid", whose, id.Session)
 		}
-		want = filepath.Join(rec.BaseRoot, rec.Session)
+		want = filepath.Join(id.BaseRoot, id.Session)
 	}
-	if filepath.Clean(rec.Root) != filepath.Clean(want) {
-		return rec, ContextMismatchError("this Codex thread's recorded AMQ root %s is not %s", rec.Root, want)
+	if filepath.Clean(id.Root) != filepath.Clean(want) {
+		return id, ContextMismatchError("%s recorded AMQ root %s is not %s", whose, id.Root, want)
 	}
-	if !validTreeIdentityToken(rec.RootID) || !validTreeIdentityToken(rec.BaseRootID) {
-		return rec, ContextMismatchError("this Codex thread's recorded AMQ identity tokens are malformed")
+	if !validTreeIdentityToken(id.RootID) || !validTreeIdentityToken(id.BaseRootID) {
+		return id, ContextMismatchError("%s recorded AMQ identity tokens are malformed", whose)
 	}
-	rec.BaseRootID = currentPersistedToken(rec.BaseRoot, rec.BaseRootID)
-	rec.RootID = currentPersistedToken(rec.Root, rec.RootID)
-	return rec, verifyRootUnderBase(rec.BaseRoot, rec.BaseRootID, rec.Session, rec.Root, rec.RootID)
+	id.BaseRootID = currentPersistedToken(id.BaseRoot, id.BaseRootID)
+	id.RootID = currentPersistedToken(id.Root, id.RootID)
+	return id, verifyRootUnderBase(id.BaseRoot, id.BaseRootID, id.Session, id.Root, id.RootID)
 }
 
 // currentPersistedToken returns the current token of path when stored, a
@@ -115,18 +122,10 @@ func currentPersistedToken(path, stored string) string {
 // that thread. Without complete root identity tokens it returns nil, so no
 // thread is handed to a TUI with an identity AMQ could not record.
 func codexThreadIdentityRecorder(env []string) func(thread string) error {
-	get := func(key string) string {
-		prefix := key + "="
-		for _, entry := range env {
-			if v, ok := strings.CutPrefix(entry, prefix); ok {
-				return v
-			}
-		}
-		return ""
-	}
+	id := launch.IdentityFromEnv(env)
 	rec := codexidentity.Record{
-		Root: get(envRoot), BaseRoot: get(envBaseRoot), Session: get(envSession),
-		Me: get(envMe), RootID: get(envRootID), BaseRootID: get(envBaseRootID),
+		Root: id.Root, BaseRoot: id.BaseRoot, Session: id.Session,
+		Me: id.Me, RootID: id.RootID, BaseRootID: id.BaseRootID,
 	}
 	if rec.Root == "" || rec.Me == "" || rec.RootID == "" || rec.BaseRootID == "" {
 		return nil

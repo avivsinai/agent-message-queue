@@ -6,10 +6,6 @@ import (
 	"strings"
 )
 
-// IdentityEnvKeys are the variables that make up an AMQ participant
-// identity.
-var IdentityEnvKeys = []string{"AM_ROOT", "AM_BASE_ROOT", "AM_SESSION", "AM_ME", "AM_ROOT_ID", "AM_BASE_ROOT_ID"}
-
 const (
 	codexIdentitySetPrefix   = "shell_environment_policy.set."
 	codexIdentityPlaceholder = "__AMQ_IDENTITY__"

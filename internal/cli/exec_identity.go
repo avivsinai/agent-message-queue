@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/execidentity"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
@@ -23,15 +22,7 @@ func recordExecIdentity(binaryPath string, env []string) {
 }
 
 func publishExecIdentity(harness string, env []string) error {
-	get := func(key string) string {
-		prefix := key + "="
-		for _, entry := range env {
-			if v, ok := strings.CutPrefix(entry, prefix); ok {
-				return v
-			}
-		}
-		return ""
-	}
+	id := launch.IdentityFromEnv(env)
 	holder, err := launch.HolderOf(os.Getpid())
 	if err != nil {
 		return err
@@ -42,7 +33,7 @@ func publishExecIdentity(harness string, env []string) error {
 	}
 	return execidentity.Publish(execidentity.Record{
 		Harness: harness, Holder: holder, StartUnix: start,
-		Root: get(envRoot), BaseRoot: get(envBaseRoot), Session: get(envSession),
-		Me: get(envMe), RootID: get(envRootID), BaseRootID: get(envBaseRootID),
+		Root: id.Root, BaseRoot: id.BaseRoot, Session: id.Session,
+		Me: id.Me, RootID: id.RootID, BaseRootID: id.BaseRootID,
 	})
 }
