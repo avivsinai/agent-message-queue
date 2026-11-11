@@ -92,9 +92,11 @@ amq coop join --me reviewer   # once per session, inside the session
   it, `amq` commands and the co-op hooks of that session use the handle with
   no `--me`. Two sessions in one project join with two handles. The binding
   survives a resume and a compaction. `amq coop leave` releases the handle.
-  `join` refuses a handle that another running Claude session holds or that
-  has a running wake, and a session that has `AM_*` variables. It takes the
-  handle of a session that no longer runs.
+  `join` must run through the session's own shell tool: it requires the
+  session record that Claude Code keeps for the process it runs under. It
+  refuses a handle that another running Claude session holds or that has a
+  running wake, and a session that has `AM_*` variables. It takes the handle
+  of a session that no longer runs.
 - **The wait hook is the doorbell.** Claude Code keeps it in the background
   (`asyncRewake`). When mail arrives it prints the doorbell and the session
   starts a turn, also when the session is idle or not on screen. It rings
