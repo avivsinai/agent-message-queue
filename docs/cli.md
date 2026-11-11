@@ -1845,11 +1845,15 @@ after /clear, has a new id and joins again.
 
 The root comes from the project configuration, as for other commands; the
 session must exist (amq session create). The mailbox of a new handle is
-created. The command refuses a session that has AM_* identity variables, a
-handle that another running Claude session holds (run amq coop leave there),
-and a handle with a running wake. It takes the handle of a session that no
-longer runs, for example one that /clear ended. Joining again with the same
-handle changes nothing; another handle replaces the first.
+created.
+
+The command must run under the Claude Code process of the session; it finds
+that process by the session record Claude Code keeps while it runs. It
+refuses a session that has AM_* identity variables, a handle that another
+running Claude session holds (run amq coop leave there), and a handle with a
+running wake. It takes the handle of a session that no longer runs, for
+example one that /clear ended. Joining again with the same handle changes
+nothing; another handle replaces the first.
 
 It prints the unread count. No wake rings the session: run amq drain
 --include-body between tasks.
@@ -1871,7 +1875,8 @@ Usage:
 Release the handle that amq coop join bound to this Claude Code session.
 The mailbox and its messages stay. After it, amq commands in this session
 resolve their context as in a session that never joined, and another
-session can join with the handle.
+session can join with the handle. When another session took the handle
+after this one ended and came back, that session keeps it.
 ```
 
 ## amq coop install-hooks

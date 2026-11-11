@@ -92,9 +92,9 @@ func TestASecondSessionCannotTakeAHeldHandle(t *testing.T) {
 	if _, err := Lookup(sessA, a.ConfigDir); err != nil {
 		t.Fatal(err)
 	}
-	left, err := Release(sessA, a.ConfigDir)
-	if err != nil || left.Me != "reviewer" || left.Released {
-		t.Fatalf("release returned %+v, %v", left, err)
+	left, freed, err := Release(sessA, a.ConfigDir)
+	if err != nil || !freed || left.Me != "reviewer" || left.Released {
+		t.Fatalf("release returned %+v, freed %v, %v", left, freed, err)
 	}
 	if _, err := Lookup(sessA, a.ConfigDir); !errors.Is(err, ErrNone) {
 		t.Fatalf("released session: got %v, want ErrNone", err)
@@ -102,7 +102,7 @@ func TestASecondSessionCannotTakeAHeldHandle(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(SessionsDir(home), sessA+".json")); err != nil {
 		t.Fatalf("tombstone missing: %v", err)
 	}
-	if _, err := Release(sessA, a.ConfigDir); !errors.Is(err, ErrNone) {
+	if _, _, err := Release(sessA, a.ConfigDir); !errors.Is(err, ErrNone) {
 		t.Fatalf("second release: got %v, want ErrNone", err)
 	}
 	if err := Bind(b, running); err != nil {
