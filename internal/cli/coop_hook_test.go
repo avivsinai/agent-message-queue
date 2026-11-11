@@ -5,8 +5,8 @@ package cli
 // session or unread count, or prints anything but the hook JSON. The stop
 // tests break if new mail does not block once, a repeat in the chain blocks
 // again, or a live wake's doorbell mail blocks. The installer test breaks if
-// an entry loses its AM_ME gate or matcher, or if old project entries that
-// run the co-op scripts go unreported.
+// an entry loses its participant gate or matcher, or if old project entries
+// that run the co-op scripts go unreported.
 
 import (
 	"bytes"
@@ -120,14 +120,17 @@ func TestCoopInstallHooksWritesTheGatedEntryAndListsOldOnes(t *testing.T) {
 	if err := json.Unmarshal(raw, &settings); err != nil {
 		t.Fatal(err)
 	}
+	// Every entry starts no amq in a session that does not take part: one
+	// with no AM_ME and no binding file for its Claude session.
+	gate := coopHookMarker + `[ -n "${AM_ME-}" ] || [ -e '` + filepath.Join(home, ".amq", "claude-sessions", "sessions") + `/'"${CLAUDE_CODE_SESSION_ID-}".json ] || exit 0; `
+	amq := "'" + mustExecutable(t) + "' --no-update-check coop hook "
 	groups := settings.Hooks["SessionStart"]
 	if len(groups) != 1 || groups[0].Matcher != coopSessionStartSources || len(groups[0].Hooks) != 1 ||
-		!strings.HasPrefix(groups[0].Hooks[0].Command, coopHookMarker+`[ -z "${AM_ME-}" ] || exec `) {
+		groups[0].Hooks[0].Command != gate+"exec "+amq+"session-start" {
 		t.Fatalf("SessionStart = %+v, want one gated co-op entry", groups)
 	}
 	stops := settings.Hooks["Stop"]
-	if len(stops) != 1 || len(stops[0].Hooks) != 1 ||
-		stops[0].Hooks[0].Command != coopHookMarker+`[ -z "${AM_ME-}" ] || `+"'"+mustExecutable(t)+"' --no-update-check coop hook stop || true" {
+	if len(stops) != 1 || len(stops[0].Hooks) != 1 || stops[0].Hooks[0].Command != gate+amq+"stop || true" {
 		t.Fatalf("Stop = %+v, want one gated co-op entry", stops)
 	}
 }

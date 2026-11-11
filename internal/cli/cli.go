@@ -61,6 +61,11 @@ func Run(args []string, version string) error {
 	if err := adoptCodexThreadIdentity(); err != nil {
 		return err
 	}
+	if !managesClaudeBinding(args) {
+		if err := adoptClaudeSessionIdentity(); err != nil {
+			return err
+		}
+	}
 	return cmd.Handler(args[1:])
 }
 

@@ -8,7 +8,7 @@ lives in the narrowest scope that owns it.
 | Agent | `<root>/agents/<me>/` | `.wake.settings` |
 | Root | `<root>/meta/` | `config.json` |
 | Project | the project directory | `.amqrc`, `.amq/launch.json` |
-| User and host | `~/.amq/` | `wake.settings`, `remote/binding.json`, `codex-threads/`, `state/` |
+| User and host | `~/.amq/` | `wake.settings`, `remote/binding.json`, `codex-threads/`, `claude-sessions/`, `state/` |
 
 The user scope belongs to one user on one machine. It never travels with a
 root: a root on shared storage meets each host's own user scope.

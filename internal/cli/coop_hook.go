@@ -27,8 +27,10 @@ func runCoopHook(args []string) error {
 	fs := flag.NewFlagSet("coop hook", flag.ContinueOnError)
 	usage := usageWithFlags(fs, "amq coop hook session-start|stop",
 		"Claude Code hook receivers for the co-op hooks; amq coop install-hooks installs them.",
-		"They read AM_ME, AM_ROOT and the session pin from the environment, never read",
-		".amqrc, and always exit 0 once the arguments parse.",
+		"They read AM_ME, AM_ROOT and the session pin from the environment, or the",
+		"identity amq coop join bound to the session, and never read .amqrc. They exit",
+		"0 once the arguments parse, except that a recorded identity that cannot be",
+		"used is a context mismatch (exit 5), as for every command.",
 		"",
 		"session-start prints the co-op preamble as SessionStart additionalContext:",
 		"the agent's handle, session and peers, its unread count, and whether a wake",

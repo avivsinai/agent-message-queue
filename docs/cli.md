@@ -57,6 +57,8 @@ options not repeated here.
 - [amq wake uninstall-dialog-hook](#amq-wake-uninstall-dialog-hook)
 - [amq coop init](#amq-coop-init)
 - [amq coop exec](#amq-coop-exec)
+- [amq coop join](#amq-coop-join)
+- [amq coop leave](#amq-coop-leave)
 - [amq coop install-hooks](#amq-coop-install-hooks)
 - [amq coop uninstall-hooks](#amq-coop-uninstall-hooks)
 - [amq coop hook](#amq-coop-hook)
@@ -934,7 +936,9 @@ amq coop - Co-op mode for multi-agent collaboration
 Subcommands:
   init             Initialize project for co-op mode
   exec             Set up co-op mode and exec into an agent
-  install-hooks    Install the co-op Claude Code hooks for AM_ME sessions
+  join             Bind this Claude Code session to an agent handle
+  leave            Release this Claude Code session's agent handle
+  install-hooks    Install the co-op Claude Code hooks for participating sessions
   uninstall-hooks  Remove the co-op Claude Code hooks
   hook             Claude Code hook receiver: print the co-op preamble
 
@@ -1822,6 +1826,52 @@ Options:
   -y    Skip confirmation prompts (including clearing a blocking wake)
 ```
 
+## amq coop join
+
+```text
+$ amq coop join --help
+Usage:
+  amq coop join --me <handle> [--session <name>]
+
+Bind this Claude Code session to an agent handle. Run it inside the session,
+through its shell tool. It is for a session that amq coop exec did not start,
+such as a session of the Claude Code desktop app.
+
+After a join, amq commands and the co-op hooks of this session use the handle
+with no --me and no AM_* variable: they find the binding by
+CLAUDE_CODE_SESSION_ID. The binding lasts as long as the session id, so it
+survives a resume. A new or forked session joins again.
+
+The root comes from the project configuration, as for other commands; the
+session must exist (amq session create). The mailbox of a new handle is
+created. The command refuses a session that has AM_* identity variables, a
+handle that another Claude session holds (run amq coop leave there), and a
+handle with a running wake. Joining again with the same handle changes
+nothing; another handle replaces the first.
+
+It prints the unread count. No wake rings the session: run amq drain
+--include-body between tasks.
+
+Options:
+  -me string
+        Agent handle for this session (required)
+  -session string
+        Session name (default: the project's declared default session)
+```
+
+## amq coop leave
+
+```text
+$ amq coop leave --help
+Usage:
+  amq coop leave
+
+Release the handle that amq coop join bound to this Claude Code session.
+The mailbox and its messages stay. After it, amq commands in this session
+resolve their context as in a session that never joined, and another
+session can join with the handle.
+```
+
 ## amq coop install-hooks
 
 ```text
@@ -1833,10 +1883,12 @@ Install the co-op hooks in $CLAUDE_CONFIG_DIR/settings.json (default
 ~/.claude/settings.json).
 
 SessionStart (startup, resume, clear, compact) gives the agent its co-op
-preamble: handle, session, peers, unread count, and whether a wake rings the
-terminal. Stop blocks a stop once for unread mail that no wake doorbell will
-announce. The hooks run only in sessions with AM_ME set, which amq coop exec
-and amq launch set; other Claude Code sessions start no amq.
+preamble: handle, session, peers, unread count, and what announces new mail.
+Stop blocks a stop once for unread mail that no wake doorbell will announce.
+
+The hooks run only in sessions that take part: sessions with AM_ME set, which
+amq coop exec and amq launch set, and sessions bound with amq coop join.
+Other Claude Code sessions start no amq.
 
 Running again keeps the same entries and replaces entries of another amq
 binary. Other settings and hooks are not changed. It also lists old project
@@ -1867,8 +1919,10 @@ Usage:
   amq coop hook session-start|stop
 
 Claude Code hook receivers for the co-op hooks; amq coop install-hooks installs them.
-They read AM_ME, AM_ROOT and the session pin from the environment, never read
-.amqrc, and always exit 0 once the arguments parse.
+They read AM_ME, AM_ROOT and the session pin from the environment, or the
+identity amq coop join bound to the session, and never read .amqrc. They exit
+0 once the arguments parse, except that a recorded identity that cannot be
+used is a context mismatch (exit 5), as for every command.
 
 session-start prints the co-op preamble as SessionStart additionalContext:
 the agent's handle, session and peers, its unread count, and whether a wake

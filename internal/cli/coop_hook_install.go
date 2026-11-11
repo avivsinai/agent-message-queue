@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/avivsinai/agent-message-queue/internal/claudeidentity"
 	"github.com/avivsinai/agent-message-queue/internal/hookfile"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 )
@@ -21,34 +22,37 @@ const (
 // coopHookEvents are the events amq coop install-hooks wires.
 var coopHookEvents = []string{"SessionStart", "Stop"}
 
-// coopHookCommand is the shell command one co-op hook runs. The AM_ME test
-// runs in the harness shell, so a session that does not take part starts
-// no amq. On SessionStart exec replaces that shell with amq: exit 2 from an
-// older amq there only shows a notice. On Stop exit 2 blocks the stop, and
-// an older amq at this path would exit 2 on the unknown subcommand, so the
-// shell stays to turn that into exit 0 with || true.
-func coopHookCommand(bin, verb string) string {
-	quoted := "'" + strings.ReplaceAll(bin, "'", `'\''`) + "'"
-	gate := coopHookMarker + `[ -z "${AM_ME-}" ] || `
+// coopHookCommand is the shell command one co-op hook runs. The gate runs
+// in the harness shell, so a session that does not take part starts no
+// amq: a participant has AM_ME (amq coop exec set it) or a binding file in
+// store for its Claude session (amq coop join wrote it). On SessionStart
+// exec replaces that shell with amq: exit 2 from an older amq there only
+// shows a notice. On Stop exit 2 blocks the stop, and an older amq at this
+// path would exit 2 on the unknown subcommand, so the shell stays to turn
+// that into exit 0 with || true.
+func coopHookCommand(bin, store, verb string) string {
+	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+	gate := coopHookMarker + `[ -n "${AM_ME-}" ] || [ -e ` + quote(store+"/") + `"${` + envClaudeSession + `-}".json ] || exit 0; `
+	amq := quote(bin) + " --no-update-check coop hook " + verb
 	if verb == "stop" {
-		return gate + quoted + " --no-update-check coop hook stop || true"
+		return gate + amq + " || true"
 	}
-	return gate + "exec " + quoted + " --no-update-check coop hook " + verb
+	return gate + "exec " + amq
 }
 
-func coopHooks(bin string) []hookfile.CommandHook {
+func coopHooks(bin, store string) []hookfile.CommandHook {
 	return []hookfile.CommandHook{
 		{
 			Event:   "SessionStart",
 			Matcher: coopSessionStartSources,
 			Marker:  coopHookMarker,
-			Command: coopHookCommand(bin, "session-start"),
+			Command: coopHookCommand(bin, store, "session-start"),
 			Timeout: 2,
 		},
 		{
 			Event:   "Stop",
 			Marker:  coopHookMarker,
-			Command: coopHookCommand(bin, "stop"),
+			Command: coopHookCommand(bin, store, "stop"),
 			Timeout: 2,
 		},
 	}
@@ -62,10 +66,12 @@ func runCoopInstallHooks(args []string) error {
 		"~/.claude/settings.json).",
 		"",
 		"SessionStart (startup, resume, clear, compact) gives the agent its co-op",
-		"preamble: handle, session, peers, unread count, and whether a wake rings the",
-		"terminal. Stop blocks a stop once for unread mail that no wake doorbell will",
-		"announce. The hooks run only in sessions with AM_ME set, which amq coop exec",
-		"and amq launch set; other Claude Code sessions start no amq.",
+		"preamble: handle, session, peers, unread count, and what announces new mail.",
+		"Stop blocks a stop once for unread mail that no wake doorbell will announce.",
+		"",
+		"The hooks run only in sessions that take part: sessions with AM_ME set, which",
+		"amq coop exec and amq launch set, and sessions bound with amq coop join.",
+		"Other Claude Code sessions start no amq.",
 		"",
 		"Running again keeps the same entries and replaces entries of another amq",
 		"binary. Other settings and hooks are not changed. It also lists old project",
@@ -79,7 +85,11 @@ func runCoopInstallHooks(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve the amq binary for the co-op hooks: %w", err)
 	}
-	hooks := coopHooks(bin)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve home for the co-op hooks: %w", err)
+	}
+	hooks := coopHooks(bin, claudeidentity.SessionsDir(home))
 	if *dryRun {
 		for _, hook := range hooks {
 			matcher := hook.Matcher
@@ -91,10 +101,6 @@ func runCoopInstallHooks(args []string) error {
 			}
 		}
 		return writeLegacyCoopHookEntries()
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("resolve home for the co-op hooks: %w", err)
 	}
 	if err := claude.InstallCommandHooks(home, hooks); err != nil {
 		return err
