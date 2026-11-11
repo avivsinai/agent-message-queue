@@ -23,7 +23,9 @@ import (
 )
 
 // claudeSessionRecord writes the session record a Claude Code process pid
-// keeps while it runs claudeSession, and returns its path.
+// keeps while it runs claudeSession, and returns its path. With the pid of
+// this test's parent process, the test runs "inside" that session; with
+// the pid of the test itself, the session runs somewhere else.
 func claudeSessionRecord(t *testing.T, pid int, claudeSession string) string {
 	t.Helper()
 	home, err := os.UserHomeDir()
@@ -55,6 +57,7 @@ func TestCoopJoinBindsTheSessionAndCommandsAdoptIt(t *testing.T) {
 	join := func(claudeSession, handle string) (string, error) {
 		t.Helper()
 		t.Setenv(envClaudeSession, claudeSession)
+		claudeSessionRecord(t, os.Getppid(), claudeSession)
 		return captureStdout(t, func() error { return runCoopJoin([]string{"--me", handle}) })
 	}
 	// adopted runs the adoption every amq command starts with, and returns
@@ -91,8 +94,7 @@ func TestCoopJoinBindsTheSessionAndCommandsAdoptIt(t *testing.T) {
 	if me, _ := adopted(second); me != "" {
 		t.Fatalf("a session that did not join adopted handle %q", me)
 	}
-	// The first session runs: this test process stands in for its Claude
-	// Code process.
+	// The first session still runs, in another process.
 	claudeSessionRecord(t, os.Getpid(), first)
 	if _, err := join(second, "reviewer"); GetExitCode(err) != ExitActionRequired || !strings.Contains(err.Error(), first) {
 		t.Fatalf("second session took a held handle: %v, want action required naming session %s", err, first)
@@ -125,19 +127,17 @@ func TestCoopJoinTakesTheHandleOfASessionThatEnded(t *testing.T) {
 		t.Fatal(err)
 	}
 	const ended, next = "7c29e148-77eb-47c0-8984-10c13b4700b1", "7c29e148-77eb-47c0-8984-10c13b4700b2"
+	// join runs the command inside claudeSession: the one Claude Code
+	// process of this test now runs that session, so a session that joined
+	// before has no record any more, as after /clear.
 	join := func(claudeSession string) error {
 		t.Helper()
 		t.Setenv(envClaudeSession, claudeSession)
+		claudeSessionRecord(t, os.Getppid(), claudeSession)
 		_, err := captureStdout(t, func() error { return runCoopJoin([]string{"--me", "reviewer"}) })
 		return err
 	}
-	record := claudeSessionRecord(t, os.Getpid(), ended)
 	if err := join(ended); err != nil {
-		t.Fatal(err)
-	}
-	// The process of the first session exits and Claude Code removes its
-	// record, as at /clear.
-	if err := os.Remove(record); err != nil {
 		t.Fatal(err)
 	}
 	if err := join(next); err != nil {
@@ -155,5 +155,14 @@ func TestCoopJoinTakesTheHandleOfASessionThatEnded(t *testing.T) {
 	t.Setenv(envClaudeSession, ended)
 	if err := adoptClaudeSessionIdentity(); GetExitCode(err) != ExitContextMismatch || !strings.Contains(err.Error(), next) {
 		t.Fatalf("the ended session's adoption = %v, want a context mismatch naming session %s", err, next)
+	}
+	// Its leave must not free the handle the new session holds, nor say so.
+	out, err := captureStdout(t, func() error { return runCoopLeave(nil) })
+	if err != nil || strings.Contains(out, "is free") {
+		t.Fatalf("the ended session's leave = %q, %v; want no claim that the handle is free", out, err)
+	}
+	t.Setenv(envClaudeSession, next)
+	if err := adoptClaudeSessionIdentity(); err != nil || os.Getenv(envMe) != "reviewer" {
+		t.Fatalf("after the ended session's leave the new session adopted %q, %v; want reviewer", os.Getenv(envMe), err)
 	}
 }

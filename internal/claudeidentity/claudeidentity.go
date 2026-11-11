@@ -115,22 +115,23 @@ func Bind(r Record, holderRuns func(holder Record) bool) error {
 	})
 }
 
-// Release gives up the session's binding under the store lock: the handle
-// has no holder, and the record stays with Released set. It returns the
-// record as it was before the release. A session that is already released
-// returns its record and ErrNone.
-func Release(claudeSession, configDir string) (Record, error) {
+// Release gives up the session's binding under the store lock: the record
+// stays with Released set, and the handle has no holder when the session
+// was its holder. It returns the record as it was before the release, and
+// freed false when another session had taken the handle, which that
+// session keeps. A session that is already released returns its record and
+// ErrNone.
+func Release(claudeSession, configDir string) (out Record, freed bool, err error) {
 	if !ValidSession(claudeSession) {
-		return Record{}, fmt.Errorf("%q is not a Claude session id", claudeSession)
+		return Record{}, false, fmt.Errorf("%q is not a Claude session id", claudeSession)
 	}
 	dir, err := storeDir(false)
 	if err != nil {
-		return Record{}, err
+		return Record{}, false, err
 	}
 	if dir == "" {
-		return Record{}, ErrNone
+		return Record{}, false, ErrNone
 	}
-	var out Record
 	err = lock.WithExclusiveFileLock(filepath.Join(dir, ".lock"), func() error {
 		r, err := readSessionRecord(dir, claudeSession, configDir)
 		if err != nil {
@@ -151,15 +152,16 @@ func Release(claudeSession, configDir string) (Record, error) {
 			if err := clearHolder(dir, r); err != nil {
 				return err
 			}
+			freed = true
 		}
 		released := r
 		released.Released = true
 		return writeRecord(dir, released)
 	})
 	if err != nil && !errors.Is(err, ErrNone) {
-		return Record{}, err
+		return Record{}, false, err
 	}
-	return out, err
+	return out, freed, err
 }
 
 // Lookup returns the identity bound to claudeSession under configDir. It

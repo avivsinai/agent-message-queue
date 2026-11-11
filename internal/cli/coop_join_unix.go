@@ -43,11 +43,15 @@ func runCoopJoin(args []string) error {
 		"",
 		"The root comes from the project configuration, as for other commands; the",
 		"session must exist (amq session create). The mailbox of a new handle is",
-		"created. The command refuses a session that has AM_* identity variables, a",
-		"handle that another running Claude session holds (run amq coop leave there),",
-		"and a handle with a running wake. It takes the handle of a session that no",
-		"longer runs, for example one that /clear ended. Joining again with the same",
-		"handle changes nothing; another handle replaces the first.",
+		"created.",
+		"",
+		"The command must run under the Claude Code process of the session; it finds",
+		"that process by the session record Claude Code keeps while it runs. It",
+		"refuses a session that has AM_* identity variables, a handle that another",
+		"running Claude session holds (run amq coop leave there), and a handle with a",
+		"running wake. It takes the handle of a session that no longer runs, for",
+		"example one that /clear ended. Joining again with the same handle changes",
+		"nothing; another handle replaces the first.",
 		"",
 		"It prints the unread count and whether a hook wakes the session for new mail",
 		"(see amq coop install-hooks).")
@@ -66,6 +70,11 @@ func runCoopJoin(args []string) error {
 	claudeSession, configDir, ok := claudeSessionKey()
 	if !ok {
 		return ActionRequiredError("coop join must run inside a Claude Code session (%s is not set to a session id)", envClaudeSession)
+	}
+	// A later join tells a holder that runs from one that ended by this
+	// record, so a session without one cannot hold a handle.
+	if _, ok := ancestorClaudeSessionRecord(configDir, claudeSession); !ok {
+		return ActionRequiredError("coop join found no Claude Code session record for session %s (%s) among the processes this command runs under; run it through the shell tool of that session, on a current Claude Code", claudeSession, filepath.Join(configDir, "sessions"))
 	}
 	// A present identity variable is an explicit context: commands and hooks
 	// would use it and never read the binding.
@@ -149,6 +158,19 @@ func coopJoinDoorbell() string {
 	return "A hook wakes this session when mail arrives after a turn ends; it starts at the end of this turn. Do not run amq watch, amq monitor or a polling loop."
 }
 
+// ancestorClaudeSessionRecord returns the session record of the Claude Code
+// process this command runs under, when that process runs claudeSession: the
+// record of the nearest parent process that has one naming the session.
+func ancestorClaudeSessionRecord(configDir, claudeSession string) (claudeNativeRegistry, bool) {
+	for _, ancestor := range launch.Ancestors() {
+		record, err := readClaudeSessionRecord(configDir, ancestor.PID)
+		if err == nil && record.SessionID == claudeSession {
+			return record, true
+		}
+	}
+	return claudeNativeRegistry{}, false
+}
+
 // claudeSessionRuns reports whether a Claude Code process still runs the
 // session of holder. Claude Code keeps one session record per process and
 // removes it at exit, so the session runs when a record in its config
@@ -194,7 +216,8 @@ func runCoopLeave(args []string) error {
 		"Release the handle that amq coop join bound to this Claude Code session.",
 		"The mailbox and its messages stay. After it, amq commands in this session",
 		"resolve their context as in a session that never joined, and another",
-		"session can join with the handle.")
+		"session can join with the handle. When another session took the handle",
+		"after this one ended and came back, that session keeps it.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
@@ -204,12 +227,15 @@ func runCoopLeave(args []string) error {
 	if !ok {
 		return ActionRequiredError("coop leave must run inside a Claude Code session (%s is not set to a session id)", envClaudeSession)
 	}
-	rec, err := claudeidentity.Release(claudeSession, configDir)
+	rec, freed, err := claudeidentity.Release(claudeSession, configDir)
 	if errors.Is(err, claudeidentity.ErrNone) {
 		return writeStdout("This session has no handle.\n")
 	}
 	if err != nil {
 		return err
+	}
+	if !freed {
+		return writeStdout("Left: another session had taken %s in %s and keeps it.\n", rec.Me, rec.Root)
 	}
 	return writeStdout("Left: %s in %s is free.\n", rec.Me, rec.Root)
 }
