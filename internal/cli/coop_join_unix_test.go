@@ -120,6 +120,9 @@ func TestCoopJoinBindsTheSessionAndCommandsAdoptIt(t *testing.T) {
 
 func TestCoopJoinTakesTheHandleOfASessionThatEnded(t *testing.T) {
 	clearSendMailboxTestEnv(t)
+	// The adoptions below set the process's adopted binding; a later test
+	// must not see a binding of this test's home.
+	t.Cleanup(func() { adoptedClaudeBinding = nil })
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	t.Chdir(t.TempDir())
