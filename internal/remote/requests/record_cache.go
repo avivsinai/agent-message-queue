@@ -1,7 +1,6 @@
 package requests
 
 import (
-	"fmt"
 	"os"
 	"reflect"
 	"sync"
@@ -49,18 +48,28 @@ func (c *recordCache) get(path string, id statIdentity) *Record {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if e, ok := c.m[path]; ok && e.id == id {
-		return deepCopy(e.rec)
+		// A cached entry was copied once already, so this copy succeeds.
+		if rec, ok := deepCopy(e.rec); ok {
+			return rec
+		}
 	}
 	return nil
 }
 
+// put caches a private copy of rec. A record that cannot be copied is not
+// cached, so the next read decodes the file again.
 func (c *recordCache) put(path string, id statIdentity, rec *Record) {
+	cp, ok := deepCopy(rec)
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if !ok {
+		delete(c.m, path)
+		return
+	}
 	if c.m == nil {
 		c.m = map[string]cachedRecord{}
 	}
-	c.m[path] = cachedRecord{id: id, rec: deepCopy(rec)}
+	c.m[path] = cachedRecord{id: id, rec: cp}
 }
 
 func (c *recordCache) drop(path string) {
@@ -70,47 +79,57 @@ func (c *recordCache) drop(path string) {
 }
 
 // deepCopy copies a record built from JSON-decoded values: exported struct
-// fields, pointers, slices, maps, and scalars.
-func deepCopy(rec *Record) *Record {
+// fields, pointers, slices, maps, and scalars. It reports false for any other
+// shape (an unexported field, a channel, a func), and the caller then does
+// not cache.
+func deepCopy(rec *Record) (*Record, bool) {
 	out := reflect.New(reflect.TypeOf(*rec))
-	copyValue(out.Elem(), reflect.ValueOf(rec).Elem())
-	return out.Interface().(*Record)
+	if !copyValue(out.Elem(), reflect.ValueOf(rec).Elem()) {
+		return nil, false
+	}
+	return out.Interface().(*Record), true
 }
 
-func copyValue(dst, src reflect.Value) {
+func copyValue(dst, src reflect.Value) bool {
 	switch src.Kind() {
 	case reflect.Pointer:
 		if src.IsNil() {
-			return
+			return true
 		}
 		dst.Set(reflect.New(src.Type().Elem()))
-		copyValue(dst.Elem(), src.Elem())
+		return copyValue(dst.Elem(), src.Elem())
 	case reflect.Slice:
 		if src.IsNil() {
-			return
+			return true
 		}
 		dst.Set(reflect.MakeSlice(src.Type(), src.Len(), src.Len()))
 		for i := range src.Len() {
-			copyValue(dst.Index(i), src.Index(i))
+			if !copyValue(dst.Index(i), src.Index(i)) {
+				return false
+			}
 		}
 	case reflect.Map:
 		if src.IsNil() {
-			return
+			return true
 		}
 		dst.Set(reflect.MakeMapWithSize(src.Type(), src.Len()))
 		for it := src.MapRange(); it.Next(); {
 			v := reflect.New(src.Type().Elem()).Elem()
-			copyValue(v, it.Value())
+			if !copyValue(v, it.Value()) {
+				return false
+			}
 			dst.SetMapIndex(it.Key(), v)
 		}
 	case reflect.Struct:
 		for i := range src.NumField() {
-			if !src.Type().Field(i).IsExported() {
-				panic(fmt.Sprintf("requests: cannot copy unexported field %s.%s", src.Type(), src.Type().Field(i).Name))
+			if !src.Type().Field(i).IsExported() || !copyValue(dst.Field(i), src.Field(i)) {
+				return false
 			}
-			copyValue(dst.Field(i), src.Field(i))
 		}
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.UnsafePointer:
+		return false
 	default:
 		dst.Set(src)
 	}
+	return true
 }
