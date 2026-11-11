@@ -26,7 +26,9 @@ amq_context="$(amq env --me "<handle>" --export)" && eval "$amq_context" &&
 
 In a Claude Code session that `coop exec` did not start (the desktop app has
 no `AM_ME`), run `amq coop join --me "<handle>"` once. Later bare `amq`
-commands in that session use the handle.
+commands in that session use the handle, and its output says whether a hook
+wakes the session for new mail. A session after `/clear` has no handle: join
+again.
 
 For a named session, add `--session <name>` to `amq env`. Treat the evaluated
 context as one terminal bound to one session. Use `--session` or `--project` for

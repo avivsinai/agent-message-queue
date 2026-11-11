@@ -4,9 +4,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/claudeidentity"
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/hookfile"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 )
@@ -30,15 +32,36 @@ var coopHookEvents = []string{"SessionStart", "Stop"}
 // shows a notice. On Stop exit 2 blocks the stop, and an older amq at this
 // path would exit 2 on the unknown subcommand, so the shell stays to turn
 // that into exit 0 with || true.
+//
+// The waiter rings with its own exit code, and the shell turns only that
+// code into the 2 that wakes the session: a usage error of an older amq
+// also exits 2, and as a ring it would start a turn at every turn end.
 func coopHookCommand(bin, store, verb string) string {
 	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 	gate := coopHookMarker + `[ -n "${AM_ME-}" ] || [ -e ` + quote(store+"/") + `"${` + envClaudeSession + `-}".json ] || exit 0; `
 	amq := quote(bin) + " --no-update-check coop hook " + verb
-	if verb == "stop" {
+	switch verb {
+	case "stop":
 		return gate + amq + " || true"
+	case "wait":
+		return gate + amq + "; [ $? -ne " + strconv.Itoa(harness.ClaudeRewakeRingExit) + " ] || exit 2"
 	}
 	return gate + "exec " + amq
 }
+
+// ownsCoopHook returns the test for the co-op commands an entry replaces:
+// the waiter's entries (wait) or the other co-op entries. An event chain
+// holds one of each.
+func ownsCoopHook(wait bool) func(command string) bool {
+	return func(command string) bool {
+		return strings.HasPrefix(command, coopHookMarker) && strings.Contains(command, " coop hook wait;") == wait
+	}
+}
+
+// coopWaitTimeout is the waiter's hook timeout in seconds. Claude Code
+// ends the hook at its timeout, and the session then has no doorbell until
+// its next turn end or start, so it is long: 7 days.
+const coopWaitTimeout = 7 * 24 * 60 * 60
 
 func coopHooks(bin, store string) []hookfile.CommandHook {
 	return []hookfile.CommandHook{
@@ -48,13 +71,32 @@ func coopHooks(bin, store string) []hookfile.CommandHook {
 			Marker:  coopHookMarker,
 			Command: coopHookCommand(bin, store, "session-start"),
 			Timeout: 2,
+			Owns:    ownsCoopHook(false),
 		},
 		{
 			Event:   "Stop",
 			Marker:  coopHookMarker,
 			Command: coopHookCommand(bin, store, "stop"),
 			Timeout: 2,
+			Owns:    ownsCoopHook(false),
 		},
+		coopWaitHook(bin, store, "SessionStart", coopSessionStartSources),
+		coopWaitHook(bin, store, "Stop", ""),
+	}
+}
+
+// coopWaitHook is the waiter's entry in one event chain. A session start
+// arms it for a session that waits for its first turn; every turn end arms
+// it again.
+func coopWaitHook(bin, store, event, matcher string) hookfile.CommandHook {
+	return hookfile.CommandHook{
+		Event:       event,
+		Matcher:     matcher,
+		Marker:      coopHookMarker,
+		Command:     coopHookCommand(bin, store, "wait"),
+		Timeout:     coopWaitTimeout,
+		AsyncRewake: true,
+		Owns:        ownsCoopHook(true),
 	}
 }
 
@@ -68,6 +110,10 @@ func runCoopInstallHooks(args []string) error {
 		"SessionStart (startup, resume, clear, compact) gives the agent its co-op",
 		"preamble: handle, session, peers, unread count, and what announces new mail.",
 		"Stop blocks a stop once for unread mail that no wake doorbell will announce.",
+		"The wait hook, on SessionStart and Stop, is the doorbell of a session that no",
+		"wake rings, such as a session of the Claude Code desktop app: it runs in the",
+		"background (asyncRewake) and wakes the session when mail arrives. It stops",
+		"after 7 days without a turn; the next turn starts it again.",
 		"",
 		"The hooks run only in sessions that take part: sessions with AM_ME set, which",
 		"amq coop exec and amq launch set, and sessions bound with amq coop join.",

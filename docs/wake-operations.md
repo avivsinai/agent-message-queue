@@ -68,7 +68,8 @@ new CLI does not prove that an existing wake upgraded; inspect `self_upgrade`
 in schema 2 and follow the reported next action.
 
 The co-op Stop hook (`amq coop hook stop`, installed by `amq coop install-hooks`)
-blocks a stop only for mail no wake will ring for. With no live wake, every pending message counts. Under a
+blocks a stop only for mail no wake will ring for. Mail that the co-op wait
+hook rang for still counts once: that ring is an attempt, not a delivery. With no live wake, every pending message counts. Under a
 live wake, only mail created at or before `baseline_at` counts, because a wake
 started with `--baseline-existing` never rings for that cohort. Every message
 counts when a live wake has no `baseline_at` yet (its baseline is not done) or

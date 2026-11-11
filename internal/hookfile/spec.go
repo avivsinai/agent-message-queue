@@ -272,6 +272,10 @@ type CommandHook struct {
 	// Async runs the hook without holding the event (Claude Code's
 	// "async"); false writes no field.
 	Async bool
+	// AsyncRewake runs the hook in the background, and its exit code 2
+	// wakes the session with the hook's stderr (Claude Code's
+	// "asyncRewake"); false writes no field.
+	AsyncRewake bool
 	// Owns, when set, decides which installed commands of the event chain
 	// this hook replaces, in place of the Marker prefix.
 	Owns func(command string) bool
@@ -393,6 +397,7 @@ func CommandEntry(h CommandHook) []byte {
 		Command string `json:"command"`
 		Timeout int    `json:"timeout"`
 		Async   bool   `json:"async,omitempty"`
+		Rewake  bool   `json:"asyncRewake,omitempty"`
 	}
 	// No HTML escaping: a gate's && stays readable in the settings file.
 	var b bytes.Buffer
@@ -401,7 +406,7 @@ func CommandEntry(h CommandHook) []byte {
 	_ = enc.Encode(struct {
 		Matcher string `json:"matcher,omitempty"`
 		Hooks   []hook `json:"hooks"`
-	}{Matcher: h.Matcher, Hooks: []hook{{Type: "command", Command: h.Command, Timeout: h.Timeout, Async: h.Async}}})
+	}{Matcher: h.Matcher, Hooks: []hook{{Type: "command", Command: h.Command, Timeout: h.Timeout, Async: h.Async, Rewake: h.AsyncRewake}}})
 	return bytes.TrimSuffix(b.Bytes(), []byte("\n"))
 }
 

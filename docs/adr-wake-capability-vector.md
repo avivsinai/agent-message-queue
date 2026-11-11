@@ -85,6 +85,15 @@ or terminal supervision. These limitations are part of the public contract.
   Neither deep-link adapter automatically submits text or proves consumption.
   JavaScript and Accessibility injection are not supported alternatives.
 
+- The co-op wait hook (`amq coop hook wait`) is a seat of an existing Claude
+  Code session: activation `none`, delivery `submitted`, session
+  `existing-exact`, no human required. It runs only where Claude Code keeps
+  an `asyncRewake` hook in the background: a pinned minimum version and the
+  `claude-desktop` entrypoint, read from the session record of the process
+  that runs the hook. Its evidence is the hook's own exit with the ring
+  code. That proves an attempt; Claude Code gives no acceptance receipt, and
+  the Stop guard reports the same mail once more at the next turn end.
+
 GUI wake does not inherit TTY repair.
 
 ### Deep-link identity exception
