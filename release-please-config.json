@@ -16,6 +16,10 @@
       "section": "Bug Fixes"
     },
     {
+      "type": "perf",
+      "section": "Performance Improvements"
+    },
+    {
       "type": "deps",
       "section": "Dependencies"
     }
