@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/cli/wakemutation"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
+	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 )
 
 // amq coop join binds the Claude Code session it runs in to one handle, so
@@ -47,8 +49,8 @@ func runCoopJoin(args []string) error {
 		"longer runs, for example one that /clear ended. Joining again with the same",
 		"handle changes nothing; another handle replaces the first.",
 		"",
-		"It prints the unread count. No wake rings the session: run amq drain",
-		"--include-body between tasks.")
+		"It prints the unread count and whether a hook wakes the session for new mail",
+		"(see amq coop install-hooks).")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
@@ -120,9 +122,31 @@ func runCoopJoin(args []string) error {
 	// This session's SessionStart ran before the join and printed no
 	// preamble, so the backlog is reported here.
 	if unread := coopHookUnread(root, handle); unread > 0 {
-		return writeStdout("Inbox: %d unread. Run amq drain --include-body.\n", unread)
+		if err := writeStdout("Inbox: %d unread. Run amq drain --include-body.\n", unread); err != nil {
+			return err
+		}
 	}
-	return nil
+	return writeStdout("%s\n", coopJoinDoorbell())
+}
+
+// coopJoinDoorbell says what will announce new mail to the session that
+// just joined, or why nothing will.
+func coopJoinDoorbell() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "No wake: run amq drain --include-body between tasks."
+	}
+	commands, err := claude.MarkedHookCommands(home, "Stop", coopHookMarker)
+	bin, _ := os.Executable()
+	switch {
+	case err != nil || !slices.ContainsFunc(commands, ownsCoopHook(true)):
+		return "No wake: the wait hook is not installed. Run amq coop install-hooks, then start a new session and join again; until then run amq drain --include-body between tasks."
+	case !slices.Contains(commands, coopHookCommand(bin, claudeidentity.SessionsDir(home), "wait")):
+		return "No wake: the installed wait hook runs another amq than this one. Run amq coop install-hooks; until then run amq drain --include-body between tasks."
+	case !coopWaitRunsInBackground():
+		return "No wake: this Claude Code session does not keep the wait hook in the background. Run amq drain --include-body between tasks."
+	}
+	return "A hook wakes this session when mail arrives after a turn ends; it starts at the end of this turn. Do not run amq watch, amq monitor or a polling loop."
 }
 
 // claudeSessionRuns reports whether a Claude Code process still runs the

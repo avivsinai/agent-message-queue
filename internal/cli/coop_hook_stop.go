@@ -29,10 +29,14 @@ type coopStopState struct {
 	ChainBlocks int      `json:"chain_blocks"`
 }
 
-// coopStopMessage is the part of an unread message the guard reads.
+// coopStopMessage is the part of an unread message the co-op hooks read.
+// Priority and File time the waiter's hold; File is nil when the inbox
+// file's metadata cannot be read.
 type coopStopMessage struct {
-	ID      string
-	Created string
+	ID       string
+	Created  string
+	Priority string
+	File     os.FileInfo
 }
 
 // writeCoopStop is the co-op Stop guard. It blocks a stop once for unread
@@ -74,7 +78,7 @@ func writeCoopStop(stdin io.Reader, w io.Writer) error {
 	old := readCoopStopState(statePath)
 	next, out := decideCoopStop(pending, baseline, old, in.StopHookActive, "root="+root+" session="+session)
 	if !slices.Equal(next.BlockedIDs, old.BlockedIDs) || next.ChainBlocks != old.ChainBlocks {
-		_ = writeCoopStopState(statePath, next)
+		_ = writeCoopHookState(statePath, next)
 	}
 	if out == nil {
 		return nil
@@ -152,7 +156,11 @@ func coopStopPending(root, me string) ([]coopStopMessage, error) {
 		if err != nil {
 			continue
 		}
-		pending = append(pending, coopStopMessage{ID: header.ID, Created: header.Created})
+		info, err := entry.Info()
+		if err != nil {
+			info = nil
+		}
+		pending = append(pending, coopStopMessage{ID: header.ID, Created: header.Created, Priority: header.Priority, File: info})
 	}
 	return pending, nil
 }
@@ -174,14 +182,14 @@ func readCoopStopState(path string) coopStopState {
 	return read
 }
 
-// writeCoopStopState replaces the state by a temp file and a rename, without
-// fsync: the state is advisory.
-func writeCoopStopState(path string, state coopStopState) error {
+// writeCoopHookState replaces a co-op hook state file by a temp file and a
+// rename, without fsync: the state is advisory.
+func writeCoopHookState(path string, state any) error {
 	data, err := json.Marshal(state)
 	if err != nil {
 		return err
 	}
-	temp, err := os.CreateTemp(filepath.Dir(path), coopStopStateFile+".tmp.*")
+	temp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp.*")
 	if err != nil {
 		return err
 	}

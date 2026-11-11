@@ -66,6 +66,7 @@ func TestCoopJoinBindsTheSessionAndCommandsAdoptIt(t *testing.T) {
 			for _, key := range identityEnvKeys {
 				_ = os.Unsetenv(key)
 			}
+			adoptedClaudeBinding = nil
 		}()
 		if err := adoptClaudeSessionIdentity(); err != nil {
 			t.Fatal(err)
@@ -74,8 +75,8 @@ func TestCoopJoinBindsTheSessionAndCommandsAdoptIt(t *testing.T) {
 	}
 
 	out, err := join(first, "reviewer")
-	if err != nil || !strings.Contains(out, "Joined as reviewer (session "+defaultSessionName) {
-		t.Fatalf("join = %q, %v; want the handle and the session", out, err)
+	if err != nil || !strings.Contains(out, "Joined as reviewer (session "+defaultSessionName) || !strings.Contains(out, "No wake: the wait hook is not installed") {
+		t.Fatalf("join = %q, %v; want the handle, the session, and the missing wait hook", out, err)
 	}
 	// A handle that only join created is a registered agent: a strict send
 	// to it is not refused.

@@ -1,17 +1,20 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
+	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 )
 
 // Co-op hook receivers: amq coop install-hooks writes Claude Code hooks that
@@ -25,7 +28,7 @@ const coopHookPeerActive = 10 * time.Minute
 
 func runCoopHook(args []string) error {
 	fs := flag.NewFlagSet("coop hook", flag.ContinueOnError)
-	usage := usageWithFlags(fs, "amq coop hook session-start|stop",
+	usage := usageWithFlags(fs, "amq coop hook session-start|stop|wait",
 		"Claude Code hook receivers for the co-op hooks; amq coop install-hooks installs them.",
 		"They read AM_ME, AM_ROOT and the session pin from the environment, or the",
 		"identity amq coop join bound to the session, and never read .amqrc. They exit",
@@ -42,22 +45,32 @@ func runCoopHook(args []string) error {
 		"live wake it counts only mail created at or before the wake's startup",
 		"baseline, because the wake rings for later mail. It allows the stop after",
 		"5 blocks in one chain, and prints a systemMessage when the context conflicts",
-		"or the mailbox cannot be read.")
+		"or the mailbox cannot be read.",
+		"",
+		"wait is the doorbell of a session that no wake rings, such as a session of",
+		"the Claude Code desktop app. It runs as an asyncRewake hook: it waits for",
+		"unread mail that is due under the wake settings hold_normal, hold_low and",
+		"debounce and that no hook has announced, then prints the doorbell on stderr",
+		"and exits 10, which the installed command turns into the exit code 2 that",
+		"wakes the session. It exits 0 at once when a wake rings the agent, another",
+		"wait runs for the agent, or the session would hold its turn end on the hook.")
 	if handled, err := parseFlagsAllowPositionals(fs, args, usage); err != nil {
 		return err
 	} else if handled {
 		return nil
 	}
 	if fs.NArg() != 1 {
-		return UsageError("coop hook needs exactly one of: session-start, stop")
+		return UsageError("coop hook needs exactly one of: session-start, stop, wait")
 	}
 	switch fs.Arg(0) {
 	case "session-start":
 		return writeCoopSessionStart(os.Stdout, time.Now())
 	case "stop":
 		return writeCoopStop(os.Stdin, os.Stdout)
+	case "wait":
+		return runCoopWait(context.Background())
 	default:
-		return UsageError("coop hook needs exactly one of: session-start, stop")
+		return UsageError("coop hook needs exactly one of: session-start, stop, wait")
 	}
 }
 
@@ -115,9 +128,12 @@ func writeCoopSessionStart(w io.Writer, now time.Time) error {
 	if unread > 0 {
 		fmt.Fprintf(&b, "\nInbox: %d unread. Run amq drain --include-body.", unread)
 	}
-	if coopHookWakeRings(root, me) {
+	switch {
+	case coopHookWakeRings(root, me):
 		b.WriteString("\nA wake rings this terminal when mail arrives; do not run amq watch, amq monitor or a polling loop.")
-	} else {
+	case coopWaitRings():
+		b.WriteString("\nA hook wakes this session when mail arrives after a turn ends; do not run amq watch, amq monitor or a polling loop.")
+	default:
 		b.WriteString("\nNo wake: run amq drain --include-body between tasks.")
 	}
 
@@ -160,6 +176,21 @@ func coopHookPeers(root, me string, now time.Time) []string {
 		peers = append(peers, agent)
 	}
 	return peers
+}
+
+// coopWaitRings reports whether the waiter is this session's doorbell when
+// no wake rings: amq coop install-hooks installed it, and the session keeps
+// it in the background.
+func coopWaitRings() bool {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	commands, err := claude.MarkedHookCommands(home, "Stop", coopHookMarker)
+	if err != nil || !slices.ContainsFunc(commands, ownsCoopHook(true)) {
+		return false
+	}
+	return coopWaitRunsInBackground()
 }
 
 // coopHookUnread counts messages in inbox/new the way amq list --new does.
