@@ -1063,6 +1063,33 @@ func (c *Carrier) destination(own *fsq.DeliveryRoot, origin map[string]string) (
 	return peer, handle, func() { _ = peer.Close() }, nil
 }
 
+// shapeReply is the one place a reply's subject, labels, context and text
+// are decided: a refusal carries its code and message, a body is encoded
+// as is, and a snapshot is labelled with its request and revision.
+func shapeReply(subject string, body any, refusal error) (string, []string, map[string]any, []byte, error) {
+	labels := []string{LabelRemote}
+	context := map[string]any{}
+	if refusal != nil {
+		code := protocol.Code("error")
+		var r *protocol.Refusal
+		if errors.As(refusal, &r) {
+			code = r.Code
+		}
+		context["remote_error"] = map[string]string{"code": string(code), "message": refusal.Error()}
+		text, _ := json.MarshalIndent(context["remote_error"], "", "  ")
+		return "remote reply refused", labels, context, text, nil
+	}
+	if snap, ok := body.(protocol.Snapshot); ok {
+		labels = append(labels, labelRefPfx+snap.RequestRef, fmt.Sprintf("%s%d", labelRevPfx, snap.Revision))
+	}
+	text, err := json.MarshalIndent(body, "", "  ")
+	if err != nil {
+		return "", nil, nil, nil, err
+	}
+	context["remote"] = json.RawMessage(text)
+	return subject, labels, context, text, nil
+}
+
 // replyWith delivers a reply message. On CommittedDurabilityError (visible
 // rename, unknown fsync), the fsync is retried in place. The message is
 // already in the mailbox; re-delivery after consumption is never idempotent.
@@ -1084,29 +1111,9 @@ func (c *Carrier) replyWith(root *fsq.DeliveryRoot, origin map[string]string, su
 	now := c.now()
 	var id string
 	var created string
-	var err error
-	labels := []string{LabelRemote}
-	context := map[string]any{}
-	var text []byte
-	switch {
-	case refusal != nil:
-		code := protocol.Code("error")
-		var r *protocol.Refusal
-		if errors.As(refusal, &r) {
-			code = r.Code
-		}
-		context["remote_error"] = map[string]string{"code": string(code), "message": refusal.Error()}
-		text, _ = json.MarshalIndent(context["remote_error"], "", "  ")
-		subject = "remote reply refused"
-	default:
-		if snap, ok := body.(protocol.Snapshot); ok {
-			labels = append(labels, labelRefPfx+snap.RequestRef, fmt.Sprintf("%s%d", labelRevPfx, snap.Revision))
-		}
-		text, err = json.MarshalIndent(body, "", "  ")
-		if err != nil {
-			return err
-		}
-		context["remote"] = json.RawMessage(text)
+	subject, labels, context, text, err := shapeReply(subject, body, refusal)
+	if err != nil {
+		return err
 	}
 	// For Publish (revision publication), use a DETERMINISTIC message id
 	// derived from (request_ref, revision) so a republish of the same
@@ -1199,29 +1206,9 @@ func (c *Carrier) replyWithRecovery(root *fsq.DeliveryRoot, origin map[string]st
 		return nil
 	}
 	now := c.now()
-	labels := []string{LabelRemote}
-	context := map[string]any{}
-	var text []byte
-	var err error
-	switch {
-	case refusal != nil:
-		code := protocol.Code("error")
-		var r *protocol.Refusal
-		if errors.As(refusal, &r) {
-			code = r.Code
-		}
-		context["remote_error"] = map[string]string{"code": string(code), "message": refusal.Error()}
-		text, _ = json.MarshalIndent(context["remote_error"], "", "  ")
-		subject = "remote reply refused"
-	default:
-		if snap, ok := body.(protocol.Snapshot); ok {
-			labels = append(labels, labelRefPfx+snap.RequestRef, fmt.Sprintf("%s%d", labelRevPfx, snap.Revision))
-		}
-		text, err = json.MarshalIndent(body, "", "  ")
-		if err != nil {
-			return err
-		}
-		context["remote"] = json.RawMessage(text)
+	subject, labels, context, text, err := shapeReply(subject, body, refusal)
+	if err != nil {
+		return err
 	}
 	// Deterministic recovery id: timestamp prefix (for drain --limit ordering)
 	// + "recover" + short digest of the command message id. The timestamp is
@@ -1444,29 +1431,9 @@ func (c *Carrier) writeLedger(msgID string, rec *replyRecord) error {
 // different refusal) lands beside it.
 func (c *Carrier) composeReply(origin map[string]string, to, subject string, body any, refusal error, cmdMsgID, msgCreated string) (string, []byte, error) {
 	now := c.now()
-	labels := []string{LabelRemote}
-	context := map[string]any{}
-	var text []byte
-	var err error
-	switch {
-	case refusal != nil:
-		code := protocol.Code("error")
-		var r *protocol.Refusal
-		if errors.As(refusal, &r) {
-			code = r.Code
-		}
-		context["remote_error"] = map[string]string{"code": string(code), "message": refusal.Error()}
-		text, _ = json.MarshalIndent(context["remote_error"], "", "  ")
-		subject = "remote reply refused"
-	default:
-		if snap, ok := body.(protocol.Snapshot); ok {
-			labels = append(labels, labelRefPfx+snap.RequestRef, fmt.Sprintf("%s%d", labelRevPfx, snap.Revision))
-		}
-		text, err = json.MarshalIndent(body, "", "  ")
-		if err != nil {
-			return "", nil, err
-		}
-		context["remote"] = json.RawMessage(text)
+	subject, labels, context, text, err := shapeReply(subject, body, refusal)
+	if err != nil {
+		return "", nil, err
 	}
 	msgDigest := requests.Digest([]byte(cmdMsgID))
 	msgDigest = strings.TrimPrefix(msgDigest, "sha256:")[:8]

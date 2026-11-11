@@ -84,3 +84,29 @@ func TestPartialAccountCountsOtherSessionsAsALowerBound(t *testing.T) {
 		t.Errorf("text does not mark the count a lower bound:\n%s", b.String())
 	}
 }
+
+// A Codex account's windows align to the reset the app-server reports, like
+// Claude's, instead of trailing (audit 2026-11-10).
+func TestCodexWindowsAlignToReportedReset(t *testing.T) {
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	r5, r7 := now.Add(2*time.Hour), now.Add(3*24*time.Hour)
+	ws := accountWindows(usage.Account{Limits: []usage.Limit{
+		{Kind: "window", Name: "5h", ResetsAt: &r5},
+		{Kind: "window", Name: "weekly", ResetsAt: &r7},
+	}}, now)
+	if !ws[0].from.Equal(r5.Add(-5*time.Hour)) || ws[0].label != "5 h window" ||
+		!ws[1].from.Equal(r7.Add(-7*24*time.Hour)) || ws[1].label != "7 d window" {
+		t.Fatalf("windows = %+v, want both aligned to the reported resets", ws)
+	}
+}
+
+// An app-server "reached" limit the account spent tokens after reads as past
+// in the limits line, as it does on the chip (audit 2026-11-10).
+func TestLimitsLineReadsPastAppServerLimitAsPast(t *testing.T) {
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	l := usage.Limit{Kind: "reached", Name: "seven_day", Source: appServer, Past: true, AsOf: now.Add(-3 * 24 * time.Hour)}
+	got := limitsLine([]usage.Limit{l}, now)
+	if !strings.Contains(got, "limit reported 3d ago; the account was active since then") {
+		t.Fatalf("limitsLine = %q, want the past form", got)
+	}
+}

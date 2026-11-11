@@ -91,12 +91,13 @@ var canonicalRows = [...]string{
 }
 
 type Flags struct {
-	Routed          bool // participating mailbox target was --session-routed
-	IgnorePin       bool // --ignore-session-pin passed caller preflight
-	ExplicitRoot    bool // caller supplied an explicit root
-	ExplicitContext bool // env --root/--session was visited
-	CrossProject    bool // source guard serves a --project route
-	FromSession     bool // send used --from-session source routing
+	Routed       bool // participating mailbox target was --session-routed
+	IgnorePin    bool // --ignore-session-pin passed caller preflight
+	ExplicitRoot bool // caller supplied an explicit root
+	// CrossProject is carried so the table shows it never waives a pin: no
+	// row reads it.
+	CrossProject bool // source guard serves a --project route
+	FromSession  bool // send used --from-session source routing
 }
 
 type Input struct {
