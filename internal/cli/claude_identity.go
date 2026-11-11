@@ -1,0 +1,70 @@
+package cli
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/avivsinai/agent-message-queue/internal/claudeidentity"
+	"github.com/avivsinai/agent-message-queue/internal/harness"
+)
+
+// envClaudeSession is the variable in which Claude Code gives hooks and
+// its Bash tool the id of the session they run in.
+const envClaudeSession = "CLAUDE_CODE_SESSION_ID"
+
+// claudeSessionKey returns the Claude session this process runs in and its
+// Claude config dir, or ok false outside a Claude Code session.
+func claudeSessionKey() (session, configDir string, ok bool) {
+	session = strings.TrimSpace(os.Getenv(envClaudeSession))
+	home, err := os.UserHomeDir()
+	if !claudeidentity.ValidSession(session) || err != nil {
+		return "", "", false
+	}
+	configDir = harness.ClaudeConfigDir(home)
+	if !filepath.IsAbs(configDir) {
+		return "", "", false
+	}
+	return session, absPath(filepath.Clean(configDir)), true
+}
+
+// adoptClaudeSessionIdentity gives an amq command or hook that runs in a
+// Claude Code session the identity amq coop join bound to that session. A
+// session amq coop exec did not start, such as one of the desktop app, has
+// none of the AM_* variables; it does have CLAUDE_CODE_SESSION_ID. Like the
+// Codex thread adoption, it acts only when every identity variable is
+// absent, validates the recorded identity before any of it becomes visible,
+// and treats a binding that cannot be used as a context mismatch, never as
+// a reason to fall back to default resolution. A session that never joined,
+// or that left, keeps the default resolution.
+func adoptClaudeSessionIdentity() error {
+	session, configDir, ok := claudeSessionKey()
+	if !ok {
+		return nil
+	}
+	for _, key := range identityEnvKeys {
+		if _, present := os.LookupEnv(key); present {
+			return nil
+		}
+	}
+	rec, err := claudeidentity.Lookup(session, configDir)
+	if errors.Is(err, claudeidentity.ErrNone) {
+		return nil
+	}
+	if err != nil {
+		return ContextMismatchError("this Claude session's AMQ identity cannot be used: %v; run amq coop join --me <handle> again, or set AM_ROOT and AM_ME explicitly", err)
+	}
+	id, err := validateRecordedIdentity(rec.Identity, "this Claude session's")
+	if err != nil {
+		return err
+	}
+	return adoptIdentity(id, "this Claude session's")
+}
+
+// managesClaudeBinding reports whether args is amq coop join or leave.
+// They read and replace the binding themselves, so a damaged binding must
+// not stop them at adoption.
+func managesClaudeBinding(args []string) bool {
+	return len(args) >= 2 && args[0] == "coop" && (args[1] == "join" || args[1] == "leave")
+}

@@ -107,7 +107,9 @@ func init() {
 			Children: []CommandInfo{
 				{Name: "init", Summary: "Initialize project for co-op mode"},
 				{Name: "exec", Summary: "Set up co-op mode and exec into an agent"},
-				{Name: "install-hooks", Summary: "Install the co-op Claude Code hooks for AM_ME sessions"},
+				{Name: "join", Summary: "Bind this Claude Code session to an agent handle"},
+				{Name: "leave", Summary: "Release this Claude Code session's agent handle"},
+				{Name: "install-hooks", Summary: "Install the co-op Claude Code hooks for participating sessions"},
 				{Name: "uninstall-hooks", Summary: "Remove the co-op Claude Code hooks"},
 				{Name: "hook", Summary: "Claude Code hook receiver: print the co-op preamble"},
 			},
