@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/board/usage"
+	facts "github.com/avivsinai/agent-message-queue/usage"
 )
 
 // Usage is what was spent in one window: per worker, per account's other
@@ -271,9 +272,9 @@ func accountWindows(a usage.Account, now time.Time) []window {
 			continue
 		}
 		switch l.Name {
-		case "five_hour":
+		case "five_hour", facts.Window5h:
 			ws[0].from, ws[0].label = l.ResetsAt.Add(-5*time.Hour), "5 h window"
-		case "seven_day":
+		case "seven_day", facts.WindowWeekly:
 			ws[1].from, ws[1].label = l.ResetsAt.Add(-7*24*time.Hour), "7 d window"
 		}
 	}

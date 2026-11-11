@@ -144,10 +144,10 @@ func limitsLine(ls []usage.Limit, now time.Time) string {
 				p += ", resets " + resetTime(*l.ResetsAt, now)
 			}
 			parts = append(parts, p)
-		case l.Kind == "reached" && l.Source == appServer:
-			parts = append(parts, bucket+strings.ReplaceAll(l.Name, "_", " "))
 		case l.Kind == "reached" && l.Past:
 			parts = append(parts, pastLimit(l, now))
+		case l.Kind == "reached" && l.Source == appServer:
+			parts = append(parts, bucket+strings.ReplaceAll(l.Name, "_", " "))
 		case l.Kind == "reached":
 			p := limitName(l.Name) + " limit reached"
 			if l.ResetsAt != nil {
