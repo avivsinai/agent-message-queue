@@ -568,6 +568,26 @@ func TestSenderBusyRefusalIsFinal(t *testing.T) {
 	}
 }
 
+// The drainer never sends an envelope whose own submit is still sending
+// it: a refusal that submit then reports must stay final (review of the
+// busy-final fix, 2026-11-12).
+func TestSenderDrainSkipsClaimedEnvelope(t *testing.T) {
+	now := time.Now()
+	r := newDrainRig(t, now)
+	cmd := r.enqueue(validUUID(0), "e_1", protocol.FormatTime(now.Add(2*time.Minute)))
+	release, err := r.spool.Claim(Key{CreatorHost: "local", RequestID: cmd.RequestID})
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if n := r.drain(); n != 0 || r.rt.HasRun(cmd.RequestID) {
+		t.Fatalf("drained n=%d ran=%v while the submit held the envelope", n, r.rt.HasRun(cmd.RequestID))
+	}
+	release()
+	if r.drain(); !r.rt.HasRun(cmd.RequestID) {
+		t.Fatal("the released envelope was not sent")
+	}
+}
+
 // TestASDConcurrentDifferentDigestNoOverwrite (bead asd, #802 round-3) is the
 // overwrite probe: two INDEPENDENT Spool instances over one state dir —
 // simulating two CLI processes, where the per-instance mutex cannot

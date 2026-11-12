@@ -78,52 +78,62 @@ func (d *Drainer) Drain(_ context.Context) (int, error) {
 		if env.State != StatePending {
 			continue
 		}
-		k := env.key()
-		n++
-		if env.LastError == string(protocol.CodeBusy) {
-			// A pending envelope already refused busy (left by a release
-			// that retried busy) is settled, never sent again.
-			if err := d.spool.MarkFailed(k, string(protocol.CodeBusy)); err != nil {
-				errs = append(errs, err)
-			}
-			continue
+		replayed, err := d.replay(env.key())
+		if replayed {
+			n++
 		}
-		// A spooled submit carries no origin: the spool is a local file, and
-		// an origin is a carrier's claim that only the carrier may make.
-		reply, herr := d.ep.Handle(env.Command, core.Source{Host: env.CreatorHost})
-		// Classify by Outcome.Code, NOT by error. The endpoint returns
-		// busy, request_conflict, expired, stale_epoch, unshared, invalid and
-		// unsupported as a Reply with Outcome.Code and a nil error. Checking
-		// herr == nil alone marks refused envelopes as dispatched.
-		code := classifyReply(reply, herr)
-		switch {
-		case code == "":
-			// No code = the endpoint accepted the command and owns the record.
-			if err := d.spool.MarkDispatched(k); err != nil {
-				errs = append(errs, err)
-			}
-		case code == protocol.CodeExpired:
-			// The endpoint has no record and the window closed: nothing ran.
-			if err := d.spool.MarkExpired(k); err != nil {
-				errs = append(errs, err)
-			}
-		case isTransientCode(code), code == protocol.CodeAttachmentLost && herr != nil:
-			// Draining / unreachable / storage_full: retry next tick.
-			// An attachment_lost refusal returned as an error recorded
-			// nothing: the endpoint could not decide the target's
-			// reservation (an unreadable record), which a repair ends.
-			if err := d.spool.MarkAttempt(k, string(code)); err != nil {
-				errs = append(errs, err)
-			}
-		default:
-			// Terminal refusal (busy, stale_epoch, unshared,
-			// request_conflict, invalid, unsupported): never sent again.
-			if err := d.spool.MarkFailed(k, string(code)); err != nil {
-				errs = append(errs, err)
-			}
+		if err != nil {
+			errs = append(errs, err)
 		}
 	}
 	return n, errors.Join(errs...)
+}
+
+// replay sends the pending envelope k once and settles it by the reply. An
+// envelope whose own submit is still sending it (its in-flight lock is held)
+// is skipped; under the lock the envelope is read again, so one that its
+// submit settled meanwhile is not sent.
+func (d *Drainer) replay(k Key) (bool, error) {
+	release, ok, err := d.spool.claim(k, false)
+	if err != nil || !ok {
+		return false, err
+	}
+	defer release()
+	env, exists, err := d.spool.Get(k.CreatorHost, k.RequestID)
+	if err != nil || !exists || env.State != StatePending || validateEnvelope(env) != nil {
+		return false, err
+	}
+	if env.LastError == string(protocol.CodeBusy) {
+		// A pending envelope already refused busy (left by a release
+		// that retried busy) is settled, never sent again.
+		return true, d.spool.MarkFailed(k, string(protocol.CodeBusy))
+	}
+	// A spooled submit carries no origin: the spool is a local file, and
+	// an origin is a carrier's claim that only the carrier may make.
+	reply, herr := d.ep.Handle(env.Command, core.Source{Host: env.CreatorHost})
+	// Classify by Outcome.Code, NOT by error. The endpoint returns
+	// busy, request_conflict, expired, stale_epoch, unshared, invalid and
+	// unsupported as a Reply with Outcome.Code and a nil error. Checking
+	// herr == nil alone marks refused envelopes as dispatched.
+	code := classifyReply(reply, herr)
+	switch {
+	case code == "":
+		// No code = the endpoint accepted the command and owns the record.
+		return true, d.spool.MarkDispatched(k)
+	case code == protocol.CodeExpired:
+		// The endpoint has no record and the window closed: nothing ran.
+		return true, d.spool.MarkExpired(k)
+	case isTransientCode(code), code == protocol.CodeAttachmentLost && herr != nil:
+		// Draining / unreachable / storage_full: retry next tick.
+		// An attachment_lost refusal returned as an error recorded
+		// nothing: the endpoint could not decide the target's
+		// reservation (an unreadable record), which a repair ends.
+		return true, d.spool.MarkAttempt(k, string(code))
+	default:
+		// Terminal refusal (busy, stale_epoch, unshared,
+		// request_conflict, invalid, unsupported): never sent again.
+		return true, d.spool.MarkFailed(k, string(code))
+	}
 }
 
 // pending returns the pending envelopes, oldest first: the ones the last

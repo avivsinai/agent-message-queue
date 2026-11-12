@@ -116,6 +116,13 @@ func submit(args []string, stdin io.Reader, probe ...*jsonProbe) (any, int, erro
 		Command:     cmd,
 		Destination: "ipc:" + stateDir,
 	}
+	// Hold the envelope's in-flight lock from before it exists until it
+	// settles, so the drainer never sends it while this call is out.
+	release, err := spool.Claim(sender.Key{CreatorHost: ipc.LocalHost, RequestID: id})
+	if err != nil {
+		return nil, 0, err
+	}
+	defer release()
 	if err := spool.Create(env); err != nil {
 		return nil, 0, err
 	}
