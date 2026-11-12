@@ -265,6 +265,7 @@ func (e *Endpoint) resubmitTombstoneLocked(cmd *protocol.Command, src Source, ke
 		return protocol.Reply{}, err
 	}
 	input, origin, native := *cmd.Input, maps.Clone(rec.Origin), rec.NativeSession
+	sent := e.unpersisted(rec, protocol.StateUncertain, protocol.CodeAttachmentLost)
 	e.mu.Unlock()
 	if err := e.crashAt(PointBeforeNative); err != nil {
 		return protocol.Reply{}, err
@@ -277,9 +278,13 @@ func (e *Endpoint) resubmitTombstoneLocked(cmd *protocol.Command, src Source, ke
 	rec, exists, err := e.store.Get(key)
 	if err != nil {
 		e.mu.Unlock()
-		return protocol.Reply{}, err
+		return sentUnrecorded(sent, err), nil
 	}
-	return e.finishAdmissionLocked(rec, exists, t, adm, nerr)
+	rep, err := e.finishAdmissionLocked(rec, exists, t, adm, nerr)
+	if err != nil {
+		return sentUnrecorded(sent, err), nil
+	}
+	return rep, nil
 }
 
 // dispatchReceivedLocked reserves room for the admissible new request rec,
@@ -341,6 +346,7 @@ func (e *Endpoint) dispatchReceivedLocked(cmd *protocol.Command, key requests.Ke
 		return protocol.Reply{}, err
 	}
 	origin, native := maps.Clone(rec.Origin), rec.NativeSession
+	sent := e.unpersisted(rec, protocol.StateUncertain, protocol.CodeAttachmentLost)
 	e.mu.Unlock()
 
 	if err := e.crashAt(PointBeforeNative); err != nil {
@@ -353,12 +359,25 @@ func (e *Endpoint) dispatchReceivedLocked(cmd *protocol.Command, key requests.Ke
 
 	// No defer: finishAdmissionLocked unlocks exactly once on every return.
 	e.mu.Lock()
-	rec, _, err := e.store.Get(key)
+	rec, exists, err := e.store.Get(key)
 	if err != nil {
 		e.mu.Unlock()
-		return protocol.Reply{}, err
+		return sentUnrecorded(sent, err), nil
 	}
-	return e.finishAdmissionLocked(rec, true, t, adm, nerr)
+	rep, err := e.finishAdmissionLocked(rec, exists, t, adm, nerr)
+	if err != nil {
+		return sentUnrecorded(sent, err), nil
+	}
+	return rep, nil
+}
+
+// sentUnrecorded answers a submit whose native call already ran when the
+// endpoint could not record what it returned. The prompt may be running, so
+// the caller is told uncertain, never refused; the durable record keeps the
+// state it had, which reconcile settles.
+func sentUnrecorded(sent protocol.Snapshot, err error) protocol.Reply {
+	return protocol.Reply{Snapshot: sent, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeAttachmentLost,
+		Message: protocol.BoundReason("the prompt was sent, but its outcome was not recorded: " + err.Error())}}
 }
 
 // admissibleLocked checks share, epoch, expiry, capability and the caller's
