@@ -8,6 +8,25 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.142.0](https://github.com/avivsinai/agent-message-queue/compare/v0.141.0...v0.142.0) (2026-11-12)
+
+
+### Features
+
+* **coop:** a desktop chat keeps its handle across /clear ([#1471](https://github.com/avivsinai/agent-message-queue/issues/1471)) ([0cdb037](https://github.com/avivsinai/agent-message-queue/commit/0cdb0372081917711af8112abc508acc00e36543))
+* **coop:** join takes a default handle ([#1470](https://github.com/avivsinai/agent-message-queue/issues/1470)) ([eaa2f75](https://github.com/avivsinai/agent-message-queue/commit/eaa2f75064a79e82b31c6d440ffa116d38880c59))
+* **who:** an agent whose wait hook runs is active ([#1472](https://github.com/avivsinai/agent-message-queue/issues/1472)) ([1048199](https://github.com/avivsinai/agent-message-queue/commit/1048199b666e487c10171216f42c4d736adacb68))
+
+
+### Bug Fixes
+
+* **coop:** a session with no handle is told a fix that works there ([#1469](https://github.com/avivsinai/agent-message-queue/issues/1469)) ([dfcdefb](https://github.com/avivsinai/agent-message-queue/commit/dfcdefb8d59529b9f69fe733af7e4c5276ddc812))
+
+
+### Performance Improvements
+
+* **coop:** the waiter reads each unread message once ([#1473](https://github.com/avivsinai/agent-message-queue/issues/1473)) ([51d67cd](https://github.com/avivsinai/agent-message-queue/commit/51d67cd4f1e43075f56d42c33c9712b81d3f429e))
+
 ## [0.141.0](https://github.com/avivsinai/agent-message-queue/compare/v0.140.1...v0.141.0) (2026-11-11)
 
 
