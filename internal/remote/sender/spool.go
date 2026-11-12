@@ -20,6 +20,8 @@
 // file per envelope, written with the repository's tmp/fsync/rename
 // primitive (fsq.WriteFileAtomic). One envelope per request id per creator
 // host; a retry with the same identity reconciles instead of duplicating.
+// <stateDir>/sender/inflight/<creatorHost>__<requestID>.lock is flocked by
+// the one process sending that envelope to the endpoint now (Claim).
 package sender
 
 import (
@@ -36,6 +38,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
@@ -45,6 +48,7 @@ const (
 	spoolDir      = "sender"
 	spoolSuffix   = ".json"
 	spoolLockName = ".lock"
+	inflightDir   = "inflight"
 	fileMode      = 0o600
 	dirMode       = 0o700
 )
@@ -175,6 +179,9 @@ func Open(stateDir string, opts ...Option) (*Spool, error) {
 	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return nil, fmt.Errorf("create sender spool: %w", err)
 	}
+	if err := os.MkdirAll(filepath.Join(dir, inflightDir), dirMode); err != nil {
+		return nil, fmt.Errorf("create sender in-flight directory: %w", err)
+	}
 	lockPath := filepath.Join(dir, spoolLockName)
 	// Probe the lock on supported platforms: if we cannot acquire it, the
 	// platform is unsupported or the directory is not writable. We acquire
@@ -234,6 +241,58 @@ func (s *Spool) Create(env *Envelope) error {
 		}
 		return s.write(env)
 	})
+}
+
+// Claim takes the in-flight lock of k, waiting for another holder to let
+// go. Its holder is the one process that sends k's command to the endpoint
+// now; the drainer never sends an envelope another process holds. The lock
+// ends with release or with the holder's process.
+func (s *Spool) Claim(k Key) (release func(), err error) {
+	release, _, err = s.claim(k, true)
+	return release, err
+}
+
+// claim takes the in-flight lock of k. Without wait, ok is false and nothing
+// is held when another process has it. Release removes the lock file before
+// it unlocks, so a waiter that then locks the removed file tries again.
+func (s *Spool) claim(k Key, wait bool) (release func(), ok bool, err error) {
+	name, err := s.filename(k)
+	if err != nil {
+		return nil, false, err
+	}
+	path := filepath.Join(s.dir, inflightDir, strings.TrimSuffix(filepath.Base(name), spoolSuffix)+".lock")
+	for {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, fileMode)
+		if err != nil {
+			return nil, false, fmt.Errorf("open in-flight lock: %w", err)
+		}
+		if wait {
+			err = lock.Lock(f)
+		} else if ok, err = lock.TryLock(f); err == nil && !ok {
+			_ = f.Close()
+			return nil, false, nil
+		}
+		if err != nil {
+			_ = f.Close()
+			return nil, false, fmt.Errorf("lock in-flight file: %w", err)
+		}
+		held, herr := f.Stat()
+		cur, cerr := os.Stat(path)
+		if herr != nil || cerr != nil && !errors.Is(cerr, os.ErrNotExist) {
+			_ = lock.Unlock(f)
+			_ = f.Close()
+			return nil, false, fmt.Errorf("stat in-flight lock: %w", errors.Join(herr, cerr))
+		}
+		if cerr == nil && os.SameFile(held, cur) {
+			return func() {
+				_ = os.Remove(path)
+				_ = lock.Unlock(f)
+				_ = f.Close()
+			}, true, nil
+		}
+		_ = lock.Unlock(f)
+		_ = f.Close()
+	}
 }
 
 // Get reads one envelope. The boolean is false when no envelope exists.

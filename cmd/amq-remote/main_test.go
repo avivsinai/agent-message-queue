@@ -766,6 +766,79 @@ func TestSenderB7RefusedNotDispatched(t *testing.T) {
 	}
 }
 
+// A submit answered busy settles its spool envelope, so the drainer never
+// sends it when the running turn ends. Field: amq-remote 0.142.1, the
+// busy-refused prompt ran after the long turn (audit 2026-11-10).
+func TestSubmitBusyRefusalSettlesEnvelope(t *testing.T) {
+	root := startServe(t)
+	if code, out, _ := cli(t, "", "submit", "fake", "--text", "long turn", "--root", root, "--json"); code != protocol.ExitSuccess {
+		t.Fatalf("first submit exit=%d out=%s", code, out)
+	}
+	const id = "11111111-1111-4111-8111-1111111171b5"
+	code, out, _ := cli(t, "", "submit", "fake", "--text", "busy ghost",
+		"--root", root, "--request-id", id, "--json")
+	if code != protocol.ExitActionRequired || !strings.Contains(out, `"busy"`) {
+		t.Fatalf("busy submit exit=%d out=%s, want %d busy", code, out, protocol.ExitActionRequired)
+	}
+	spool, err := sender.Open(filepath.Join(root, "extensions", "remote"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, exists, err := spool.Get(ipc.LocalHost, id)
+	if err != nil || !exists {
+		t.Fatalf("envelope missing: exists=%v err=%v", exists, err)
+	}
+	if env.State != sender.StateFailed || env.LastError != string(protocol.CodeBusy) {
+		t.Fatalf("envelope state=%s last_error=%q, want failed/busy", env.State, env.LastError)
+	}
+}
+
+// A submit refused as draining tells the caller to retry after restart, so
+// its envelope settles failed and the restarted endpoint's drainer never
+// runs it as well (audit 2026-11-10).
+func TestSubmitDrainingRefusalSettlesEnvelope(t *testing.T) {
+	root, err := os.MkdirTemp("", "amqr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	stateDir := filepath.Join(root, stateDirName)
+	store, err := requests.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ep := core.New(core.Config{Store: store})
+	ep.Register(fake.New("fake", "e_1"))
+	srv, err := ipc.Listen(stateDir, ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = srv.Serve(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	_ = ep.Close() // the endpoint is shutting down: every command is refused draining
+
+	const id = "11111111-1111-4111-8111-1111111171d6"
+	code, out, errOut := cli(t, "", "submit", "fake", "--text", "drained",
+		"--root", root, "--epoch", "e_1", "--request-id", id, "--json")
+	if code != protocol.ExitActionRequired {
+		t.Fatalf("draining submit exit=%d out=%s err=%s, want %d", code, out, errOut, protocol.ExitActionRequired)
+	}
+	spool, err := sender.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, exists, err := spool.Get(ipc.LocalHost, id)
+	if err != nil || !exists {
+		t.Fatalf("envelope missing: exists=%v err=%v", exists, err)
+	}
+	if env.State != sender.StateFailed || env.LastError != string(protocol.CodeDraining) {
+		t.Fatalf("envelope state=%s last_error=%q, want failed/draining", env.State, env.LastError)
+	}
+}
+
 // syncBuffer is a mutex-guarded bytes.Buffer (review ruling 20:43:46Z): the
 // serve tick loop writes diagnostics while the failure report reads them, and
 // a raw bytes.Buffer shared between goroutines is a data race.

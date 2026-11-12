@@ -584,7 +584,10 @@ prompt is exit 2.
 the live target first, and a failed inspect writes nothing. With a previously
 verified `--epoch`, an unreachable endpoint still exits 0 and returns the
 spool receipt. Restart dispatches that envelope only while its admission
-window is still open; a closed window expires it without dispatch.
+window is still open; a closed window expires it without dispatch. Only an
+unreachable endpoint queues a submit. A refusal (`busy`, `draining`,
+`storage_full` or any other code, exit 6) settles the envelope, and nothing
+sends it later: to run the prompt, submit it again.
 
 ### `status`, `wait`, `cancel`, `requests`
 

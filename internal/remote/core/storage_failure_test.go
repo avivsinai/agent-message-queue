@@ -153,3 +153,38 @@ func TestAsyncStorageFailureIsVisibleToTheOwner(t *testing.T) {
 		}
 	})
 }
+
+// A submit whose native call ran but whose outcome the endpoint cannot
+// write tells the caller uncertain, never an error or a refusal: the prompt
+// may be running (review of the busy-final fix, 2026-11-12).
+func TestSentSubmitUnrecordedIsUncertain(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	ep, rt, store, _ := raceEndpoint(t)
+	rt.HoldAfterAdmit()
+	const id = "11111111-1111-4111-8111-111111111152"
+	type result struct {
+		reply any
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() { r, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); done <- result{r, err} }()
+	if !waitUntil(func() bool { return rt.HasRun(id) }) {
+		t.Fatal("submit never admitted a run")
+	}
+	dir := recordsDir(t, store, "local")
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	rt.ReleaseAfterAdmit()
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("submit err = %v, want an uncertain reply", got.err)
+	}
+	rep := got.reply.(protocol.Reply)
+	if rep.Snapshot.State != protocol.StateUncertain || rep.Outcome.Code != protocol.CodeAttachmentLost {
+		t.Fatalf("submit = %s/%s, want uncertain/attachment_lost", rep.Snapshot.State, rep.Outcome.Code)
+	}
+}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -115,6 +116,13 @@ func submit(args []string, stdin io.Reader, probe ...*jsonProbe) (any, int, erro
 		Command:     cmd,
 		Destination: "ipc:" + stateDir,
 	}
+	// Hold the envelope's in-flight lock from before it exists until it
+	// settles, so the drainer never sends it while this call is out.
+	release, err := spool.Claim(sender.Key{CreatorHost: ipc.LocalHost, RequestID: id})
+	if err != nil {
+		return nil, 0, err
+	}
+	defer release()
 	if err := spool.Create(env); err != nil {
 		return nil, 0, err
 	}
@@ -143,24 +151,27 @@ func submit(args []string, stdin io.Reader, probe ...*jsonProbe) (any, int, erro
 			receipt := env.Receipt("endpoint_unreachable")
 			return receipt, exitForSpoolReceipt(receipt), nil
 		}
+		// A typed refusal (draining, attachment_lost, unsupported, ...) is
+		// what the caller is told, so the envelope settles failed and the
+		// drainer never sends it. Any other error leaves the outcome unknown:
+		// the envelope stays pending and the drainer's replay reconciles it.
+		var r *protocol.Refusal
+		if errors.As(derr, &r) {
+			_ = spool.MarkFailed(sender.Key{CreatorHost: ipc.LocalHost, RequestID: id}, string(r.Code))
+		}
 		return nil, 0, derr
 	}
-	// The endpoint returns refusals (stale_epoch, expired, unsupported,
-	// etc.) as a Reply with Outcome.Code and nil error. A non-empty code
-	// means the endpoint REFUSED the command — the envelope must NOT be
-	// marked dispatched. Mark it failed (terminal) so the caller learns the
-	// truth via status; a transient code (busy) is left pending for the
-	// drainer to retry.
+	// The endpoint returns refusals (busy, storage_full, stale_epoch,
+	// expired, unsupported, etc.) as a Reply with Outcome.Code and nil
+	// error. A non-empty code means the endpoint REFUSED the command and the
+	// caller is told so: the envelope settles expired or failed, never
+	// pending, so the drainer never runs a prompt its caller was told was
+	// refused. Only an unreachable endpoint queues the submit.
 	if rep.Outcome.Code != "" {
 		code := rep.Outcome.Code
-		switch code {
-		case protocol.CodeBusy, protocol.CodeDraining, protocol.CodeStorageFull:
-			// Transient: leave pending, drainer retries next tick.
-			_ = spool.MarkAttempt(sender.Key{CreatorHost: ipc.LocalHost, RequestID: id}, string(code))
-		case protocol.CodeExpired:
+		if code == protocol.CodeExpired {
 			_ = spool.MarkExpired(sender.Key{CreatorHost: ipc.LocalHost, RequestID: id})
-		default:
-			// Terminal refusal: mark failed with the code.
+		} else {
 			_ = spool.MarkFailed(sender.Key{CreatorHost: ipc.LocalHost, RequestID: id}, string(code))
 		}
 		return rep, exitForOutcome(rep), nil
