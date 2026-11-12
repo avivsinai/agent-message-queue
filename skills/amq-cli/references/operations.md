@@ -328,8 +328,9 @@ Bulk JSON separates `retried`, `already_delivered`, and `skipped`, and its
 
 `amq who` and `amq doctor --ops` report `notifier_live` only when the wake-lock
 inspector verifies a live `amq wake` process identity. That proves prompt
-notification, not message consumption. `recent_activity` means only that
-`last_seen` is fresh. Use `drain` or `monitor` when consumption is required;
+notification, not message consumption. `hook_live` means a co-op wait hook of
+the agent's Claude Code session waits to wake it. `recent_activity` means only
+that `last_seen` is fresh. Use `drain` or `monitor` when consumption is required;
 run long-lived wake/monitor commands under launchd, systemd, or another
 supervisor rather than treating AMQ itself as a daemon.
 

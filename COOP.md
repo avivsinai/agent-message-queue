@@ -115,7 +115,8 @@ amq coop join                 # once per session, inside the session
   once per message, and the Stop guard still reports that message once if it
   is unread at the next turn end, so a ring is an attempt, not proof that the
   agent read anything. `join` prints whether the hook will wake the session,
-  or why not.
+  or why not. While the hook waits, `amq who` shows the agent as
+  `active (hook_live)`.
 - **Policy is the wake settings.** The wait hook obeys `hold_normal`,
   `hold_low` and `debounce` from `~/.amq/wake.settings` and the agent's
   `.wake.settings` (`amq wake config`; `--machine` changes the user's file),

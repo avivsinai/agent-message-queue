@@ -222,6 +222,22 @@ func coopWaitSettings(root, me string, last wakeSettingsLayers) (wakeSettings, w
 	return mergeWakeSettingsLayers(agent, machine, last)
 }
 
+// coopWaitRuns reports whether a wait hook holds the doorbell of (root, me).
+// The one waiter that may ring keeps the agent's waiter lock for as long as
+// its process lives, so a lock that cannot be taken is a waiter that runs.
+// Looking changes nothing in a root that may not be the caller's own: the
+// lock file is opened only if it exists as a regular file, read-only and
+// without following a link, and it is never created.
+func coopWaitRuns(root, me string) bool {
+	f, _, err := fsq.OpenRegularNoFollow(filepath.Join(fsq.AgentBase(root, me), coopWaitLockFile))
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+	ok, err := lock.TryLock(f)
+	return err == nil && !ok
+}
+
 // coopWaitRunsInBackground reports whether the Claude Code session this
 // hook runs in keeps an asyncRewake hook in the background. A session that
 // does not would hold its turn end until the waiter exits, so anything

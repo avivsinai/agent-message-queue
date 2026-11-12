@@ -6,7 +6,10 @@ package cli
 // rings. The decision test breaks if held or already announced mail rings,
 // or if due mail does not. The ring test breaks if new mail does not ring
 // with the fixed doorbell and the ring code, if the ring is not recorded,
-// or if a later waiter rings again for the same mail.
+// or if a later waiter rings again for the same mail. The presence test
+// breaks if an agent whose waiter runs reads as stale to its peers, as a
+// joined desktop-app session did, or if looking creates the waiter's lock;
+// pre-merge review added that a lock path that is a link is not followed.
 
 import (
 	"context"
@@ -18,7 +21,9 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
 
 type coopWaitFileTime struct {
@@ -89,5 +94,47 @@ func TestCoopWaitRingsOnceForNewMail(t *testing.T) {
 	}
 	if err := wait(quiet); err != nil {
 		t.Fatalf("same mail again: %v, want no second ring", err)
+	}
+}
+
+func TestAnAgentWhoseWaiterRunsIsActive(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	root := filepath.Join(t.TempDir(), "queue")
+	if err := runInit([]string{"--root", root, "--agents", "claude,codex"}); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := filepath.Join(fsq.AgentBase(root, "claude"), coopWaitLockFile)
+	if got := resolvePresenceSource(root, "claude", false); got != "" {
+		t.Fatalf("an agent no waiter ran for has presence source %q, want none", got)
+	}
+	if _, err := os.Lstat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("looking at presence created the waiter lock: %v", err)
+	}
+	release, ok, err := lock.TryExclusive(lockPath)
+	if err != nil || !ok {
+		t.Fatalf("take the waiter lock: ok=%v err=%v", ok, err)
+	}
+	if got := resolvePresenceSource(root, "claude", false); got != presenceSourceHookLive {
+		t.Fatalf("an agent whose waiter runs has presence source %q, want %q", got, presenceSourceHookLive)
+	}
+	release()
+	if got := resolvePresenceSource(root, "claude", false); got != "" {
+		t.Fatalf("an agent whose waiter ended has presence source %q, want none", got)
+	}
+
+	// A lock path that is a link names a file outside the root. Looking
+	// must not create or lock it.
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.Remove(lockPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, lockPath); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolvePresenceSource(root, "claude", false); got != "" {
+		t.Fatalf("a lock path that is a link gives presence source %q, want none", got)
+	}
+	if _, err := os.Lstat(outside); !os.IsNotExist(err) {
+		t.Fatalf("looking at presence created the link's target: %v", err)
 	}
 }
