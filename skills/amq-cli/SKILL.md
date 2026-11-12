@@ -37,9 +37,10 @@ raw `--root`.
 
 ## Receive under a live wake
 
-If session-start context says `wake=live(...)`, or
-`amq wake check --me <handle> --json` reports `live_wake: true` with an
-injection mode other than `none`, the wake delivers a doorbell for you.
+If session-start context says that a wake rings this terminal or that a hook
+wakes this session, or `amq wake check --me <handle> --json` reports
+`live_wake: true` with an injection mode other than `none`, a doorbell is
+delivered for you.
 Run `amq drain --include-body` when it fires, then act on the messages.
 
 The default drain reads at most 20 messages in filename order, including held
@@ -48,7 +49,7 @@ as needed; do not assume the inbox is empty. Use `--limit 0` only for a known,
 manageable batch. Urgent hold bypass does not change drain order.
 
 Do not run `amq watch`, `amq monitor`, sleep-poll, or start another inbox
-watcher under that live wake. A blocking wait holds your turn while the
+watcher under that live wake or wait hook. A blocking wait holds your turn while the
 doorbell queues behind it. When your work is done, finish the turn; do not
 keep a tool running or send idle check-ins just to wait for mail.
 
@@ -76,7 +77,8 @@ it, `--unset <key>` falls back, and `--machine` sets this user's default.
 Injection flags are fixed for a running wake. Exit codes and recovery are in
 [wake operations](https://github.com/avivsinai/agent-message-queue/blob/main/docs/wake-operations.md#live-settings).
 
-Without an injecting wake, use the receive methods in the operations guide.
+Without an injecting wake or a wait hook, use the receive methods in the
+operations guide.
 A notify-only wake (`--inject-mode none`) paired with a supervisor `monitor`
 service is a separate supported setup.
 
