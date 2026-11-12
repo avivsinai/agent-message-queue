@@ -76,9 +76,10 @@ func runCoopJoin(args []string) error {
 		"that process by the session record Claude Code keeps while it runs. It",
 		"refuses a session that has AM_* identity variables, a handle that another",
 		"running Claude session holds (run amq coop leave there), and a handle with a",
-		"running wake. It takes the handle of a session that no longer runs. Joining",
-		"again with the same handle changes nothing; another handle replaces the",
-		"first.",
+		"running wake. It takes the handle of a session that does not run, such as a",
+		"chat with no process, and says so; that session is then refused with the",
+		"reason until it joins with --me. Joining again with the same handle changes",
+		"nothing; another handle replaces the first.",
 		"",
 		"It prints the unread count and whether a hook wakes the session for new mail",
 		"(see amq coop install-hooks).")
@@ -158,7 +159,7 @@ func runCoopJoin(args []string) error {
 	if id, err = validateRecordedIdentity(id, "this Claude session's"); err != nil {
 		return err
 	}
-	err = claudeidentity.Bind(claudeidentity.Record{ClaudeSession: claudeSession, ConfigDir: configDir, Identity: id}, claudeSessionRuns)
+	replaced, err := claudeidentity.Bind(claudeidentity.Record{ClaudeSession: claudeSession, ConfigDir: configDir, Identity: id}, claudeSessionRuns)
 	var held *claudeidentity.HeldError
 	if errors.As(err, &held) {
 		return ActionRequiredError("handle %s in %s is held by the running Claude session %s; run amq coop leave in that session, or choose another handle with --me <handle>", handle, root, held.ClaudeSession)
@@ -171,6 +172,14 @@ func runCoopJoin(args []string) error {
 	publishAgentIdentity(root, rootToken, handle, harness.Invocation{Harness: harness.Claude})
 	if err := writeStdout("Joined as %s (session %s, root %s).%s\n", handle, name, root, chosenBy); err != nil {
 		return err
+	}
+	// The handle moved from a session that may come back, for example a
+	// chat with no process now. Say so here; that session is refused with
+	// the reason at its next command.
+	if replaced != "" {
+		if err := writeStdout("The handle was held by Claude session %s, which does not run; that session has no handle now and joins with --me <handle>.\n", replaced); err != nil {
+			return err
+		}
 	}
 	// This session's SessionStart ran before the join and printed no
 	// preamble, so the backlog is reported here.

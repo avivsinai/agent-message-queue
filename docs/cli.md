@@ -1860,9 +1860,10 @@ The command must run under the Claude Code process of the session; it finds
 that process by the session record Claude Code keeps while it runs. It
 refuses a session that has AM_* identity variables, a handle that another
 running Claude session holds (run amq coop leave there), and a handle with a
-running wake. It takes the handle of a session that no longer runs. Joining
-again with the same handle changes nothing; another handle replaces the
-first.
+running wake. It takes the handle of a session that does not run, such as a
+chat with no process, and says so; that session is then refused with the
+reason until it joins with --me. Joining again with the same handle changes
+nothing; another handle replaces the first.
 
 It prints the unread count and whether a hook wakes the session for new mail
 (see amq coop install-hooks).

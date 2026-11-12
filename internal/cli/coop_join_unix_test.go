@@ -169,18 +169,19 @@ func TestCoopJoinTakesTheHandleOfASessionThatEnded(t *testing.T) {
 	// join runs the command inside claudeSession: the one Claude Code
 	// process of this test now runs that session, so a session that joined
 	// before has no record any more, as after /clear.
-	join := func(claudeSession string) error {
+	join := func(claudeSession string) (string, error) {
 		t.Helper()
 		t.Setenv(envClaudeSession, claudeSession)
 		claudeSessionRecord(t, os.Getppid(), claudeSession)
-		_, err := captureStdout(t, func() error { return runCoopJoin([]string{"--me", "reviewer"}) })
-		return err
+		return captureStdout(t, func() error { return runCoopJoin([]string{"--me", "reviewer"}) })
 	}
-	if err := join(ended); err != nil {
-		t.Fatal(err)
+	if out, err := join(ended); err != nil || strings.Contains(out, "was held by") {
+		t.Fatalf("first join = %q, %v; want no handle taken from another session", out, err)
 	}
-	if err := join(next); err != nil {
-		t.Fatalf("join with the handle of an ended session: %v", err)
+	// The session that ended may be a chat that comes back, so the join
+	// says whose handle it took.
+	if out, err := join(next); err != nil || !strings.Contains(out, "was held by Claude session "+ended) {
+		t.Fatalf("join with the handle of an ended session = %q, %v; want it to name session %s", out, err, ended)
 	}
 	t.Setenv(envClaudeSession, next)
 	if err := adoptClaudeSessionIdentity(); err != nil || os.Getenv(envMe) != "reviewer" {
@@ -192,8 +193,8 @@ func TestCoopJoinTakesTheHandleOfASessionThatEnded(t *testing.T) {
 	// The ended session, if it comes back, must not act under the handle
 	// and must not read as a session that never joined.
 	t.Setenv(envClaudeSession, ended)
-	if err := adoptClaudeSessionIdentity(); GetExitCode(err) != ExitContextMismatch || !strings.Contains(err.Error(), next) {
-		t.Fatalf("the ended session's adoption = %v, want a context mismatch naming session %s", err, next)
+	if err := adoptClaudeSessionIdentity(); GetExitCode(err) != ExitContextMismatch || !strings.Contains(err.Error(), next) || !strings.Contains(err.Error(), "amq coop join --me") {
+		t.Fatalf("the ended session's adoption = %v, want a context mismatch naming session %s and the join that works there", err, next)
 	}
 	// Its leave must not free the handle the new session holds, nor say so.
 	out, err := captureStdout(t, func() error { return runCoopLeave(nil) })
