@@ -340,8 +340,8 @@ Windows launch surface (`launchapi`), and the Windows Codex and Claude
 keepalive adapters (`internal/keepalive/adapter`). The rest of `go test ./...`
 is not run there; the broader suite has known failures
 ([#891](https://github.com/avivsinai/agent-message-queue/issues/891)).
-`amq wake`, `coop exec`, and terminal supervision are not native Windows
-contracts. Direct submitted injection via `amq-keepalive.exe` is the supported
+`amq wake`, `coop exec`, `coop join`, and terminal supervision are not native
+Windows contracts. Direct submitted injection via `amq-keepalive.exe` is the supported
 injection path. Use WSL with a Linux asset for the complete co-op workflow.
 `amq-bridge`, `amq-acp`, `amq-remote`, `amq-owner-sign`, and `amq-board` are
 published for Linux and macOS, not Windows.

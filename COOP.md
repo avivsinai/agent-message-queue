@@ -106,14 +106,18 @@ amq coop join --me reviewer   # once per session, inside the session
   or why not.
 - **Policy is the wake settings.** The wait hook obeys `hold_normal`,
   `hold_low` and `debounce` from `~/.amq/wake.settings` and the agent's
-  `.wake.settings` (`amq wake config`), and applies a change while it waits.
+  `.wake.settings` (`amq wake config`; `--machine` changes the user's file),
+  and applies a change while it waits. For a joined handle the command prints
+  `wake: no running wake`; the wait hook still reads both files.
   The doorbell carries no sender or subject, so `preview_len` does not apply.
 - **Permission is yours.** Add the rule `Bash(amq *)` to `permissions.allow`
-  in the Claude settings so that a doorbell's `amq drain` does not stop at a
-  permission dialog. AMQ does not write permission rules.
+  in `~/.claude/settings.json` so that a doorbell's `amq drain` does not stop
+  at a permission dialog. AMQ does not write permission rules.
 
 Limits:
 
+- `amq coop join` and `amq coop leave` run on macOS and Linux. Native Windows
+  refuses them.
 - The wait hook runs only in desktop-app sessions (entrypoint
   `claude-desktop`) on Claude Code 2.1.321 or later, and is proven only on
   macOS. In other sessions it exits at once: plain `claude -p` would hold
