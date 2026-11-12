@@ -298,7 +298,7 @@ func runCoopInitInternal(args []string, printNextSteps bool) (returnErr error) {
 		if err := writeStdoutLine("  (handle = command basename; custom handle: amq coop exec --me <handle> <command>)"); err != nil {
 			return err
 		}
-		if err := writeStdoutLine("  A Claude Code session with no terminal (desktop app): amq coop join --me <handle>, inside the session"); err != nil {
+		if err := writeStdoutLine("  A Claude Code session with no terminal (desktop app): amq coop join, inside the session"); err != nil {
 			return err
 		}
 		if err := writeStdoutLine(""); err != nil {

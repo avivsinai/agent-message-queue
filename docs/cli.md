@@ -1831,7 +1831,7 @@ Options:
 ```text
 $ amq coop join --help
 Usage:
-  amq coop join --me <handle> [--session <name>]
+  amq coop join [--me <handle>] [--session <name>]
 
 Bind this Claude Code session to an agent handle. Run it inside the session,
 through its shell tool. It is for a session that amq coop exec did not start,
@@ -1842,6 +1842,12 @@ with no --me and no AM_* variable: they find the binding by
 CLAUDE_CODE_SESSION_ID. The binding lasts as long as the session id: it
 survives a resume and a compaction. A new or forked session, and a session
 after /clear, has a new id and joins again.
+
+Without --me, a session that holds a handle keeps it, and a session whose
+binding cannot be read is refused. A session that holds
+none takes the name the user gave it in Claude Code (/rename reviewer), in
+lower case, when that is a handle, and otherwise claude, the handle amq coop
+exec claude uses. The output says which one it took.
 
 The root comes from the project configuration, as for other commands. The
 project must be set up (amq coop init, or amq setup) and the session must
@@ -1861,7 +1867,7 @@ It prints the unread count and whether a hook wakes the session for new mail
 
 Options:
   -me string
-        Agent handle for this session (required)
+        Agent handle for this session (default: the one it holds, else the name the user gave the session, else claude)
   -session string
         Session name (default: the project's declared default session)
 ```

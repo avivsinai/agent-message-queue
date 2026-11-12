@@ -20,7 +20,11 @@ package cli
 // the states in which the new hints would again name a refused command: a
 // session with an AM_* variable, where join refuses, and a project file
 // whose queue does not exist yet, where coop init refuses and session
-// create works.
+// create works. The fourth test breaks if a join with no --me stops taking,
+// in this order, the handle the session holds, the name its user gave it
+// when that is a handle, and claude; pre-merge review added that the name
+// never gives the human's handle, that a binding which cannot be read is
+// refused and not replaced, and that --me is used as normalized.
 
 import (
 	"fmt"
@@ -37,6 +41,14 @@ import (
 // the pid of the test itself, the session runs somewhere else.
 func claudeSessionRecord(t *testing.T, pid int, claudeSession string) string {
 	t.Helper()
+	return claudeSessionRecordNamed(t, pid, claudeSession, "", "")
+}
+
+// claudeSessionRecordNamed is claudeSessionRecord for a session with a
+// name; nameSource says who chose it ("user", or "derived" for a name
+// Claude Code made from the directory).
+func claudeSessionRecordNamed(t *testing.T, pid int, claudeSession, name, nameSource string) string {
+	t.Helper()
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Fatal(err)
@@ -46,7 +58,7 @@ func claudeSessionRecord(t *testing.T, pid int, claudeSession string) string {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, fmt.Sprintf("%d.json", pid))
-	record := fmt.Sprintf(`{"pid":%d,"sessionId":%q,"pidDomain":%q}`, pid, claudeSession, runtime.GOOS)
+	record := fmt.Sprintf(`{"pid":%d,"sessionId":%q,"name":%q,"nameSource":%q,"pidDomain":%q}`, pid, claudeSession, name, nameSource, runtime.GOOS)
 	if err := os.WriteFile(path, []byte(record), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -219,5 +231,76 @@ func TestAClaudeSessionWithNoHandleIsToldTheFixThatWorksThere(t *testing.T) {
 	t.Setenv(envRoot, filepath.Join(t.TempDir(), "elsewhere"))
 	if err := requireMe(""); err == nil || strings.Contains(err.Error(), "amq coop join") {
 		t.Fatalf("a session with an AM_* variable is not sent to the join, got: %v", err)
+	}
+}
+
+func TestCoopJoinWithoutAHandleTakesTheSessionNameOrClaude(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+	if _, err := captureStdout(t, func() error { return runCoopInit([]string{"--no-gitignore"}) }); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { adoptedClaudeBinding = nil })
+	join := func(claudeSession, name, nameSource string, args ...string) string {
+		t.Helper()
+		t.Setenv(envClaudeSession, claudeSession)
+		claudeSessionRecordNamed(t, os.Getppid(), claudeSession, name, nameSource)
+		out, err := captureStdout(t, func() error { return runCoopJoin(args) })
+		if err != nil {
+			t.Fatalf("join in session named %q with %v: %v", name, args, err)
+		}
+		return out
+	}
+	const (
+		titled  = "7c29e148-77eb-47c0-8984-10c13b4700b1"
+		derived = "7c29e148-77eb-47c0-8984-10c13b4700b4"
+		human   = "7c29e148-77eb-47c0-8984-10c13b4700b5"
+		spaced  = "7c29e148-77eb-47c0-8984-10c13b4700b6"
+		named   = "7c29e148-77eb-47c0-8984-10c13b4700b2"
+		kept    = "7c29e148-77eb-47c0-8984-10c13b4700b3"
+	)
+	for _, tc := range []struct {
+		session, name, nameSource string
+		args                      []string
+		want                      string
+	}{
+		// A title is a sentence; a derived name is a handle nobody chose.
+		{titled, "Shell command execution", "user", nil, "Joined as claude (session collab, root "},
+		{derived, "project-c2", "derived", nil, "Joined as claude (session collab, root "},
+		// The human's handle is never a default.
+		{human, "User", "user", nil, "Joined as claude (session collab, root "},
+		{spaced, "", "", []string{"--me", " spacey "}, "Joined as spacey (session collab, root "},
+		{named, "Reviewer", "user", nil, "Joined as reviewer (session collab, root "},
+		{kept, "Reviewer", "user", []string{"--me", "builder"}, "Joined as builder (session collab, root "},
+		{kept, "Reviewer", "user", nil, "Joined as builder (session collab, root "},
+	} {
+		if out := join(tc.session, tc.name, tc.nameSource, tc.args...); !strings.HasPrefix(out, tc.want) {
+			t.Fatalf("join in session named %q with %v printed %q, want prefix %q", tc.name, tc.args, out, tc.want)
+		}
+	}
+
+	// The session of the last case holds builder. With its holder marker
+	// gone the binding cannot be read, and a bare join must not replace it
+	// with a default.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	markers, err := filepath.Glob(filepath.Join(home, ".amq", "claude-sessions", "current", "*.json"))
+	if err != nil || len(markers) == 0 {
+		t.Fatalf("holder markers: %v %v", markers, err)
+	}
+	for _, marker := range markers {
+		if err := os.Remove(marker); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err = runCoopJoin(nil)
+	if GetExitCode(err) != ExitActionRequired || !strings.Contains(err.Error(), "--me <handle>") {
+		t.Fatalf("a bare join over a binding that cannot be read: %v, want a refusal that names --me", err)
+	}
+	if out, err := captureStdout(t, func() error { return runCoopJoin([]string{"--me", "builder"}) }); err != nil || !strings.HasPrefix(out, "Joined as builder ") {
+		t.Fatalf("an explicit --me repairs the binding: %q %v", out, err)
 	}
 }

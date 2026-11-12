@@ -57,7 +57,7 @@ func adoptClaudeSessionIdentity() error {
 		return nil
 	}
 	if err != nil {
-		return ContextMismatchError("this Claude session's AMQ identity cannot be used: %v; run amq coop join --me <handle> again, or set AM_ROOT and AM_ME explicitly", err)
+		return ContextMismatchError("this Claude session's AMQ identity cannot be used: %v; run amq coop join again, or set AM_ROOT and AM_ME explicitly", err)
 	}
 	id, err := validateRecordedIdentity(rec.Identity, "this Claude session's")
 	if err != nil {

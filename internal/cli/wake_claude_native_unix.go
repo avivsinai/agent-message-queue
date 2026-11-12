@@ -43,6 +43,8 @@ type claudeNativeReady struct {
 type claudeNativeRegistry struct {
 	PID        int    `json:"pid"`
 	SessionID  string `json:"sessionId"`
+	Name       string `json:"name"`
+	NameSource string `json:"nameSource"`
 	Cwd        string `json:"cwd"`
 	Version    string `json:"version"`
 	Protocol   int    `json:"peerProtocol"`
