@@ -469,7 +469,7 @@ amq drain --include-body --limit 20               # Continue with another bounde
 amq drain --include-body --limit 0                # All pending mail, only for a manageable batch
 amq drain --session auth --include-body           # Deliberate sibling-session receive
 amq reply --id "<msg_id>" --body "Response"          # Reply in thread
-amq watch --timeout 60s                           # Block until message arrives (only when no wake is live for you)
+amq watch --timeout 60s                           # Block until message arrives (only when no wake or wait hook rings for you)
 amq list --new                                    # Peek without side effects
 amq send --to grok --body "hello"                 # Grok is a normal peer handle, like codex or claude
 ```
