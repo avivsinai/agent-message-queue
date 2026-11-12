@@ -105,7 +105,7 @@ func runWho(args []string) error {
 				ai.NotifierReason = p.NotifierReason
 			}
 			ai.PresenceSource = resolvePresenceSource(scope.Root, row.Handle, recentActivity)
-			ai.Active = recentActivity || ai.PresenceSource == presenceSourceNotifierLive
+			ai.Active = ai.PresenceSource != ""
 			agents = append(agents, ai)
 		}
 
