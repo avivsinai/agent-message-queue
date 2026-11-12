@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.142.1](https://github.com/avivsinai/agent-message-queue/compare/v0.142.0...v0.142.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* **coop:** join says when it took a handle from a session that does not run ([#1475](https://github.com/avivsinai/agent-message-queue/issues/1475)) ([3b42d5f](https://github.com/avivsinai/agent-message-queue/commit/3b42d5f05e6b8a103511977997da6ddf74c31ae2))
+
 ## [0.142.0](https://github.com/avivsinai/agent-message-queue/compare/v0.141.0...v0.142.0) (2026-11-12)
 
 
