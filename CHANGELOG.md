@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.142.2](https://github.com/avivsinai/agent-message-queue/compare/v0.142.1...v0.142.2) (2026-11-12)
+
+
+### Bug Fixes
+
+* **remote:** a submit refused for any reason never runs later ([#1477](https://github.com/avivsinai/agent-message-queue/issues/1477)) ([ca527ad](https://github.com/avivsinai/agent-message-queue/commit/ca527adb9e00957563dd868b77a1d4629d3276a5))
+
 ## [0.142.1](https://github.com/avivsinai/agent-message-queue/compare/v0.142.0...v0.142.1) (2026-11-12)
 
 
