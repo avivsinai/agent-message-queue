@@ -26,6 +26,24 @@ import (
 // one agent. The binding is per session: two sessions in one project join
 // with two handles. Wake policy stays with the handle, in the wake settings.
 
+// coopJoinCanRun reports whether amq coop join would get past its checks of
+// the session this command runs in: a Claude Code session with a session
+// record among this process's ancestors and no AM_* identity variable. A
+// hint names the join only then.
+func coopJoinCanRun() bool {
+	session, configDir, ok := claudeSessionKey()
+	if !ok {
+		return false
+	}
+	for _, key := range identityEnvKeys {
+		if _, present := os.LookupEnv(key); present {
+			return false
+		}
+	}
+	_, ok = ancestorClaudeSessionRecord(configDir, session)
+	return ok
+}
+
 func runCoopJoin(args []string) error {
 	fs := flag.NewFlagSet("coop join", flag.ContinueOnError)
 	me := fs.String("me", "", "Agent handle for this session (required)")
@@ -41,9 +59,10 @@ func runCoopJoin(args []string) error {
 		"survives a resume and a compaction. A new or forked session, and a session",
 		"after /clear, has a new id and joins again.",
 		"",
-		"The root comes from the project configuration, as for other commands; the",
-		"session must exist (amq session create). The mailbox of a new handle is",
-		"created.",
+		"The root comes from the project configuration, as for other commands. The",
+		"project must be set up (amq coop init, or amq setup) and the session must",
+		"exist (amq session create, which also makes the queue a project file",
+		"names). The mailbox of a new handle is created.",
 		"",
 		"The command must run under the Claude Code process of the session; it finds",
 		"that process by the session record Claude Code keeps while it runs. It",
@@ -96,7 +115,15 @@ func runCoopJoin(args []string) error {
 	if err := validateSessionName(name); err != nil {
 		return err
 	}
-	root := filepath.Join(absPath(base), name)
+	base = absPath(base)
+	// With a project file, amq session create makes the queue it names;
+	// with none, the project is not set up and only setup helps.
+	if !dirExists(base) {
+		if _, err := findAndLoadAmqrc(); errors.Is(err, errAmqrcNotFound) {
+			return NotFoundError("no AMQ queue at %s; set this project up with: amq coop init", base)
+		}
+	}
+	root := filepath.Join(base, name)
 	if info, err := os.Stat(root); err != nil || !info.IsDir() {
 		return NotFoundError("session %s does not exist at %s; create it with: amq session create %s", name, root, name)
 	}

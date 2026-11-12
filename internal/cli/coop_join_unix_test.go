@@ -11,7 +11,16 @@ package cli
 // test for a defect seen live in the desktop app: /clear ends the session's
 // Claude Code process, the next prompt starts a session with a new id, and
 // that session could not join with its own handle because the ended session
-// held it and nothing could run amq coop leave there.
+// held it and nothing could run amq coop leave there. The third test is the
+// regression test for two hints seen in a desktop-app session that named a
+// fix which does not work there: a command with no handle said to export
+// AM_ME, which does not last between the shell calls of a Claude Code
+// session, and a join in a project that is not set up said to run amq
+// session create, which refuses for the same reason. Pre-merge review added
+// the states in which the new hints would again name a refused command: a
+// session with an AM_* variable, where join refuses, and a project file
+// whose queue does not exist yet, where coop init refuses and session
+// create works.
 
 import (
 	"fmt"
@@ -167,5 +176,48 @@ func TestCoopJoinTakesTheHandleOfASessionThatEnded(t *testing.T) {
 	t.Setenv(envClaudeSession, next)
 	if err := adoptClaudeSessionIdentity(); err != nil || os.Getenv(envMe) != "reviewer" {
 		t.Fatalf("after the ended session's leave the new session adopted %q, %v; want reviewer", os.Getenv(envMe), err)
+	}
+}
+
+func TestAClaudeSessionWithNoHandleIsToldTheFixThatWorksThere(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+	if err := requireMe(""); err == nil || !strings.Contains(err.Error(), "export AM_ME") {
+		t.Fatalf("outside Claude Code the hint is the export, got: %v", err)
+	}
+
+	const claudeSession = "7c29e148-77eb-47c0-8984-10c13b4700b1"
+	t.Setenv(envClaudeSession, claudeSession)
+	claudeSessionRecord(t, os.Getppid(), claudeSession)
+	if err := requireMe(""); err == nil || !strings.Contains(err.Error(), "amq coop join") || strings.Contains(err.Error(), "export") {
+		t.Fatalf("in a Claude Code session the hint is the join, got: %v", err)
+	}
+	err := runCoopJoin([]string{"--me", "reviewer"})
+	if GetExitCode(err) != ExitNotFound || !strings.Contains(err.Error(), "amq coop init") || strings.Contains(err.Error(), "session create") {
+		t.Fatalf("a join in a project that is not set up names amq coop init, got: %v", err)
+	}
+	// A fresh clone: the project file is there, its queue is not.
+	if err := os.WriteFile(".amqrc", []byte(`{"root": ".queue"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resetAmqrcCache()
+	t.Cleanup(resetAmqrcCache)
+	err = runCoopJoin([]string{"--me", "reviewer"})
+	if GetExitCode(err) != ExitNotFound || !strings.Contains(err.Error(), "amq session create collab") || strings.Contains(err.Error(), "coop init") {
+		t.Fatalf("a join in a project whose queue does not exist yet names amq session create, got: %v", err)
+	}
+	if _, err := captureStdout(t, func() error { return runSessionCreate([]string{"collab"}) }); err != nil {
+		t.Fatalf("the command the hint names: %v", err)
+	}
+	if _, err := captureStdout(t, func() error { return runCoopJoin([]string{"--me", "reviewer"}) }); err != nil {
+		t.Fatalf("join after the hint's command: %v", err)
+	}
+
+	// Join refuses a session that has an AM_* variable, so the hint is the
+	// plain one there.
+	t.Setenv(envRoot, filepath.Join(t.TempDir(), "elsewhere"))
+	if err := requireMe(""); err == nil || strings.Contains(err.Error(), "amq coop join") {
+		t.Fatalf("a session with an AM_* variable is not sent to the join, got: %v", err)
 	}
 }
