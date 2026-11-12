@@ -80,6 +80,14 @@ func (d *Drainer) Drain(_ context.Context) (int, error) {
 		}
 		k := env.key()
 		n++
+		if env.LastError == string(protocol.CodeBusy) {
+			// A pending envelope already refused busy (left by a release
+			// that retried busy) is settled, never sent again.
+			if err := d.spool.MarkFailed(k, string(protocol.CodeBusy)); err != nil {
+				errs = append(errs, err)
+			}
+			continue
+		}
 		// A spooled submit carries no origin: the spool is a local file, and
 		// an origin is a carrier's claim that only the carrier may make.
 		reply, herr := d.ep.Handle(env.Command, core.Source{Host: env.CreatorHost})
