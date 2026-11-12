@@ -259,13 +259,20 @@ func claudeKeyOf(configDir, claudeSession string) string {
 // process this command runs under, when that process runs claudeSession: the
 // record of the nearest parent process that has one naming the session.
 func ancestorClaudeSessionRecord(configDir, claudeSession string) (claudeNativeRegistry, bool) {
+	record, _, ok := ancestorClaudeSession(configDir, claudeSession)
+	return record, ok
+}
+
+// ancestorClaudeSession is ancestorClaudeSessionRecord with the identity of
+// the process that keeps the record.
+func ancestorClaudeSession(configDir, claudeSession string) (claudeNativeRegistry, launch.HolderIdentity, bool) {
 	for _, ancestor := range launch.Ancestors() {
 		record, err := readClaudeSessionRecord(configDir, ancestor.PID)
 		if err == nil && record.SessionID == claudeSession {
-			return record, true
+			return record, ancestor, true
 		}
 	}
-	return claudeNativeRegistry{}, false
+	return claudeNativeRegistry{}, launch.HolderIdentity{}, false
 }
 
 // claudeSessionRuns reports whether a Claude Code process still runs the
