@@ -1845,7 +1845,8 @@ after /clear, has a new id and joins again.
 
 The root comes from the project configuration, as for other commands. The
 project must be set up (amq coop init, or amq setup) and the session must
-exist (amq session create). The mailbox of a new handle is created.
+exist (amq session create, which also makes the queue a project file
+names). The mailbox of a new handle is created.
 
 The command must run under the Claude Code process of the session; it finds
 that process by the session record Claude Code keeps while it runs. It
