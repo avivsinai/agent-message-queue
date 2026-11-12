@@ -15,20 +15,25 @@ worktrees, approvals, and delivery.
 
 ## Start in the correct context
 
-Inside `coop exec`, use the environment as provided and run bare `amq` commands.
-Do not override `--me` or reconstruct the root. Outside it, resolve and export the
-complete context before reading or sending:
+Use the first case that applies:
 
-```bash
-amq_context="$(amq env --me "<handle>" --export)" && eval "$amq_context" &&
-  amq drain --include-body
-```
+1. `AM_ME` is set (`amq coop exec` or `amq launch` started the session): run
+   bare `amq` commands. Do not override `--me` or reconstruct the root.
+2. A Claude Code session with no `AM_ME`, such as a chat of the desktop app:
+   run `amq coop join --me "<handle>"` once. Later bare `amq` commands in that
+   session use the handle. Follow what the output says about the wake: when
+   the wait hook is not installed, tell the user that `amq coop install-hooks`
+   installs it once per machine and that it takes effect in a new session. A
+   session after `/clear` has no handle: join again. Do not use the `amq env`
+   export here; a shell variable does not last between the shell calls of a
+   Claude Code session.
+3. Any other shell: resolve and export the complete context before reading or
+   sending:
 
-In a Claude Code session that `coop exec` did not start (the desktop app has
-no `AM_ME`), run `amq coop join --me "<handle>"` once. Later bare `amq`
-commands in that session use the handle, and its output says whether a hook
-wakes the session for new mail. A session after `/clear` has no handle: join
-again.
+   ```bash
+   amq_context="$(amq env --me "<handle>" --export)" && eval "$amq_context" &&
+     amq drain --include-body
+   ```
 
 For a named session, add `--session <name>` to `amq env`. Treat the evaluated
 context as one terminal bound to one session. Use `--session` or `--project` for

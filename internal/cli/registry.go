@@ -96,7 +96,7 @@ func init() {
 		{Name: "env", Summary: "Output shell commands to set environment variables", Handler: runEnv},
 		{
 			Name:        "coop",
-			Summary:     "Co-op mode setup (init, exec, hooks)",
+			Summary:     "Co-op mode setup (init, exec, join, hooks)",
 			Description: "Co-op mode for multi-agent collaboration",
 			Examples: []string{
 				"amq coop exec claude",

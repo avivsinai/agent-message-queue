@@ -557,6 +557,9 @@ func TestCoopInitNextStepsDefaultAgentsSkipsUser(t *testing.T) {
 	if !containsStr(output, "custom handle: amq coop exec --me <handle> <command>") {
 		t.Fatalf("missing custom-handle hint line, output:\n%s", output)
 	}
+	if !containsStr(output, "amq coop join --me <handle>, inside the session") {
+		t.Fatalf("missing the step for a session with no terminal, output:\n%s", output)
+	}
 	for _, line := range strings.Split(output, "\n") {
 		if strings.Contains(line, "Terminal") && strings.Contains(line, "user") {
 			t.Fatalf("unexpected Terminal line mentioning reserved handle %q, output:\n%s", "user", output)

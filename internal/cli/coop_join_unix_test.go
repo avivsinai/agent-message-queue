@@ -11,7 +11,12 @@ package cli
 // test for a defect seen live in the desktop app: /clear ends the session's
 // Claude Code process, the next prompt starts a session with a new id, and
 // that session could not join with its own handle because the ended session
-// held it and nothing could run amq coop leave there.
+// held it and nothing could run amq coop leave there. The third test is the
+// regression test for two hints seen in a desktop-app session that named a
+// fix which does not work there: a command with no handle said to export
+// AM_ME, which does not last between the shell calls of a Claude Code
+// session, and a join in a project that is not set up said to run amq
+// session create, which refuses for the same reason.
 
 import (
 	"fmt"
@@ -167,5 +172,25 @@ func TestCoopJoinTakesTheHandleOfASessionThatEnded(t *testing.T) {
 	t.Setenv(envClaudeSession, next)
 	if err := adoptClaudeSessionIdentity(); err != nil || os.Getenv(envMe) != "reviewer" {
 		t.Fatalf("after the ended session's leave the new session adopted %q, %v; want reviewer", os.Getenv(envMe), err)
+	}
+}
+
+func TestAClaudeSessionWithNoHandleIsToldTheFixThatWorksThere(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+	if err := requireMe(""); err == nil || !strings.Contains(err.Error(), "export AM_ME") {
+		t.Fatalf("outside Claude Code the hint is the export, got: %v", err)
+	}
+
+	const claudeSession = "7c29e148-77eb-47c0-8984-10c13b4700b1"
+	t.Setenv(envClaudeSession, claudeSession)
+	claudeSessionRecord(t, os.Getppid(), claudeSession)
+	if err := requireMe(""); err == nil || !strings.Contains(err.Error(), "amq coop join") || strings.Contains(err.Error(), "export") {
+		t.Fatalf("in a Claude Code session the hint is the join, got: %v", err)
+	}
+	err := runCoopJoin([]string{"--me", "reviewer"})
+	if GetExitCode(err) != ExitNotFound || !strings.Contains(err.Error(), "amq coop init") || strings.Contains(err.Error(), "session create") {
+		t.Fatalf("a join in a project that is not set up names amq coop init, got: %v", err)
 	}
 }

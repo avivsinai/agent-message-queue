@@ -113,7 +113,7 @@ Commands:
   wake         Background waker (TIOCSTI injection)
   upgrade      Upgrade amq to the latest release
   env          Output shell commands to set environment variables
-  coop         Co-op mode setup (init, exec, hooks)
+  coop         Co-op mode setup (init, exec, join, hooks)
   swarm        Claude Code Agent Teams integration (join, tasks, bridge)
   integration  Optional interoperability adapters
   receipts     Message delivery receipts
@@ -1843,9 +1843,9 @@ CLAUDE_CODE_SESSION_ID. The binding lasts as long as the session id: it
 survives a resume and a compaction. A new or forked session, and a session
 after /clear, has a new id and joins again.
 
-The root comes from the project configuration, as for other commands; the
-session must exist (amq session create). The mailbox of a new handle is
-created.
+The root comes from the project configuration, as for other commands. The
+project must be set up (amq coop init, or amq setup) and the session must
+exist (amq session create). The mailbox of a new handle is created.
 
 The command must run under the Claude Code process of the session; it finds
 that process by the session record Claude Code keeps while it runs. It

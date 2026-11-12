@@ -313,10 +313,15 @@ func defaultMe() string {
 }
 
 func requireMe(handle string) error {
-	if strings.TrimSpace(handle) == "" {
-		return UsageError("--me is required (or set AM_ME, e.g., export AM_ME=your-handle)")
+	if strings.TrimSpace(handle) != "" {
+		return nil
 	}
-	return nil
+	// A shell variable does not last between the shell calls of a Claude
+	// Code session, so the fix there is the binding, not an export.
+	if _, _, ok := claudeSessionKey(); ok && coopJoinSupported {
+		return UsageError("--me is required: this Claude Code session has no handle; run amq coop join --me <handle> once, then repeat the command")
+	}
+	return UsageError("--me is required (or set AM_ME, e.g., export AM_ME=your-handle)")
 }
 
 // loadKnownAgents loads the agent list from config.json.
