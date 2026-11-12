@@ -84,7 +84,7 @@ is needed:
 
 ```sh
 amq coop install-hooks        # once per user and machine
-amq coop join --me reviewer   # once per session, inside the session
+amq coop join                 # once per session, inside the session
 ```
 
 - **Identity is per session.** `amq coop join` binds the session's id
@@ -97,6 +97,14 @@ amq coop join --me reviewer   # once per session, inside the session
   refuses a handle that another running Claude session holds or that has a
   running wake, and a session that has `AM_*` variables. It takes the handle
   of a session that no longer runs.
+- **The handle has a default.** `amq coop join --me reviewer` names it.
+  Without `--me`, a session that holds a handle keeps it. A session that
+  holds none takes the name its user gave it in Claude Code
+  (`/rename reviewer`), in lower case, when that is a handle, and otherwise
+  `claude`. A name that Claude Code derived, a title that is a sentence, and
+  the human's handle `user` are not used. `join` prints which one it took. When another running
+  session holds that handle, the join is refused and the session names its
+  own with `--me`.
 - **The wait hook is the doorbell.** Claude Code keeps it in the background
   (`asyncRewake`). When mail arrives it prints the doorbell and the session
   starts a turn, also when the session is idle or not on screen. It rings

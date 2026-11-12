@@ -46,9 +46,9 @@ func coopJoinCanRun() bool {
 
 func runCoopJoin(args []string) error {
 	fs := flag.NewFlagSet("coop join", flag.ContinueOnError)
-	me := fs.String("me", "", "Agent handle for this session (required)")
+	me := fs.String("me", "", "Agent handle for this session (default: the one it holds, else the name the user gave the session, else claude)")
 	session := fs.String("session", "", "Session name (default: the project's declared default session)")
-	usage := usageWithFlags(fs, "amq coop join --me <handle> [--session <name>]",
+	usage := usageWithFlags(fs, "amq coop join [--me <handle>] [--session <name>]",
 		"Bind this Claude Code session to an agent handle. Run it inside the session,",
 		"through its shell tool. It is for a session that amq coop exec did not start,",
 		"such as a session of the Claude Code desktop app.",
@@ -58,6 +58,12 @@ func runCoopJoin(args []string) error {
 		"CLAUDE_CODE_SESSION_ID. The binding lasts as long as the session id: it",
 		"survives a resume and a compaction. A new or forked session, and a session",
 		"after /clear, has a new id and joins again.",
+		"",
+		"Without --me, a session that holds a handle keeps it, and a session whose",
+		"binding cannot be read is refused. A session that holds",
+		"none takes the name the user gave it in Claude Code (/rename reviewer), in",
+		"lower case, when that is a handle, and otherwise claude, the handle amq coop",
+		"exec claude uses. The output says which one it took.",
 		"",
 		"The root comes from the project configuration, as for other commands. The",
 		"project must be set up (amq coop init, or amq setup) and the session must",
@@ -82,9 +88,12 @@ func runCoopJoin(args []string) error {
 	if fs.NArg() != 0 {
 		return UsageError("coop join takes no positional arguments")
 	}
-	handle, err := normalizeHandle(*me)
-	if err != nil {
-		return UsageError("coop join needs --me <handle>: %v", err)
+	named := ""
+	if *me != "" {
+		var err error
+		if named, err = normalizeHandle(*me); err != nil {
+			return UsageError("coop join --me: %v", err)
+		}
 	}
 	claudeSession, configDir, ok := claudeSessionKey()
 	if !ok {
@@ -92,7 +101,8 @@ func runCoopJoin(args []string) error {
 	}
 	// A later join tells a holder that runs from one that ended by this
 	// record, so a session without one cannot hold a handle.
-	if _, ok := ancestorClaudeSessionRecord(configDir, claudeSession); !ok {
+	claudeRecord, ok := ancestorClaudeSessionRecord(configDir, claudeSession)
+	if !ok {
 		return ActionRequiredError("coop join found no Claude Code session record for session %s (%s) among the processes this command runs under; run it through the shell tool of that session, on a current Claude Code", claudeSession, filepath.Join(configDir, "sessions"))
 	}
 	// A present identity variable is an explicit context: commands and hooks
@@ -101,6 +111,10 @@ func runCoopJoin(args []string) error {
 		if _, present := os.LookupEnv(key); present {
 			return ActionRequiredError("this session has %s in its environment, so it already has an AMQ context and a binding would not be used; remove the AM_* variables (for example from the Claude settings env block) and start a new session", key)
 		}
+	}
+	handle, chosenBy, err := coopJoinHandle(named, claudeRecord, claudeSession, configDir)
+	if err != nil {
+		return err
 	}
 	base, err := resolveBaseRoot()
 	if err != nil {
@@ -128,7 +142,7 @@ func runCoopJoin(args []string) error {
 		return NotFoundError("session %s does not exist at %s; create it with: amq session create %s", name, root, name)
 	}
 	if wake := inspectWakeLock(root, handle); wake.Exists && wake.Process.Running {
-		return ActionRequiredError("handle %s in %s has a running wake (pid %d), so another session owns it; choose another handle", handle, root, wake.PID)
+		return ActionRequiredError("handle %s in %s has a running wake (pid %d), so another session owns it; choose another handle with --me <handle>", handle, root, wake.PID)
 	}
 	rootToken, err := provisionSelfMailboxInExistingRoot(root, handle)
 	if err != nil {
@@ -144,7 +158,7 @@ func runCoopJoin(args []string) error {
 	err = claudeidentity.Bind(claudeidentity.Record{ClaudeSession: claudeSession, ConfigDir: configDir, Identity: id}, claudeSessionRuns)
 	var held *claudeidentity.HeldError
 	if errors.As(err, &held) {
-		return ActionRequiredError("handle %s in %s is held by the running Claude session %s; run amq coop leave in that session, or choose another handle", handle, root, held.ClaudeSession)
+		return ActionRequiredError("handle %s in %s is held by the running Claude session %s; run amq coop leave in that session, or choose another handle with --me <handle>", handle, root, held.ClaudeSession)
 	}
 	if err != nil {
 		return err
@@ -152,7 +166,7 @@ func runCoopJoin(args []string) error {
 	// As coop exec does, record that Claude Code runs under the handle, so
 	// peers see it as a registered agent.
 	publishAgentIdentity(root, rootToken, handle, harness.Invocation{Harness: harness.Claude})
-	if err := writeStdout("Joined as %s (session %s, root %s).\n", handle, name, root); err != nil {
+	if err := writeStdout("Joined as %s (session %s, root %s).%s\n", handle, name, root, chosenBy); err != nil {
 		return err
 	}
 	// This session's SessionStart ran before the join and printed no
@@ -164,6 +178,40 @@ func runCoopJoin(args []string) error {
 	}
 	return writeStdout("%s\n", coopJoinDoorbell())
 }
+
+// coopJoinHandle picks the handle of a join and, when the caller did not
+// name it, the sentence that says where it came from. named is the handle
+// --me gave, normalized, and it wins. With none, a session keeps the handle
+// it holds, so a repeated join changes nothing; a binding that cannot be
+// read is refused, never replaced by a default. A session that holds none
+// takes the name its user gave it in Claude Code when that is a handle once
+// in lower case, and otherwise the harness name, the handle amq coop exec
+// claude uses. Only a name the user gave counts, and it is taken whole or
+// not at all: a name Claude Code derived from the directory, and a title
+// written from the first prompt, say nothing about who the agent is. The
+// human's handle is never a default.
+func coopJoinHandle(named string, session claudeNativeRegistry, claudeSession, configDir string) (handle, chosenBy string, err error) {
+	if named != "" {
+		return named, "", nil
+	}
+	rec, err := claudeidentity.Lookup(claudeSession, configDir)
+	switch {
+	case err == nil:
+		return rec.Me, "", nil
+	case !errors.Is(err, claudeidentity.ErrNone):
+		return "", "", ActionRequiredError("this session's handle cannot be read: %v; name the handle with --me <handle>", err)
+	}
+	if session.NameSource == claudeNameSourceUser {
+		if name, err := normalizeHandle(strings.ToLower(strings.TrimSpace(session.Name))); err == nil && name != reservedHumanHandle {
+			return name, " The handle is this session's name; --me <handle> chooses another.", nil
+		}
+	}
+	return harness.Claude, " The handle is the default; --me <handle> chooses another.", nil
+}
+
+// claudeNameSourceUser is the nameSource of a session record whose name
+// the user chose, with /rename, --name or the host application.
+const claudeNameSourceUser = "user"
 
 // coopJoinDoorbell says what will announce new mail to the session that
 // just joined, or why nothing will.
