@@ -149,12 +149,13 @@ func submit(args []string, stdin io.Reader, probe ...*jsonProbe) (any, int, erro
 	// etc.) as a Reply with Outcome.Code and nil error. A non-empty code
 	// means the endpoint REFUSED the command — the envelope must NOT be
 	// marked dispatched. Mark it failed (terminal) so the caller learns the
-	// truth via status; a transient code (busy) is left pending for the
-	// drainer to retry.
+	// truth via status. Busy is final: the caller is told the prompt did not
+	// run, so the drainer must never send it later. Only draining and
+	// storage_full are left pending for the drainer to retry.
 	if rep.Outcome.Code != "" {
 		code := rep.Outcome.Code
 		switch code {
-		case protocol.CodeBusy, protocol.CodeDraining, protocol.CodeStorageFull:
+		case protocol.CodeDraining, protocol.CodeStorageFull:
 			// Transient: leave pending, drainer retries next tick.
 			_ = spool.MarkAttempt(sender.Key{CreatorHost: ipc.LocalHost, RequestID: id}, string(code))
 		case protocol.CodeExpired:

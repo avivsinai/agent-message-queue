@@ -198,7 +198,7 @@ func (e *Endpoint) resubmitTombstoneLocked(cmd *protocol.Command, src Source, ke
 	if t == nil {
 		// The target is offline and the tombstone stays as it is. An empty
 		// code would read as accepted, yet nothing will admit a terminal
-		// tombstone later: answer busy so the sender keeps the retry.
+		// tombstone later: answer busy so the caller sends it again.
 		e.mu.Unlock()
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeBusy, Message: "the target is offline; nothing was sent"}}, nil
 	}

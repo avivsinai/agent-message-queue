@@ -444,10 +444,9 @@ func TestSenderRefusalClassification(t *testing.T) {
 
 // TestSenderTransientRefusalRetriesNextTick pins round-4 N2: a transient
 // refusal keeps the envelope pending (MarkAttempt) and the same envelope
-// dispatches on a later tick, bounded only by NotAfter. Busy IS transient: an
-// offline-enqueued submit that meets one busy tick must not die as failed.
-// An endpoint shutting down refuses with draining, and the envelope waits
-// for the restarted endpoint.
+// dispatches on a later tick, bounded only by NotAfter. An endpoint shutting
+// down refuses with draining, and the envelope waits for the restarted
+// endpoint.
 func TestSenderTransientRefusalRetriesNextTick(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -455,22 +454,6 @@ func TestSenderTransientRefusalRetriesNextTick(t *testing.T) {
 		makeBusy   func(r *drainRig, notAfter string)
 		makeUnbusy func(r *drainRig)
 	}{
-		{
-			name: "busy",
-			code: protocol.CodeBusy,
-			makeBusy: func(r *drainRig, notAfter string) {
-				// Another local request holds the target.
-				if _, err := r.ep.Handle(testCommand(validUUID(2), "fake", "e_1", notAfter), core.Source{Host: "local"}); err != nil {
-					r.t.Fatalf("occupy target: %v", err)
-				}
-			},
-			makeUnbusy: func(r *drainRig) {
-				r.rt.Complete(validUUID(2), "done")
-				if err := r.ep.Tick(); err != nil {
-					r.t.Fatalf("tick: %v", err)
-				}
-			},
-		},
 		{
 			name:       "draining",
 			code:       protocol.CodeDraining,
@@ -556,6 +539,32 @@ func TestSenderTransientRefusalRetriesNextTick(t *testing.T) {
 				t.Fatal("tick 2: the endpoint never ran the command")
 			}
 		})
+	}
+}
+
+// A busy refusal is final: the endpoint keeps a rejected record, so the
+// drainer never sends the request again, even once the target is free.
+// Field: amq-remote 0.142.1, a submit refused busy ran when the long turn
+// ended (audit 2026-11-10).
+func TestSenderBusyRefusalIsFinal(t *testing.T) {
+	now := time.Now()
+	r := newDrainRig(t, now)
+	notAfter := protocol.FormatTime(now.Add(2 * time.Minute))
+	cmd := r.enqueue(validUUID(0), "e_1", notAfter)
+	if _, err := r.ep.Handle(testCommand(validUUID(2), "fake", "e_1", notAfter), core.Source{Host: "local"}); err != nil {
+		t.Fatalf("occupy target: %v", err)
+	}
+	r.drain()
+	if got := r.envelope(cmd.RequestID); got.State != StateFailed || got.LastError != string(protocol.CodeBusy) {
+		t.Fatalf("state=%s last_error=%s, want failed/busy", got.State, got.LastError)
+	}
+	r.rt.Complete(validUUID(2), "done")
+	if err := r.ep.Tick(); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	r.drain()
+	if r.rt.HasRun(cmd.RequestID) {
+		t.Fatal("the busy-refused submit ran after the target was free")
 	}
 }
 

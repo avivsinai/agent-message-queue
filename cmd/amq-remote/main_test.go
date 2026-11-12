@@ -766,6 +766,33 @@ func TestSenderB7RefusedNotDispatched(t *testing.T) {
 	}
 }
 
+// A submit answered busy settles its spool envelope, so the drainer never
+// sends it when the running turn ends. Field: amq-remote 0.142.1, the
+// busy-refused prompt ran after the long turn (audit 2026-11-10).
+func TestSubmitBusyRefusalSettlesEnvelope(t *testing.T) {
+	root := startServe(t)
+	if code, out, _ := cli(t, "", "submit", "fake", "--text", "long turn", "--root", root, "--json"); code != protocol.ExitSuccess {
+		t.Fatalf("first submit exit=%d out=%s", code, out)
+	}
+	const id = "11111111-1111-4111-8111-1111111171b5"
+	code, out, _ := cli(t, "", "submit", "fake", "--text", "busy ghost",
+		"--root", root, "--request-id", id, "--json")
+	if code != protocol.ExitActionRequired || !strings.Contains(out, `"busy"`) {
+		t.Fatalf("busy submit exit=%d out=%s, want %d busy", code, out, protocol.ExitActionRequired)
+	}
+	spool, err := sender.Open(filepath.Join(root, "extensions", "remote"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, exists, err := spool.Get(ipc.LocalHost, id)
+	if err != nil || !exists {
+		t.Fatalf("envelope missing: exists=%v err=%v", exists, err)
+	}
+	if env.State != sender.StateFailed || env.LastError != string(protocol.CodeBusy) {
+		t.Fatalf("envelope state=%s last_error=%q, want failed/busy", env.State, env.LastError)
+	}
+}
+
 // syncBuffer is a mutex-guarded bytes.Buffer (review ruling 20:43:46Z): the
 // serve tick loop writes diagnostics while the failure report reads them, and
 // a raw bytes.Buffer shared between goroutines is a data race.

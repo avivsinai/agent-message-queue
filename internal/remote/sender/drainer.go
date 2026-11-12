@@ -100,7 +100,7 @@ func (d *Drainer) Drain(_ context.Context) (int, error) {
 				errs = append(errs, err)
 			}
 		case isTransientCode(code), code == protocol.CodeAttachmentLost && herr != nil:
-			// Busy / draining / unreachable / storage_full: retry next tick.
+			// Draining / unreachable / storage_full: retry next tick.
 			// An attachment_lost refusal returned as an error recorded
 			// nothing: the endpoint could not decide the target's
 			// reservation (an unreadable record), which a repair ends.
@@ -108,8 +108,8 @@ func (d *Drainer) Drain(_ context.Context) (int, error) {
 				errs = append(errs, err)
 			}
 		default:
-			// Terminal refusal (stale_epoch, unshared,
-			// request_conflict, invalid, unsupported): no retry will succeed.
+			// Terminal refusal (busy, stale_epoch, unshared,
+			// request_conflict, invalid, unsupported): never sent again.
 			if err := d.spool.MarkFailed(k, string(code)); err != nil {
 				errs = append(errs, err)
 			}
@@ -175,16 +175,13 @@ func classifyReply(reply any, herr error) protocol.Code {
 }
 
 // isTransientCode reports whether a dispatch outcome code is worth retrying.
-// Busy IS transient: a target busy ONCE is not a permanent failure of the
-// caller's command. The envelope stays pending, retrying next tick, bounded
-// by NotAfter (only expiry ends it). The spool exists for the caller who is
-// not there to retry; abandoning an accepted envelope on one busy tick would
-// defeat its purpose. The live CLI submit still returns busy to the present
-// caller with exit 6 — that half is right.
+// Busy is NOT transient: the endpoint answers busy with a terminal rejected
+// record, which the owner or a waiting caller already reads as "did not
+// run". Sending the same request again later would run a prompt its caller
+// was told was refused. A caller who still wants it sends it again.
 func isTransientCode(code protocol.Code) bool {
 	switch code {
-	case protocol.CodeBusy,
-		protocol.CodeDraining,
+	case protocol.CodeDraining,
 		protocol.CodeEndpointUnreachable,
 		protocol.CodeStorageFull:
 		return true
