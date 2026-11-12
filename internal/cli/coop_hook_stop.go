@@ -156,9 +156,10 @@ func coopStopPending(root, me string) ([]coopStopMessage, error) {
 
 // coopInbox reads inbox/new for a caller that looks again and again. A
 // message file there never changes: it is written elsewhere and renamed in.
-// So each file is read once, a file that cannot be read is not tried again,
-// and a file that left the directory is forgotten. A look then costs one
-// directory listing, however much mail is unread.
+// So a file that was read is not read again, and a file that left the
+// directory is forgotten. A file that could not be read is tried at every
+// look, because the failure may pass. A look then costs one directory
+// listing and no file read while nothing new arrives.
 type coopInbox struct {
 	seen map[string]coopStopMessage
 }
@@ -178,18 +179,17 @@ func (in *coopInbox) pending(root, me string) ([]coopStopMessage, error) {
 		}
 		msg, known := in.seen[name]
 		if !known {
-			// The zero message stands for a file that cannot be read.
-			if header, err := format.ReadHeaderFile(filepath.Join(dir, name)); err == nil {
-				msg = coopStopMessage{ID: header.ID, Created: header.Created, Priority: header.Priority}
-				if info, err := entry.Info(); err == nil {
-					msg.File = info
-				}
+			header, err := format.ReadHeaderFile(filepath.Join(dir, name))
+			if err != nil {
+				continue
+			}
+			msg = coopStopMessage{ID: header.ID, Created: header.Created, Priority: header.Priority}
+			if info, err := entry.Info(); err == nil {
+				msg.File = info
 			}
 		}
 		seen[name] = msg
-		if msg.ID != "" {
-			pending = append(pending, msg)
-		}
+		pending = append(pending, msg)
 	}
 	in.seen = seen
 	return pending, nil

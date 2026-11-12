@@ -179,6 +179,29 @@ func TestCoopInboxReadsEachUnreadMessageOnce(t *testing.T) {
 	if gone, err := inbox.pending(root, "claude"); err != nil || len(gone) != 0 {
 		t.Fatalf("after the message left = %v %v, want none", gone, err)
 	}
+
+	// A file that cannot be read at one look is read at a later one.
+	if _, err := captureStdout(t, func() error {
+		return runSend([]string{"--root", root, "--me", "codex", "--to", "claude", "--body", "again"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	files, err = filepath.Glob(filepath.Join(fsq.AgentInboxNew(root, "claude"), "*.md"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("inbox files = %v %v", files, err)
+	}
+	if err := os.Chmod(files[0], 0); err != nil {
+		t.Fatal(err)
+	}
+	if hidden, err := inbox.pending(root, "claude"); err != nil || len(hidden) != 0 {
+		t.Fatalf("a file that cannot be read = %v %v, want none", hidden, err)
+	}
+	if err := os.Chmod(files[0], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if back, err := inbox.pending(root, "claude"); err != nil || len(back) != 1 {
+		t.Fatalf("after the file can be read = %v %v, want the message", back, err)
+	}
 }
 
 func TestCoopWaitEndsWhenItsClaudeProcessIsGone(t *testing.T) {
