@@ -42,10 +42,10 @@ func TestBindThenLookupReturnsTheIdentity(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	r := rec(home, sessA, "reviewer")
-	if err := Bind(r, running); err != nil {
+	if _, err := Bind(r, running); err != nil {
 		t.Fatal(err)
 	}
-	if err := Bind(r, running); err != nil {
+	if _, err := Bind(r, running); err != nil {
 		t.Fatalf("binding the same identity again: %v", err)
 	}
 	got, err := Lookup(sessA, r.ConfigDir)
@@ -79,11 +79,11 @@ func TestASecondSessionCannotTakeAHeldHandle(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	a, b := rec(home, sessA, "reviewer"), rec(home, sessB, "reviewer")
-	if err := Bind(a, running); err != nil {
+	if _, err := Bind(a, running); err != nil {
 		t.Fatal(err)
 	}
 	var held *HeldError
-	if err := Bind(b, running); !errors.As(err, &held) || held.ClaudeSession != sessA {
+	if _, err := Bind(b, running); !errors.As(err, &held) || held.ClaudeSession != sessA {
 		t.Fatalf("got %v, want HeldError naming %s", err, sessA)
 	}
 	if _, err := Lookup(sessB, b.ConfigDir); !errors.Is(err, ErrNone) {
@@ -105,7 +105,7 @@ func TestASecondSessionCannotTakeAHeldHandle(t *testing.T) {
 	if _, _, err := Release(sessA, a.ConfigDir); !errors.Is(err, ErrNone) {
 		t.Fatalf("second release: got %v, want ErrNone", err)
 	}
-	if err := Bind(b, running); err != nil {
+	if _, err := Bind(b, running); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Lookup(sessB, b.ConfigDir); err != nil {
@@ -116,18 +116,18 @@ func TestASecondSessionCannotTakeAHeldHandle(t *testing.T) {
 func TestRebindingASessionFreesItsOldHandle(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	if err := Bind(rec(home, sessA, "reviewer"), running); err != nil {
+	if _, err := Bind(rec(home, sessA, "reviewer"), running); err != nil {
 		t.Fatal(err)
 	}
 	a := rec(home, sessA, "builder")
-	if err := Bind(a, running); err != nil {
+	if _, err := Bind(a, running); err != nil {
 		t.Fatal(err)
 	}
 	got, err := Lookup(sessA, a.ConfigDir)
 	if err != nil || got.Me != "builder" {
 		t.Fatalf("got %+v, %v, want builder", got, err)
 	}
-	if err := Bind(rec(home, sessB, "reviewer"), running); err != nil {
+	if _, err := Bind(rec(home, sessB, "reviewer"), running); err != nil {
 		t.Fatalf("the old handle was not freed: %v", err)
 	}
 }

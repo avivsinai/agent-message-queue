@@ -100,7 +100,9 @@ amq coop join                 # once per session, inside the session
   session record that Claude Code keeps for the process it runs under. It
   refuses a handle that another running Claude session holds or that has a
   running wake, and a session that has `AM_*` variables. It takes the handle
-  of a session that no longer runs.
+  of a session that does not run, such as a chat with no process, and says
+  so. That session's next `amq` command is refused with the reason, and it
+  joins with `--me`.
 - **The handle has a default.** `amq coop join --me reviewer` names it.
   Without `--me`, a session that holds a handle keeps it. A session that
   holds none takes the name its user gave it in Claude Code

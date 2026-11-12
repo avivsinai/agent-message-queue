@@ -89,18 +89,19 @@ func ValidHostSession(id string) bool { return hostSessionRe.MatchString(id) }
 // holder marker moves, and the old record stays unreleased, so the old
 // session reads as no longer the holder and not as never bound. A session
 // that binds a different handle frees its old one. Binding the same session
-// to the same identity again succeeds.
-func Bind(r Record, holderRuns func(holder Record) bool) error {
+// to the same identity again succeeds. replaced is the session whose handle
+// r's session took, or "" when the handle had no other unreleased holder.
+func Bind(r Record, holderRuns func(holder Record) bool) (replaced string, err error) {
 	r.Schema = schema
 	r.Released = false
 	if err := r.check(); err != nil {
-		return err
+		return "", err
 	}
 	dir, err := storeDir(true)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return lock.WithExclusiveFileLock(filepath.Join(dir, ".lock"), func() error {
+	err = lock.WithExclusiveFileLock(filepath.Join(dir, ".lock"), func() error {
 		if err := syncStoreDirs(dir); err != nil {
 			return err
 		}
@@ -112,8 +113,11 @@ func Bind(r Record, holderRuns func(holder Record) bool) error {
 		if holder != "" && holder != r.ClaudeSession {
 			var other Record
 			if readStrict(sessionPath(dir, holder), &other) == nil && other.check() == nil &&
-				other.ClaudeSession == holder && !other.Released && currentKey(other) == key && holderRuns(other) {
-				return &HeldError{ClaudeSession: holder}
+				other.ClaudeSession == holder && !other.Released && currentKey(other) == key {
+				if holderRuns(other) {
+					return &HeldError{ClaudeSession: holder}
+				}
+				replaced = holder
 			}
 		}
 		// A session bound to another handle gives that handle up. The marker
@@ -130,6 +134,10 @@ func Bind(r Record, holderRuns func(holder Record) bool) error {
 		}
 		return writeHolder(dir, key, r.ClaudeSession)
 	})
+	if err != nil {
+		return "", err
+	}
+	return replaced, nil
 }
 
 // Release gives up the session's binding under the store lock: the record
