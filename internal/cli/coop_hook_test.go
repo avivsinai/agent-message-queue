@@ -124,8 +124,9 @@ func TestCoopInstallHooksWritesTheGatedEntryAndListsOldOnes(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Every entry starts no amq in a session that does not take part: one
-	// with no AM_ME and no binding file for its Claude session.
-	gate := coopHookMarker + `[ -n "${AM_ME-}" ] || [ -e '` + filepath.Join(home, ".amq", "claude-sessions", "sessions") + `/'"${CLAUDE_CODE_SESSION_ID-}".json ] || exit 0; `
+	// with no AM_ME and no binding file for its Claude session or its chat.
+	store := `[ -e '` + filepath.Join(home, ".amq", "claude-sessions", "sessions") + `/'"${`
+	gate := coopHookMarker + `[ -n "${AM_ME-}" ] || ` + store + `CLAUDE_CODE_SESSION_ID-}".json ] || ` + store + `CLAUDE_CODE_HOST_SESSION_ID-}".json ] || exit 0; `
 	amq := "'" + mustExecutable(t) + "' --no-update-check coop hook "
 	for _, want := range []struct {
 		event, matcher, command string

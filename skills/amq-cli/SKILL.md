@@ -24,10 +24,10 @@ Use the first case that applies:
    handle or the output says the default is taken. Later bare `amq` commands
    in that session use the handle. Follow what the output says about the wake: when
    the wait hook is not installed, tell the user that `amq coop install-hooks`
-   installs it once per machine and that it takes effect in a new session. A
-   session after `/clear` has no handle: join again. Do not use the `amq env`
-   export here; a shell variable does not last between the shell calls of a
-   Claude Code session.
+   installs it once per machine and that it takes effect in a new session.
+   When a later command says the session has no handle (a terminal session
+   after `/clear`), join again. Do not use the `amq env` export here; a shell
+   variable does not last between the shell calls of a Claude Code session.
 3. Any other shell: resolve and export the complete context before reading or
    sending:
 

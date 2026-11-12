@@ -27,7 +27,9 @@ var coopHookEvents = []string{"SessionStart", "Stop"}
 // coopHookCommand is the shell command one co-op hook runs. The gate runs
 // in the harness shell, so a session that does not take part starts no
 // amq: a participant has AM_ME (amq coop exec set it) or a binding file in
-// store for its Claude session (amq coop join wrote it). On SessionStart
+// store (amq coop join wrote it) named by its Claude session id or by the
+// id of the chat a host application runs it for. The gate only keeps other
+// sessions from starting amq; amq decides which binding is the session's. On SessionStart
 // exec replaces that shell with amq: exit 2 from an older amq there only
 // shows a notice. On Stop exit 2 blocks the stop, and an older amq at this
 // path would exit 2 on the unknown subcommand, so the shell stays to turn
@@ -38,7 +40,8 @@ var coopHookEvents = []string{"SessionStart", "Stop"}
 // also exits 2, and as a ring it would start a turn at every turn end.
 func coopHookCommand(bin, store, verb string) string {
 	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
-	gate := coopHookMarker + `[ -n "${AM_ME-}" ] || [ -e ` + quote(store+"/") + `"${` + envClaudeSession + `-}".json ] || exit 0; `
+	bound := func(env string) string { return `[ -e ` + quote(store+"/") + `"${` + env + `-}".json ]` }
+	gate := coopHookMarker + `[ -n "${AM_ME-}" ] || ` + bound(envClaudeSession) + ` || ` + bound(envClaudeHostSession) + ` || exit 0; `
 	amq := quote(bin) + " --no-update-check coop hook " + verb
 	switch verb {
 	case "stop":

@@ -14,16 +14,23 @@ import (
 // its Bash tool the id of the session they run in.
 const envClaudeSession = "CLAUDE_CODE_SESSION_ID"
 
+// envClaudeHostSession is the variable in which an application that hosts
+// Claude Code, such as the desktop app, gives it the id of the chat. AMQ
+// reads it only in the hook gate; see claudeSessionKey.
+const envClaudeHostSession = "CLAUDE_CODE_HOST_SESSION_ID"
+
 // adoptedClaudeBinding is the binding adoptClaudeSessionIdentity adopted
 // for this process, or nil.
 var adoptedClaudeBinding *claudeidentity.Record
 
-// claudeSessionKey returns the Claude session this process runs in and its
-// Claude config dir, or ok false outside a Claude Code session.
-func claudeSessionKey() (session, configDir string, ok bool) {
+// claudeSessionID returns the id of the Claude Code session this process
+// runs in and its Claude config dir, or ok false outside a Claude Code
+// session.
+func claudeSessionID() (session, configDir string, ok bool) {
 	session = strings.TrimSpace(os.Getenv(envClaudeSession))
 	home, err := os.UserHomeDir()
-	if !claudeidentity.ValidSession(session) || err != nil {
+	// The variable holds a Claude session id, never a chat id.
+	if err != nil || !claudeidentity.ValidSession(session) || claudeidentity.ValidHostSession(session) {
 		return "", "", false
 	}
 	configDir = harness.ClaudeConfigDir(home)
@@ -31,6 +38,22 @@ func claudeSessionKey() (session, configDir string, ok bool) {
 		return "", "", false
 	}
 	return session, absPath(filepath.Clean(configDir)), true
+}
+
+// claudeSessionKey returns the key AMQ binds this session's identity to,
+// and the session's Claude config dir. Under a host application the key is
+// the chat's id, so the identity belongs to the chat and stays when /clear
+// ends the chat's Claude session and starts another. Claude Code's own
+// record of the session decides that, not the environment: a process
+// started inside a chat inherits the chat's variables, and Claude Code
+// records the chat id only for the session that is the chat. With no chat
+// id in that record the key is the Claude session id.
+func claudeSessionKey() (key, configDir string, ok bool) {
+	session, configDir, ok := claudeSessionID()
+	if !ok {
+		return "", "", false
+	}
+	return claudeKeyOf(configDir, session), configDir, true
 }
 
 // adoptClaudeSessionIdentity gives an amq command or hook that runs in a
@@ -43,14 +66,14 @@ func claudeSessionKey() (session, configDir string, ok bool) {
 // a reason to fall back to default resolution. A session that never joined,
 // or that left, keeps the default resolution.
 func adoptClaudeSessionIdentity() error {
-	session, configDir, ok := claudeSessionKey()
-	if !ok {
-		return nil
-	}
 	for _, key := range identityEnvKeys {
 		if _, present := os.LookupEnv(key); present {
 			return nil
 		}
+	}
+	session, configDir, ok := claudeSessionKey()
+	if !ok {
+		return nil
 	}
 	rec, err := claudeidentity.Lookup(session, configDir)
 	if errors.Is(err, claudeidentity.ErrNone) {

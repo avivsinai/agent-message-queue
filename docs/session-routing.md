@@ -7,8 +7,10 @@ also carry AMQ-managed root identity tokens. For a named session,
 exact root and `AM_SESSION` is empty. Do not set the identity tokens manually.
 
 A Claude Code session bound with `amq coop join` has none of these variables.
-Each `amq` command in it finds the bound context by `CLAUDE_CODE_SESSION_ID`
-and then runs as in a pinned shell; a binding that cannot be used is a context
+Each `amq` command in it finds the bound context by the session's key (the
+chat id in Claude Code's session record under a host application such as the
+desktop app, else `CLAUDE_CODE_SESSION_ID`) and then runs as in a pinned
+shell; a binding that cannot be used is a context
 mismatch. See [Claude Code desktop app](../COOP.md#claude-code-desktop-app).
 
 ## Root selection

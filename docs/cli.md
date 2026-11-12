@@ -1838,10 +1838,12 @@ through its shell tool. It is for a session that amq coop exec did not start,
 such as a session of the Claude Code desktop app.
 
 After a join, amq commands and the co-op hooks of this session use the handle
-with no --me and no AM_* variable: they find the binding by
-CLAUDE_CODE_SESSION_ID. The binding lasts as long as the session id: it
-survives a resume and a compaction. A new or forked session, and a session
-after /clear, has a new id and joins again.
+with no --me and no AM_* variable. Under an application that hosts Claude
+Code, such as the desktop app, the binding belongs to the chat, by the chat
+id in Claude Code's session record: it survives a resume, a compaction and
+/clear. In a session with no host it belongs to CLAUDE_CODE_SESSION_ID: it
+survives a resume and a compaction, and a session after /clear joins again.
+A new or forked session joins.
 
 Without --me, a session that holds a handle keeps it, and a session whose
 binding cannot be read is refused. A session that holds
@@ -1858,9 +1860,9 @@ The command must run under the Claude Code process of the session; it finds
 that process by the session record Claude Code keeps while it runs. It
 refuses a session that has AM_* identity variables, a handle that another
 running Claude session holds (run amq coop leave there), and a handle with a
-running wake. It takes the handle of a session that no longer runs, for
-example one that /clear ended. Joining again with the same handle changes
-nothing; another handle replaces the first.
+running wake. It takes the handle of a session that no longer runs. Joining
+again with the same handle changes nothing; another handle replaces the
+first.
 
 It prints the unread count and whether a hook wakes the session for new mail
 (see amq coop install-hooks).

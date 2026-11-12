@@ -87,11 +87,15 @@ amq coop install-hooks        # once per user and machine
 amq coop join                 # once per session, inside the session
 ```
 
-- **Identity is per session.** `amq coop join` binds the session's id
-  (`CLAUDE_CODE_SESSION_ID`) to one handle in `~/.amq/claude-sessions/`. After
-  it, `amq` commands and the co-op hooks of that session use the handle with
-  no `--me`. Two sessions in one project join with two handles. The binding
-  survives a resume and a compaction. `amq coop leave` releases the handle.
+- **Identity is per chat.** `amq coop join` binds the session to one handle
+  in `~/.amq/claude-sessions/`. After it, `amq` commands and the co-op hooks
+  of that session use the handle with no `--me`. Two sessions in one project
+  join with two handles. Under the desktop app the binding belongs to the
+  chat, by the chat id that Claude Code keeps in its session record: it
+  survives a resume, a compaction and `/clear`. In a Claude Code session with
+  no host application it belongs to the Claude session id: it survives a
+  resume and a compaction, and a session after `/clear` joins again.
+  `amq coop leave` releases the handle.
   `join` must run through the session's own shell tool: it requires the
   session record that Claude Code keeps for the process it runs under. It
   refuses a handle that another running Claude session holds or that has a
@@ -134,11 +138,17 @@ Limits:
   session has ended a turn after the join. Claude Code ends the hook after
   its timeout of 7 days, so a session with no turn for 7 days has no doorbell
   until its next turn.
-- `/clear` ends the session's process, and the next prompt starts a session
-  with a new id and no handle. Tell that session to join again; it can take
-  the same handle. Mail that arrives in between waits unread.
-- The `amq` on the session's `PATH` and the `amq` in the hook entries must
-  both have `coop join`. `join` reports a hook entry of another binary.
+- `/clear` in the desktop app ends the chat's Claude Code process, and the
+  next prompt starts one. Mail that arrives in between waits unread; the new
+  session reports it at its start and the wait hook rings for it. The chat
+  keeping its handle across `/clear` is proven with the desktop app's Claude
+  Code 2.1.321 run outside the app; inside the app only the chat id staying
+  the same was measured.
+- A chat that joined with amq 0.141.0 has no handle after an upgrade, because
+  that release bound the Claude session id. Join again.
+- The hook entries must be the ones the `amq` on the session's `PATH`
+  installs. `join` reports entries of another binary or of an older release;
+  run `amq coop install-hooks` again.
 
 ### Multiple pairs (isolated sessions)
 

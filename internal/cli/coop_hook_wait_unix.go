@@ -229,7 +229,7 @@ func coopWaitSettings(root, me string, last wakeSettingsLayers) (wakeSettings, w
 // CLAUDE_CODE_SESSION_ID, an entrypoint AMQ has not seen background the
 // hook, or a version below the one it was seen on.
 func coopWaitRunsInBackground() bool {
-	session, configDir, ok := claudeSessionKey()
+	session, configDir, ok := claudeSessionID()
 	if !ok {
 		return false
 	}
