@@ -23,15 +23,15 @@ import (
 
 // amq coop join binds the Claude Code session it runs in to one handle, so
 // a session amq coop exec did not start (a session of the desktop app) is
-// one agent. The binding is per session: two sessions in one project join
-// with two handles. Wake policy stays with the handle, in the wake settings.
+// one agent. The binding is per session key (see claudeSessionKey): two
+// sessions in one project join with two handles. Wake policy stays with the handle, in the wake settings.
 
 // coopJoinCanRun reports whether amq coop join would get past its checks of
 // the session this command runs in: a Claude Code session with a session
 // record among this process's ancestors and no AM_* identity variable. A
 // hint names the join only then.
 func coopJoinCanRun() bool {
-	session, configDir, ok := claudeSessionKey()
+	session, configDir, ok := claudeSessionID()
 	if !ok {
 		return false
 	}
@@ -54,10 +54,12 @@ func runCoopJoin(args []string) error {
 		"such as a session of the Claude Code desktop app.",
 		"",
 		"After a join, amq commands and the co-op hooks of this session use the handle",
-		"with no --me and no AM_* variable: they find the binding by",
-		"CLAUDE_CODE_SESSION_ID. The binding lasts as long as the session id: it",
-		"survives a resume and a compaction. A new or forked session, and a session",
-		"after /clear, has a new id and joins again.",
+		"with no --me and no AM_* variable. Under an application that hosts Claude",
+		"Code, such as the desktop app, the binding belongs to the chat, by the chat",
+		"id in Claude Code's session record: it survives a resume, a compaction and",
+		"/clear. In a session with no host it belongs to CLAUDE_CODE_SESSION_ID: it",
+		"survives a resume and a compaction, and a session after /clear joins again.",
+		"A new or forked session joins.",
 		"",
 		"Without --me, a session that holds a handle keeps it, and a session whose",
 		"binding cannot be read is refused. A session that holds",
@@ -74,9 +76,9 @@ func runCoopJoin(args []string) error {
 		"that process by the session record Claude Code keeps while it runs. It",
 		"refuses a session that has AM_* identity variables, a handle that another",
 		"running Claude session holds (run amq coop leave there), and a handle with a",
-		"running wake. It takes the handle of a session that no longer runs, for",
-		"example one that /clear ended. Joining again with the same handle changes",
-		"nothing; another handle replaces the first.",
+		"running wake. It takes the handle of a session that no longer runs. Joining",
+		"again with the same handle changes nothing; another handle replaces the",
+		"first.",
 		"",
 		"It prints the unread count and whether a hook wakes the session for new mail",
 		"(see amq coop install-hooks).")
@@ -95,16 +97,17 @@ func runCoopJoin(args []string) error {
 			return UsageError("coop join --me: %v", err)
 		}
 	}
-	claudeSession, configDir, ok := claudeSessionKey()
+	sessionID, configDir, ok := claudeSessionID()
 	if !ok {
 		return ActionRequiredError("coop join must run inside a Claude Code session (%s is not set to a session id)", envClaudeSession)
 	}
 	// A later join tells a holder that runs from one that ended by this
 	// record, so a session without one cannot hold a handle.
-	claudeRecord, ok := ancestorClaudeSessionRecord(configDir, claudeSession)
+	claudeRecord, ok := ancestorClaudeSessionRecord(configDir, sessionID)
 	if !ok {
-		return ActionRequiredError("coop join found no Claude Code session record for session %s (%s) among the processes this command runs under; run it through the shell tool of that session, on a current Claude Code", claudeSession, filepath.Join(configDir, "sessions"))
+		return ActionRequiredError("coop join found no Claude Code session record for session %s (%s) among the processes this command runs under; run it through the shell tool of that session, on a current Claude Code", sessionID, filepath.Join(configDir, "sessions"))
 	}
+	claudeSession := claudeRecordKey(claudeRecord)
 	// A present identity variable is an explicit context: commands and hooks
 	// would use it and never read the binding.
 	for _, key := range identityEnvKeys {
@@ -226,11 +229,30 @@ func coopJoinDoorbell() string {
 	case err != nil || !slices.ContainsFunc(commands, ownsCoopHook(true)):
 		return "No wake: the wait hook is not installed. Run amq coop install-hooks, then start a new session and join again; until then run amq drain --include-body between tasks."
 	case !slices.Contains(commands, coopHookCommand(bin, claudeidentity.SessionsDir(home), "wait")):
-		return "No wake: the installed wait hook runs another amq than this one. Run amq coop install-hooks; until then run amq drain --include-body between tasks."
+		return "No wake: the installed wait hook is not the one this amq installs (another binary, or an older release). Run amq coop install-hooks, then start a new session; until then run amq drain --include-body between tasks."
 	case !coopWaitRunsInBackground():
 		return "No wake: this Claude Code session does not keep the wait hook in the background. Run amq drain --include-body between tasks."
 	}
 	return "A hook wakes this session when mail arrives after a turn ends; it starts at the end of this turn. Do not run amq watch, amq monitor or a polling loop."
+}
+
+// claudeRecordKey is the key of the session a record describes: the chat id
+// Claude Code recorded for it, else its Claude session id.
+func claudeRecordKey(record claudeNativeRegistry) string {
+	if claudeidentity.ValidHostSession(record.HostSessionID) {
+		return record.HostSessionID
+	}
+	return record.SessionID
+}
+
+// claudeKeyOf returns the key of claudeSession, the session this command
+// runs in: the key of its session record, or the Claude session id when
+// that record cannot be found.
+func claudeKeyOf(configDir, claudeSession string) string {
+	if record, ok := ancestorClaudeSessionRecord(configDir, claudeSession); ok {
+		return claudeRecordKey(record)
+	}
+	return claudeSession
 }
 
 // ancestorClaudeSessionRecord returns the session record of the Claude Code
@@ -249,7 +271,7 @@ func ancestorClaudeSessionRecord(configDir, claudeSession string) (claudeNativeR
 // claudeSessionRuns reports whether a Claude Code process still runs the
 // session of holder. Claude Code keeps one session record per process and
 // removes it at exit, so the session runs when a record in its config
-// directory names it and that record's process is alive. A session that
+// directory has its key and that record's process is alive. A session that
 // ended (the conversation was cleared or deleted, or Claude Code crashed)
 // can no longer run amq coop leave. Anything unproven counts as running: a
 // directory that cannot be listed, an unreadable record of a live process,
@@ -275,7 +297,7 @@ func claudeSessionRuns(holder claudeidentity.Record) bool {
 			}
 			continue
 		}
-		if record.SessionID != holder.ClaudeSession {
+		if claudeRecordKey(record) != holder.ClaudeSession {
 			continue
 		}
 		if (record.PidDomain != "" && record.PidDomain != runtime.GOOS) || wakemutation.ProcessAlive(pid) {

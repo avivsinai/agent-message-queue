@@ -24,7 +24,11 @@ package cli
 // in this order, the handle the session holds, the name its user gave it
 // when that is a handle, and claude; pre-merge review added that the name
 // never gives the human's handle, that a binding which cannot be read is
-// refused and not replaced, and that --me is used as normalized.
+// refused and not replaced, and that --me is used as normalized. The
+// fifth test breaks if a chat of a host application loses its handle when
+// /clear gives it a new Claude session, or if a Claude Code session started
+// inside the chat, which inherits the chat's variables, gets the chat's
+// handle.
 
 import (
 	"fmt"
@@ -42,6 +46,17 @@ import (
 func claudeSessionRecord(t *testing.T, pid int, claudeSession string) string {
 	t.Helper()
 	return claudeSessionRecordNamed(t, pid, claudeSession, "", "")
+}
+
+// claudeChatRecord is claudeSessionRecord for a session that is the chat
+// of a host application, as Claude Code records it under the desktop app. With chat "" the session is one started inside a chat.
+func claudeChatRecord(t *testing.T, pid int, claudeSession, chat string) {
+	t.Helper()
+	path := claudeSessionRecord(t, pid, claudeSession)
+	record := fmt.Sprintf(`{"pid":%d,"sessionId":%q,"hostSessionId":%q,"pidDomain":%q}`, pid, claudeSession, chat, runtime.GOOS)
+	if err := os.WriteFile(path, []byte(record), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // claudeSessionRecordNamed is claudeSessionRecord for a session with a
@@ -302,5 +317,46 @@ func TestCoopJoinWithoutAHandleTakesTheSessionNameOrClaude(t *testing.T) {
 	}
 	if out, err := captureStdout(t, func() error { return runCoopJoin([]string{"--me", "builder"}) }); err != nil || !strings.HasPrefix(out, "Joined as builder ") {
 		t.Fatalf("an explicit --me repairs the binding: %q %v", out, err)
+	}
+}
+
+func TestAChatKeepsItsHandleWhenClearStartsANewClaudeSession(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+	if _, err := captureStdout(t, func() error { return runCoopInit([]string{"--no-gitignore"}) }); err != nil {
+		t.Fatal(err)
+	}
+	const chat = "local_7c29e148-77eb-47c0-8984-10c13b4700c0"
+	const before, after, inside = "7c29e148-77eb-47c0-8984-10c13b4700b1", "7c29e148-77eb-47c0-8984-10c13b4700b2", "7c29e148-77eb-47c0-8984-10c13b4700b3"
+	// handle runs the adoption every amq command starts with, in a session
+	// whose Claude Code process recorded chatInRecord.
+	handle := func(claudeSession, chatInRecord string) string {
+		t.Helper()
+		t.Setenv(envClaudeSession, claudeSession)
+		t.Setenv(envClaudeHostSession, chat)
+		claudeChatRecord(t, os.Getppid(), claudeSession, chatInRecord)
+		defer func() {
+			for _, key := range identityEnvKeys {
+				_ = os.Unsetenv(key)
+			}
+			adoptedClaudeBinding = nil
+		}()
+		if err := adoptClaudeSessionIdentity(); err != nil {
+			t.Fatal(err)
+		}
+		return os.Getenv(envMe)
+	}
+
+	t.Setenv(envClaudeSession, before)
+	claudeChatRecord(t, os.Getppid(), before, chat)
+	if _, err := captureStdout(t, func() error { return runCoopJoin([]string{"--me", "reviewer"}) }); err != nil {
+		t.Fatal(err)
+	}
+	if got := handle(after, chat); got != "reviewer" {
+		t.Fatalf("the chat's next Claude session has handle %q, want reviewer with no join", got)
+	}
+	if got := handle(inside, ""); got != "" {
+		t.Fatalf("a session started inside the chat has handle %q, want none", got)
 	}
 }

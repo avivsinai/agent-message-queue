@@ -41,17 +41,20 @@ type claudeNativeReady struct {
 // claudeNativeRegistry is the part of Claude Code's per-process session
 // record (sessions/<pid>.json in its config dir) that AMQ reads.
 type claudeNativeRegistry struct {
-	PID        int    `json:"pid"`
-	SessionID  string `json:"sessionId"`
-	Name       string `json:"name"`
-	NameSource string `json:"nameSource"`
-	Cwd        string `json:"cwd"`
-	Version    string `json:"version"`
-	Protocol   int    `json:"peerProtocol"`
-	Kind       string `json:"kind"`
-	Entrypoint string `json:"entrypoint"`
-	PidDomain  string `json:"pidDomain"`
-	Socket     string `json:"messagingSocketPath"`
+	PID       int    `json:"pid"`
+	SessionID string `json:"sessionId"`
+	// HostSessionID is the id of the chat when an application hosts Claude
+	// Code and this session is the chat itself.
+	HostSessionID string `json:"hostSessionId"`
+	Name          string `json:"name"`
+	NameSource    string `json:"nameSource"`
+	Cwd           string `json:"cwd"`
+	Version       string `json:"version"`
+	Protocol      int    `json:"peerProtocol"`
+	Kind          string `json:"kind"`
+	Entrypoint    string `json:"entrypoint"`
+	PidDomain     string `json:"pidDomain"`
+	Socket        string `json:"messagingSocketPath"`
 }
 
 // readClaudeSessionRecord reads the session record Claude Code process pid

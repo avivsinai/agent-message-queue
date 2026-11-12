@@ -1,9 +1,15 @@
 // Package claudeidentity keeps the AMQ identity bound to one Claude Code
 // session. A hook or command of the session finds its identity here by the
-// Claude session id, without any AM_* variable in its environment.
+// session's key, without any AM_* variable in its environment.
+//
+// The key names the session as its user sees it. Under an application that
+// hosts Claude Code, such as the desktop app, that is the chat: the key is
+// the chat's id, which stays when /clear ends the chat's Claude session and
+// starts another. With no host it is the Claude session id. This package
+// stores keys and does not decide them.
 //
 // The store is per user ($HOME/.amq/claude-sessions, mode 0700): one record
-// per Claude session under sessions/, and under current/ the session that
+// per session under sessions/, and under current/ the session that
 // holds each (root identity, handle). A record whose session is no longer
 // the holder of its handle is not current: another session took the handle
 // after this one released it, rebound to a different handle, or stopped
@@ -33,6 +39,7 @@ import (
 )
 
 // Record is the AMQ identity bound to one Claude Code session.
+// ClaudeSession is the session's key.
 type Record struct {
 	Schema        int    `json:"schema"`
 	ClaudeSession string `json:"claude_session"`
@@ -57,10 +64,20 @@ const (
 	maxBytes = 4096
 )
 
-var sessionRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+var (
+	sessionRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	// hostSessionRe is the shape Claude Code accepts for the id a host
+	// application gives a chat.
+	hostSessionRe = regexp.MustCompile(`^local_[0-9a-f-]{8,72}$`)
+)
 
-// ValidSession reports whether id has the shape of a Claude Code session id.
-func ValidSession(id string) bool { return sessionRe.MatchString(id) }
+// ValidSession reports whether id has the shape of a session key: a Claude
+// Code session id or the id a host application gives a chat.
+func ValidSession(id string) bool { return sessionRe.MatchString(id) || ValidHostSession(id) }
+
+// ValidHostSession reports whether id has the shape of the id a host
+// application gives a chat.
+func ValidHostSession(id string) bool { return hostSessionRe.MatchString(id) }
 
 // Bind durably records r, then makes r.ClaudeSession the holder of its
 // (root identity, handle), under the store lock so the record and its
@@ -123,7 +140,7 @@ func Bind(r Record, holderRuns func(holder Record) bool) error {
 // ErrNone.
 func Release(claudeSession, configDir string) (out Record, freed bool, err error) {
 	if !ValidSession(claudeSession) {
-		return Record{}, false, fmt.Errorf("%q is not a Claude session id", claudeSession)
+		return Record{}, false, fmt.Errorf("%q is not a Claude session key", claudeSession)
 	}
 	dir, err := storeDir(false)
 	if err != nil {
@@ -170,7 +187,7 @@ func Release(claudeSession, configDir string) (out Record, freed bool, err error
 // directory, or is no longer the holder of its handle.
 func Lookup(claudeSession, configDir string) (Record, error) {
 	if !ValidSession(claudeSession) {
-		return Record{}, fmt.Errorf("%q is not a Claude session id", claudeSession)
+		return Record{}, fmt.Errorf("%q is not a Claude session key", claudeSession)
 	}
 	dir, err := storeDir(false)
 	if err != nil {
@@ -240,7 +257,7 @@ func (r Record) check() error {
 	case r.Schema != schema:
 		return fmt.Errorf("unknown schema %d", r.Schema)
 	case !ValidSession(r.ClaudeSession):
-		return fmt.Errorf("session %q is not a Claude session id", r.ClaudeSession)
+		return fmt.Errorf("session %q is not a Claude session key", r.ClaudeSession)
 	case !filepath.IsAbs(r.ConfigDir) || !filepath.IsAbs(r.Root) || !filepath.IsAbs(r.BaseRoot):
 		return errors.New("the Claude config directory and both roots must be absolute")
 	case strings.TrimSpace(r.Me) == "" || strings.TrimSpace(r.RootID) == "" || strings.TrimSpace(r.BaseRootID) == "":
