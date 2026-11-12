@@ -109,9 +109,10 @@ func decideCoopStop(pending []coopStopMessage, baseline *time.Time, old coopStop
 	ids = slices.Compact(ids)
 
 	next := coopStopState{Schema: 1, BlockedIDs: []string{}}
+	reported := coopIDSet(old.BlockedIDs)
 	var fresh []string
 	for _, id := range ids {
-		if slices.Contains(old.BlockedIDs, id) {
+		if reported[id] {
 			next.BlockedIDs = append(next.BlockedIDs, id)
 		} else {
 			fresh = append(fresh, id)
@@ -138,30 +139,59 @@ func decideCoopStop(pending []coopStopMessage, baseline *time.Time, old coopStop
 	}
 }
 
+// coopIDSet is ids as a set, for a caller that tests many ids against it.
+func coopIDSet(ids []string) map[string]bool {
+	set := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		set[id] = true
+	}
+	return set
+}
+
 // coopStopPending reads the id and creation time of each message in
 // inbox/new, skipping corrupt ones as amq list --new does.
 func coopStopPending(root, me string) ([]coopStopMessage, error) {
+	return new(coopInbox).pending(root, me)
+}
+
+// coopInbox reads inbox/new for a caller that looks again and again. A
+// message file there never changes: it is written elsewhere and renamed in.
+// So each file is read once, a file that cannot be read is not tried again,
+// and a file that left the directory is forgotten. A look then costs one
+// directory listing, however much mail is unread.
+type coopInbox struct {
+	seen map[string]coopStopMessage
+}
+
+func (in *coopInbox) pending(root, me string) ([]coopStopMessage, error) {
 	dir := fsq.AgentInboxNew(root, me)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
+	seen := make(map[string]coopStopMessage, len(entries))
 	var pending []coopStopMessage
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() || strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".md") {
 			continue
 		}
-		header, err := format.ReadHeaderFile(filepath.Join(dir, name))
-		if err != nil {
-			continue
+		msg, known := in.seen[name]
+		if !known {
+			// The zero message stands for a file that cannot be read.
+			if header, err := format.ReadHeaderFile(filepath.Join(dir, name)); err == nil {
+				msg = coopStopMessage{ID: header.ID, Created: header.Created, Priority: header.Priority}
+				if info, err := entry.Info(); err == nil {
+					msg.File = info
+				}
+			}
 		}
-		info, err := entry.Info()
-		if err != nil {
-			info = nil
+		seen[name] = msg
+		if msg.ID != "" {
+			pending = append(pending, msg)
 		}
-		pending = append(pending, coopStopMessage{ID: header.ID, Created: header.Created, Priority: header.Priority, File: info})
 	}
+	in.seen = seen
 	return pending, nil
 }
 

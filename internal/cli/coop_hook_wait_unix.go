@@ -14,6 +14,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/update"
 )
@@ -58,22 +59,25 @@ func runCoopWait(ctx context.Context) error {
 	if err != nil || root == "" || me == "" {
 		return nil
 	}
-	if !coopWaitRunsInBackground() {
+	claude, ok := coopWaitHost()
+	if !ok {
 		return nil
 	}
 	root = canonicalWakeRoot(root)
 	if info, err := os.Stat(fsq.AgentBase(root, me)); err != nil || !info.IsDir() {
 		return nil
 	}
-	return waitCoopMail(ctx, root, me, os.Getenv(envClaudeSession), os.Getppid())
+	return waitCoopMail(ctx, root, me, os.Getenv(envClaudeSession), os.Getppid(), claude)
 }
 
 // waitCoopMail waits until mail is due for claudeSession's agent, then
 // records it and returns errCoopWaitRing. It returns nil when ctx ends,
-// when the hook's shell is gone (Claude Code ended the hook or exited),
-// when a newer waiter took over, or when the session's binding is no
-// longer held. While a wake rings the agent it stays silent.
-func waitCoopMail(ctx context.Context, root, me, claudeSession string, parent int) error {
+// when the hook's shell is gone (Claude Code ended the hook), when the
+// session's Claude Code process claude is gone (a process that was killed
+// leaves the hook's shell behind), when a newer waiter took over, or when
+// the session's binding is no longer held. While a wake rings the agent it
+// stays silent.
+func waitCoopMail(ctx context.Context, root, me, claudeSession string, parent int, claude launch.HolderIdentity) error {
 	agent := fsq.AgentBase(root, me)
 	statePath := filepath.Join(agent, coopWaitStateFile)
 	ownerPath := filepath.Join(agent, coopWaitOwnerFile)
@@ -85,6 +89,7 @@ func waitCoopMail(ctx context.Context, root, me, claudeSession string, parent in
 		release   func()
 		layers    wakeSettingsLayers
 		debounced bool
+		inbox     coopInbox
 	)
 	defer func() {
 		if release != nil {
@@ -93,6 +98,9 @@ func waitCoopMail(ctx context.Context, root, me, claudeSession string, parent in
 	}()
 	for {
 		if os.Getppid() != parent || !coopWaitOwns(ownerPath, owner) || !claudeBindingStillHeld() {
+			return nil
+		}
+		if state, _ := launch.InspectHolder(claude); state == launch.LeaseStale {
 			return nil
 		}
 		if release == nil {
@@ -109,7 +117,7 @@ func waitCoopMail(ctx context.Context, root, me, claudeSession string, parent in
 		wait := coopWaitPoll
 		var due []string
 		if release != nil && !coopHookWakeRings(root, me) {
-			pending, err := coopStopPending(root, me)
+			pending, err := inbox.pending(root, me)
 			if err == nil && len(pending) > 0 {
 				var settings wakeSettings
 				settings, layers = coopWaitSettings(root, me, layers)
@@ -156,13 +164,15 @@ func coopWaitOwns(path, owner string) bool {
 // is held). A message is due when its hold has passed; the hold runs from
 // the inbox file's time, as the wake's does.
 func decideCoopWait(pending []coopStopMessage, announced []string, policy wakeHoldPolicy, now time.Time) (due []string, next time.Time) {
+	skip := coopIDSet(announced)
 	for _, msg := range pending {
-		if msg.ID == "" || slices.Contains(announced, msg.ID) || slices.Contains(due, msg.ID) {
+		if msg.ID == "" || skip[msg.ID] {
 			continue
 		}
 		hold := newWakeHold(policy, msg.Priority, msg.File, now)
 		if !hold.due.After(now) {
 			due = append(due, msg.ID)
+			skip[msg.ID] = true
 			continue
 		}
 		if next.IsZero() || hold.due.Before(next) {
@@ -176,9 +186,11 @@ func decideCoopWait(pending []coopStopMessage, announced []string, policy wakeHo
 // nextCoopWaitState keeps the rang ids that are still unread and adds due.
 func nextCoopWaitState(old coopWaitState, pending []coopStopMessage, due []string) coopWaitState {
 	next := coopWaitState{Schema: 1, ClaudeSession: old.ClaudeSession, RangIDs: slices.Clone(due)}
+	rang, kept := coopIDSet(old.RangIDs), coopIDSet(due)
 	for _, msg := range pending {
-		if slices.Contains(old.RangIDs, msg.ID) && !slices.Contains(next.RangIDs, msg.ID) {
+		if rang[msg.ID] && !kept[msg.ID] {
 			next.RangIDs = append(next.RangIDs, msg.ID)
+			kept[msg.ID] = true
 		}
 	}
 	slices.Sort(next.RangIDs)
@@ -239,22 +251,29 @@ func coopWaitRuns(root, me string) bool {
 }
 
 // coopWaitRunsInBackground reports whether the Claude Code session this
-// hook runs in keeps an asyncRewake hook in the background. A session that
-// does not would hold its turn end until the waiter exits, so anything
-// unproven is false: no session record among this process's ancestors for
-// CLAUDE_CODE_SESSION_ID, an entrypoint AMQ has not seen background the
-// hook, or a version below the one it was seen on.
+// hook runs in keeps an asyncRewake hook in the background.
 func coopWaitRunsInBackground() bool {
+	_, ok := coopWaitHost()
+	return ok
+}
+
+// coopWaitHost returns the Claude Code process of the session this hook
+// runs in, when that session keeps an asyncRewake hook in the background.
+// A session that does not would hold its turn end until the waiter exits,
+// so anything unproven is false: no session record among this process's
+// ancestors for CLAUDE_CODE_SESSION_ID, an entrypoint AMQ has not seen
+// background the hook, or a version below the one it was seen on.
+func coopWaitHost() (claude launch.HolderIdentity, ok bool) {
 	session, configDir, ok := claudeSessionID()
 	if !ok {
-		return false
+		return launch.HolderIdentity{}, false
 	}
-	record, ok := ancestorClaudeSessionRecord(configDir, session)
+	record, claude, ok := ancestorClaudeSession(configDir, session)
 	if !ok {
-		return false
+		return launch.HolderIdentity{}, false
 	}
 	cmp, ok := update.CompareVersions(harness.ClaudeRewakeMinVersion, record.Version)
-	return ok && cmp <= 0 && slices.Contains(harness.ClaudeRewakeEntrypoints, record.Entrypoint)
+	return claude, ok && cmp <= 0 && slices.Contains(harness.ClaudeRewakeEntrypoints, record.Entrypoint)
 }
 
 // errCoopWaitRing is the waiter's ring. Its text is the doorbell, which

@@ -10,11 +10,16 @@ package cli
 // breaks if an agent whose waiter runs reads as stale to its peers, as a
 // joined desktop-app session did, or if looking creates the waiter's lock;
 // pre-merge review added that a lock path that is a link is not followed.
+// The last two tests come from a measurement of the hooks' cost: a waiter
+// read the header of every unread message again at each poll, for as long
+// as the mail stayed unread, and a waiter whose Claude Code process was
+// killed kept running, because the shell of its hook survives that process.
 
 import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -23,6 +28,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
 
@@ -67,7 +73,7 @@ func TestCoopWaitRingsOnceForNewMail(t *testing.T) {
 	wait := func(limit time.Duration) error {
 		ctx, cancel := context.WithTimeout(context.Background(), limit)
 		defer cancel()
-		return waitCoopMail(ctx, root, "claude", claudeSession, os.Getppid())
+		return waitCoopMail(ctx, root, "claude", claudeSession, os.Getppid(), launch.HolderIdentity{})
 	}
 	quiet := 2 * defaultWakeDebounce
 	if err := wait(quiet); err != nil {
@@ -136,5 +142,74 @@ func TestAnAgentWhoseWaiterRunsIsActive(t *testing.T) {
 	}
 	if _, err := os.Lstat(outside); !os.IsNotExist(err) {
 		t.Fatalf("looking at presence created the link's target: %v", err)
+	}
+}
+
+func TestCoopInboxReadsEachUnreadMessageOnce(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	root := filepath.Join(t.TempDir(), "queue")
+	if err := runInit([]string{"--root", root, "--agents", "claude,codex"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := captureStdout(t, func() error {
+		return runSend([]string{"--root", root, "--me", "codex", "--to", "claude", "--body", "hi"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var inbox coopInbox
+	first, err := inbox.pending(root, "claude")
+	if err != nil || len(first) != 1 {
+		t.Fatalf("pending = %v %v, want the one message", first, err)
+	}
+	files, err := filepath.Glob(filepath.Join(fsq.AgentInboxNew(root, "claude"), "*.md"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("inbox files = %v %v", files, err)
+	}
+	// A message file never changes, so a second look that read it again
+	// would see this as a corrupt file and drop the message.
+	if err := os.WriteFile(files[0], []byte("not a message"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := inbox.pending(root, "claude"); err != nil || len(again) != 1 || again[0].ID != first[0].ID {
+		t.Fatalf("second look = %v %v, want the same message with no second read", again, err)
+	}
+	if err := os.Remove(files[0]); err != nil {
+		t.Fatal(err)
+	}
+	if gone, err := inbox.pending(root, "claude"); err != nil || len(gone) != 0 {
+		t.Fatalf("after the message left = %v %v, want none", gone, err)
+	}
+}
+
+func TestCoopWaitEndsWhenItsClaudeProcessIsGone(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	root := filepath.Join(t.TempDir(), "queue")
+	if err := runInit([]string{"--root", root, "--agents", "claude,codex"}); err != nil {
+		t.Fatal(err)
+	}
+	root = canonicalWakeRoot(root)
+	// A process stands for the session's Claude Code. The waiter is not
+	// its child here, as the hook's shell is not after that process dies.
+	claude := exec.Command("sleep", "60")
+	if err := claude.Start(); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := launch.HolderOf(claude.Process.Pid)
+	if err != nil {
+		_ = claude.Process.Kill()
+		t.Fatal(err)
+	}
+	_ = claude.Process.Kill()
+	_ = claude.Wait()
+
+	const limit = 10 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
+	defer cancel()
+	start := time.Now()
+	if err := waitCoopMail(ctx, root, "claude", "7c29e148-77eb-47c0-8984-10c13b4700b1", os.Getppid(), identity); err != nil {
+		t.Fatalf("waiter of a dead Claude process: %v, want a quiet end", err)
+	}
+	if waited := time.Since(start); waited > limit/2 {
+		t.Fatalf("the waiter ran %s after its Claude process was gone, want it to end at once", waited)
 	}
 }
