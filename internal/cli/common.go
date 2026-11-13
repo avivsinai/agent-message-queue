@@ -317,9 +317,10 @@ func requireMe(handle string) error {
 		return nil
 	}
 	// A shell variable does not last between the shell calls of a Claude
-	// Code session, so the fix there is the binding, not an export.
+	// Code session or a Codex thread, so the fix there is the binding, not
+	// an export.
 	if coopJoinCanRun() {
-		return UsageError("--me is required: this Claude Code session has no handle; run amq coop join once, then repeat the command")
+		return UsageError("--me is required: this session has no handle; run amq coop join once, then repeat the command")
 	}
 	return UsageError("--me is required (or set AM_ME, e.g., export AM_ME=your-handle)")
 }

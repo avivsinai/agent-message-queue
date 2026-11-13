@@ -1,16 +1,19 @@
-// Package codexidentity keeps the AMQ identity that amq coop exec gave a
-// Codex thread it created on Codex's shared app-server daemon. Codex 0.160
-// runs a TUI's tool commands in the daemon's environment, so they see none
-// of the AM_* variables coop exec set; they do see CODEX_THREAD_ID, the
-// thread coop exec created. A command finds its identity here by that id.
+// Package codexidentity keeps the AMQ identity of a Codex thread: the one
+// amq coop exec gave a thread it created on Codex's shared app-server
+// daemon, or the one amq coop join bound to a thread AMQ did not start,
+// such as a chat of the Codex desktop app. Codex runs a thread's tool
+// commands without any of the AM_* variables; they do see CODEX_THREAD_ID.
+// A command finds its identity here by that id.
 //
 // The store is per user ($HOME/.amq/codex-threads, mode 0700): one record
-// per thread under threads/, and under current/ the thread that the newest
-// coop exec gave each (root identity, handle). A record whose thread is no
-// longer current for its handle is revoked: a later coop exec for the same
-// handle replaced it. Under bindings/ each publication also leaves one
+// per thread under threads/, and under current/ the thread that holds each
+// (root identity, handle). A record whose thread is no longer current for
+// its handle is revoked: a later coop exec or join for the same handle
+// replaced it. Under bindings/ each publication and each release leaves one
 // event with its time, so the history of which handle carried which thread,
 // and when that changed, survives a later publication of the same thread.
+// A released record moves to released/ as a tombstone, so the thread reads
+// as one AMQ never bound, to this and to earlier AMQ releases alike.
 // Records are never deleted by AMQ, so a revoked or damaged record stays
 // distinguishable from a thread AMQ never managed.
 // The store keeps the owner user's trust boundary; it is no defense against
@@ -36,8 +39,8 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
 
-// Record is the identity coop exec put in the environment of the TUI it
-// started on Thread.
+// Record is the AMQ identity of Thread: the one coop exec put in the
+// environment of the TUI it started on Thread, or the one coop join bound.
 type Record struct {
 	Schema     int    `json:"schema"`
 	Thread     string `json:"thread"`
@@ -50,13 +53,21 @@ type Record struct {
 	BaseRootID string `json:"base_root_id"`
 }
 
-// ErrNone means AMQ never recorded an identity for the thread.
+// ErrNone means no AMQ identity is bound to the thread: AMQ never recorded
+// one, or the thread released it.
 var ErrNone = errors.New("no AMQ identity is recorded for this Codex thread")
 
 const (
 	schema   = 1
 	maxBytes = 4096
 )
+
+// HeldError means another Codex thread that still runs holds the handle.
+type HeldError struct{ Thread string }
+
+func (e *HeldError) Error() string {
+	return fmt.Sprintf("Codex thread %s holds this handle; release it there first", e.Thread)
+}
 
 var threadRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
@@ -78,59 +89,290 @@ func Publish(r Record) error {
 	if err != nil {
 		return err
 	}
+	return lock.WithExclusiveFileLock(filepath.Join(dir, ".lock"), func() error {
+		if err := syncStoreDirs(dir); err != nil {
+			return err
+		}
+		return publishLocked(dir, r)
+	})
+}
+
+// Bind is Publish guarded for a thread that claims a handle itself (amq
+// coop join). Under the store lock it refuses with *HeldError and writes
+// nothing when another thread holds the handle and holderRuns reports that
+// it still runs. A holder that no longer runs cannot release its handle, so
+// r's thread replaces it, and the old record stays, so the old thread reads
+// as no longer the holder and not as never bound. A thread that binds a
+// different handle frees its old one. Binding the same thread to the same
+// identity again changes nothing. replaced is the thread whose handle r's
+// thread took, or "" when the handle had no other holder.
+func Bind(r Record, holderRuns func(holder Record) bool) (replaced string, err error) {
+	r.Schema = schema
+	if err := r.check(); err != nil {
+		return "", err
+	}
+	dir, err := storeDir(true)
+	if err != nil {
+		return "", err
+	}
+	err = lock.WithExclusiveFileLock(filepath.Join(dir, ".lock"), func() error {
+		if err := syncStoreDirs(dir); err != nil {
+			return err
+		}
+		holder, err := heldBy(dir, r)
+		if err != nil {
+			return err
+		}
+		if holder.Thread != "" && holder.Thread != r.Thread {
+			if holderRuns(holder) {
+				return &HeldError{Thread: holder.Thread}
+			}
+			replaced = holder.Thread
+		}
+		old, err := readThread(dir, r.Thread)
+		if err == nil && old == r && holder.Thread == r.Thread {
+			return nil
+		}
+		// A thread bound to another handle gives that handle up. The marker
+		// cannot be deleted safely, so it keeps no holder.
+		if err == nil && currentKey(old) != currentKey(r) {
+			if err := clearCurrent(dir, old); err != nil {
+				return err
+			}
+		}
+		return publishLocked(dir, r)
+	})
+	if err != nil {
+		return "", err
+	}
+	return replaced, nil
+}
+
+// publishLocked writes r's record, makes r.Thread the current thread of its
+// handle, and records the binding event. The caller holds the store lock
+// and has synced the store's directories.
+func publishLocked(dir string, r Record) error {
 	raw, err := json.Marshal(r)
 	if err != nil {
 		return err
 	}
-	current, err := json.Marshal(currentRecord{Schema: schema, Thread: r.Thread})
-	if err != nil {
+	// A binding recorded before the history existed has no event. Save the
+	// ones this publication replaces first: the handle's current thread and
+	// the thread's current handle, so both stay listed as revoked at this
+	// publication's time.
+	var prior currentRecord
+	if readCurrent(dir, r, &prior) == nil && ValidThread(prior.Thread) {
+		if err := captureLegacyBinding(dir, prior.Thread); err != nil {
+			return err
+		}
+	}
+	if err := captureLegacyBinding(dir, r.Thread); err != nil {
 		return err
 	}
-	return lock.WithExclusiveFileLock(filepath.Join(dir, ".lock"), func() error {
-		// Make every directory of the store durable in its parent on every
-		// publication, not only when this call created it: an earlier
-		// publication may have failed after mkdir, or another may still be
-		// between its mkdir and its sync.
-		for _, d := range []string{filepath.Dir(filepath.Dir(dir)), filepath.Dir(dir), dir} {
+	if _, err := fsq.WriteStateFile(filepath.Dir(dir), filepath.Join(storeName, "threads", r.Thread+".json"), append(raw, '\n'), 0o600); err != nil {
+		return fmt.Errorf("record the Codex thread identity: %w", err)
+	}
+	if err := writeCurrent(dir, r, r.Thread); err != nil {
+		return err
+	}
+	return writeEvent(dir, r, false, time.Now().UTC())
+}
+
+// Release gives up the thread's binding under the store lock. The record
+// moves to released/, so Lookup of the thread returns ErrNone, and the
+// handle has no holder when the thread was its holder. It returns the
+// record as it was, and freed false when another thread had taken the
+// handle, which that thread keeps. A thread with no binding returns
+// ErrNone.
+func Release(thread, codexHome string) (out Record, freed bool, err error) {
+	if !ValidThread(thread) {
+		return Record{}, false, fmt.Errorf("CODEX_THREAD_ID %q is not a Codex thread id", thread)
+	}
+	dir, err := storeDir(false)
+	if err != nil {
+		return Record{}, false, err
+	}
+	if dir == "" {
+		return Record{}, false, ErrNone
+	}
+	err = lock.WithExclusiveFileLock(filepath.Join(dir, ".lock"), func() error {
+		r, err := readThreadOf(dir, thread, codexHome)
+		if err != nil {
+			return err
+		}
+		out = r
+		// A store an earlier AMQ made has no released/ yet.
+		if dir, err = storeDir(true); err != nil {
+			return err
+		}
+		if err := syncStoreDirs(dir); err != nil {
+			return err
+		}
+		if err := captureLegacyBinding(dir, thread); err != nil {
+			return err
+		}
+		var cur currentRecord
+		if err := readCurrent(dir, r, &cur); err != nil && !errors.Is(err, ErrNone) {
+			return err
+		}
+		// The record moves first: a crash after it leaves a marker that
+		// names a thread with no record, which no reader counts as a holder.
+		now := time.Now().UTC()
+		tomb := filepath.Join(dir, "released", fmt.Sprintf("%020d-%s.json", now.UnixNano(), thread))
+		if err := os.Rename(filepath.Join(dir, "threads", thread+".json"), tomb); err != nil {
+			return fmt.Errorf("release the Codex thread identity: %w", err)
+		}
+		for _, d := range []string{filepath.Join(dir, "threads"), filepath.Join(dir, "released")} {
 			if err := fsq.SyncDir(d); err != nil {
 				return fmt.Errorf("sync %s: %w", d, err)
 			}
 		}
-		// A binding recorded before the history existed has no event. Save
-		// the ones this publication replaces first: the handle's current
-		// thread and the thread's current handle, so both stay listed as
-		// revoked at this publication's time.
-		var prior currentRecord
-		if readCurrent(dir, r, &prior) == nil && ValidThread(prior.Thread) {
-			if err := captureLegacyBinding(dir, prior.Thread); err != nil {
+		if cur.Thread == thread {
+			if err := writeCurrent(dir, r, ""); err != nil {
 				return err
 			}
+			freed = true
 		}
-		if err := captureLegacyBinding(dir, r.Thread); err != nil {
-			return err
-		}
-		if _, err := fsq.WriteStateFile(filepath.Dir(dir), filepath.Join(storeName, "threads", r.Thread+".json"), append(raw, '\n'), 0o600); err != nil {
-			return fmt.Errorf("record the Codex thread identity: %w", err)
-		}
-		if _, err := fsq.WriteStateFile(filepath.Dir(dir), filepath.Join(storeName, "current", currentKey(r)+".json"), append(current, '\n'), 0o600); err != nil {
-			return fmt.Errorf("record the current Codex thread: %w", err)
-		}
-		now := time.Now().UTC()
-		event, err := json.Marshal(bindingEvent{Schema: schema, Thread: r.Thread, Me: r.Me, RootID: r.RootID, Bound: now.Format(time.RFC3339Nano)})
-		if err != nil {
-			return err
-		}
-		if _, err := fsq.WriteStateFile(filepath.Dir(dir), filepath.Join(storeName, "bindings", fmt.Sprintf("%020d-%s.json", now.UnixNano(), r.Thread)), append(event, '\n'), 0o600); err != nil {
-			return fmt.Errorf("record the Codex thread binding: %w", err)
-		}
-		return nil
+		return writeEvent(dir, r, true, now)
 	})
+	if err != nil {
+		return Record{}, false, err
+	}
+	return out, freed, nil
+}
+
+// Holder returns the thread that holds handle me in the root at root with
+// identity token rootID: the thread the handle's current marker names,
+// when that thread's record still binds it to this handle. ok is false
+// when no thread holds the handle.
+func Holder(root, rootID, me string) (thread string, ok bool, err error) {
+	dir, err := storeDir(false)
+	if err != nil || dir == "" {
+		return "", false, err
+	}
+	holder, err := heldBy(dir, Record{Root: root, RootID: rootID, Me: me})
+	if err != nil || holder.Thread == "" {
+		return "", false, err
+	}
+	return holder.Thread, true, nil
+}
+
+// heldBy returns the record of the thread that holds r's handle, or a zero
+// Record when no thread does. A marker counts only when the thread's record
+// is valid and still names this handle of this root, since Publish leaves
+// the marker of a thread's earlier handle in place.
+func heldBy(dir string, r Record) (Record, error) {
+	var cur currentRecord
+	if err := readCurrent(dir, r, &cur); err != nil {
+		if errors.Is(err, ErrNone) {
+			return Record{}, nil
+		}
+		return Record{}, err
+	}
+	if !ValidThread(cur.Thread) {
+		return Record{}, nil
+	}
+	holder, err := readThread(dir, cur.Thread)
+	if err != nil || currentKey(holder) != currentKey(r) {
+		return Record{}, nil
+	}
+	return holder, nil
+}
+
+// readThread reads and checks the record of thread.
+func readThread(dir, thread string) (Record, error) {
+	var r Record
+	if err := readStrict(filepath.Join(dir, "threads", thread+".json"), &r); err != nil {
+		return Record{}, err
+	}
+	if err := r.check(); err != nil {
+		return Record{}, fmt.Errorf("the identity record of Codex thread %s is invalid: %v", thread, err)
+	}
+	if r.Thread != thread {
+		return Record{}, fmt.Errorf("the identity record of Codex thread %s names thread %s", thread, r.Thread)
+	}
+	return r, nil
+}
+
+// readThreadOf is readThread for a thread of codexHome. A missing record is
+// ErrNone.
+func readThreadOf(dir, thread, codexHome string) (Record, error) {
+	r, err := readThread(dir, thread)
+	if err != nil {
+		return Record{}, err
+	}
+	if resolvedHome(r.CodexHome) != resolvedHome(codexHome) {
+		return Record{}, fmt.Errorf("the Codex thread %s was recorded for CODEX_HOME %s, not %s", thread, r.CodexHome, codexHome)
+	}
+	return r, nil
+}
+
+// writeCurrent makes thread the current thread of r's handle; "" leaves the
+// handle with no holder.
+func writeCurrent(dir string, r Record, thread string) error {
+	raw, err := json.Marshal(currentRecord{Schema: schema, Thread: thread})
+	if err != nil {
+		return err
+	}
+	if _, err := fsq.WriteStateFile(filepath.Dir(dir), filepath.Join(storeName, "current", currentKey(r)+".json"), append(raw, '\n'), 0o600); err != nil {
+		return fmt.Errorf("record the current Codex thread: %w", err)
+	}
+	return nil
+}
+
+// clearCurrent leaves r's handle with no holder when its marker still names
+// r's thread.
+func clearCurrent(dir string, r Record) error {
+	var cur currentRecord
+	if err := readCurrent(dir, r, &cur); err != nil {
+		if errors.Is(err, ErrNone) {
+			return nil
+		}
+		return err
+	}
+	if cur.Thread != r.Thread {
+		return nil
+	}
+	return writeCurrent(dir, r, "")
+}
+
+// writeEvent records in the binding history that r's thread was bound to
+// its handle, or released it, at time at.
+func writeEvent(dir string, r Record, released bool, at time.Time) error {
+	e := bindingEvent{Schema: schema, Thread: r.Thread, Me: r.Me, RootID: r.RootID}
+	if released {
+		e.Released = at.Format(time.RFC3339Nano)
+	} else {
+		e.Bound = at.Format(time.RFC3339Nano)
+	}
+	raw, err := json.Marshal(e)
+	if err != nil {
+		return err
+	}
+	if _, err := fsq.WriteStateFile(filepath.Dir(dir), filepath.Join(storeName, "bindings", fmt.Sprintf("%020d-%s.json", at.UnixNano(), e.Thread)), append(raw, '\n'), 0o600); err != nil {
+		return fmt.Errorf("record the Codex thread binding: %w", err)
+	}
+	return nil
+}
+
+// syncStoreDirs makes the store's directory, its parent and the AMQ home
+// durable in their parents on every publication, not only when this call
+// created them: an earlier publication may have failed after mkdir, or
+// another may still be between its mkdir and its sync.
+func syncStoreDirs(dir string) error {
+	for _, d := range []string{filepath.Dir(filepath.Dir(dir)), filepath.Dir(dir), dir} {
+		if err := fsq.SyncDir(d); err != nil {
+			return fmt.Errorf("sync %s: %w", d, err)
+		}
+	}
+	return nil
 }
 
 // Lookup returns the identity recorded for thread under codexHome. It
-// returns ErrNone when AMQ never recorded one, and an error when a record
-// exists but is damaged, belongs to another CODEX_HOME, or was revoked by a
-// later coop exec for the same handle.
+// returns ErrNone when AMQ never recorded one or the thread released it,
+// and an error when a record exists but is damaged, belongs to another
+// CODEX_HOME, or was revoked by a later coop exec or join for the same
+// handle.
 func Lookup(thread, codexHome string) (Record, error) {
 	if !ValidThread(thread) {
 		return Record{}, fmt.Errorf("CODEX_THREAD_ID %q is not a Codex thread id", thread)
@@ -142,18 +384,9 @@ func Lookup(thread, codexHome string) (Record, error) {
 	if dir == "" {
 		return Record{}, ErrNone
 	}
-	var r Record
-	if err := readStrict(filepath.Join(dir, "threads", thread+".json"), &r); err != nil {
+	r, err := readThreadOf(dir, thread, codexHome)
+	if err != nil {
 		return Record{}, err
-	}
-	if err := r.check(); err != nil {
-		return Record{}, fmt.Errorf("the identity record of Codex thread %s is invalid: %v", thread, err)
-	}
-	if r.Thread != thread {
-		return Record{}, fmt.Errorf("the identity record of Codex thread %s names thread %s", thread, r.Thread)
-	}
-	if resolvedHome(r.CodexHome) != resolvedHome(codexHome) {
-		return Record{}, fmt.Errorf("the Codex thread %s was recorded for CODEX_HOME %s, not %s", thread, r.CodexHome, codexHome)
 	}
 	var cur currentRecord
 	if err := readCurrent(dir, r, &cur); err != nil {
@@ -163,7 +396,10 @@ func Lookup(thread, codexHome string) (Record, error) {
 		return Record{}, err
 	}
 	if cur.Thread != thread {
-		return Record{}, fmt.Errorf("a later amq coop exec gave handle %s in %s to Codex thread %s; this thread %s no longer carries that identity", r.Me, r.Root, cur.Thread, thread)
+		if !ValidThread(cur.Thread) {
+			return Record{}, fmt.Errorf("the binding of Codex thread %s to handle %s in %s is not current; no thread holds it", thread, r.Me, r.Root)
+		}
+		return Record{}, fmt.Errorf("handle %s in %s is now held by Codex thread %s; this thread %s no longer carries that identity", r.Me, r.Root, cur.Thread, thread)
 	}
 	return r, nil
 }
@@ -180,9 +416,10 @@ func resolvedHome(home string) string {
 }
 
 // Binding is one interval during which a handle of a root carried a Codex
-// thread. Bound is when coop exec gave the handle the thread; Revoked is
-// when a later publication gave the handle another thread or gave the
-// thread to another handle, and is zero while the binding holds. Uncertain
+// thread. Bound is when coop exec or join gave the handle the thread;
+// Revoked is when a later publication gave the handle another thread or
+// gave the thread to another handle, or when the thread released it, and
+// is zero while the binding holds. Uncertain
 // marks an open binding that the thread record or the handle's current
 // marker does not confirm.
 type Binding struct {
@@ -194,18 +431,22 @@ type Binding struct {
 	Uncertain bool
 }
 
-// bindingEvent is one publication, kept under bindings/ apart from the
-// thread's identity record so that a later publication of the same thread
-// never rewrites an earlier binding or its time.
+// bindingEvent is one publication (Bound set) or one release (Released
+// set), kept under bindings/ apart from the thread's identity record so
+// that a later publication of the same thread never rewrites an earlier
+// binding or its time. A publication event carries no released field, so
+// a reader that does not know release events reads it unchanged and skips
+// a release event as damaged.
 type bindingEvent struct {
-	Schema int    `json:"schema"`
-	Thread string `json:"thread"`
-	Me     string `json:"me"`
-	RootID string `json:"root_id"`
-	Bound  string `json:"bound"`
+	Schema   int    `json:"schema"`
+	Thread   string `json:"thread"`
+	Me       string `json:"me"`
+	RootID   string `json:"root_id"`
+	Bound    string `json:"bound,omitempty"`
+	Released string `json:"released,omitempty"`
 }
 
-// Bindings replays the publication history into bindings. It never creates
+// Bindings replays the publication and release history into bindings. It never creates
 // the store; a missing store lists nothing, and a damaged event is skipped.
 // A thread recorded before the history existed is listed only while its
 // handle's current marker still names it, since its binding time is unknown.
@@ -229,7 +470,10 @@ func Bindings() ([]Binding, error) {
 			e.Schema != schema || !ValidThread(e.Thread) || strings.TrimSpace(e.Me) == "" || strings.TrimSpace(e.RootID) == "" {
 			continue
 		}
-		at, err := time.Parse(time.RFC3339Nano, e.Bound)
+		if (e.Bound == "") == (e.Released == "") {
+			continue
+		}
+		at, err := time.Parse(time.RFC3339Nano, e.Bound+e.Released)
 		if err != nil {
 			continue
 		}
@@ -249,6 +493,12 @@ func Bindings() ([]Binding, error) {
 	}
 	for _, e := range events {
 		k := key(e.RootID, e.Me)
+		if e.Released != "" {
+			if i, ok := open[k]; ok && out[i].Thread == e.Thread {
+				closeOpen(k, e.at)
+			}
+			continue
+		}
 		if i, ok := open[k]; ok && out[i].Thread == e.Thread {
 			continue
 		}
@@ -309,15 +559,7 @@ func captureLegacyBinding(dir, thread string) error {
 	if err != nil {
 		return nil
 	}
-	bound := info.ModTime().UTC()
-	event, err := json.Marshal(bindingEvent{Schema: schema, Thread: thread, Me: r.Me, RootID: r.RootID, Bound: bound.Format(time.RFC3339Nano)})
-	if err != nil {
-		return err
-	}
-	if _, err := fsq.WriteStateFile(filepath.Dir(dir), filepath.Join(storeName, "bindings", fmt.Sprintf("%020d-%s.json", bound.UnixNano(), thread)), append(event, '\n'), 0o600); err != nil {
-		return fmt.Errorf("record the earlier Codex thread binding: %w", err)
-	}
-	return nil
+	return writeEvent(dir, r, false, info.ModTime().UTC())
 }
 
 // historyNames reports whether the history has any binding of thread.
@@ -381,7 +623,7 @@ func readCurrent(dir string, r Record, cur *currentRecord) error {
 }
 
 // CurrentDir is the current/ directory of the store below home's AMQ home.
-// It exists once any coop exec published a thread; a hook gate tests it
+// It exists once any coop exec or join published a thread; a hook gate tests it
 // before it starts amq.
 func CurrentDir(home string) string {
 	return filepath.Join(amqhome.Under(home), storeName, "current")
@@ -389,8 +631,8 @@ func CurrentDir(home string) string {
 
 const storeName = "codex-threads"
 
-// storeDir is $HOME/.amq/codex-threads with its threads/ and current/
-// directories. Every directory below the home must be a plain directory,
+// storeDir is $HOME/.amq/codex-threads with its threads/, current/,
+// bindings/ and released/ directories. Every directory below the home must be a plain directory,
 // not a symlink. With create, the AMQ home is made and checked by amqhome
 // and missing directories below it are made with mode 0700 (Publish then
 // syncs them); without, a missing store returns "".
@@ -403,7 +645,7 @@ func storeDir(create bool) (string, error) {
 		return "", err
 	}
 	store := filepath.Join(amqDir, storeName)
-	for _, cur := range []string{filepath.Dir(store), store, filepath.Join(store, "threads"), filepath.Join(store, "current"), filepath.Join(store, "bindings")} {
+	for _, cur := range []string{filepath.Dir(store), store, filepath.Join(store, "threads"), filepath.Join(store, "current"), filepath.Join(store, "bindings"), filepath.Join(store, "released")} {
 		fi, err := os.Lstat(cur)
 		if errors.Is(err, os.ErrNotExist) {
 			if !create {

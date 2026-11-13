@@ -189,6 +189,28 @@ func Release(claudeSession, configDir string) (out Record, freed bool, err error
 	return out, freed, err
 }
 
+// Holder returns the session key that holds handle me in the root at root
+// with identity token rootID: the session the handle's holder marker names,
+// when that session's record is unreleased and still binds this handle. ok
+// is false when no session holds the handle.
+func Holder(root, rootID, me string) (claudeSession string, ok bool, err error) {
+	dir, err := storeDir(false)
+	if err != nil || dir == "" {
+		return "", false, err
+	}
+	key := currentKey(Record{Identity: launch.Identity{Root: root, RootID: rootID, Me: me}})
+	holder, err := readHolder(dir, key)
+	if err != nil || holder == "" {
+		return "", false, err
+	}
+	var r Record
+	if readStrict(sessionPath(dir, holder), &r) != nil || r.check() != nil ||
+		r.ClaudeSession != holder || r.Released || currentKey(r) != key {
+		return "", false, nil
+	}
+	return holder, true, nil
+}
+
 // Lookup returns the identity bound to claudeSession under configDir. It
 // returns ErrNone when AMQ never bound one or the session released it, and
 // an error when the record is damaged, belongs to another Claude config

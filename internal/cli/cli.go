@@ -58,10 +58,10 @@ func Run(args []string, version string) error {
 	if cmd == nil {
 		return UsageError("unknown command: %s. Run 'amq --help' for available commands", args[0])
 	}
-	if err := adoptCodexThreadIdentity(); err != nil {
-		return err
-	}
-	if !managesClaudeBinding(args) {
+	if !managesSessionBinding(args) {
+		if err := adoptCodexThreadIdentity(); err != nil {
+			return err
+		}
 		if err := adoptClaudeSessionIdentity(); err != nil {
 			return err
 		}

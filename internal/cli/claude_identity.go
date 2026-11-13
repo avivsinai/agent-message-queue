@@ -105,9 +105,10 @@ func claudeBindingStillHeld() bool {
 	return err == nil && rec.Root == adoptedClaudeBinding.Root && rec.Me == adoptedClaudeBinding.Me
 }
 
-// managesClaudeBinding reports whether args is amq coop join or leave.
+// managesSessionBinding reports whether args is amq coop join or leave.
 // They read and replace the binding themselves, so a damaged binding must
-// not stop them at adoption.
-func managesClaudeBinding(args []string) bool {
+// not stop them at adoption, and an adopted identity must not look like an
+// explicit AM_* context to them.
+func managesSessionBinding(args []string) bool {
 	return len(args) >= 2 && args[0] == "coop" && (args[1] == "join" || args[1] == "leave")
 }

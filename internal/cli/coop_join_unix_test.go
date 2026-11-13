@@ -28,7 +28,13 @@ package cli
 // fifth test breaks if a chat of a host application loses its handle when
 // /clear gives it a new Claude session, or if a Claude Code session started
 // inside the chat, which inherits the chat's variables, gets the chat's
-// handle.
+// handle. The sixth test breaks if a Codex thread cannot join and then act
+// under the handle with no AM_* variable, if a thread whose writer lock is
+// held loses its handle to another thread, if a thread whose lock is
+// released keeps it, if a thread that joined again is refused for its own
+// running wake, if a handle bound to a Claude session can be bound to a
+// Codex thread too, or if a thread that left does not read as one that
+// never joined.
 
 import (
 	"fmt"
@@ -36,8 +42,37 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 )
+
+// clearJoinTestEnv is clearSendMailboxTestEnv for a test that decides in
+// which harness its commands run.
+func clearJoinTestEnv(t *testing.T) {
+	t.Helper()
+	clearSendMailboxTestEnv(t)
+	setOptionalEnv(t, envClaudeSession, "", false)
+	setOptionalEnv(t, "CODEX_THREAD_ID", "", false)
+}
+
+// holdCodexThread takes the writer lock Codex holds while thread is loaded
+// under codexHome, and returns the function that unloads it.
+func holdCodexThread(t *testing.T, codexHome, thread string) func() {
+	t.Helper()
+	path := codexWriterLockPath(codexHome, thread)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	return func() { _ = f.Close() }
+}
 
 // claudeSessionRecord writes the session record a Claude Code process pid
 // keeps while it runs claudeSession, and returns its path. With the pid of
@@ -81,7 +116,7 @@ func claudeSessionRecordNamed(t *testing.T, pid int, claudeSession, name, nameSo
 }
 
 func TestCoopJoinBindsTheSessionAndCommandsAdoptIt(t *testing.T) {
-	clearSendMailboxTestEnv(t)
+	clearJoinTestEnv(t)
 	t.Setenv("HOME", t.TempDir())
 	project := t.TempDir()
 	t.Chdir(project)
@@ -155,7 +190,7 @@ func TestCoopJoinBindsTheSessionAndCommandsAdoptIt(t *testing.T) {
 }
 
 func TestCoopJoinTakesTheHandleOfASessionThatEnded(t *testing.T) {
-	clearSendMailboxTestEnv(t)
+	clearJoinTestEnv(t)
 	// The adoptions below set the process's adopted binding; a later test
 	// must not see a binding of this test's home.
 	t.Cleanup(func() { adoptedClaudeBinding = nil })
@@ -208,7 +243,7 @@ func TestCoopJoinTakesTheHandleOfASessionThatEnded(t *testing.T) {
 }
 
 func TestAClaudeSessionWithNoHandleIsToldTheFixThatWorksThere(t *testing.T) {
-	clearSendMailboxTestEnv(t)
+	clearJoinTestEnv(t)
 	t.Setenv("HOME", t.TempDir())
 	t.Chdir(t.TempDir())
 	if err := requireMe(""); err == nil || !strings.Contains(err.Error(), "export AM_ME") {
@@ -251,7 +286,7 @@ func TestAClaudeSessionWithNoHandleIsToldTheFixThatWorksThere(t *testing.T) {
 }
 
 func TestCoopJoinWithoutAHandleTakesTheSessionNameOrClaude(t *testing.T) {
-	clearSendMailboxTestEnv(t)
+	clearJoinTestEnv(t)
 	t.Setenv("HOME", t.TempDir())
 	t.Chdir(t.TempDir())
 	if _, err := captureStdout(t, func() error { return runCoopInit([]string{"--no-gitignore"}) }); err != nil {
@@ -322,7 +357,7 @@ func TestCoopJoinWithoutAHandleTakesTheSessionNameOrClaude(t *testing.T) {
 }
 
 func TestAChatKeepsItsHandleWhenClearStartsANewClaudeSession(t *testing.T) {
-	clearSendMailboxTestEnv(t)
+	clearJoinTestEnv(t)
 	t.Setenv("HOME", t.TempDir())
 	t.Chdir(t.TempDir())
 	if _, err := captureStdout(t, func() error { return runCoopInit([]string{"--no-gitignore"}) }); err != nil {
@@ -359,5 +394,87 @@ func TestAChatKeepsItsHandleWhenClearStartsANewClaudeSession(t *testing.T) {
 	}
 	if got := handle(inside, ""); got != "" {
 		t.Fatalf("a session started inside the chat has handle %q, want none", got)
+	}
+}
+
+func TestCoopJoinBindsACodexThreadAndItsWriterLockDecidesTakeover(t *testing.T) {
+	clearJoinTestEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	project := t.TempDir()
+	t.Chdir(project)
+	if _, err := captureStdout(t, func() error { return runCoopInit([]string{"--agents", "claude,codex", "--no-gitignore"}) }); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(project, defaultCoopRoot, defaultSessionName)
+	const first, second = "019a1166-dd8e-77c0-bc3b-a4b7e24e91a1", "019a1166-dd8e-77c0-bc3b-a4b7e24e91a2"
+	join := func(thread string, args ...string) (string, error) {
+		t.Helper()
+		t.Setenv("CODEX_THREAD_ID", thread)
+		return captureStdout(t, func() error { return runCoopJoin(args) })
+	}
+	// adopted runs the adoption every amq command starts with in thread.
+	adopted := func(thread string) (string, string, error) {
+		t.Helper()
+		t.Setenv("CODEX_THREAD_ID", thread)
+		defer func() {
+			for _, key := range identityEnvKeys {
+				_ = os.Unsetenv(key)
+			}
+		}()
+		err := adoptCodexThreadIdentity()
+		return os.Getenv(envMe), os.Getenv(envRoot), err
+	}
+
+	unloadFirst := holdCodexThread(t, codexHome, first)
+	out, err := join(first)
+	if err != nil || !strings.HasPrefix(out, "Joined as codex (session "+defaultSessionName) || !strings.Contains(out, "No wake: run amq drain --include-body between tasks.") {
+		t.Fatalf("join = %q, %v; want the default handle codex and no wake", out, err)
+	}
+	if me, got, err := adopted(first); err != nil || me != "codex" || !sameCleanPath(got, root) {
+		t.Fatalf("adopted me=%q root=%q err=%v, want codex in %s", me, got, err, root)
+	}
+	// The thread's own wake runs; joining again changes nothing.
+	wakePath := writeWakeLockExactForTest(t, root, "codex", wakeLock{PID: os.Getpid(), Root: canonicalWakeRoot(root), Agent: "codex"})
+	if out, err := join(first); err != nil || !strings.Contains(out, "The running wake of codex announces new mail.") {
+		t.Fatalf("join again with the thread's own wake running = %q, %v; want no change and the wake named", out, err)
+	}
+	if err := os.Remove(wakePath); err != nil {
+		t.Fatal(err)
+	}
+
+	holdCodexThread(t, codexHome, second)
+	if _, err := join(second, "--me", "codex"); GetExitCode(err) != ExitActionRequired || !strings.Contains(err.Error(), "running Codex thread "+first) {
+		t.Fatalf("second thread took a handle held by a loaded thread: %v, want action required naming %s", err, first)
+	}
+	unloadFirst()
+	if out, err := join(second, "--me", "codex"); err != nil || !strings.Contains(out, "was held by Codex thread "+first) {
+		t.Fatalf("join with the handle of an unloaded thread = %q, %v; want it to name thread %s", out, err, first)
+	}
+	if _, _, err := adopted(first); GetExitCode(err) != ExitContextMismatch || !strings.Contains(err.Error(), second) || !strings.Contains(err.Error(), "amq coop join --me") {
+		t.Fatalf("the unloaded thread's adoption = %v, want a context mismatch naming %s and the join", err, second)
+	}
+
+	// A handle bound to a Claude session is not bound to a Codex thread too.
+	const claudeSession = "7c29e148-77eb-47c0-8984-10c13b4700b1"
+	setOptionalEnv(t, "CODEX_THREAD_ID", "", false)
+	t.Setenv(envClaudeSession, claudeSession)
+	claudeSessionRecord(t, os.Getppid(), claudeSession)
+	if _, err := captureStdout(t, func() error { return runCoopJoin([]string{"--me", "reviewer"}) }); err != nil {
+		t.Fatal(err)
+	}
+	setOptionalEnv(t, envClaudeSession, "", false)
+	if _, err := join(second, "--me", "reviewer"); GetExitCode(err) != ExitActionRequired || !strings.Contains(err.Error(), "bound to Claude session "+claudeSession) {
+		t.Fatalf("a Codex thread took a handle bound to a Claude session: %v", err)
+	}
+
+	t.Setenv("CODEX_THREAD_ID", second)
+	if out, err := captureStdout(t, func() error { return runCoopLeave(nil) }); err != nil || out != "Left: codex in "+root+" is free.\n" {
+		t.Fatalf("leave = %q, %v", out, err)
+	}
+	if me, _, err := adopted(second); err != nil || me != "" {
+		t.Fatalf("a thread that left adopted %q, %v; want the context of a thread that never joined", me, err)
 	}
 }

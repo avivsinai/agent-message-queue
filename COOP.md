@@ -153,6 +153,33 @@ Limits:
   installs. `join` reports entries of another binary or of an older release;
   run `amq coop install-hooks` again.
 
+### Codex desktop app
+
+A chat of the Codex desktop app is not started by `amq coop exec`, so it has
+no `AM_ME`. Its shell tool sees `CODEX_THREAD_ID`, and the same two commands
+bind and release it:
+
+```sh
+amq coop join                 # once per chat, inside the chat
+amq coop leave                # release the handle
+```
+
+- **Identity is per chat.** `join` binds the thread to one handle in
+  `~/.amq/codex-threads/`, by its thread id. After it, `amq` commands of that
+  chat use the handle with no `--me`. The default handle is `codex`;
+  `--me reviewer` names another. A thread that holds a handle keeps it.
+- **A loaded thread holds its handle.** Codex holds
+  `<CODEX_HOME>/thread-writer-locks/<thread>.lock` while a thread is loaded.
+  `join` requires that lock for its own thread, refuses a handle whose holder
+  still has it, and takes the handle of a thread that no longer has it, and
+  says so. A handle bound to a Claude Code session is refused until that
+  session leaves.
+- **No wake yet.** Nothing rings a joined Codex chat. Run
+  `amq drain --include-body` between tasks.
+
+`join` refuses a shell that has both `CLAUDE_CODE_SESSION_ID` and
+`CODEX_THREAD_ID`, since it cannot tell which session it runs in.
+
 ### Multiple pairs (isolated sessions)
 
 Create each named session before launching it:

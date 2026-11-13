@@ -6,12 +6,14 @@ also carry AMQ-managed root identity tokens. For a named session,
 `AM_BASE_ROOT` is the authorized parent. For a sessionless context, it is the
 exact root and `AM_SESSION` is empty. Do not set the identity tokens manually.
 
-A Claude Code session bound with `amq coop join` has none of these variables.
-Each `amq` command in it finds the bound context by the session's key (the
-chat id in Claude Code's session record under a host application such as the
-desktop app, else `CLAUDE_CODE_SESSION_ID`) and then runs as in a pinned
-shell; a binding that cannot be used is a context
-mismatch. See [Claude Code desktop app](../COOP.md#claude-code-desktop-app).
+A Claude Code session or Codex thread bound with `amq coop join` has none of
+these variables. Each `amq` command in it finds the bound context by the
+session's key (for Claude Code, the chat id in its session record under a
+host application such as the desktop app, else `CLAUDE_CODE_SESSION_ID`; for
+Codex, `CODEX_THREAD_ID`) and then runs as in a pinned shell; a binding that
+cannot be used is a context mismatch. See
+[Claude Code desktop app](../COOP.md#claude-code-desktop-app) and
+[Codex desktop app](../COOP.md#codex-desktop-app).
 
 ## Root selection
 
