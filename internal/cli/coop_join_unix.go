@@ -15,11 +15,13 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/claudeidentity"
 	"github.com/avivsinai/agent-message-queue/internal/cli/wakemutation"
 	"github.com/avivsinai/agent-message-queue/internal/codexidentity"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/writerlock"
 )
@@ -218,6 +220,29 @@ func codexJoinSession(thread string) (*joinSession, error) {
 	}, nil
 }
 
+// coopJoinBeforeBind runs, when set, between a join's checks and its bind.
+var coopJoinBeforeBind func()
+
+// withCoopJoinLock runs fn under the per-user lock every coop join takes.
+func withCoopJoinLock(fn func() error) error {
+	dir, err := amqhome.EnsureDir()
+	if err != nil {
+		return err
+	}
+	return lock.WithExclusiveFileLock(filepath.Join(dir, "coop-join.lock"), fn)
+}
+
+// coopJoinStoreError makes a holder record that cannot be read a refusal:
+// the session it names may still hold the handle.
+func coopJoinStoreError(handle, root string, err error) error {
+	var claudeErr *claudeidentity.UnreadableHolderError
+	var codexErr *codexidentity.UnreadableHolderError
+	if errors.As(err, &claudeErr) || errors.As(err, &codexErr) {
+		return ActionRequiredError("handle %s in %s cannot be joined: %v; inspect that record, or choose another handle with --me <handle>", handle, root, err)
+	}
+	return err
+}
+
 // codexWriterLockPath is the lock Codex holds while thread is loaded.
 func codexWriterLockPath(codexHome, thread string) string {
 	return filepath.Join(codexHome, "thread-writer-locks", thread+".lock")
@@ -350,35 +375,50 @@ func runCoopJoin(args []string) error {
 	}
 	// A session that holds this handle here joins again with no change, even
 	// while its own wake runs (a Codex thread amq coop exec started has one).
-	holder, holds, err := s.holder(id.Root, id.RootID, handle)
-	if err != nil {
-		return err
-	}
-	rejoin := holds && holder == s.key
-	ownWake := false
-	if wake := inspectWakeLock(root, handle); wake.Exists && wake.Process.Running {
-		if !rejoin {
-			return ActionRequiredError("handle %s in %s has a running wake (pid %d), so another session owns it; choose another handle with --me <handle>", handle, root, wake.PID)
+	var (
+		rejoin, ownWake bool
+		rootToken       string
+		replaced, held  string
+	)
+	// Both harnesses' joins take one lock from the check of the other
+	// harness's store through the bind, so two joins of one handle from
+	// different harnesses cannot both pass the check. Lock order: this lock,
+	// then a store's lock.
+	err = withCoopJoinLock(func() error {
+		holder, holds, err := s.holder(id.Root, id.RootID, handle)
+		if err != nil {
+			return coopJoinStoreError(handle, root, err)
 		}
-		ownWake = true
-	}
-	// One handle carries one session: a binding in the other harness's store
-	// holds it whether or not that session runs.
-	if other, ok, err := s.other(id.Root, id.RootID, handle); err != nil {
-		return err
-	} else if ok {
-		return ActionRequiredError("handle %s in %s is bound to %s %s; run amq coop leave there, or choose another handle with --me <handle>", handle, root, s.otherKind, other)
-	}
-	rootToken, err := provisionSelfMailboxInExistingRoot(root, handle)
+		rejoin = holds && holder == s.key
+		if wake := inspectWakeLock(root, handle); wake.Exists && wake.Process.Running {
+			if !rejoin {
+				return ActionRequiredError("handle %s in %s has a running wake (pid %d), so another session owns it; choose another handle with --me <handle>", handle, root, wake.PID)
+			}
+			ownWake = true
+		}
+		// One handle carries one session: a binding in the other harness's
+		// store holds it whether or not that session runs.
+		if other, ok, err := s.other(id.Root, id.RootID, handle); err != nil {
+			return coopJoinStoreError(handle, root, err)
+		} else if ok {
+			return ActionRequiredError("handle %s in %s is bound to %s %s; run amq coop leave there, or choose another handle with --me <handle>", handle, root, s.otherKind, other)
+		}
+		if coopJoinBeforeBind != nil {
+			coopJoinBeforeBind()
+		}
+		if rootToken, err = provisionSelfMailboxInExistingRoot(root, handle); err != nil {
+			return err
+		}
+		if replaced, held, err = s.bind(id); err != nil {
+			return coopJoinStoreError(handle, root, err)
+		}
+		if held != "" {
+			return ActionRequiredError("handle %s in %s is held by the running %s %s; run amq coop leave in that %s, or choose another handle with --me <handle>", handle, root, s.kind, held, s.place)
+		}
+		return nil
+	})
 	if err != nil {
 		return err
-	}
-	replaced, held, err := s.bind(id)
-	if err != nil {
-		return err
-	}
-	if held != "" {
-		return ActionRequiredError("handle %s in %s is held by the running %s %s; run amq coop leave in that %s, or choose another handle with --me <handle>", handle, root, s.kind, held, s.place)
 	}
 	// As coop exec does, record that the harness runs under the handle, so
 	// peers see it as a registered agent. A session that already held the

@@ -34,7 +34,10 @@ package cli
 // released keeps it, if a thread that joined again is refused for its own
 // running wake, if a handle bound to a Claude session can be bound to a
 // Codex thread too, or if a thread that left does not read as one that
-// never joined.
+// never joined. Pre-merge review added that a thread whose handle was taken
+// can run amq coop join, through the dispatch, to choose another, and that
+// a Claude session and a Codex thread joining one handle at the same time
+// cannot both get it (the second test of the pair interleaves them).
 
 import (
 	"fmt"
@@ -44,6 +47,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // clearJoinTestEnv is clearSendMailboxTestEnv for a test that decides in
@@ -456,6 +460,14 @@ func TestCoopJoinBindsACodexThreadAndItsWriterLockDecidesTakeover(t *testing.T) 
 	if _, _, err := adopted(first); GetExitCode(err) != ExitContextMismatch || !strings.Contains(err.Error(), second) || !strings.Contains(err.Error(), "amq coop join --me") {
 		t.Fatalf("the unloaded thread's adoption = %v, want a context mismatch naming %s and the join", err, second)
 	}
+	// The fix that mismatch names works: the dispatch does not stop a join
+	// at the adoption of the binding it replaces.
+	unloadFirst = holdCodexThread(t, codexHome, first)
+	t.Setenv("CODEX_THREAD_ID", first)
+	if out, err := captureStdout(t, func() error { return Run([]string{"--no-update-check", "coop", "join", "--me", "builder"}, "test") }); err != nil || !strings.HasPrefix(out, "Joined as builder ") {
+		t.Fatalf("amq coop join in the thread whose handle was taken = %q, %v", out, err)
+	}
+	unloadFirst()
 
 	// A handle bound to a Claude session is not bound to a Codex thread too.
 	const claudeSession = "7c29e148-77eb-47c0-8984-10c13b4700b1"
@@ -476,5 +488,43 @@ func TestCoopJoinBindsACodexThreadAndItsWriterLockDecidesTakeover(t *testing.T) 
 	}
 	if me, _, err := adopted(second); err != nil || me != "" {
 		t.Fatalf("a thread that left adopted %q, %v; want the context of a thread that never joined", me, err)
+	}
+}
+
+func TestAClaudeSessionAndACodexThreadCannotJoinOneHandleAtOnce(t *testing.T) {
+	clearJoinTestEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Chdir(t.TempDir())
+	if _, err := captureStdout(t, func() error { return runCoopInit([]string{"--no-gitignore"}) }); err != nil {
+		t.Fatal(err)
+	}
+	const claudeSession, thread = "7c29e148-77eb-47c0-8984-10c13b4700d1", "019a1166-dd8e-77c0-bc3b-a4b7e24e91d1"
+	holdCodexThread(t, codexHome, thread)
+	claudeSessionRecord(t, os.Getppid(), claudeSession)
+	t.Setenv(envClaudeSession, claudeSession)
+	// When the Claude join has checked the Codex store, the Codex thread
+	// joins the same handle. The Claude join keeps its own environment,
+	// read before this point.
+	codexDone := make(chan error, 1)
+	coopJoinBeforeBind = func() {
+		coopJoinBeforeBind = nil
+		setOptionalEnv(t, envClaudeSession, "", false)
+		t.Setenv("CODEX_THREAD_ID", thread)
+		go func() { codexDone <- runCoopJoin([]string{"--me", "shared"}) }()
+		select {
+		case err := <-codexDone:
+			codexDone <- err
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	t.Cleanup(func() { coopJoinBeforeBind = nil })
+	if _, err := captureStdout(t, func() error { return runCoopJoin([]string{"--me", "shared"}) }); err != nil {
+		t.Fatalf("the Claude join: %v", err)
+	}
+	if err := <-codexDone; GetExitCode(err) != ExitActionRequired || !strings.Contains(err.Error(), "bound to Claude session "+claudeSession) {
+		t.Fatalf("the Codex join that raced it = %v, want action required naming the Claude session", err)
 	}
 }
