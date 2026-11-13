@@ -112,3 +112,29 @@ func TestReleaseUnbindsTheThreadAndEndsItsBinding(t *testing.T) {
 		t.Fatalf("Bindings after release = %+v, %v; want one binding that ended", bindings, err)
 	}
 }
+
+// Pre-merge review finding: a running holder whose record had a bad mode
+// lost its handle to the next join, with no notice.
+func TestAHolderWhoseRecordCannotBeReadKeepsItsHandle(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := filepath.Join(home, "q")
+	rec := func(thread string) Record {
+		return Record{Thread: thread, CodexHome: filepath.Join(home, ".codex"), Root: root, BaseRoot: root, Me: "codex", RootID: "r", BaseRootID: "b"}
+	}
+	a := rec("01a1166e-dd8e-77c0-bc3b-a4b7e24e91e1")
+	if _, err := Bind(a, func(Record) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, ".amq", "codex-threads", "threads", a.Thread+".json")
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var unreadable *UnreadableHolderError
+	if _, err := Bind(rec("01a1166e-dd8e-77c0-bc3b-a4b7e24e91e2"), func(Record) bool { return false }); !errors.As(err, &unreadable) || unreadable.Path != path {
+		t.Fatalf("Bind over a holder whose record cannot be read = %v, want an error naming %s", err, path)
+	}
+	if _, _, err := Holder(root, a.RootID, a.Me); !errors.As(err, &unreadable) {
+		t.Fatalf("Holder = %v, want the unreadable record", err)
+	}
+}

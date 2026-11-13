@@ -69,6 +69,20 @@ func (e *HeldError) Error() string {
 	return fmt.Sprintf("Codex thread %s holds this handle; release it there first", e.Thread)
 }
 
+// UnreadableHolderError means the current marker of a handle names a
+// thread whose identity record cannot be read, so whether that thread still
+// holds the handle is unknown.
+type UnreadableHolderError struct {
+	Thread, Path string
+	Err          error
+}
+
+func (e *UnreadableHolderError) Error() string {
+	return fmt.Sprintf("the identity record %s of Codex thread %s, which holds this handle, cannot be read: %v", e.Path, e.Thread, e.Err)
+}
+
+func (e *UnreadableHolderError) Unwrap() error { return e.Err }
+
 var threadRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // ValidThread reports whether id has the shape of a Codex thread id.
@@ -259,8 +273,10 @@ func Holder(root, rootID, me string) (thread string, ok bool, err error) {
 
 // heldBy returns the record of the thread that holds r's handle, or a zero
 // Record when no thread does. A marker counts only when the thread's record
-// is valid and still names this handle of this root, since Publish leaves
-// the marker of a thread's earlier handle in place.
+// still names this handle of this root, since Publish leaves the marker of
+// a thread's earlier handle in place, and a marker whose thread has no
+// record names no holder. A record that cannot be read is
+// *UnreadableHolderError: the thread may still hold the handle.
 func heldBy(dir string, r Record) (Record, error) {
 	var cur currentRecord
 	if err := readCurrent(dir, r, &cur); err != nil {
@@ -273,7 +289,12 @@ func heldBy(dir string, r Record) (Record, error) {
 		return Record{}, nil
 	}
 	holder, err := readThread(dir, cur.Thread)
-	if err != nil || currentKey(holder) != currentKey(r) {
+	switch {
+	case errors.Is(err, ErrNone):
+		return Record{}, nil
+	case err != nil:
+		return Record{}, &UnreadableHolderError{Thread: cur.Thread, Path: filepath.Join(dir, "threads", cur.Thread+".json"), Err: err}
+	case currentKey(holder) != currentKey(r):
 		return Record{}, nil
 	}
 	return holder, nil
