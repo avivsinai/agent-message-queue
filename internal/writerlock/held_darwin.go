@@ -1,6 +1,6 @@
 //go:build darwin
 
-package adapter
+package writerlock
 
 import (
 	"context"
@@ -12,16 +12,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// platformWriterLockInspector uses F_GETLK without taking the lock. Live check
+// Held uses F_GETLK without taking the lock. Live check
 // on macOS: a Codex GUI-held flock on
 // ~/.codex/thread-writer-locks/<uuid>.lock is visible to F_GETLK as Type=F_WRLCK
 // with Pid=-1, and LOCK_EX|LOCK_NB on the same fd returns EAGAIN. An idle file
 // returns Type=F_UNLCK. Inspection errors fail closed; lsof is not a lock
 // inspector (an open fd is not a held flock). Linux uses /proc/locks instead:
 // flock and fcntl do not interoperate there.
-type platformWriterLockInspector struct{}
-
-func (platformWriterLockInspector) Held(_ context.Context, path string) (bool, error) {
+func Held(_ context.Context, path string) (bool, error) {
 	return fcntlLockHeld(path)
 }
 

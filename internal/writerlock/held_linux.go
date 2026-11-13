@@ -1,6 +1,6 @@
 //go:build linux
 
-package adapter
+package writerlock
 
 import (
 	"bufio"
@@ -13,15 +13,13 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// platformWriterLockInspector reads /proc/locks. On Linux, flock(2) and
+// Held reads /proc/locks. On Linux, flock(2) and
 // fcntl(F_GETLK) are independent lock types (except over NFS), and Codex's
 // writer lock is an flock, so F_GETLK would always report idle. Match FLOCK
 // ADVISORY WRITE rows whose maj:min:ino equals the lock file. Inspection
 // errors fail closed; lsof is not a lock inspector (an open fd is not a held
 // flock).
-type platformWriterLockInspector struct{}
-
-func (platformWriterLockInspector) Held(_ context.Context, path string) (bool, error) {
+func Held(_ context.Context, path string) (bool, error) {
 	return procLocksHeld(path)
 }
 
