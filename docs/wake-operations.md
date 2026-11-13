@@ -949,7 +949,8 @@ doctor otherwise exits 0.
 
 `notifier_live` means the wake-lock inspector confirmed a live wake process.
 It proves prompt notification, not message consumption. `hook_live` means a
-co-op wait hook of the agent's Claude Code session holds its doorbell; it
+co-op wait hook of the agent's Claude Code session or Codex chat holds its
+doorbell; it
 proves that a process waits to wake the session, no more. `recent_activity`
 means only that `last_seen` is fresh. AMQ does not claim `consumer_live`
 without a separate monitor heartbeat or lock.

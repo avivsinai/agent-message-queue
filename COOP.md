@@ -156,12 +156,14 @@ Limits:
 ### Codex desktop app
 
 A chat of the Codex desktop app is not started by `amq coop exec`, so it has
-no `AM_ME`. Its shell tool sees `CODEX_THREAD_ID`, and the same two commands
-bind and release it:
+no `AM_ME`. Its shell tool sees `CODEX_THREAD_ID`, and the same commands bind
+and release it:
 
 ```sh
-amq coop join                 # once per chat, inside the chat
-amq coop leave                # release the handle
+amq coop install-hooks --harness codex   # once per user and machine
+# approve the AMQ_COOP_HOOK entries in Codex (Settings > Hooks, /hooks in the CLI)
+amq coop join                            # once per chat, in a new chat
+amq coop leave                           # release the handle
 ```
 
 - **Identity is per chat.** `join` binds the thread to one handle in
@@ -174,8 +176,29 @@ amq coop leave                # release the handle
   still has it, and takes the handle of a thread that no longer has it, and
   says so. A handle bound to a Claude Code session is refused until that
   session leaves.
-- **No wake yet.** Nothing rings a joined Codex chat. Run
-  `amq drain --include-body` between tasks.
+- **The wait hook is the doorbell.** `install-hooks --harness codex` writes
+  an async hook on `SessionStart` and `Stop` to `$CODEX_HOME/hooks.json`.
+  Codex runs it in the background for the thread. When mail is due under the
+  wake settings (`hold_normal`, `hold_low`, `debounce`), it queues the
+  doorbell to the thread with `codex queue` (the app's own binary, named by
+  `CODEX_APP_RUNTIME_CLI_PATH` in the hook environment), which starts a turn
+  in an idle chat; that turn's `Stop` arms the next waiter. The doorbell
+  carries no sender or subject. A ring that fails shows a warning at the next
+  turn and is rung again by the next waiter. While a waiter runs, `amq who`
+  shows the agent as `active (hook_live)`. `join` prints whether the hook
+  will wake the chat, or why not. Without it, run `amq drain --include-body`
+  between tasks.
+
+Limits of the Codex wait hook:
+
+- It needs Codex 0.148 or newer; an older Codex skips an async hook with a
+  warning.
+- Codex runs a hook only after you approve it, and only in a chat opened
+  after that. A changed entry (another `amq` path, a new release that changes
+  the command) needs approval again.
+- Codex ends the hook when it unloads the chat, so such a chat has no
+  doorbell until its next turn. It also ends the hook after 7 days without a
+  turn.
 
 `join` refuses a shell that has both `CLAUDE_CODE_SESSION_ID` and
 `CODEX_THREAD_ID`, since it cannot tell which session it runs in.

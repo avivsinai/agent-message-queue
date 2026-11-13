@@ -2,11 +2,17 @@
 
 package cli
 
-import "context"
+import (
+	"context"
+	"io"
+)
 
 // runCoopWait does nothing where amq wake does not run: the waiter reads
 // the wake's settings and lock.
 func runCoopWait(context.Context) error { return nil }
+
+// runCoopWaitCodex does nothing where amq wake does not run.
+func runCoopWaitCodex(context.Context, io.Reader) error { return nil }
 
 // coopWaitRuns reports no waiter where the waiter does not run.
 func coopWaitRuns(root, me string) bool { return false }

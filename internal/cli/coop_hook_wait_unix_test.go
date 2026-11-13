@@ -14,14 +14,19 @@ package cli
 // read the header of every unread message again at each poll, for as long
 // as the mail stayed unread, and a waiter whose Claude Code process was
 // killed kept running, because the shell of its hook survives that process.
+// The Codex test breaks if a joined Codex chat's waiter does not queue the
+// fixed doorbell to its thread for due mail, or if a thread with no binding
+// starts a waiter or rings.
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -73,7 +78,7 @@ func TestCoopWaitRingsOnceForNewMail(t *testing.T) {
 	wait := func(limit time.Duration) error {
 		ctx, cancel := context.WithTimeout(context.Background(), limit)
 		defer cancel()
-		return waitCoopMail(ctx, root, "claude", claudeSession, os.Getppid(), launch.HolderIdentity{})
+		return waitCoopMail(ctx, root, "claude", claudeWaiter(claudeSession, os.Getppid(), launch.HolderIdentity{}))
 	}
 	quiet := 2 * defaultWakeDebounce
 	if err := wait(quiet); err != nil {
@@ -229,10 +234,91 @@ func TestCoopWaitEndsWhenItsClaudeProcessIsGone(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), limit)
 	defer cancel()
 	start := time.Now()
-	if err := waitCoopMail(ctx, root, "claude", "7c29e148-77eb-47c0-8984-10c13b4700b1", os.Getppid(), identity); err != nil {
+	if err := waitCoopMail(ctx, root, "claude", claudeWaiter("7c29e148-77eb-47c0-8984-10c13b4700b1", os.Getppid(), identity)); err != nil {
 		t.Fatalf("waiter of a dead Claude process: %v, want a quiet end", err)
 	}
 	if waited := time.Since(start); waited > limit/2 {
 		t.Fatalf("the waiter ran %s after its Claude process was gone, want it to end at once", waited)
+	}
+}
+
+// codexQueueRecorder stands for the codex binary: it answers the queue help
+// probe and records every queue call.
+type codexQueueRecorder struct{ queued [][]string }
+
+func (r *codexQueueRecorder) Run(_ context.Context, _ string, args ...string) ([]byte, error) {
+	if slices.Equal(args, []string{"queue", "--help"}) {
+		return []byte("Usage: codex queue --thread <ID> --message <TEXT>"), nil
+	}
+	r.queued = append(r.queued, args)
+	return []byte(fmt.Sprintf("Queued message m1 for thread %s.", args[2])), nil
+}
+
+func TestCodexWaitQueuesTheDoorbellToItsThread(t *testing.T) {
+	clearJoinTestEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Chdir(t.TempDir())
+	if _, err := captureStdout(t, func() error { return runCoopInit([]string{"--agents", "claude,codex", "--no-gitignore"}) }); err != nil {
+		t.Fatal(err)
+	}
+	const thread, unbound = "019a1166-dd8e-77c0-bc3b-a4b7e24e91f1", "019a1166-dd8e-77c0-bc3b-a4b7e24e91f2"
+	holdCodexThread(t, codexHome, thread)
+	rollout := filepath.Join(codexHome, "sessions", "2026", "11", "13", "rollout-2026-11-13T10-00-00-"+thread+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(rollout), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rollout, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The desktop app names its own codex in the hook environment.
+	app := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(app, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envCodexAppCLI, app)
+	recorder := &codexQueueRecorder{}
+	codexWaitRunner = recorder
+	t.Cleanup(func() { codexWaitRunner = nil })
+
+	t.Setenv("CODEX_THREAD_ID", thread)
+	if _, err := captureStdout(t, func() error { return runCoopJoin(nil) }); err != nil {
+		t.Fatal(err)
+	}
+	// A hook has no CODEX_THREAD_ID; the thread is the input's session_id.
+	setOptionalEnv(t, "CODEX_THREAD_ID", "", false)
+	wait := func(sessionID string) (string, time.Duration) {
+		t.Helper()
+		defer func() {
+			for _, key := range append([]string{"CODEX_THREAD_ID"}, identityEnvKeys...) {
+				_ = os.Unsetenv(key)
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		defer cancel()
+		input := fmt.Sprintf(`{"session_id":%q,"hook_event_name":"Stop","last_assistant_message":"session_id: %s"}`, sessionID, thread)
+		start := time.Now()
+		out, err := captureStdout(t, func() error { return runCoopWaitCodex(ctx, strings.NewReader(input)) })
+		if err != nil {
+			t.Fatalf("waiter of %s: %v, want exit 0", sessionID, err)
+		}
+		return out, time.Since(start)
+	}
+
+	if out, took := wait(unbound); out != "" || took > time.Second || len(recorder.queued) != 0 {
+		t.Fatalf("a thread with no binding waited %s, printed %q, queued %v; want an exit at once and no ring", took, out, recorder.queued)
+	}
+	if _, err := captureStdout(t, func() error {
+		return runSend([]string{"--root", filepath.Join(defaultCoopRoot, defaultSessionName), "--me", "claude", "--to", "codex", "--body", "hi"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if out, took := wait(thread); out != "" || took >= 4*time.Second {
+		t.Fatalf("the joined thread's waiter printed %q after %s, want a quiet ring before its limit", out, took)
+	}
+	want := []string{"queue", "--thread", thread, "--message", harness.Doorbell}
+	if len(recorder.queued) != 1 || !slices.Equal(recorder.queued[0], want) {
+		t.Fatalf("queued %v, want one call %v", recorder.queued, want)
 	}
 }

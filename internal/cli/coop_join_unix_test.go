@@ -434,8 +434,8 @@ func TestCoopJoinBindsACodexThreadAndItsWriterLockDecidesTakeover(t *testing.T) 
 
 	unloadFirst := holdCodexThread(t, codexHome, first)
 	out, err := join(first)
-	if err != nil || !strings.HasPrefix(out, "Joined as codex (session "+defaultSessionName) || !strings.Contains(out, "No wake: run amq drain --include-body between tasks.") {
-		t.Fatalf("join = %q, %v; want the default handle codex and no wake", out, err)
+	if err != nil || !strings.HasPrefix(out, "Joined as codex (session "+defaultSessionName) || !strings.Contains(out, "No wake: the wait hook is not installed. Run amq coop install-hooks --harness codex") {
+		t.Fatalf("join = %q, %v; want the default handle codex and the missing wait hook", out, err)
 	}
 	if me, got, err := adopted(first); err != nil || me != "codex" || !sameCleanPath(got, root) {
 		t.Fatalf("adopted me=%q root=%q err=%v, want codex in %s", me, got, err, root)

@@ -7,7 +7,9 @@ package cli
 // again, or a live wake's doorbell mail blocks. The installer test breaks if
 // an entry loses its participant gate or matcher, if the waiter entries are
 // missing or replace the others, or if old project entries that run the
-// co-op scripts go unreported.
+// co-op scripts go unreported. Its Codex part breaks if the Codex wait hook
+// is not written to $CODEX_HOME/hooks.json as an async entry on SessionStart
+// and Stop behind the gate on the Codex identity store.
 
 import (
 	"bytes"
@@ -160,6 +162,38 @@ func TestCoopInstallHooksWritesTheGatedEntryAndListsOldOnes(t *testing.T) {
 	again, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
 	if err != nil || !bytes.Equal(again, raw) {
 		t.Fatalf("second install changed the settings (%v):\n%s", err, again)
+	}
+
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	if _, err := captureStdout(t, func() error { return runCoopInstallHooks([]string{"--harness", "codex"}) }); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = os.ReadFile(filepath.Join(codexHome, "hooks.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var codex struct {
+		Hooks map[string][]struct {
+			Matcher *string `json:"matcher"`
+			Hooks   []struct {
+				Command string `json:"command"`
+				Timeout int    `json:"timeout"`
+				Async   bool   `json:"async"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(raw, &codex); err != nil {
+		t.Fatal(err)
+	}
+	wait := coopHookMarker + `[ -n "${AM_ME-}" ] || [ -d '` + filepath.Join(home, ".amq", "codex-threads", "threads") + `' ] || exit 0; ` +
+		amq + "codex-wait || true"
+	for _, event := range []string{"SessionStart", "Stop"} {
+		groups := codex.Hooks[event]
+		if len(groups) != 1 || groups[0].Matcher != nil || len(groups[0].Hooks) != 1 ||
+			groups[0].Hooks[0].Command != wait || !groups[0].Hooks[0].Async || groups[0].Hooks[0].Timeout != coopWaitTimeout {
+			t.Fatalf("Codex %s = %+v, want one async entry running %q", event, groups, wait)
+		}
 	}
 }
 

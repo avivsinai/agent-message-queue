@@ -45,6 +45,9 @@ const (
 	coopWaitPoll = time.Second
 )
 
+// coopWaitState's ClaudeSession is the waiter's session key: the Claude
+// session, or the Codex thread id. The field keeps its name so a record
+// written by an earlier release reads the same.
 type coopWaitState struct {
 	Schema        int      `json:"schema"`
 	ClaudeSession string   `json:"claude_session"`
@@ -67,17 +70,50 @@ func runCoopWait(ctx context.Context) error {
 	if info, err := os.Stat(fsq.AgentBase(root, me)); err != nil || !info.IsDir() {
 		return nil
 	}
-	return waitCoopMail(ctx, root, me, os.Getenv(envClaudeSession), os.Getppid(), claude)
+	return waitCoopMail(ctx, root, me, claudeWaiter(os.Getenv(envClaudeSession), os.Getppid(), claude))
 }
 
-// waitCoopMail waits until mail is due for claudeSession's agent, then
-// records it and returns errCoopWaitRing. It returns nil when ctx ends,
-// when the hook's shell is gone (Claude Code ended the hook), when the
-// session's Claude Code process claude is gone (a process that was killed
-// leaves the hook's shell behind), when a newer waiter took over, or when
-// the session's binding is no longer held. While a wake rings the agent it
-// stays silent.
-func waitCoopMail(ctx context.Context, root, me, claudeSession string, parent int, claude launch.HolderIdentity) error {
+// coopWaiter is what one harness gives the wait loop.
+type coopWaiter struct {
+	// session keys the rang record: what one session heard says nothing
+	// about another that takes the handle.
+	session string
+	// parent is the process that started the waiter; when it changes, the
+	// harness ended the hook.
+	parent int
+	// held reports whether the session's binding is still its binding.
+	held func() bool
+	// gone reports whether the host session ended while its hook's
+	// process survived it.
+	gone func() bool
+	// ring rings for the due mail, after the rang record is stored. undo
+	// puts the record back: the ring did not reach the session, so the next
+	// waiter rings again. err is what the waiter returns.
+	ring func() (undo bool, err error)
+}
+
+// claudeWaiter is the waiter of a Claude Code session whose Claude Code
+// process is claude. Its ring is errCoopWaitRing.
+func claudeWaiter(claudeSession string, parent int, claude launch.HolderIdentity) coopWaiter {
+	return coopWaiter{
+		session: claudeSession,
+		parent:  parent,
+		held:    claudeBindingStillHeld,
+		gone: func() bool {
+			state, _ := launch.InspectHolder(claude)
+			return state == launch.LeaseStale
+		},
+		ring: func() (bool, error) { return false, errCoopWaitRing },
+	}
+}
+
+// waitCoopMail waits until mail is due for the waiter's agent, then
+// records it and rings. It returns nil when ctx ends, when the hook's
+// process parent changed (the harness ended the hook), when the host
+// session is gone (a process that was killed leaves the hook's shell
+// behind), when a newer waiter took over, or when the session's binding is
+// no longer held. While a wake rings the agent it stays silent.
+func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 	agent := fsq.AgentBase(root, me)
 	statePath := filepath.Join(agent, coopWaitStateFile)
 	ownerPath := filepath.Join(agent, coopWaitOwnerFile)
@@ -97,10 +133,7 @@ func waitCoopMail(ctx context.Context, root, me, claudeSession string, parent in
 		}
 	}()
 	for {
-		if os.Getppid() != parent || !coopWaitOwns(ownerPath, owner) || !claudeBindingStillHeld() {
-			return nil
-		}
-		if state, _ := launch.InspectHolder(claude); state == launch.LeaseStale {
+		if os.Getppid() != w.parent || !coopWaitOwns(ownerPath, owner) || !w.held() || w.gone() {
 			return nil
 		}
 		if release == nil {
@@ -121,7 +154,7 @@ func waitCoopMail(ctx context.Context, root, me, claudeSession string, parent in
 			if err == nil && len(pending) > 0 {
 				var settings wakeSettings
 				settings, layers = coopWaitSettings(root, me, layers)
-				rang := readCoopWaitState(statePath, claudeSession)
+				rang := readCoopWaitState(statePath, w.session)
 				announced := append(readCoopStopState(filepath.Join(agent, coopStopStateFile)).BlockedIDs, rang.RangIDs...)
 				now := time.Now()
 				var next time.Time
@@ -137,7 +170,11 @@ func waitCoopMail(ctx context.Context, root, me, claudeSession string, parent in
 					if err := writeCoopHookState(statePath, nextCoopWaitState(rang, pending, due)); err != nil {
 						return nil
 					}
-					return errCoopWaitRing
+					undo, err := w.ring()
+					if undo {
+						_ = writeCoopHookState(statePath, rang)
+					}
+					return err
 				case !next.IsZero() && next.Sub(now) < wait:
 					wait = next.Sub(now)
 				}
