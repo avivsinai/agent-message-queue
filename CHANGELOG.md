@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.143.0](https://github.com/avivsinai/agent-message-queue/compare/v0.142.2...v0.143.0) (2026-11-13)
+
+
+### Features
+
+* **coop:** a wait hook wakes a joined Codex chat ([#1481](https://github.com/avivsinai/agent-message-queue/issues/1481)) ([70db15f](https://github.com/avivsinai/agent-message-queue/commit/70db15f023f58986c98ad2187d2f81ab56856d46))
+* **coop:** join and leave bind a Codex thread ([#1480](https://github.com/avivsinai/agent-message-queue/issues/1480)) ([b581c85](https://github.com/avivsinai/agent-message-queue/commit/b581c852aac169427b80175ad1dbff96d757a28a))
+
 ## [0.142.2](https://github.com/avivsinai/agent-message-queue/compare/v0.142.1...v0.142.2) (2026-11-12)
 
 
