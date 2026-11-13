@@ -629,6 +629,13 @@ func CurrentDir(home string) string {
 	return filepath.Join(amqhome.Under(home), storeName, "current")
 }
 
+// ThreadsDir is the threads/ directory of the store below home's AMQ home.
+// It exists once any thread was bound; the Codex wait hook's gate tests it
+// before it starts amq.
+func ThreadsDir(home string) string {
+	return filepath.Join(amqhome.Under(home), storeName, "threads")
+}
+
 const storeName = "codex-threads"
 
 // storeDir is $HOME/.amq/codex-threads with its threads/, current/,

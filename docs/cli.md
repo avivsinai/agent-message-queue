@@ -1900,10 +1900,11 @@ handle after this one ended and came back, that session keeps it.
 ```text
 $ amq coop install-hooks --help
 Usage:
-  amq coop install-hooks [--dry-run]
+  amq coop install-hooks [--dry-run] [--harness claude|codex]
 
 Install the co-op hooks in $CLAUDE_CONFIG_DIR/settings.json (default
-~/.claude/settings.json).
+~/.claude/settings.json), or with --harness codex the wait hook in
+$CODEX_HOME/hooks.json.
 
 SessionStart (startup, resume, clear, compact) gives the agent its co-op
 preamble: handle, session, peers, unread count, and what announces new mail.
@@ -1917,6 +1918,12 @@ The hooks run only in sessions that take part: sessions with AM_ME set, which
 amq coop exec and amq launch set, and sessions bound with amq coop join.
 Other Claude Code sessions start no amq.
 
+With --harness codex, the wait hook runs on SessionStart and Stop as an async
+Codex hook and is the doorbell of a chat bound with amq coop join: it queues
+the doorbell to the chat's thread when mail arrives. Codex runs it only after
+you approve it, in a chat opened after that. It stops after 7 days without
+a turn, or when Codex unloads the chat; the next turn starts it again.
+
 Running again keeps the same entries and replaces entries of another amq
 binary. Other settings and hooks are not changed. It also lists old project
 hook entries that run the co-op scripts; remove them, or both run.
@@ -1924,6 +1931,8 @@ hook entries that run the co-op scripts; remove them, or both run.
 Options:
   -dry-run
         Print the hooks without changing the settings file
+  -harness string
+        claude, or codex for the wait hook of a joined Codex chat (default "claude")
 ```
 
 ## amq coop uninstall-hooks
@@ -1931,11 +1940,16 @@ Options:
 ```text
 $ amq coop uninstall-hooks --help
 Usage:
-  amq coop uninstall-hooks
+  amq coop uninstall-hooks [--harness claude|codex]
 
 Remove the co-op hooks (AMQ_COOP_HOOK entries) from
-$CLAUDE_CONFIG_DIR/settings.json (default ~/.claude/settings.json).
+$CLAUDE_CONFIG_DIR/settings.json (default ~/.claude/settings.json), or with
+--harness codex from $CODEX_HOME/hooks.json.
 Other settings and hooks are not changed.
+
+Options:
+  -harness string
+        claude, or codex (default "claude")
 ```
 
 ## amq coop hook
@@ -1943,7 +1957,7 @@ Other settings and hooks are not changed.
 ```text
 $ amq coop hook --help
 Usage:
-  amq coop hook session-start|stop|wait
+  amq coop hook [--harness claude|codex] session-start|stop|wait
 
 Claude Code hook receivers for the co-op hooks; amq coop install-hooks installs them.
 They read AM_ME, AM_ROOT and the session pin from the environment, or the
@@ -1970,6 +1984,17 @@ debounce and that no hook has announced, then prints the doorbell on stderr
 and exits 10, which the installed command turns into the exit code 2 that
 wakes the session. It exits 0 at once when a wake rings the agent, another
 wait runs for the agent, or the session would hold its turn end on the hook.
+
+With --harness codex, wait is the doorbell of a joined Codex chat. It runs as
+an async Codex hook and reads the thread id from the hook input's session_id.
+It rings by queueing the doorbell to the thread with codex queue (the
+desktop app's binary when CODEX_APP_RUNTIME_CLI_PATH names it), and always
+exits 0; a ring that fails prints a systemMessage and is rung again by the
+next waiter.
+
+Options:
+  -harness string
+        The harness that runs the hook: claude, or codex (wait only) (default "claude")
 ```
 
 ## amq swarm list
