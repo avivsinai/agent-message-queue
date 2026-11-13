@@ -1957,9 +1957,9 @@ Options:
 ```text
 $ amq coop hook --help
 Usage:
-  amq coop hook [--harness claude|codex] session-start|stop|wait
+  amq coop hook session-start|stop|wait|codex-wait
 
-Claude Code hook receivers for the co-op hooks; amq coop install-hooks installs them.
+Hook receivers for the co-op hooks; amq coop install-hooks installs them.
 They read AM_ME, AM_ROOT and the session pin from the environment, or the
 identity amq coop join bound to the session, and never read .amqrc. They exit
 0 once the arguments parse, except that a recorded identity that cannot be
@@ -1985,16 +1985,12 @@ and exits 10, which the installed command turns into the exit code 2 that
 wakes the session. It exits 0 at once when a wake rings the agent, another
 wait runs for the agent, or the session would hold its turn end on the hook.
 
-With --harness codex, wait is the doorbell of a joined Codex chat. It runs as
+codex-wait is the doorbell of a joined Codex chat. It runs as
 an async Codex hook and reads the thread id from the hook input's session_id.
 It rings by queueing the doorbell to the thread with codex queue (the
 desktop app's binary when CODEX_APP_RUNTIME_CLI_PATH names it), and always
 exits 0; a ring that fails prints a systemMessage and is rung again by the
 next waiter.
-
-Options:
-  -harness string
-        The harness that runs the hook: claude, or codex (wait only) (default "claude")
 ```
 
 ## amq swarm list

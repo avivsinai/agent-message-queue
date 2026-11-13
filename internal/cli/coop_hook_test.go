@@ -187,7 +187,7 @@ func TestCoopInstallHooksWritesTheGatedEntryAndListsOldOnes(t *testing.T) {
 		t.Fatal(err)
 	}
 	wait := coopHookMarker + `[ -n "${AM_ME-}" ] || [ -d '` + filepath.Join(home, ".amq", "codex-threads", "threads") + `' ] || exit 0; ` +
-		amq + "--harness codex wait || true"
+		amq + "codex-wait || true"
 	for _, event := range []string{"SessionStart", "Stop"} {
 		groups := codex.Hooks[event]
 		if len(groups) != 1 || groups[0].Matcher != nil || len(groups[0].Hooks) != 1 ||

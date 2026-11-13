@@ -110,11 +110,13 @@ func coopWaitHook(bin, store, event, matcher string) hookfile.CommandHook {
 // codexCoopWaitCommand is the command of the Codex wait hook. The gate
 // starts no amq unless the shell has AM_ME or a Codex thread was ever bound
 // (amq coop join or coop exec wrote the store's threads directory). The
-// shell stays as the parent and ends in || true: exit 2 means something to
-// Codex on Stop, and an older amq at this path exits 2 on the unknown flag.
+// receiver is a verb of its own, so an older amq at this path refuses it on
+// stderr alone and prints nothing on stdout, which Codex reads. The shell
+// stays as the parent and ends in || true: exit 2 means something to Codex
+// on Stop, and an older amq exits 2 on the unknown verb.
 func codexCoopWaitCommand(bin, threads string) string {
 	return coopHookMarker + `[ -n "${AM_ME-}" ] || [ -d ` + shellQuote(threads) + ` ] || exit 0; ` +
-		shellQuote(bin) + " --no-update-check coop hook --harness codex wait || true"
+		shellQuote(bin) + " --no-update-check coop hook codex-wait || true"
 }
 
 // codexCoopHooks are the Codex wait hook's entries: a session start arms
