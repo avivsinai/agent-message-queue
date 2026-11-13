@@ -59,6 +59,20 @@ func (e *HeldError) Error() string {
 	return fmt.Sprintf("Claude session %s holds this handle; release it there first", e.ClaudeSession)
 }
 
+// UnreadableHolderError means the holder marker of a handle names a session
+// whose identity record cannot be read, so whether that session still holds
+// the handle is unknown.
+type UnreadableHolderError struct {
+	ClaudeSession, Path string
+	Err                 error
+}
+
+func (e *UnreadableHolderError) Error() string {
+	return fmt.Sprintf("the identity record %s of Claude session %s, which holds this handle, cannot be read: %v", e.Path, e.ClaudeSession, e.Err)
+}
+
+func (e *UnreadableHolderError) Unwrap() error { return e.Err }
+
 const (
 	schema   = 1
 	maxBytes = 4096
@@ -106,19 +120,15 @@ func Bind(r Record, holderRuns func(holder Record) bool) (replaced string, err e
 			return err
 		}
 		key := currentKey(r)
-		holder, err := readHolder(dir, key)
+		other, err := heldBy(dir, key)
 		if err != nil {
 			return err
 		}
-		if holder != "" && holder != r.ClaudeSession {
-			var other Record
-			if readStrict(sessionPath(dir, holder), &other) == nil && other.check() == nil &&
-				other.ClaudeSession == holder && !other.Released && currentKey(other) == key {
-				if holderRuns(other) {
-					return &HeldError{ClaudeSession: holder}
-				}
-				replaced = holder
+		if other.ClaudeSession != "" && other.ClaudeSession != r.ClaudeSession {
+			if holderRuns(other) {
+				return &HeldError{ClaudeSession: other.ClaudeSession}
 			}
+			replaced = other.ClaudeSession
 		}
 		// A session bound to another handle gives that handle up. The marker
 		// cannot be deleted safely, so it keeps no holder.
@@ -187,6 +197,52 @@ func Release(claudeSession, configDir string) (out Record, freed bool, err error
 		return Record{}, false, err
 	}
 	return out, freed, err
+}
+
+// Holder returns the session key that holds handle me in the root at root
+// with identity token rootID: the session the handle's holder marker names,
+// when that session's record is unreleased and still binds this handle. ok
+// is false when no session holds the handle.
+func Holder(root, rootID, me string) (claudeSession string, ok bool, err error) {
+	dir, err := storeDir(false)
+	if err != nil || dir == "" {
+		return "", false, err
+	}
+	holder, err := heldBy(dir, currentKey(Record{Identity: launch.Identity{Root: root, RootID: rootID, Me: me}}))
+	if err != nil || holder.ClaudeSession == "" {
+		return "", false, err
+	}
+	return holder.ClaudeSession, true, nil
+}
+
+// heldBy returns the record of the session that holds the handle of key,
+// or a zero Record when no session does. A marker counts only when the
+// session's record is unreleased and still names this handle, and a marker
+// whose session has no record names no holder. A record that cannot be
+// read is *UnreadableHolderError: the session may still hold the handle.
+func heldBy(dir, key string) (Record, error) {
+	holder, err := readHolder(dir, key)
+	if err != nil || holder == "" {
+		return Record{}, err
+	}
+	path := sessionPath(dir, holder)
+	var r Record
+	err = readStrict(path, &r)
+	switch {
+	case errors.Is(err, ErrNone):
+		return Record{}, nil
+	case err == nil && r.check() != nil:
+		err = fmt.Errorf("invalid record: %v", r.check())
+	case err == nil && r.ClaudeSession != holder:
+		err = fmt.Errorf("the record names session %s", r.ClaudeSession)
+	}
+	if err != nil {
+		return Record{}, &UnreadableHolderError{ClaudeSession: holder, Path: path, Err: err}
+	}
+	if r.Released || currentKey(r) != key {
+		return Record{}, nil
+	}
+	return r, nil
 }
 
 // Lookup returns the identity bound to claudeSession under configDir. It

@@ -17,6 +17,9 @@ import (
 // that one handle has one live Claude session until it releases, and that a
 // release leaves a tombstone. TestRebindingASessionFreesItsOldHandle guards
 // that a session that moves to another handle stops holding the old one.
+// TestAHolderWhoseRecordCannotBeReadKeepsItsHandle is the regression test
+// for a pre-merge review finding: a running holder whose record had a bad
+// mode lost its handle to the next join, with no notice.
 
 const (
 	sessA = "0190a1f0-1111-7000-8000-00000000000a"
@@ -129,5 +132,26 @@ func TestRebindingASessionFreesItsOldHandle(t *testing.T) {
 	}
 	if _, err := Bind(rec(home, sessB, "reviewer"), running); err != nil {
 		t.Fatalf("the old handle was not freed: %v", err)
+	}
+}
+
+func TestAHolderWhoseRecordCannotBeReadKeepsItsHandle(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	a := rec(home, sessA, "reviewer")
+	if _, err := Bind(a, running); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, ".amq", "claude-sessions", "sessions", sessA+".json")
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var unreadable *UnreadableHolderError
+	ended := func(Record) bool { return false }
+	if _, err := Bind(rec(home, sessB, "reviewer"), ended); !errors.As(err, &unreadable) || unreadable.Path != path {
+		t.Fatalf("Bind over a holder whose record cannot be read = %v, want an error naming %s", err, path)
+	}
+	if _, _, err := Holder(a.Root, a.RootID, a.Me); !errors.As(err, &unreadable) {
+		t.Fatalf("Holder = %v, want the unreadable record", err)
 	}
 }

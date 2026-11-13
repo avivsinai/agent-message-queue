@@ -52,7 +52,7 @@ func adoptCodexThreadIdentity() error {
 		return nil
 	}
 	if err != nil {
-		return ContextMismatchError("this Codex thread's AMQ identity cannot be used: %v; start the session again with amq coop exec, or set AM_ROOT and AM_ME explicitly", err)
+		return ContextMismatchError("this Codex thread's AMQ identity cannot be used: %v; run amq coop join --me <handle>, or set AM_ROOT and AM_ME explicitly", err)
 	}
 	id, err := validateRecordedIdentity(launch.Identity{
 		Root: rec.Root, BaseRoot: rec.BaseRoot, Session: rec.Session,

@@ -28,6 +28,9 @@ Use the first case that applies:
    When a later command says the session has no handle (a terminal session
    after `/clear`), join again. Do not use the `amq env` export here; a shell
    variable does not last between the shell calls of a Claude Code session.
+   A Codex chat with no `AM_ME` (`CODEX_THREAD_ID` is set) joins the same
+   way; its default handle is `codex`, and it has no wake: run
+   `amq drain --include-body` between tasks.
 3. Any other shell: resolve and export the complete context before reading or
    sending:
 

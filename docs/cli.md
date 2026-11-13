@@ -1833,9 +1833,11 @@ $ amq coop join --help
 Usage:
   amq coop join [--me <handle>] [--session <name>]
 
-Bind this Claude Code session to an agent handle. Run it inside the session,
-through its shell tool. It is for a session that amq coop exec did not start,
-such as a session of the Claude Code desktop app.
+Bind this Claude Code session or Codex thread to an agent handle. Run it
+inside the session, through its shell tool. It is for a session that amq
+coop exec did not start, such as a chat of the Claude Code or Codex desktop
+app. It tells the harness from CLAUDE_CODE_SESSION_ID or CODEX_THREAD_ID,
+and refuses a shell that has both.
 
 After a join, amq commands and the co-op hooks of this session use the handle
 with no --me and no AM_* variable. Under an application that hosts Claude
@@ -1843,34 +1845,38 @@ Code, such as the desktop app, the binding belongs to the chat, by the chat
 id in Claude Code's session record: it survives a resume, a compaction and
 /clear. In a session with no host it belongs to CLAUDE_CODE_SESSION_ID: it
 survives a resume and a compaction, and a session after /clear joins again.
+In Codex the binding belongs to the thread, by CODEX_THREAD_ID.
 A new or forked session joins.
 
 Without --me, a session that holds a handle keeps it, and a session whose
-binding cannot be read is refused. A session that holds
+binding cannot be read is refused. A Claude Code session that holds
 none takes the name the user gave it in Claude Code (/rename reviewer), in
 lower case, when that is a handle, and otherwise claude, the handle amq coop
-exec claude uses. The output says which one it took.
+exec claude uses. A Codex thread that holds none takes codex. The output
+says which one it took.
 
 The root comes from the project configuration, as for other commands. The
 project must be set up (amq coop init, or amq setup) and the session must
 exist (amq session create, which also makes the queue a project file
 names). The mailbox of a new handle is created.
 
-The command must run under the Claude Code process of the session; it finds
-that process by the session record Claude Code keeps while it runs. It
-refuses a session that has AM_* identity variables, a handle that another
-running Claude session holds (run amq coop leave there), and a handle with a
-running wake. It takes the handle of a session that does not run, such as a
-chat with no process, and says so; that session is then refused with the
-reason until it joins with --me. Joining again with the same handle changes
-nothing; another handle replaces the first.
+The command must run in a session that runs: under the Claude Code process
+of the session, found by the session record Claude Code keeps while it runs,
+or in a Codex thread whose writer lock Codex holds. It refuses a session
+that has AM_* identity variables, a handle that another running session
+holds (run amq coop leave there), a handle bound in the other harness, and
+a handle with a running wake that is not this session's own. It takes the
+handle of a session that does not run, such as a chat with no process, and
+says so; that session is then refused with the reason until it joins with
+--me. Joining again with the same handle changes nothing; another handle
+replaces the first.
 
 It prints the unread count and whether a hook wakes the session for new mail
-(see amq coop install-hooks).
+(see amq coop install-hooks). A Codex thread has no wake yet.
 
 Options:
   -me string
-        Agent handle for this session (default: the one it holds, else the name the user gave the session, else claude)
+        Agent handle for this session (default: the one it holds; else, in Claude Code, the name the user gave the session or claude, and in Codex, codex)
   -session string
         Session name (default: the project's declared default session)
 ```
@@ -1882,11 +1888,11 @@ $ amq coop leave --help
 Usage:
   amq coop leave
 
-Release the handle that amq coop join bound to this Claude Code session.
-The mailbox and its messages stay. After it, amq commands in this session
-resolve their context as in a session that never joined, and another
-session can join with the handle. When another session took the handle
-after this one ended and came back, that session keeps it.
+Release the handle that amq coop join bound to this Claude Code session or
+Codex thread. The mailbox and its messages stay. After it, amq commands in
+this session resolve their context as in a session that never joined, and
+another session can join with the handle. When another session took the
+handle after this one ended and came back, that session keeps it.
 ```
 
 ## amq coop install-hooks
