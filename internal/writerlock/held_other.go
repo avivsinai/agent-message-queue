@@ -1,6 +1,6 @@
 //go:build !darwin && !linux && !windows
 
-package adapter
+package writerlock
 
 import (
 	"context"
@@ -8,8 +8,7 @@ import (
 	"runtime"
 )
 
-type platformWriterLockInspector struct{}
-
-func (platformWriterLockInspector) Held(_ context.Context, _ string) (bool, error) {
+// Held is unsupported on this platform and always returns an error.
+func Held(_ context.Context, _ string) (bool, error) {
 	return false, fmt.Errorf("codex-queue writer-lock inspection is unsupported on %s; run on darwin or linux", runtime.GOOS)
 }

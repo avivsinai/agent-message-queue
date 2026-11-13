@@ -1,6 +1,6 @@
-//go:build darwin
+//go:build linux
 
-package adapter
+package writerlock
 
 import (
 	"os"
@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func TestFcntlLockHeldSeesFlockWithoutAcquiring(t *testing.T) {
+func TestProcLocksSeesFlockWithoutAcquiring(t *testing.T) {
 	path := t.TempDir() + "/held.lock"
 	f, err := os.Create(path)
 	if err != nil {
@@ -21,20 +21,21 @@ func TestFcntlLockHeldSeesFlockWithoutAcquiring(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) })
 	time.Sleep(10 * time.Millisecond)
-	held, err := fcntlLockHeld(path)
+	held, err := procLocksHeld(path)
 	if err != nil {
-		t.Fatalf("fcntlLockHeld: %v", err)
+		t.Fatalf("procLocksHeld: %v", err)
 	}
 	if !held {
-		t.Fatal("F_GETLK did not see a flock holder")
+		dump, _ := os.ReadFile("/proc/locks")
+		t.Fatalf("/proc/locks did not see a FLOCK ADVISORY WRITE on the temp file; /proc/locks=\n%s", dump)
 	}
 	idle := t.TempDir() + "/idle.lock"
 	if err := os.WriteFile(idle, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	idleHeld, err := fcntlLockHeld(idle)
+	idleHeld, err := procLocksHeld(idle)
 	if err != nil {
-		t.Fatalf("idle fcntlLockHeld: %v", err)
+		t.Fatalf("idle procLocksHeld: %v", err)
 	}
 	if idleHeld {
 		t.Fatal("idle lock file reported held")

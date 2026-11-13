@@ -1,6 +1,6 @@
 //go:build windows
 
-package adapter
+package writerlock
 
 import (
 	"context"
@@ -11,11 +11,9 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// platformWriterLockInspector probes a lock that Codex holds, over its whole
+// Held probes a lock that Codex holds, over its whole
 // byte range, so it does not use internal/lock, which locks one byte.
-type platformWriterLockInspector struct{}
-
-func (platformWriterLockInspector) Held(ctx context.Context, path string) (bool, error) {
+func Held(ctx context.Context, path string) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}

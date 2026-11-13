@@ -157,6 +157,7 @@ internal/usagenormalize/      Meaning of Codex plan-limit replies
 internal/usagetransport/      Bounded child process for one usage command
 internal/wakecmd/             Owner slash commands a live wake types
 internal/wakelock/            Reads and validates the wake lock
+internal/writerlock/          Whether a Codex thread-writer lock is held
 ```
 
 Mailbox layout:
