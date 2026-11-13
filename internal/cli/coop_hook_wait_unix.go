@@ -45,6 +45,9 @@ const (
 	coopWaitPoll = time.Second
 )
 
+// coopWaitState's ClaudeSession is the waiter's session key: the Claude
+// session, or the Codex thread id. The field keeps its name so a record
+// written by an earlier release reads the same.
 type coopWaitState struct {
 	Schema        int      `json:"schema"`
 	ClaudeSession string   `json:"claude_session"`
