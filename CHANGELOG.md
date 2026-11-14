@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.143.3](https://github.com/avivsinai/agent-message-queue/compare/v0.143.2...v0.143.3) (2026-11-14)
+
+
+### Bug Fixes
+
+* **remote:** a write the relay refused is never recorded as sent ([#1488](https://github.com/avivsinai/agent-message-queue/issues/1488)) ([c7fb6e0](https://github.com/avivsinai/agent-message-queue/commit/c7fb6e0cc1d216c7478ec033fa1dd2ed078125c0))
+
 ## [0.143.2](https://github.com/avivsinai/agent-message-queue/compare/v0.143.1...v0.143.2) (2026-11-14)
 
 
