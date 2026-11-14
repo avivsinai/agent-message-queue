@@ -214,6 +214,9 @@ type Server struct {
 	// buzz are the machine lifecycle's Buzz operations; each runs through
 	// call.
 	buzz buzzcli.Ops
+	// posts are the Buzz writes and reads of dialogs, the session mirror
+	// and the hook warnings.
+	posts posts
 	// dialogs is the dialog poster's state, used only by the worker that
 	// runs dialogTick.
 	dialogs dialogState
@@ -264,6 +267,7 @@ func NewServer(cfg Config, version string) *Server {
 		store:    newSessionStore(cfg),
 	}
 	s.buzz = buzzcli.Ops{Exec: s.lifecycleExec}
+	s.posts = cliPosts{s: s}
 	return s
 }
 

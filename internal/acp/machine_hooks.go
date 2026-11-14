@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/mirror"
 )
@@ -152,7 +154,7 @@ func (s *Server) checkHooks(path string, info os.FileInfo, readers []hookReader)
 			continue
 		}
 		for _, channel := range channels {
-			_, _ = postAnswer(channel, mirror.Unmention(text), s.cfg.PostTimeout)
+			_ = s.posts.Send(context.Background(), buzzop.Message{Channel: channel, Content: mirror.Unmention(text)})
 		}
 	}
 }

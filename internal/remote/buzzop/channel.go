@@ -26,6 +26,12 @@ type Message struct {
 	Channel, Content, Mention, ReplyTo string
 }
 
+// Reaction is one emoji on a message and the public keys that reacted with it.
+type Reaction struct {
+	Emoji   string
+	PubKeys []string
+}
+
 // Tri is a fact that is known true, known false, or not known. The zero
 // value is TriUnknown.
 type Tri int
