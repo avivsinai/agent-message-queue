@@ -218,14 +218,11 @@ func agentRelay(url, secret, authTag string) relay.Config {
 // postWithBuzzCLI runs `buzz messages send --channel <channel> --content -`
 // with only the agent identity and a minimal environment, and returns the
 // event_id the CLI prints. A refused messages-send (accepted:false on HTTP
-// 200) still prints event_id, so this function asks acceptedFor about the
-// args and returns the resulting *notAcceptedError to the caller.
+// 200) still prints event_id, so a write that is not accepted returns
+// writeError's *notAcceptedError to the caller.
 func postWithBuzzCLI(channel, content string, budget time.Duration) (string, error) {
 	out, err := runBuzzCLI(budget, strings.NewReader(content), "messages", "send", "--channel", channel, "--content", "-")
-	if err != nil {
-		return "", err
-	}
-	if err := acceptedFor([]string{"messages", "send"}, out, nil); err != nil {
+	if err := writeError(shapeAccepted, out, err); err != nil {
 		return "", err
 	}
 	var sent struct {
@@ -448,9 +445,8 @@ func (s *Server) recordFinal(eventID, result string, err error) string {
 		return result
 	}
 	state := finalPostAccepted
-	var notSent *notSentError
 	switch {
-	case errors.As(err, &notSent):
+	case buzzResult(shapeAccepted, nil, err).Outcome == buzzop.NotSent:
 		state = finalPostUnsent
 	case err != nil:
 		state = finalPostUncertain

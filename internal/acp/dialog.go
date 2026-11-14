@@ -162,7 +162,7 @@ var editMessage = editWithBuzzCLI
 // A refused edit (accepted:false on exit 0) returns a *notAcceptedError.
 func editWithBuzzCLI(eventID, content string, budget time.Duration) error {
 	out, err := runBuzzCLI(budget, nil, "messages", "edit", "--event", eventID, "--content", content)
-	return acceptedFor([]string{"messages", "edit"}, out, err)
+	return writeError(shapeAccepted, out, err)
 }
 
 // dialogPost is the record of one posted dialog.
@@ -674,8 +674,7 @@ func (s *Server) postDialog(path string, t dialogTarget, req dialog.Request) {
 		return
 	}
 	id, err := postAnswer(t.channel, p.Text, s.cfg.PostTimeout)
-	var notSent *notSentError
-	if errors.As(err, &notSent) || errors.Is(err, errNoBuzzIdentity) {
+	if buzzResult(shapeAccepted, nil, err).Outcome == buzzop.NotSent {
 		_ = os.Remove(path)
 		return
 	}

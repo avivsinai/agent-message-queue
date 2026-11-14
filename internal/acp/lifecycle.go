@@ -16,6 +16,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 )
 
 // One Buzz agent serves one session. Its pin names that session's binding:
@@ -614,10 +615,9 @@ func (s *Server) helperChannel(m *agentMarker, now time.Time) bool {
 	if m.Channel == "" {
 		out, err := buzzCall(s.cfg.PostTimeout, "channels", "create", "--name", name, "--type", "stream", "--visibility", "private")
 		var created struct {
-			Accepted  bool   `json:"accepted"`
 			ChannelID string `json:"channel_id"`
 		}
-		if err != nil || json.Unmarshal(out, &created) != nil || !created.Accepted || created.ChannelID == "" {
+		if buzzResult(shapeAccepted, out, err).Outcome != buzzop.Accepted || json.Unmarshal(out, &created) != nil || created.ChannelID == "" {
 			return false
 		}
 		m.Channel = created.ChannelID
@@ -625,10 +625,7 @@ func (s *Server) helperChannel(m *agentMarker, now time.Time) bool {
 	// Adding the owner again with a new role changes the role, so a channel
 	// set up before the owner was made an admin is upgraded here.
 	out, err := buzzCall(s.cfg.PostTimeout, "channels", "add-member", "--channel", m.Channel, "--pubkey", s.id.Owner, "--role", "admin")
-	var added struct {
-		Accepted bool `json:"accepted"`
-	}
-	if err != nil || json.Unmarshal(out, &added) != nil || !added.Accepted {
+	if buzzResult(shapeAccepted, out, err).Outcome != buzzop.Accepted {
 		failure := string(out)
 		if err != nil {
 			failure = err.Error()
