@@ -3,6 +3,7 @@ package acp
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -32,7 +33,14 @@ func TestPinnedAgentArchivesAndReturnsWithItsBinding(t *testing.T) {
 	var calls []string
 	buzzCall = func(_ time.Duration, args ...string) ([]byte, error) {
 		calls = append(calls, strings.Join(args, " "))
-		return nil, nil
+		// Real Buzz CLI shapes (verified at buzz-src f3b127e):
+		//   - agents archive / unarchive print ok-shape (agents.rs:117-126,
+		//     156-165). Everything else here (users set-status etc.) prints
+		//     normalize_write_response (event_id+accepted+message).
+		if args[0] == "agents" && (args[1] == "archive" || args[1] == "unarchive") {
+			return []byte(`{"ok":true,"event_id":"e1","action":"` + args[1] + `","target":"t1"}`), nil
+		}
+		return []byte(`{"event_id":"e1","accepted":true,"message":"ok"}`), nil
 	}
 	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t)}, "test")
 
@@ -73,7 +81,10 @@ func TestTwoAgentsOnOnePinEachChangeOnce(t *testing.T) {
 	var calls []string
 	buzzCall = func(_ time.Duration, args ...string) ([]byte, error) {
 		calls = append(calls, buzzSelf[:1]+" "+strings.Join(args[:2], " "))
-		return nil, nil
+		if args[0] == "agents" && (args[1] == "archive" || args[1] == "unarchive") {
+			return []byte(`{"ok":true,"event_id":"e1","action":"` + args[1] + `","target":"t1"}`), nil
+		}
+		return []byte(`{"event_id":"e1","accepted":true,"message":"ok"}`), nil
 	}
 	state := canonicalTempDir(t)
 	a := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: state}, "test")
@@ -135,7 +146,10 @@ func TestIdenticalWorkersChangeTheAgentOnce(t *testing.T) {
 			reentered = true
 			b.lifecycleTick(time.Now()) // b ticks while a's archive runs
 		}
-		return nil, nil
+		if args[0] == "agents" && (args[1] == "archive" || args[1] == "unarchive") {
+			return []byte(`{"ok":true,"event_id":"e1","action":"` + args[1] + `","target":"t1"}`), nil
+		}
+		return []byte(`{"event_id":"e1","accepted":true,"message":"ok"}`), nil
 	}
 
 	if _, err := binding.Retire(binding.RemovedDetached, func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
@@ -243,7 +257,7 @@ func recordHelperCalls(calls *[]string, control string) func(time.Duration, ...s
 		case "channels add-member":
 			return []byte(`{"accepted":true}`), nil
 		}
-		return nil, nil
+		return []byte(`{"accepted":true}`), nil
 	}
 }
 
@@ -287,4 +301,53 @@ func TestHelperDraftsOneSessionPerWindow(t *testing.T) {
 	if got := drafts(); !slices.Equal(got, []string{"alpha", "beta"}) {
 		t.Fatalf("drafts after the next window = %q; want beta next", got)
 	}
+}
+
+// Review finding fix/buzz-write-acceptance: a write the Buzz relay refused
+// (accepted:false on exit 0, or ok shape with ok:false) is not a delivered
+// write. acceptedFor routes per command shape: the normalize_write_response
+// shape for messages send/edit, channels create/archive/unarchive/add-member,
+// users set-status, agents draft-create; the {ok,event_id,action,target}
+// shape for agents archive/unarchive.
+// The error is intentionally NOT a notSentError: a refused write is a write
+// the relay saw and rejected; callers do not revert lifecycle markers for
+// it, exactly as they do not for a non-zero CLI exit.
+func TestBuzzWriteAcceptanceRefusalsAreFailures(t *testing.T) {
+	t.Run("a refused messages send returns no event id", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("needs a POSIX shell")
+		}
+		dir := canonicalTempDir(t)
+		cli := filepath.Join(dir, "buzz")
+		// Real Buzz CLI normalize_write_response on a refused messages-send,
+		// exit 0 (relay returned 200 with the body saying accepted:false).
+		// Production pre-fix code ignored the accepted flag.
+		script := "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"event_id\":\"deadbeef\",\"accepted\":false,\"message\":\"duplicate\"}'\n"
+		if err := os.WriteFile(cli, []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(envBuzzCLI, cli)
+		saved := buzzIdentity
+		t.Cleanup(func() { buzzIdentity = saved })
+		buzzIdentity = []string{"BUZZ_PRIVATE_KEY=test"}
+		id, err := postWithBuzzCLI("chan", "hi", 2*time.Second)
+		if err == nil {
+			t.Fatalf("postWithBuzzCLI on refused messages-send returned id=%q with no error", id)
+		}
+		if id != "" {
+			t.Fatalf("postWithBuzzCLI on refused messages-send returned event id %q; want empty", id)
+		}
+	})
+	t.Run("agents archive with the real ok output succeeds", func(t *testing.T) {
+		// Real production shape from buzz-cli cmd_archive under the agents
+		// subcommand (tag block/buzz f3b127e).
+		saved := buzzCall
+		t.Cleanup(func() { buzzCall = saved })
+		buzzCall = func(time.Duration, ...string) ([]byte, error) {
+			return []byte(`{"ok":true,"event_id":"e1","action":"archive","target":"t1"}`), nil
+		}
+		if err := buzzRun(time.Second, "agents", "archive", buzzSelf, "--reason", "test"); err != nil {
+			t.Fatalf("real agents-archive ok:true must succeed: %v", err)
+		}
+	})
 }

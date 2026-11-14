@@ -163,9 +163,10 @@ func reacted(rs []reaction, owner, emoji string) bool {
 var editMessage = editWithBuzzCLI
 
 // editWithBuzzCLI runs `buzz messages edit --event <id> --content <text>`.
+// A refused edit (accepted:false on exit 0) returns a *notAcceptedError.
 func editWithBuzzCLI(eventID, content string, budget time.Duration) error {
-	_, err := runBuzzCLI(budget, nil, "messages", "edit", "--event", eventID, "--content", content)
-	return err
+	out, err := runBuzzCLI(budget, nil, "messages", "edit", "--event", eventID, "--content", content)
+	return acceptedFor([]string{"messages", "edit"}, out, err)
 }
 
 // dialogPost is the record of one posted dialog.

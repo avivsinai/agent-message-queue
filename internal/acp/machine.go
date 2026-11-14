@@ -756,9 +756,18 @@ func (s *Server) findChannels(r channelRecord) (ids []string, ok bool) {
 	return ids, true
 }
 
-// accepted reports whether a write command succeeded: exit 0 and the relay
-// said accepted:true. An event id alone is no acceptance: the CLI prints the
-// event id of a write the relay refused too.
+// notAcceptedError is a write the Buzz CLI reported with accepted:false,
+// or, for the NIP-IA archive/unarchive commands, a CLI run that did not
+// print their ok:true body.
+// The relay refused the operation: nothing was published by this call.
+// Callers must not advance lifecycle markers on this error.
+type notAcceptedError struct{ out string }
+
+func (e *notAcceptedError) Error() string { return "not accepted: " + e.out }
+
+// accepted reports whether a write that prints the write response
+// succeeded: exit 0 and accepted:true. An event id alone is no acceptance:
+// the CLI prints the event id of a write the relay refused too.
 func accepted(out []byte, err error) error {
 	if err != nil {
 		return err
@@ -767,9 +776,62 @@ func accepted(out []byte, err error) error {
 		Accepted bool `json:"accepted"`
 	}
 	if json.Unmarshal(out, &res) != nil || !res.Accepted {
-		return fmt.Errorf("not accepted: %s", strings.TrimSpace(string(out)))
+		return &notAcceptedError{out: strings.TrimSpace(string(out))}
 	}
 	return nil
+}
+
+// acceptedOK reports whether `buzz agents archive` or `agents unarchive`
+// succeeded. These two commands print {ok, event_id, action, target} after
+// the submit returned without error, and they do not print the relay's
+// accepted flag (block/buzz f3b127e buzz-cli, AgentsCmd Archive and
+// Unarchive). Exit 0 with ok:true is the strongest signal they give.
+func acceptedOK(out []byte, err error) error {
+	var res struct {
+		OK bool `json:"ok"`
+	}
+	if err != nil || json.Unmarshal(out, &res) != nil || !res.OK {
+		return &notAcceptedError{out: strings.TrimSpace(string(out))}
+	}
+	return nil
+}
+
+// acceptedFor reports whether the CLI write named by args succeeded. The
+// subcommand selects the parser, by what that command prints (block/buzz
+// f3b127e buzz-cli):
+//
+//   - write response {event_id, accepted, message}: messages send, messages
+//     edit, channels create, channels archive, channels unarchive, channels
+//     add-member, users set-status, agents draft-create.
+//   - ok response: agents archive, agents unarchive.
+//
+// A subcommand outside this table is an error: its output is not known
+// here, so success is not assumed.
+func acceptedFor(args []string, out []byte, err error) error {
+	if err != nil {
+		return err
+	}
+	shape := ""
+	if len(args) >= 2 {
+		switch args[0] + " " + args[1] {
+		case "messages send", "messages edit",
+			"channels create", "channels archive", "channels unarchive", "channels add-member",
+			"users set-status",
+			"agents draft-create":
+			shape = "accepted"
+		case "agents archive", "agents unarchive":
+			shape = "ok"
+		}
+	}
+	switch shape {
+	case "accepted":
+		return accepted(out, nil)
+	case "ok":
+		return acceptedOK(out, nil)
+	default:
+		return fmt.Errorf("buzz %s: response shape unknown to acceptedFor: %s",
+			strings.Join(args[:min(len(args), 2)], " "), strings.TrimSpace(string(out)))
+	}
 }
 
 // finishSetup adds the owner, welcomes them with a mention so the phone
