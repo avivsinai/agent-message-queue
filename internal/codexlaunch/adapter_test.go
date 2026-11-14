@@ -834,13 +834,8 @@ func TestManagedSeatBindsDaemonOnNewerCodexRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	expected = append(expected, conversation.Identity.ID)
-	if len(argv) != len(expected) {
-		t.Fatalf("argv length = %d; daemon template+thread length = %d", len(argv), len(expected))
-	}
-	for i := range argv {
-		if argv[i] != expected[i] {
-			t.Fatalf("daemon template argv[%d] = %q; want %q", i, argv[i], expected[i])
-		}
+	if !slices.Equal(argv, expected) {
+		t.Fatalf("argv = %q, want the daemon template and the thread %q", argv, expected)
 	}
 }
 

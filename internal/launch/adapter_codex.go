@@ -124,7 +124,7 @@ func (adapter *CodexAdapter) probeCapabilities(ctx context.Context) (AdapterCapa
 	result.Resume = true
 	if !codexCaptureVersionSupported(result.ProviderVersion) {
 		result.Reason = "capture_version_unsupported"
-		return result, nil
+		return result, resumeHelp
 	}
 	result.Capture = true
 	return result, resumeHelp

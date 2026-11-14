@@ -161,9 +161,10 @@ implicitly. A conversation captured by notify resumes embedded. One whose
 capture is `codex_daemon_thread_v1` resumes on the daemon when the launch
 options are admitted, the daemon is eligible, the daemon listens at the socket
 that captured the thread, and it reads the thread in the launch directory at
-in the launch directory at the release of the installed Codex on the same session. The socket path is fixed by the
-canonical `CODEX_HOME`. A restarted daemon at that socket is a successor; a
-daemon at another socket is not, even when it answers with the same thread.
+the release of the installed Codex on the same session. The socket path is
+fixed by the canonical `CODEX_HOME`. A restarted daemon at that socket is a
+successor; a daemon at another socket is not, even when it answers with the
+same thread.
 Static admission, including executable containment, completes before any probe
 runs the provider or reads the daemon. Any other outcome (a changed endpoint,
 no daemon, an option, sign-in, trust, or version that is not admitted, or a
