@@ -765,23 +765,60 @@ type notAcceptedError struct{ out string }
 
 func (e *notAcceptedError) Error() string { return "not accepted: " + e.out }
 
-// accepted reports whether a write command succeeded. The result shape
-// depends on the sub-command:
+// accepted reports whether one normalize_write_response-shaped write
+// succeeded: exit 0 AND accepted:true (block/buzz f3b127e:
+// normalize_write_response flattens the relay OK into {event_id, accepted,
+// message}). An event id alone is no acceptance: the relay's duplicate
+// path can return accepted:false on HTTP 200 with an event id attached.
 //
-//   - normalize_write_response shape {event_id, accepted, message}:
-//     messages send (messages.rs:713), messages edit
-//     (messages.rs:847-865), channels create (channels.rs:738 calls
-//     print_create_response, client.rs:1516-1520), channels archive
-//     (channels.rs:1767-1775), channels unarchive (channels.rs:1777-1785),
-//     channels add-member (channels.rs:1803-1830),
-//     users set-status (users.rs cmd_set_status), agents draft-create
-//     (agents.rs:14-38 calls publish_ephemeral_event, which on accepted
-//     returns {"event_id","accepted":true,"message"} at client.rs:1181).
-//   - ok shape {ok:true, event_id, action, target}: agents archive
-//     (agents.rs:115-126), agents unarchive (agents.rs:151-162).
+// Caller contract: command shape matters. accepted is only meaningful for
+// the commands that print normalize_write_response; acceptedFor dispatches
+// to this parser or to the ok-shape parser per argv[0:2].
+func accepted(out []byte, err error) error {
+	if err != nil {
+		return err
+	}
+	var res struct {
+		Accepted bool `json:"accepted"`
+	}
+	if json.Unmarshal(out, &res) != nil || !res.Accepted {
+		return &notAcceptedError{out: strings.TrimSpace(string(out))}
+	}
+	return nil
+}
+
+// acceptedOK reports whether an agents-archive/unarchive write succeeded
+// (block/buzz f3b127e: those commands print {ok,event_id,action,target}).
+// The CLI prints ok:true only after submit_event returned Ok, which on a
+// relay refusal raises an Err (non-zero exit): ok:true on exit 0 can only
+// appear on a refusal that the relay returned as HTTP 200 with accepted
+// inside, i.e. duplicate. Either way the operation is rejected for marker
+// purposes unless ok:true holds.
+func acceptedOK(out []byte, err error) error {
+	var res struct {
+		OK bool `json:"ok"`
+	}
+	if err != nil || json.Unmarshal(out, &res) != nil || !res.OK {
+		return &notAcceptedError{out: strings.TrimSpace(string(out))}
+	}
+	return nil
+}
+
+// acceptedFor reports whether the CLI write identified by args was
+// accepted at the relay. Its parser is chosen by the subcommand from
+// block/buzz f3b127e buzz-cli:
 //
-// The buzzRun caller passes only the args argv, so the table lets the
-// parser pick a shape per command. A command not in the table fails closed.
+//	accepted (normalize_write_response): cmd_send_message, cmd_edit_message,
+//	cmd_create_channel, cmd_archive_channel, cmd_unarchive_channel,
+//	cmd_add_channel_member, cmd_set_status, agents DraftCreate.
+//	ok: cmd_archive, cmd_unarchive (under AgentsCmd).
+//
+// Times argv positions: for DraftCreate and DraftUpdate the canonical
+// subcommand is agents draft-create and agents draft-update; reads do
+// not go through buzzRun.
+//
+// A call argv whose subcommand is not in the table fails closed: the
+// pattern of the CLI's response is unknown to this parser.
 func acceptedFor(args []string, out []byte, err error) error {
 	if err != nil {
 		return err
@@ -800,43 +837,13 @@ func acceptedFor(args []string, out []byte, err error) error {
 	}
 	switch shape {
 	case "accepted":
-		var res struct {
-			Accepted bool `json:"accepted"`
-		}
-		if json.Unmarshal(out, &res) == nil && res.Accepted {
-			return nil
-		}
+		return accepted(out, nil)
 	case "ok":
-		var res struct {
-			OK bool `json:"ok"`
-		}
-		if json.Unmarshal(out, &res) == nil && res.OK {
-			return nil
-		}
+		return acceptedOK(out, nil)
 	default:
 		return fmt.Errorf("buzz %s: response shape unknown to acceptedFor: %s",
 			strings.Join(args[:min(len(args), 2)], " "), strings.TrimSpace(string(out)))
 	}
-	return &notAcceptedError{out: strings.TrimSpace(string(out))}
-}
-
-// accepted reports whether a write command succeeded: exit 0 and the relay
-// said accepted:true. An event id alone is no acceptance: the CLI prints the
-// event id of a write the relay refused too.
-// Deprecated: call sites that know the argv should call acceptedFor; kept
-// for the machine lifecycle paths that only check archive/unarchive/etc
-// where the shape is always normalize_write_response.
-func accepted(out []byte, err error) error {
-	if err != nil {
-		return err
-	}
-	var res struct {
-		Accepted bool `json:"accepted"`
-	}
-	if json.Unmarshal(out, &res) != nil || !res.Accepted {
-		return &notAcceptedError{out: strings.TrimSpace(string(out))}
-	}
-	return nil
 }
 
 // finishSetup adds the owner, welcomes them with a mention so the phone
