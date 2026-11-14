@@ -1129,9 +1129,9 @@ func (s *Server) restorable(b binding.Binding, r channelRecord) bool {
 // restore brings back the channel of the same session attaching again: the
 // newest retired record of b's name and identity that was active and ended
 // with its session. A channel whose archive was sent is unarchived first,
-// and only a confirmed unarchive lets it become active. It reports whether
-// such a record exists, so no new channel is made while it is being brought
-// back.
+// and only a confirmed unarchive, or the relay's refusal that the channel is
+// not archived, lets it become active. It reports whether such a record
+// exists, so no new channel is made while it is being brought back.
 func (s *Server) restore(b binding.Binding, now time.Time) bool {
 	var found *channelRecord
 	for _, r := range s.retiredRecords() {
@@ -1152,7 +1152,7 @@ func (s *Server) restore(b binding.Binding, now time.Time) bool {
 			return true
 		}
 		r.LastTry = now.UTC().Format(time.RFC3339)
-		if err := accepted(s.call("channels", "unarchive", "--channel", r.ChannelID)); err != nil {
+		if err := accepted(s.call("channels", "unarchive", "--channel", r.ChannelID)); err != nil && !notArchived(err) {
 			r.LastError = err.Error()
 			_ = s.save(&r, now)
 			return true
@@ -1174,6 +1174,15 @@ func (s *Server) restore(b binding.Binding, now time.Time) bool {
 	_ = s.removeDurably(retiredPath)
 	_ = accepted(s.call("messages", "send", "--channel", r.ChannelID, "--content", "Connected again: "+r.Label+"."))
 	return true
+}
+
+// notArchived reports whether the relay refused an unarchive because the
+// channel is not archived. That refusal proves the state a restore needs: an
+// archive recorded as sent never reached the relay, or the channel was
+// unarchived since. A failure that proves nothing, such as a timeout, is not
+// one.
+func notArchived(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "channel is not archived")
 }
 
 // resetRequest asks the leader to retire the record with Reg and make a
