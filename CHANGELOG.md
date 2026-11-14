@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.143.1](https://github.com/avivsinai/agent-message-queue/compare/v0.143.0...v0.143.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* **release:** a re-run publish no longer blocks the next release ([#1484](https://github.com/avivsinai/agent-message-queue/issues/1484)) ([4878009](https://github.com/avivsinai/agent-message-queue/commit/4878009702dfbde80b86a625537b7a59c1a93a86))
+* **remote:** a session gets its channel back when the archive never ran ([#1483](https://github.com/avivsinai/agent-message-queue/issues/1483)) ([a9dfaff](https://github.com/avivsinai/agent-message-queue/commit/a9dfaff111453b5403eb1a92bd25ab7fefdc9ea8))
+
 ## [0.143.0](https://github.com/avivsinai/agent-message-queue/compare/v0.142.2...v0.143.0) (2026-11-13)
 
 
