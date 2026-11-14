@@ -13,7 +13,7 @@ func TestPrepareWorkerEnvStripsBuzzSecrets(t *testing.T) {
 	t.Setenv("BUZZ_ACP_AGENT_COMMAND", "amq-acp")
 	t.Setenv("BUZZ_RELAY_URL", "ws://localhost:3000")
 
-	if err := PrepareWorkerEnv(); err != nil {
+	if _, err := PrepareWorkerEnv(); err != nil {
 		t.Fatalf("PrepareWorkerEnv: %v", err)
 	}
 	for _, entry := range os.Environ() {
@@ -28,13 +28,13 @@ func TestPrepareWorkerEnvStripsBuzzSecrets(t *testing.T) {
 func TestPrepareWorkerEnvRefusesParallelAgents(t *testing.T) {
 	t.Setenv("BUZZ_ACP_AGENTS", "10")
 	t.Setenv(EnvRemote, RemoteModeBinding)
-	if err := PrepareWorkerEnv(); (err == nil) != lock.AdvisoryLockAvailable() {
+	if _, err := PrepareWorkerEnv(); (err == nil) != lock.AdvisoryLockAvailable() {
 		t.Fatalf("binding mode, agents=10: PrepareWorkerEnv = %v", err)
 	}
 
 	t.Setenv("BUZZ_ACP_AGENTS", "10")
 	t.Setenv(EnvRemote, "")
-	err := PrepareWorkerEnv()
+	_, err := PrepareWorkerEnv()
 	if err == nil {
 		t.Fatal("BYOH mode: PrepareWorkerEnv succeeded for agents=10, want refusal")
 	}
@@ -45,7 +45,7 @@ func TestPrepareWorkerEnvRefusesParallelAgents(t *testing.T) {
 
 func TestPrepareWorkerEnvRefusesOpenInbound(t *testing.T) {
 	t.Setenv("BUZZ_ACP_RESPOND_TO", "anyone")
-	err := PrepareWorkerEnv()
+	_, err := PrepareWorkerEnv()
 	if err == nil {
 		t.Fatal("PrepareWorkerEnv succeeded for respond-to=anyone, want refusal")
 	}
@@ -58,7 +58,7 @@ func TestPrepareWorkerEnvAllowsOwnerOnlySingleAgent(t *testing.T) {
 	t.Setenv("BUZZ_ACP_AGENTS", "1")
 	t.Setenv("BUZZ_ACP_RESPOND_TO", "owner-only")
 	t.Setenv("BUZZ_PRIVATE_KEY", "nsec-must-not-survive")
-	if err := PrepareWorkerEnv(); err != nil {
+	if _, err := PrepareWorkerEnv(); err != nil {
 		t.Fatalf("PrepareWorkerEnv: %v", err)
 	}
 	if os.Getenv("BUZZ_PRIVATE_KEY") != "" {

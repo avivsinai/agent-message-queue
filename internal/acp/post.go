@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/relay"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 )
 
 // A Buzz agent's chat reply exists only if the agent publishes it: buzz-acp
@@ -169,29 +170,30 @@ func hostChannel(line string) string {
 	return ""
 }
 
-// buzzSelf is the managed agent's own public key (64 lowercase hex), or ""
-// when the secret is absent or unreadable. The agent archives and unarchives
-// itself under it (lifecycle.go).
-var buzzSelf string
-
-// captureBuzzIdentity records the credentials the buzz CLI needs, the agent's
-// own public key, and the agent's owner (dialog.go).
-func captureBuzzIdentity() {
+// captureBuzzIdentity records the credentials the buzz CLI needs and the
+// relay credential, and returns the agent's public identity: its own public
+// key, under which it archives and unarchives itself (lifecycle.go), its
+// owner (dialog.go), its relay and its display name.
+func captureBuzzIdentity() buzzop.Identity {
 	buzzIdentity = nil
 	for _, key := range buzzIdentityKeys {
 		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 			buzzIdentity = append(buzzIdentity, key+"="+v)
 		}
 	}
-	buzzSelf = ""
+	var id buzzop.Identity
 	if secret := strings.TrimSpace(os.Getenv("BUZZ_PRIVATE_KEY")); secret != "" {
 		if pub, err := agentPubKey(secret); err == nil {
-			buzzSelf = pub
+			id.Agent = pub
 		}
 	}
-	buzzOwner = agentOwner(os.Getenv("BUZZ_AUTH_TAG"), os.Getenv("BUZZ_PRIVATE_KEY"), os.Getenv("BUZZ_ACP_AGENT_OWNER"))
-	buzzRelayURL, buzzRelayKey = strings.TrimSpace(os.Getenv("BUZZ_RELAY_URL")), relayKey(os.Getenv("BUZZ_RELAY_URL"))
-	buzzRelay = agentRelay(buzzRelayURL, os.Getenv("BUZZ_PRIVATE_KEY"), os.Getenv("BUZZ_AUTH_TAG"))
+	id.Owner = agentOwner(os.Getenv("BUZZ_AUTH_TAG"), os.Getenv("BUZZ_PRIVATE_KEY"), os.Getenv("BUZZ_ACP_AGENT_OWNER"))
+	id.RelayURL, id.RelayKey = buzzop.NormalizeRelay(os.Getenv("BUZZ_RELAY_URL")), buzzop.RelayKey(os.Getenv("BUZZ_RELAY_URL"))
+	id.DisplayName = strings.TrimSpace(os.Getenv(envBuzzDisplayName))
+	// The relay credential connects to the URL as given, not the normalized
+	// one.
+	buzzRelay = agentRelay(strings.TrimSpace(os.Getenv("BUZZ_RELAY_URL")), os.Getenv("BUZZ_PRIVATE_KEY"), os.Getenv("BUZZ_AUTH_TAG"))
+	return id
 }
 
 // buzzRelay is the managed agent's own relay identity: the relay URL, the

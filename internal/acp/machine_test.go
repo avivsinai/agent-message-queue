@@ -17,6 +17,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 )
 
@@ -66,13 +67,8 @@ func machineServer(t *testing.T) (*Server, *machineCalls) {
 		t.Skip("no advisory lock on this platform")
 	}
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
-	savedSelf, savedOwner, savedKey, savedURL, savedCall := buzzSelf, buzzOwner, buzzRelayKey, buzzRelayURL, machineCall
-	t.Cleanup(func() {
-		buzzSelf, buzzOwner, buzzRelayKey, buzzRelayURL, machineCall = savedSelf, savedOwner, savedKey, savedURL, savedCall
-	})
-	buzzSelf, buzzOwner = strings.Repeat("e", 64), strings.Repeat("0", 64)
-	buzzRelayURL = "wss://relay.example/"
-	buzzRelayKey = relayKey(buzzRelayURL)
+	savedCall := machineCall
+	t.Cleanup(func() { machineCall = savedCall })
 	rec := &machineCalls{reply: func([]string) ([]byte, error) { return []byte(`{"accepted":true,"event_id":"ev"}`), nil }}
 	machineCall = func(_ context.Context, _ time.Duration, args ...string) ([]byte, error) {
 		rec.mu.Lock()
@@ -84,12 +80,17 @@ func machineServer(t *testing.T) (*Server, *machineCalls) {
 	return newMachineServer(t, canonicalTempDir(t)), rec
 }
 
+// machineIdentity is the machine agent's Buzz key, owner and relay.
+var machineIdentity = buzzop.Identity{Agent: strings.Repeat("e", 64), Owner: strings.Repeat("0", 64),
+	RelayURL: buzzop.NormalizeRelay("wss://relay.example/"), RelayKey: buzzop.RelayKey("wss://relay.example/")}
+
 // newMachineServer is one machine worker on stateDir; a second one on the
 // same directory is the worker after a restart.
 func newMachineServer(t *testing.T, stateDir string) *Server {
 	t.Helper()
 	s := NewServer(Config{RemoteBinding: true, Machine: true, StateDir: stateDir,
-		TurnTimeout: 100 * time.Millisecond, PollInterval: 5 * time.Millisecond, HeartbeatInterval: 20 * time.Millisecond}, "test")
+		TurnTimeout: 100 * time.Millisecond, PollInterval: 5 * time.Millisecond, HeartbeatInterval: 20 * time.Millisecond,
+		Identity: machineIdentity}, "test")
 	t.Cleanup(s.resign)
 	return s
 }
@@ -119,7 +120,7 @@ func liveSession(t *testing.T, name string) binding.Binding {
 // activeChannel writes an active record of channel for b.
 func activeChannel(t *testing.T, s *Server, b binding.Binding, channel string) {
 	t.Helper()
-	r := channelRecord{Relay: normalizeRelay(buzzRelayURL), Machine: buzzSelf, ChannelID: channel, Name: b.Name,
+	r := channelRecord{Relay: s.id.RelayURL, Machine: s.id.Agent, ChannelID: channel, Name: b.Name,
 		Identity: b.SessionIdentity(), Label: sessionAgentName(b), Reg: "reg-" + b.Name, State: channelActive,
 		OwnerAdded: true, Welcomed: true, Creates: 1}
 	if err := s.save(&r, time.Now()); err != nil {
@@ -151,8 +152,9 @@ func channelPrompt(t *testing.T, s *Server, channel string) string {
 	t.Helper()
 	// Without an owner the served worker's machine tick provisions
 	// nothing, so routing sees exactly the records the test wrote.
-	buzzOwner = ""
-	live := startServer(t, s.cfg)
+	cfg := s.cfg
+	cfg.Identity.Owner = ""
+	live := startServer(t, cfg)
 	live.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":2}}`)
 	live.read()
 	live.send(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/"}}`)
@@ -251,12 +253,12 @@ func TestMachineProvisionsAChannelForALiveSession(t *testing.T) {
 	tick(s, now.Add(time.Minute))
 
 	r := channelState(t, s, "alpha")
-	addMember := "channels add-member --channel " + machineChanA + " --pubkey " + buzzOwner + " --role admin"
+	addMember := "channels add-member --channel " + machineChanA + " --pubkey " + s.id.Owner + " --role admin"
 	want := []string{
 		"channels create --name " + b.Label + " --type stream --visibility private --description amq-remote " + r.Reg,
 		addMember,
 		addMember,
-		"messages send --channel " + machineChanA + " --content AMQ Remote: this channel reaches " + b.Label + ". Write here to talk to that session. --mention " + buzzOwner,
+		"messages send --channel " + machineChanA + " --content AMQ Remote: this channel reaches " + b.Label + ". Write here to talk to that session. --mention " + s.id.Owner,
 	}
 	if got := rec.list(); !slices.Equal(got, want) {
 		t.Fatalf("buzz calls = %q\nwant %q", got, want)
@@ -557,7 +559,7 @@ func TestMachineSaysSessionEndedForAPrunedSession(t *testing.T) {
 func TestMachineRecoveredSlotKeepsTheRetiredOutcome(t *testing.T) {
 	s, rec := machineServer(t)
 	alpha := liveSession(t, "alpha")
-	stale := channelRecord{Relay: normalizeRelay(buzzRelayURL), Machine: buzzSelf, ChannelID: machineChanA, Name: "alpha",
+	stale := channelRecord{Relay: s.id.RelayURL, Machine: s.id.Agent, ChannelID: machineChanA, Name: "alpha",
 		Identity: alpha.SessionIdentity(), Label: sessionAgentName(alpha), Reg: "reg-alpha", State: channelRetired,
 		RetiredBy: retiredEnded, RetiredFrom: channelActive, OwnerAdded: true, Welcomed: true, Creates: 1}
 	raw, _ := json.Marshal(stale)
@@ -605,7 +607,7 @@ func TestMachineRecoveredSlotKeepsTheRetiredOutcome(t *testing.T) {
 func TestMachineRestoresAChannelTheRelaySaysIsNotArchived(t *testing.T) {
 	s, rec := machineServer(t)
 	alpha := liveSession(t, "alpha")
-	r := channelRecord{Relay: normalizeRelay(buzzRelayURL), Machine: buzzSelf, ChannelID: machineChanA, Name: "alpha",
+	r := channelRecord{Relay: s.id.RelayURL, Machine: s.id.Agent, ChannelID: machineChanA, Name: "alpha",
 		Identity: alpha.SessionIdentity(), Label: sessionAgentName(alpha), Reg: "reg-alpha", State: channelRetired,
 		RetiredBy: retiredEnded, RetiredFrom: channelActive, OwnerAdded: true, Welcomed: true, Creates: 1,
 		SaidEnded: true, ArchiveSent: true}
@@ -649,7 +651,7 @@ func TestMachineUncertainCreateAdoptsOneChannelAndNeverCreatesAgain(t *testing.T
 		case "channels get":
 			return []byte(`{"channel_id":"` + machineChanA + `","description":"amq-remote ` + reg + `"}`), nil
 		case "channels members":
-			return []byte(`[{"pubkey":"` + buzzSelf + `","role":"owner"}]`), nil
+			return []byte(`[{"pubkey":"` + s.id.Agent + `","role":"owner"}]`), nil
 		}
 		return []byte(`{"accepted":true,"event_id":"ev"}`), nil
 	}
@@ -720,7 +722,7 @@ func TestMachineCreateThatReturnsAfterDetachIsArchived(t *testing.T) {
 			case "channels get":
 				return []byte(`{"channel_id":"` + machineChanA + `","description":"amq-remote ` + reg + `"}`), nil
 			case "channels members":
-				return []byte(`[{"pubkey":"` + buzzSelf + `","role":"owner"}]`), nil
+				return []byte(`[{"pubkey":"` + s.id.Agent + `","role":"owner"}]`), nil
 			}
 			return []byte(`{"accepted":true,"event_id":"ev"}`), nil
 		}
@@ -805,16 +807,16 @@ func TestMachineLeaderReplacesTheMarkerOfADepartedNewerWorker(t *testing.T) {
 	departed := self
 	departed.PID, departed.ProcessStart = 1<<30, laterStart(t, self.ProcessStart)
 	dir := s.agentMarkerDir(machineName)
-	raw, _ := json.Marshal(agentMarker{Name: machineName, PubKey: buzzSelf, Worker: departed, Updated: time.Now().UTC().Format(time.RFC3339)})
+	raw, _ := json.Marshal(agentMarker{Name: machineName, PubKey: s.id.Agent, Worker: departed, Updated: time.Now().UTC().Format(time.RFC3339)})
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, buzzSelf+".json"), raw, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, s.id.Agent+".json"), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	tick(s, time.Now())
 
-	if m, _ := readAgentMarker(filepath.Join(dir, buzzSelf+".json")); m.Worker != self {
+	if m, _ := readAgentMarker(filepath.Join(dir, s.id.Agent+".json")); m.Worker != self {
 		t.Fatalf("marker worker = %+v, want the leader %+v", m.Worker, self)
 	}
 }

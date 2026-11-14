@@ -16,6 +16,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 )
 
 // mailboxServer binds a binding-mode server to handle "agent" on a fresh
@@ -30,18 +31,12 @@ func mailboxServer(t *testing.T) (*Server, string) {
 	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent", Name: "agent"}); err != nil {
 		t.Fatal(err)
 	}
-	withBuzzSelf(t)
-	return NewServer(Config{RemoteBinding: true, StateDir: canonicalTempDir(t), TurnTimeout: 2 * time.Second, PollInterval: 5 * time.Millisecond, HeartbeatInterval: 20 * time.Millisecond}, "test"), root
+	return NewServer(Config{RemoteBinding: true, StateDir: canonicalTempDir(t), TurnTimeout: 2 * time.Second, PollInterval: 5 * time.Millisecond, HeartbeatInterval: 20 * time.Millisecond, Identity: testAgent}, "test"), root
 }
 
-// withBuzzSelf gives the test a Buzz agent key, as Desktop gives every
-// agent, so its event claims name it.
-func withBuzzSelf(t *testing.T) {
-	t.Helper()
-	saved := buzzSelf
-	t.Cleanup(func() { buzzSelf = saved })
-	buzzSelf = strings.Repeat("e", 64)
-}
+// testAgent gives the test a Buzz agent key, as Desktop gives every agent,
+// so its event claims name it.
+var testAgent = buzzop.Identity{Agent: strings.Repeat("e", 64)}
 
 // inboxPrompts lists the prompt ids in the agent's inbox (new and cur).
 func inboxPrompts(t *testing.T, root string) []string {
@@ -790,11 +785,9 @@ func TestAnotherAgentsClaimIsNeitherFollowedNorSwept(t *testing.T) {
 	alpha, root := mailboxServer(t)
 	alpha.cfg.TurnTimeout = 300 * time.Millisecond
 	posts := recordPosts(t)
-	savedSelf := buzzSelf
-	t.Cleanup(func() { buzzSelf = savedSelf })
 	prompt := "<context>\nScope: dm\nChannel: DM (#6eff60e4-32ab-48ec-bd3d-f4c97872f370)\n</context>\nhi"
 	eventID := strings.Repeat("5", 64)
-	buzzSelf = strings.Repeat("a", 64)
+	alpha.id.Agent = strings.Repeat("a", 64)
 	turn := newTurn()
 	turn.channel = buzzChannel(prompt)
 	if _, rpcErr := alpha.runRemote("s", prompt, eventID, turn, func(any) error { return nil }); rpcErr != nil {
@@ -802,10 +795,10 @@ func TestAnotherAgentsClaimIsNeitherFollowedNorSwept(t *testing.T) {
 	}
 	replyAs(t, root, cockpitThread("session/s"), inboxPrompts(t, root)[0], format.KindAnswer, "late answer")
 
-	buzzSelf = strings.Repeat("b", 64)
+	another := buzzop.Identity{Agent: strings.Repeat("b", 64)}
 	for name, other := range map[string]*Server{
-		"beta":   NewServer(Config{RemoteBinding: true, Pin: "beta", StateDir: alpha.cfg.StateDir}, "test"),
-		"helper": NewServer(Config{RemoteBinding: true, Helper: true, StateDir: alpha.cfg.StateDir}, "test"),
+		"beta":   NewServer(Config{RemoteBinding: true, Pin: "beta", StateDir: alpha.cfg.StateDir, Identity: another}, "test"),
+		"helper": NewServer(Config{RemoteBinding: true, Helper: true, StateDir: alpha.cfg.StateDir, Identity: another}, "test"),
 	} {
 		if b, err := other.turnBinding("s", eventID); err == nil {
 			t.Errorf("%s followed alpha's claim to %s", name, b.Root)
@@ -815,7 +808,6 @@ func TestAnotherAgentsClaimIsNeitherFollowedNorSwept(t *testing.T) {
 	if got := strings.Join(posts(), "|"); strings.Contains(got, "late answer") {
 		t.Fatalf("another agent posted alpha's late answer: %q", got)
 	}
-	buzzSelf = strings.Repeat("a", 64)
 	alpha.sweepLateReplies(time.Now().Add(time.Hour))
 	if got := strings.Join(posts(), "|"); strings.Count(got, "late answer") != 1 {
 		t.Fatalf("posts=%q; want alpha's own sweep to post the late answer once", got)
@@ -843,7 +835,7 @@ func TestOneEventReachesEachAgentsSession(t *testing.T) {
 	eventID := strings.Repeat("4", 64)
 	run := func(s *Server, self, root, answer string) {
 		t.Helper()
-		buzzSelf = strings.Repeat(self, 64)
+		s.id.Agent = strings.Repeat(self, 64)
 		turn := newTurn()
 		turn.channel = chanA
 		if _, rpcErr := s.runRemote("s", "hi both", eventID, turn, func(v any) error {

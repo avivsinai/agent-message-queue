@@ -226,14 +226,14 @@ func (s *Server) mirrorLead() bool {
 	if s.mirrors.release != nil || !lock.AdvisoryLockAvailable() {
 		return true
 	}
-	if buzzSelf == "" {
+	if s.id.Agent == "" {
 		return false
 	}
 	dir := s.agentMarkerDir(machineName)
 	if os.MkdirAll(dir, 0o700) != nil {
 		return false
 	}
-	release, ok, err := lock.TryExclusive(filepath.Join(dir, buzzSelf+".mirror.lock"))
+	release, ok, err := lock.TryExclusive(filepath.Join(dir, s.id.Agent+".mirror.lock"))
 	if err != nil || !ok {
 		return false
 	}
@@ -1099,7 +1099,7 @@ func mirrorWord(text string) (on bool, ok bool) {
 // are fetched; without a verified owner event the switch does not apply and
 // the channel is told why.
 func (s *Server) mirrorSwitch(channel, eventID, prompt string) (name string, on bool, at time.Time, ok bool) {
-	if !s.cfg.Machine || channel == "" || buzzOwner == "" {
+	if !s.cfg.Machine || channel == "" || s.id.Owner == "" {
 		return "", false, time.Time{}, false
 	}
 	if _, ok := mirrorWord(ownerWords(prompt)); !ok {
@@ -1114,7 +1114,7 @@ func (s *Server) mirrorSwitch(channel, eventID, prompt string) (name string, on 
 	if b, err := binding.ReadNamed(r.Name); err != nil || mirror.SourceFor(b.Harness) == nil || b.SessionIdentity() != r.Identity || !s.live(b) {
 		return "", false, time.Time{}, false
 	}
-	evt, err := ownerEvent(eventID, prompt, channel)
+	evt, err := ownerEvent(s.id.Owner, eventID, prompt, channel)
 	if err != nil {
 		s.tellUnverified(channel, "mirror:"+channel, "The mirror was not switched", err)
 		return "", false, time.Time{}, false

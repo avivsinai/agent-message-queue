@@ -63,8 +63,8 @@ type eventMedia struct {
 
 // attachImages returns prompt with one line per file of its Buzz event, each
 // image stored under root. A prompt without files is returned unchanged.
-func attachImages(root, prompt string) string {
-	media := promptMedia(prompt)
+func attachImages(root, relayURL, prompt string) string {
+	media := promptMedia(relayURL, prompt)
 	if len(media) == 0 {
 		return prompt
 	}
@@ -79,7 +79,7 @@ func attachImages(root, prompt string) string {
 			lines = append(lines, fmt.Sprintf("[image not attached: %d more files; at most %d are attached per message]", len(media)-i, remoteFileLimit))
 			break
 		}
-		stored, err := storeImage(root, dir, m, deadline)
+		stored, err := storeImage(root, relayURL, dir, m, deadline)
 		if err != nil {
 			lines = append(lines, "[image not attached: "+oneLine(mediaName(m.url))+": "+oneLine(err.Error())+"]")
 			continue
@@ -91,7 +91,7 @@ func attachImages(root, prompt string) string {
 
 // promptMedia lists the files of the prompt's Buzz event: its imeta tags, or,
 // when it has none, the Blossom URLs on the agent's relay in the event.
-func promptMedia(prompt string) []eventMedia {
+func promptMedia(relayURL, prompt string) []eventMedia {
 	evt := buzzEvent(prompt)
 	if evt == "" {
 		return nil
@@ -138,7 +138,7 @@ func promptMedia(prompt string) []eventMedia {
 	for _, m := range blobLinkRe.FindAllStringSubmatchIndex(evt, -1) {
 		// The fetch names the sha256 in lower case, as Blossom stores it.
 		raw := evt[m[0]:m[2]] + strings.ToLower(evt[m[2]:m[3]]) + evt[m[3]:m[1]]
-		if onRelay(raw) && !seen[raw] {
+		if onRelay(relayURL, raw) && !seen[raw] {
 			seen[raw] = true
 			media = append(media, eventMedia{url: raw})
 		}
@@ -148,8 +148,8 @@ func promptMedia(prompt string) []eventMedia {
 
 // onRelay reports that raw is an https URL on the host and port of the
 // agent's relay.
-func onRelay(raw string) bool {
-	relay, err := url.Parse(buzzRelayURL)
+func onRelay(relayURL, raw string) bool {
+	relay, err := url.Parse(relayURL)
 	if err != nil || relay.Hostname() == "" {
 		return false
 	}
@@ -196,7 +196,7 @@ var mediaGet = func(budget time.Duration, limit int, rawURL string) ([]byte, err
 // storeImage returns the stored file of m: the file already stored under its
 // sha256, else the image fetched and written to dir (mode 0600) by its
 // content's sha256 and type.
-func storeImage(root, dir string, m eventMedia, deadline time.Time) (string, error) {
+func storeImage(root, relayURL, dir string, m eventMedia, deadline time.Time) (string, error) {
 	if m.size > remoteFileMax {
 		return "", fmt.Errorf("%d bytes is over the 20 MiB limit", m.size)
 	}
@@ -205,7 +205,7 @@ func storeImage(root, dir string, m eventMedia, deadline time.Time) (string, err
 	}
 	// The download is signed with the agent's key, so it goes only to the
 	// agent's own relay.
-	if !onRelay(m.url) {
+	if !onRelay(relayURL, m.url) {
 		return "", errors.New("it is not on this agent's relay")
 	}
 	// The relay serves a Blossom URL's blob by the sha256 the URL names, so

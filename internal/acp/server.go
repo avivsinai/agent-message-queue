@@ -18,6 +18,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 )
 
@@ -194,6 +195,10 @@ type Server struct {
 	streamClosed bool
 	// late is the late-reply sweep state (binding mode only).
 	late lateReplySweep
+	// id is the managed agent's Buzz identity (Config.Identity), fixed at
+	// construction. Its owner is the only key whose reactions and messages
+	// answer a dialog.
+	id buzzop.Identity
 	// lastChannel is the DM channel of the latest DM prompt in this
 	// process. Each DM is also written for the lifecycle leader (recordDM);
 	// the leader falls back to its own value when that file is unreadable.
@@ -249,6 +254,7 @@ func NewServer(cfg Config, version string) *Server {
 	}
 	return &Server{
 		cfg:      cfg,
+		id:       cfg.Identity,
 		version:  version,
 		sessions: make(map[string]*sessionState),
 		store:    newSessionStore(cfg),
