@@ -765,15 +765,9 @@ type notAcceptedError struct{ out string }
 
 func (e *notAcceptedError) Error() string { return "not accepted: " + e.out }
 
-// accepted reports whether one normalize_write_response-shaped write
-// succeeded: exit 0 AND accepted:true (block/buzz f3b127e:
-// normalize_write_response flattens the relay OK into {event_id, accepted,
-// message}). An event id alone is no acceptance: the relay's duplicate
-// path can return accepted:false on HTTP 200 with an event id attached.
-//
-// Caller contract: command shape matters. accepted is only meaningful for
-// the commands that print normalize_write_response; acceptedFor dispatches
-// to this parser or to the ok-shape parser per argv[0:2].
+// accepted reports whether a write that prints the write response
+// succeeded: exit 0 and accepted:true. An event id alone is no acceptance:
+// the CLI prints the event id of a write the relay refused too.
 func accepted(out []byte, err error) error {
 	if err != nil {
 		return err
@@ -787,13 +781,11 @@ func accepted(out []byte, err error) error {
 	return nil
 }
 
-// acceptedOK reports whether an agents-archive/unarchive write succeeded
-// (block/buzz f3b127e: those commands print {ok,event_id,action,target}).
-// The CLI prints ok:true only after submit_event returned Ok, which on a
-// relay refusal raises an Err (non-zero exit): ok:true on exit 0 can only
-// appear on a refusal that the relay returned as HTTP 200 with accepted
-// inside, i.e. duplicate. Either way the operation is rejected for marker
-// purposes unless ok:true holds.
+// acceptedOK reports whether `buzz agents archive` or `agents unarchive`
+// succeeded. These two commands print {ok, event_id, action, target} after
+// the submit returned without error, and they do not print the relay's
+// accepted flag (block/buzz f3b127e buzz-cli, AgentsCmd Archive and
+// Unarchive). Exit 0 with ok:true is the strongest signal they give.
 func acceptedOK(out []byte, err error) error {
 	var res struct {
 		OK bool `json:"ok"`
@@ -804,21 +796,17 @@ func acceptedOK(out []byte, err error) error {
 	return nil
 }
 
-// acceptedFor reports whether the CLI write identified by args was
-// accepted at the relay. Its parser is chosen by the subcommand from
-// block/buzz f3b127e buzz-cli:
+// acceptedFor reports whether the CLI write named by args succeeded. The
+// subcommand selects the parser, by what that command prints (block/buzz
+// f3b127e buzz-cli):
 //
-//	accepted (normalize_write_response): cmd_send_message, cmd_edit_message,
-//	cmd_create_channel, cmd_archive_channel, cmd_unarchive_channel,
-//	cmd_add_channel_member, cmd_set_status, agents DraftCreate.
-//	ok: cmd_archive, cmd_unarchive (under AgentsCmd).
+//   - write response {event_id, accepted, message}: messages send, messages
+//     edit, channels create, channels archive, channels unarchive, channels
+//     add-member, users set-status, agents draft-create.
+//   - ok response: agents archive, agents unarchive.
 //
-// Times argv positions: for DraftCreate and DraftUpdate the canonical
-// subcommand is agents draft-create and agents draft-update; reads do
-// not go through buzzRun.
-//
-// A call argv whose subcommand is not in the table fails closed: the
-// pattern of the CLI's response is unknown to this parser.
+// A subcommand outside this table is an error: its output is not known
+// here, so success is not assumed.
 func acceptedFor(args []string, out []byte, err error) error {
 	if err != nil {
 		return err

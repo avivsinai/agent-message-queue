@@ -313,7 +313,7 @@ func TestHelperDraftsOneSessionPerWindow(t *testing.T) {
 // the relay saw and rejected; callers do not revert lifecycle markers for
 // it, exactly as they do not for a non-zero CLI exit.
 func TestBuzzWriteAcceptanceRefusalsAreFailures(t *testing.T) {
-	t.Run("real postWithBuzzCLI with refused messages-send output (T1)", func(t *testing.T) {
+	t.Run("a refused messages send returns no event id", func(t *testing.T) {
 		if runtime.GOOS == "windows" {
 			t.Skip("needs a POSIX shell")
 		}
@@ -338,7 +338,7 @@ func TestBuzzWriteAcceptanceRefusalsAreFailures(t *testing.T) {
 			t.Fatalf("postWithBuzzCLI on refused messages-send returned event id %q; want empty", id)
 		}
 	})
-	t.Run("agents archive with real ok:true advances the marker", func(t *testing.T) {
+	t.Run("agents archive with the real ok output succeeds", func(t *testing.T) {
 		// Real production shape from buzz-cli cmd_archive under the agents
 		// subcommand (tag block/buzz f3b127e).
 		saved := buzzCall
