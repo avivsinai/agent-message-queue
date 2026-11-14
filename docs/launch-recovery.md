@@ -145,10 +145,12 @@ cleanup still work; only the current release runs a new or recovered
 execution. Recovery refusals use exit 6 and name the retry or cleanup command.
 
 Every execution attempt, including recovery, checks inherited native-backend
-exclusions and runs the full startup admission (provider version, sign-in,
-directory trust, daemon version, hook trust, terminal instructions, managed
-update requirements, and the seat's `--remote` matching the verified local
-socket) on the bound daemon before publishing routing. A recovered
+exclusions and runs the full startup admission on the bound daemon before
+publishing routing: provider-version probe, sign-in, daemon-version probe,
+hook trust, terminal instructions, managed update requirements, and the
+seat's `--remote` matching the verified local socket. The daemon's reported
+release must equal the CLI's, read live; the floor release for the daemon
+template is `0.167.0`. A recovered
 execution that fails admission keeps its acquired thread; it never creates a
 replacement.
 
