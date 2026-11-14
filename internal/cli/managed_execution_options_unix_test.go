@@ -67,7 +67,7 @@ func TestManagedCoopExecDoesNotForwardPrivateLaunchNonce(t *testing.T) {
 					t.Fatal(err)
 				}
 				argv, dynamic, mode = plan.Argv, plan.DynamicArgv, plan.AdapterMode
-				version, conversation = launch.CodexDaemonVersion, ""
+				version, conversation = launch.CodexDaemonMinimumVersion, ""
 				backend, profile = launch.CommandsBackendName, launch.CommandsProfile().Identity()
 			}
 			ticket, err := launch.NewExecutionTicket(launch.ExecutionTicketRequest{

@@ -426,7 +426,7 @@ func seedPendingCodexDaemonExecution(t *testing.T, fixture executionFixture, non
 		t.Fatal(err)
 	}
 	ticket, err := NewExecutionTicket(ExecutionTicketRequest{
-		Handle: plan.Handle, LaunchNonce: nonce, Mode: plan.AdapterMode, Provider: CodexProvider, ProviderVersion: CodexDaemonVersion,
+		Handle: plan.Handle, LaunchNonce: nonce, Mode: plan.AdapterMode, Provider: CodexProvider, ProviderVersion: CodexDaemonMinimumVersion,
 		PreSpawnAcquire: plan.PreSpawnAcquire, Backend: CommandsBackendName, Profile: CommandsProfile().Identity(),
 		ProjectRoot: fixture.project, SessionRoot: fixture.session, Cwd: fixture.cwd, ProviderExecutable: provider, AMQExecutable: fixture.amq,
 		TargetArgv: plan.Argv, DynamicArgv: plan.DynamicArgv,
@@ -445,7 +445,7 @@ func seedPendingCodexDaemonExecution(t *testing.T, fixture executionFixture, non
 	if err := WriteExecutionTicket(fixture.root, lease, ticket); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteConversation(fixture.root, lease, ConversationRecord{Version: ConversationVersion, Handle: "codex", State: CapturePending, ProviderVersion: CodexDaemonVersion, LaunchNonce: nonce}); err != nil {
+	if err := WriteConversation(fixture.root, lease, ConversationRecord{Version: ConversationVersion, Handle: "codex", State: CapturePending, ProviderVersion: CodexDaemonMinimumVersion, LaunchNonce: nonce}); err != nil {
 		t.Fatal(err)
 	}
 	return ticket, ExecutionEnvelope{Cwd: fixture.cwd, AMQExecutable: fixture.amq, ProviderExecutable: provider, TargetArgv: plan.Argv}
@@ -827,7 +827,7 @@ func TestReconcileRollbackPreservesAcquiredCodexTicket(t *testing.T) {
 			}
 			plan := AgentPlan{Handle: ticket.Handle, LaunchNonce: nonce, AdapterMode: ticket.Mode, Cwd: ticket.Cwd,
 				ResumePolicy: ResumeEnabled, PreSpawnAcquire: true, Argv: ticket.TargetArgv, DynamicArgv: ticket.DynamicArgv}
-			planned := []plannedAgent{{plan: plan, adapter: NewCodexAdapter(ticket.ProviderExecutable), providerVersion: CodexDaemonVersion}}
+			planned := []plannedAgent{{plan: plan, adapter: NewCodexAdapter(ticket.ProviderExecutable), providerVersion: CodexDaemonMinimumVersion}}
 			if failure == "template_mismatch" {
 				planned[0].plan.Argv = append(slices.Clone(plan.Argv), "changed prompt")
 				planned[0].plan.InitialInput = &PlannedInitialInput{Kind: InitialInputArgument, SHA256: initialInputDigest("changed prompt"), ArgvIndex: 5}
@@ -937,7 +937,7 @@ func TestCompletedCodexTicketCanBeReplannedAfterExecutableReplacement(t *testing
 			if err := lease.LockHandles(ticket.Handle); err != nil {
 				t.Fatal(err)
 			}
-			planned := []plannedAgent{{adapter: NewCodexAdapter(ticket.TargetArgv[0]), providerVersion: CodexDaemonVersion,
+			planned := []plannedAgent{{adapter: NewCodexAdapter(ticket.TargetArgv[0]), providerVersion: CodexDaemonMinimumVersion,
 				plan: AgentPlan{Handle: ticket.Handle, LaunchNonce: nextNonce, AdapterMode: ticket.Mode, Cwd: ticket.Cwd,
 					ResumePolicy: ResumeEnabled, PreSpawnAcquire: true, Argv: ticket.TargetArgv, DynamicArgv: ticket.DynamicArgv}}}
 			if err := writeExecutionTickets(ReconcileRequest{Root: fixture.root, ProjectRoot: fixture.project}, lease, planned, fixture.amq, CommandsBackendName, CommandsProfile().Identity()); err != nil {

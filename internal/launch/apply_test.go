@@ -533,7 +533,7 @@ type changingCodexPlanAdapter struct {
 
 func (a changingCodexPlanAdapter) Capabilities(context.Context) AdapterCapabilities {
 	return AdapterCapabilities{Provider: CodexProvider, Mode: AdapterModeCapture, Available: true,
-		ProviderVersion: CodexDaemonVersion, Fresh: true, Resume: true, Capture: true, PreSpawnAcquire: true}
+		ProviderVersion: CodexDaemonMinimumVersion, Fresh: true, Resume: true, Capture: true, PreSpawnAcquire: true}
 }
 
 func (a changingCodexPlanAdapter) PlanFresh(request PlanRequest) (AgentPlan, error) {
