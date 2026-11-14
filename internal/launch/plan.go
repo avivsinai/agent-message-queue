@@ -44,9 +44,9 @@ const (
 	// DynamicArgCodexIdentity is one AMQ identity variable in a Codex
 	// shell_environment_policy.set override; the slot names the variable.
 	DynamicArgCodexIdentity DynamicArgKind = "codex_identity"
-// DynamicArgCodexMailboxesPath is the writable_roots value of a Codex seat;
-// the slot is filled with <session root>/agents and the trust digest binds the kind.
-DynamicArgCodexMailboxesPath DynamicArgKind = "codex_mailboxes_path"
+	// DynamicArgCodexMailboxesPath is the writable_roots value of a Codex seat;
+	// the slot is filled with <session root>/agents and the trust digest binds the kind.
+	DynamicArgCodexMailboxesPath DynamicArgKind = "codex_mailboxes_path"
 )
 
 type InitialInputKind string

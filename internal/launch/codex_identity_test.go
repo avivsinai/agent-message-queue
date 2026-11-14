@@ -6,23 +6,9 @@ import (
 	"testing"
 )
 
-// canonicalMailboxesSlot projects the argument at slot index i by the same rule
-// plan.go uses to build the trust digest. The kind sits in Dynamic; the Value
-// is cleared, mirroring the canonicalArgument{Dynamic: dynamic.Kind} assignment.
-func canonicalMailboxesSlot(plan AgentPlan, i int) canonicalArgument {
-	for _, d := range plan.DynamicArgv {
-		if d.Index == i {
-			return canonicalArgument{Dynamic: d.Kind}
-		}
-	}
-	return canonicalArgument{Value: plan.Argv[i]}
-}
-
 // A managed Codex seat pinned with workspace-write must never widen its
 // sandbox through a path in argv: the launcher adds one fixed token and AMQ
-// fills it at exec time from each seat's own session root. Two seats that
-// differ only in root share the mailbox-slot contribution to the trust
-// projection (kind codex_mailboxes_path), with no path leaking in.
+// fills it at exec time from each seat's own session root.
 func TestCodexSeatWritableRootsTokenBecomesItsMailboxesPath(t *testing.T) {
 	tool, err := os.Executable()
 	if err != nil {
@@ -80,25 +66,12 @@ func TestCodexSeatWritableRootsTokenBecomesItsMailboxesPath(t *testing.T) {
 	if a2.Argv[si2] != codexMailboxesArgPrefix+codexMailboxesToken {
 		t.Fatalf("a2 slot argv=%q; want the un-filled token", a2.Argv[si2])
 	}
-	// The mailbox slot is bound by its kind (create-only invariant of the
-	// trust projection in plan.go), not its path. Compute each seat's
-	// canonicalArgument at its slot index and assert both collapse to the
-	// same kind (codex_mailboxes_path), with the path not present in Value.
-	c1 := canonicalMailboxesSlot(a1, si1)
-	c2 := canonicalMailboxesSlot(a2, si2)
-	if c1.Dynamic != DynamicArgCodexMailboxesPath || c2.Dynamic != DynamicArgCodexMailboxesPath {
-		t.Fatalf("slot canonicalization lost the kind: c1=%+v c2=%+v", c1, c2)
-	}
-	if c1.Value != "" || c2.Value != "" {
-		t.Fatalf("trust projection included the path: c1=%q c2=%q", c1.Value, c2.Value)
-	}
-	// Execute: run through the full ticket pipeline so every trust-template
-	// check fires before the fill.
+	// The plan argv holds the token; the trust projection binds the kind, not
+	// the path (the path arrives at exec only through ticket.SessionRoot).
 	planToExecute := func(plan AgentPlan, seatRoot string) []string {
 		ticket, err := NewExecutionTicket(ExecutionTicketRequest{Handle: plan.Handle, LaunchNonce: "96969696-9696-4969-8969-969696969696",
 			Mode: plan.AdapterMode, Provider: CodexProvider, ProviderVersion: "0.167.0",
-			PreSpawnAcquire: false,
-			Backend: CommandsBackendName, Profile: CommandsProfile().Identity(),
+			PreSpawnAcquire: false, Backend: CommandsBackendName, Profile: CommandsProfile().Identity(),
 			ProjectRoot: session, SessionRoot: seatRoot, Cwd: session,
 			ProviderExecutable: plan.Argv[0], AMQExecutable: tool,
 			TargetArgv: plan.Argv, DynamicArgv: plan.DynamicArgv})
