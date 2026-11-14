@@ -12,6 +12,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 )
 
 // A pinned agent archives itself when its binding is removed
@@ -22,13 +23,13 @@ func TestPinnedAgentArchivesAndReturnsWithItsBinding(t *testing.T) {
 	if err := binding.WriteNamed(bound); err != nil {
 		t.Fatal(err)
 	}
-	savedIdentity, savedSelf, savedOwner, savedCall := buzzIdentity, buzzSelf, buzzOwner, buzzCall
-	t.Cleanup(func() { buzzIdentity, buzzSelf, buzzOwner, buzzCall = savedIdentity, savedSelf, savedOwner, savedCall })
+	savedIdentity, savedCall := buzzIdentity, buzzCall
+	t.Cleanup(func() { buzzIdentity, buzzCall = savedIdentity, savedCall })
 	recordPosts(t)
 	t.Setenv("BUZZ_PRIVATE_KEY", strings.Repeat("1", 64))
-	captureBuzzIdentity()
-	if len(buzzSelf) != 64 {
-		t.Fatalf("own public key = %q", buzzSelf)
+	id := captureBuzzIdentity()
+	if len(id.Agent) != 64 {
+		t.Fatalf("own public key = %q", id.Agent)
 	}
 	var calls []string
 	buzzCall = func(_ time.Duration, args ...string) ([]byte, error) {
@@ -42,7 +43,7 @@ func TestPinnedAgentArchivesAndReturnsWithItsBinding(t *testing.T) {
 		}
 		return []byte(`{"event_id":"e1","accepted":true,"message":"ok"}`), nil
 	}
-	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t)}, "test")
+	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t), Identity: id}, "test")
 
 	s.lifecycleTick(time.Now()) // bound: nothing to change
 	if _, err := binding.Retire(binding.RemovedDetached, func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
@@ -56,9 +57,9 @@ func TestPinnedAgentArchivesAndReturnsWithItsBinding(t *testing.T) {
 	s.lifecycleTick(time.Now())
 
 	want := []string{
-		"agents archive " + buzzSelf + " --reason retired",
+		"agents archive " + id.Agent + " --reason retired",
 		"users set-status --text session ended",
-		"agents unarchive " + buzzSelf + " --reason returned",
+		"agents unarchive " + id.Agent + " --reason returned",
 		"users set-status --clear",
 	}
 	if !slices.Equal(calls, want) {
@@ -75,24 +76,25 @@ func TestTwoAgentsOnOnePinEachChangeOnce(t *testing.T) {
 	if err := binding.WriteNamed(bound); err != nil {
 		t.Fatal(err)
 	}
-	savedSelf, savedCall := buzzSelf, buzzCall
-	t.Cleanup(func() { buzzSelf, buzzCall = savedSelf, savedCall })
+	savedCall := buzzCall
+	t.Cleanup(func() { buzzCall = savedCall })
 	recordPosts(t)
 	var calls []string
+	var ticking string // the agent whose tick makes the call
 	buzzCall = func(_ time.Duration, args ...string) ([]byte, error) {
-		calls = append(calls, buzzSelf[:1]+" "+strings.Join(args[:2], " "))
+		calls = append(calls, ticking+" "+strings.Join(args[:2], " "))
 		if args[0] == "agents" && (args[1] == "archive" || args[1] == "unarchive") {
 			return []byte(`{"ok":true,"event_id":"e1","action":"` + args[1] + `","target":"t1"}`), nil
 		}
 		return []byte(`{"event_id":"e1","accepted":true,"message":"ok"}`), nil
 	}
 	state := canonicalTempDir(t)
-	a := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: state}, "test")
-	b := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: state}, "test")
+	a := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: state, Identity: buzzop.Identity{Agent: strings.Repeat("a", 64)}}, "test")
+	b := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: state, Identity: buzzop.Identity{Agent: strings.Repeat("b", 64)}}, "test")
 	ticks := func() {
-		buzzSelf = strings.Repeat("a", 64)
+		ticking = "a"
 		a.lifecycleTick(time.Now())
-		buzzSelf = strings.Repeat("b", 64)
+		ticking = "b"
 		b.lifecycleTick(time.Now())
 	}
 
@@ -129,13 +131,13 @@ func TestIdenticalWorkersChangeTheAgentOnce(t *testing.T) {
 	if err := binding.WriteNamed(bound); err != nil {
 		t.Fatal(err)
 	}
-	savedSelf, savedCall := buzzSelf, buzzCall
-	t.Cleanup(func() { buzzSelf, buzzCall = savedSelf, savedCall })
+	savedCall := buzzCall
+	t.Cleanup(func() { buzzCall = savedCall })
 	recordPosts(t)
-	buzzSelf = strings.Repeat("a", 64)
+	id := buzzop.Identity{Agent: strings.Repeat("a", 64)}
 	state := canonicalTempDir(t)
-	a := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: state}, "test")
-	b := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: state}, "test")
+	a := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: state, Identity: id}, "test")
+	b := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: state, Identity: id}, "test")
 	t.Cleanup(a.resign)
 	t.Cleanup(b.resign)
 	var calls []string
@@ -181,24 +183,21 @@ func TestHelperDraftsAnAgentForANewSession(t *testing.T) {
 	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha", Holder: holder, Label: label}); err != nil {
 		t.Fatal(err)
 	}
-	savedSelf, savedOwner, savedCall := buzzSelf, buzzOwner, buzzCall
-	t.Cleanup(func() { buzzSelf, buzzOwner, buzzCall = savedSelf, savedOwner, savedCall })
+	savedCall := buzzCall
+	t.Cleanup(func() { buzzCall = savedCall })
 	recordPosts(t)
 	const control = "0b2c39a1-6f1e-4d0a-9b3a-5c1d2e3f4a5b"
 	helperKey, owner := strings.Repeat("c", 64), strings.Repeat("d", 64)
-	buzzOwner = owner
 	var calls []string
 	buzzCall = recordHelperCalls(&calls, control)
 	state := canonicalTempDir(t)
-	helper := NewServer(Config{RemoteBinding: true, Helper: true, StateDir: state}, "test")
-	agent := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: state}, "test")
+	helper := NewServer(Config{RemoteBinding: true, Helper: true, StateDir: state, Identity: buzzop.Identity{Agent: helperKey, Owner: owner}}, "test")
+	// The agent the owner created.
+	agent := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: state, Identity: buzzop.Identity{Agent: strings.Repeat("a", 64), Owner: owner}}, "test")
 	now := time.Now()
 
-	buzzSelf = helperKey
 	helper.lifecycleTick(now)
-	buzzSelf = strings.Repeat("a", 64) // the agent the owner created starts
 	agent.lifecycleTick(now)
-	buzzSelf = helperKey
 	helper.lifecycleTick(now.Add(time.Hour))
 
 	want := []string{
@@ -219,26 +218,26 @@ func TestHelperDraftsAnAgentForANewSession(t *testing.T) {
 // existing channel, without creating another one.
 func TestHelperMakesTheOwnerAnAdminOfAnExistingChannel(t *testing.T) {
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
-	savedSelf, savedOwner, savedCall := buzzSelf, buzzOwner, buzzCall
-	t.Cleanup(func() { buzzSelf, buzzOwner, buzzCall = savedSelf, savedOwner, savedCall })
+	savedCall := buzzCall
+	t.Cleanup(func() { buzzCall = savedCall })
 	recordPosts(t)
 	const control = "0b2c39a1-6f1e-4d0a-9b3a-5c1d2e3f4a5b"
-	buzzSelf, buzzOwner = strings.Repeat("c", 64), strings.Repeat("d", 64)
+	id := buzzop.Identity{Agent: strings.Repeat("c", 64), Owner: strings.Repeat("d", 64)}
 	var calls []string
 	buzzCall = recordHelperCalls(&calls, control)
-	helper := NewServer(Config{RemoteBinding: true, Helper: true, StateDir: canonicalTempDir(t)}, "test")
+	helper := NewServer(Config{RemoteBinding: true, Helper: true, StateDir: canonicalTempDir(t), Identity: id}, "test")
 	dir := helper.agentMarkerDir(helperName)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	old := `{"name":"_helper","channel":"` + control + `","owner_added":true,"updated":"2026-10-19T15:48:38Z"}`
-	if err := os.WriteFile(filepath.Join(dir, buzzSelf+".json"), []byte(old), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, id.Agent+".json"), []byte(old), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	helper.lifecycleTick(time.Now())
 
-	want := []string{"channels add-member --channel " + control + " --pubkey " + buzzOwner + " --role admin"}
+	want := []string{"channels add-member --channel " + control + " --pubkey " + id.Owner + " --role admin"}
 	if !slices.Equal(calls, want) {
 		t.Fatalf("buzz calls = %q\nwant %q", calls, want)
 	}
@@ -275,13 +274,12 @@ func TestHelperDraftsOneSessionPerWindow(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	savedSelf, savedOwner, savedCall := buzzSelf, buzzOwner, buzzCall
-	t.Cleanup(func() { buzzSelf, buzzOwner, buzzCall = savedSelf, savedOwner, savedCall })
+	savedCall := buzzCall
+	t.Cleanup(func() { buzzCall = savedCall })
 	recordPosts(t)
-	buzzSelf, buzzOwner = strings.Repeat("c", 64), strings.Repeat("d", 64)
 	var calls []string
 	buzzCall = recordHelperCalls(&calls, "0b2c39a1-6f1e-4d0a-9b3a-5c1d2e3f4a5b")
-	helper := NewServer(Config{RemoteBinding: true, Helper: true, StateDir: canonicalTempDir(t)}, "test")
+	helper := NewServer(Config{RemoteBinding: true, Helper: true, StateDir: canonicalTempDir(t), Identity: buzzop.Identity{Agent: strings.Repeat("c", 64), Owner: strings.Repeat("d", 64)}}, "test")
 	drafts := func() []string {
 		var out []string
 		for _, c := range calls {
@@ -346,7 +344,7 @@ func TestBuzzWriteAcceptanceRefusalsAreFailures(t *testing.T) {
 		buzzCall = func(time.Duration, ...string) ([]byte, error) {
 			return []byte(`{"ok":true,"event_id":"e1","action":"archive","target":"t1"}`), nil
 		}
-		if err := buzzRun(time.Second, "agents", "archive", buzzSelf, "--reason", "test"); err != nil {
+		if err := buzzRun(time.Second, "agents", "archive", "", "--reason", "test"); err != nil {
 			t.Fatalf("real agents-archive ok:true must succeed: %v", err)
 		}
 	})

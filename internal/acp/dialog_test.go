@@ -16,6 +16,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/relay/relaytest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 	"github.com/avivsinai/agent-message-queue/internal/remote/mirror"
 )
@@ -33,13 +34,11 @@ func TestDialogTickPostsReactsEdits(t *testing.T) {
 	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent", Name: "alpha", Label: "Claude Code · proj @ mac"}); err != nil {
 		t.Fatal(err)
 	}
-	withBuzzSelf(t)
 	lr := agentRelayForTest(t)
 	ownerKey := nostr.Generate()
 	owner := ownerKey.Public().Hex()
-	savedOwner, savedRead, savedEdit := buzzOwner, readReactions, editMessage
-	t.Cleanup(func() { buzzOwner, readReactions, editMessage = savedOwner, savedRead, savedEdit })
-	buzzOwner = owner
+	savedRead, savedEdit := readReactions, editMessage
+	t.Cleanup(func() { readReactions, editMessage = savedRead, savedEdit })
 	var posts, edits []string
 	savedPost := postAnswer
 	t.Cleanup(func() { postAnswer = savedPost })
@@ -54,7 +53,7 @@ func TestDialogTickPostsReactsEdits(t *testing.T) {
 		edits = append(edits, event+": "+content)
 		return nil
 	}
-	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t)}, "test")
+	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t), Identity: buzzop.Identity{Agent: testAgent.Agent, Owner: owner}}, "test")
 	s.ready, s.lastChannel = true, dm
 
 	dir, err := dialog.DirFor("alpha")
@@ -150,10 +149,8 @@ func TestDialogReactionReadsBackOffByAgeNewestFirst(t *testing.T) {
 	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha"}); err != nil {
 		t.Fatal(err)
 	}
-	withBuzzSelf(t)
-	savedOwner, savedRead, savedPost := buzzOwner, readReactions, postAnswer
-	t.Cleanup(func() { buzzOwner, readReactions, postAnswer = savedOwner, savedRead, savedPost })
-	buzzOwner = strings.Repeat("0b", 32)
+	savedRead, savedPost := readReactions, postAnswer
+	t.Cleanup(func() { readReactions, postAnswer = savedRead, savedPost })
 	events := map[string]string{} // posted event -> dialog text
 	postAnswer = func(_, content string, _ time.Duration) (string, error) {
 		id := fmt.Sprintf("%064x", len(events)+1)
@@ -165,7 +162,7 @@ func TestDialogReactionReadsBackOffByAgeNewestFirst(t *testing.T) {
 		reads = append(reads, strings.Fields(strings.SplitN(events[event], "\n", 2)[1])[1])
 		return nil, nil
 	}
-	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t)}, "test")
+	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t), Identity: buzzop.Identity{Agent: testAgent.Agent, Owner: strings.Repeat("0b", 32)}}, "test")
 	s.ready, s.lastChannel = true, "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
 	dir, err := dialog.DirFor("alpha")
 	if err != nil {
@@ -206,17 +203,15 @@ func TestDialogFailedEditBacksOff(t *testing.T) {
 	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha"}); err != nil {
 		t.Fatal(err)
 	}
-	withBuzzSelf(t)
-	savedOwner, savedEdit, savedPost := buzzOwner, editMessage, postAnswer
-	t.Cleanup(func() { buzzOwner, editMessage, postAnswer = savedOwner, savedEdit, savedPost })
-	buzzOwner = strings.Repeat("0b", 32)
+	savedEdit, savedPost := editMessage, postAnswer
+	t.Cleanup(func() { editMessage, postAnswer = savedEdit, savedPost })
 	postAnswer = func(string, string, time.Duration) (string, error) { return strings.Repeat("e", 64), nil }
 	edits := 0
 	editMessage = func(string, string, time.Duration) error {
 		edits++
 		return errors.New("relay refused the edit")
 	}
-	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t)}, "test")
+	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t), Identity: buzzop.Identity{Agent: testAgent.Agent, Owner: strings.Repeat("0b", 32)}}, "test")
 	s.ready, s.lastChannel = true, "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
 	dir, err := dialog.DirFor("alpha")
 	if err != nil {
@@ -263,18 +258,16 @@ func TestFreeTextDialogTakesOnlyTheOwnersTypedAnswer(t *testing.T) {
 	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha"}); err != nil {
 		t.Fatal(err)
 	}
-	withBuzzSelf(t)
 	lr := agentRelayForTest(t)
 	ownerKey := nostr.Generate()
 	owner := ownerKey.Public().Hex()
-	savedOwner, savedRead, savedPost := buzzOwner, readReactions, postAnswer
-	t.Cleanup(func() { buzzOwner, readReactions, postAnswer = savedOwner, savedRead, savedPost })
-	buzzOwner = owner
+	savedRead, savedPost := readReactions, postAnswer
+	t.Cleanup(func() { readReactions, postAnswer = savedRead, savedPost })
 	postAnswer = func(string, string, time.Duration) (string, error) { return strings.Repeat("f", 64), nil }
 	readReactions = func(string, time.Duration) ([]reaction, error) {
 		return []reaction{{Emoji: "✅", PubKeys: []string{owner}}, {Emoji: "❌", PubKeys: []string{owner}}}, nil
 	}
-	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t)}, "test")
+	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t), Identity: buzzop.Identity{Agent: testAgent.Agent, Owner: owner}}, "test")
 	s.lastChannel = dm
 	dir, err := dialog.DirFor("alpha")
 	if err != nil {
@@ -324,13 +317,11 @@ func TestDialogAnswerIsTheVerifiedSignedEvent(t *testing.T) {
 			if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha"}); err != nil {
 				t.Fatal(err)
 			}
-			withBuzzSelf(t)
 			lr := agentRelayForTest(t)
 			ownerKey := nostr.Generate()
 			owner := ownerKey.Public().Hex()
-			savedOwner, savedRead, savedPost := buzzOwner, readReactions, postAnswer
-			t.Cleanup(func() { buzzOwner, readReactions, postAnswer = savedOwner, savedRead, savedPost })
-			buzzOwner = owner
+			savedRead, savedPost := readReactions, postAnswer
+			t.Cleanup(func() { readReactions, postAnswer = savedRead, savedPost })
 			// The not-taken notice posts from its own goroutine; the case
 			// waits for it so the cleanup never restores postAnswer while
 			// that goroutine reads it (audit 2026-11-10).
@@ -345,7 +336,7 @@ func TestDialogAnswerIsTheVerifiedSignedEvent(t *testing.T) {
 				return strings.Repeat("f", 64), nil
 			}
 			readReactions = func(string, time.Duration) ([]reaction, error) { return nil, nil }
-			s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t)}, "test")
+			s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t), Identity: buzzop.Identity{Agent: testAgent.Agent, Owner: owner}}, "test")
 			s.lastChannel = dm
 			dir, err := dialog.DirFor("alpha")
 			if err != nil {
@@ -391,7 +382,7 @@ func TestOwnerAnswerMustBeNewerThanItsDialogAndUnused(t *testing.T) {
 	lr.Inject(old)
 	first := openPostedDialog(t, s, dir, "1")
 	params, _ := json.Marshal(promptParams{SessionID: "s", Meta: eventMeta(old),
-		Prompt: []contentBlock{{Type: "text", Text: buzzPrompt(dmChannel, buzzOwner, "yes")}}})
+		Prompt: []contentBlock{{Type: "text", Text: buzzPrompt(dmChannel, s.id.Owner, "yes")}}})
 	if run, _, rpcErr := s.beginPrompt(params); rpcErr == nil && run != nil {
 		_, _ = run(func(any) error { return nil })
 	}
@@ -401,7 +392,7 @@ func TestOwnerAnswerMustBeNewerThanItsDialogAndUnused(t *testing.T) {
 
 	used := signedBy(t, owner, "yes", dmChannel)
 	lr.Inject(used)
-	_, a, ok := s.dialogReply(dmChannel, used.ID.Hex(), buzzPrompt(dmChannel, buzzOwner, "yes"))
+	_, a, ok := s.dialogReply(dmChannel, used.ID.Hex(), buzzPrompt(dmChannel, s.id.Owner, "yes"))
 	if !ok {
 		t.Fatal("a fresh owner yes did not answer the only open dialog")
 	}
@@ -412,7 +403,7 @@ func TestOwnerAnswerMustBeNewerThanItsDialogAndUnused(t *testing.T) {
 		t.Fatal(err)
 	}
 	openPostedDialog(t, s, dir, "2")
-	if _, a, ok := s.dialogReply(dmChannel, used.ID.Hex(), buzzPrompt(dmChannel, buzzOwner, "yes")); ok {
+	if _, a, ok := s.dialogReply(dmChannel, used.ID.Hex(), buzzPrompt(dmChannel, s.id.Owner, "yes")); ok {
 		t.Fatalf("the event that answered one dialog answered the next: %+v", a)
 	}
 }
@@ -438,7 +429,7 @@ func TestOwnerAnswerTargetsTheOneDialogItRepliesTo(t *testing.T) {
 			reqs := []dialog.Request{openPostedDialog(t, s, dir, "1"), openPostedDialog(t, s, dir, "2")}
 			evt := signedBy(t, owner, "yes", dmChannel, tc.tags...)
 			lr.Inject(evt)
-			_, a, ok := s.dialogReply(dmChannel, evt.ID.Hex(), buzzPrompt(dmChannel, buzzOwner, "yes"))
+			_, a, ok := s.dialogReply(dmChannel, evt.ID.Hex(), buzzPrompt(dmChannel, s.id.Owner, "yes"))
 			if tc.want == 0 && ok || tc.want != 0 && (!ok || a.ID != reqs[tc.want-1].ID) {
 				t.Fatalf("dialogReply = %+v, %v; want dialog %d", a, ok, tc.want)
 			}
@@ -458,7 +449,7 @@ func TestOldMirrorOnDoesNotUndoALaterOff(t *testing.T) {
 	activeChannel(t, s, b, dmChannel)
 	lr := agentRelayForTest(t)
 	owner := nostr.Generate()
-	buzzOwner = owner.Public().Hex()
+	s.id.Owner = owner.Public().Hex()
 	old := nostr.Event{CreatedAt: nostr.Timestamp(time.Now().Add(-time.Hour).Unix()), Kind: 9, Content: "mirror on", Tags: nostr.Tags{{"h", dmChannel}}}
 	if err := old.Sign(owner); err != nil {
 		t.Fatal(err)
@@ -467,7 +458,7 @@ func TestOldMirrorOnDoesNotUndoALaterOff(t *testing.T) {
 	if err := mirror.SetOff("alpha", true); err != nil {
 		t.Fatal(err)
 	}
-	if name, on, at, ok := s.mirrorSwitch(dmChannel, old.ID.Hex(), buzzPrompt(dmChannel, buzzOwner, "mirror on")); ok {
+	if name, on, at, ok := s.mirrorSwitch(dmChannel, old.ID.Hex(), buzzPrompt(dmChannel, s.id.Owner, "mirror on")); ok {
 		_, _ = s.answerMirrorSwitch("s", dmChannel, name, on, at, func(any) error { return nil })
 	}
 	if dir, err := mirror.DirFor("alpha"); err != nil || !mirror.Off(dir) {
@@ -483,7 +474,7 @@ func TestPendingPromptEventDoesNotMoveToTheNextDialog(t *testing.T) {
 	first := openPostedDialog(t, s, dir, "1")
 	evt := signedBy(t, owner, "yes", dmChannel)
 	lr.Inject(evt)
-	text := buzzPrompt(dmChannel, buzzOwner, "yes")
+	text := buzzPrompt(dmChannel, s.id.Owner, "yes")
 	params, _ := json.Marshal(promptParams{SessionID: "s", Meta: eventMeta(evt), Prompt: []contentBlock{{Type: "text", Text: text}}})
 	run, _, rpcErr := s.beginPrompt(params)
 	if rpcErr != nil || run == nil {
@@ -517,7 +508,7 @@ func TestOldMirrorOnDoesNotUndoARecordlessOff(t *testing.T) {
 	activeChannel(t, s, b, dmChannel)
 	lr := agentRelayForTest(t)
 	owner := nostr.Generate()
-	buzzOwner = owner.Public().Hex()
+	s.id.Owner = owner.Public().Hex()
 	dir, err := mirror.DirFor("alpha")
 	if err != nil {
 		t.Fatal(err)
@@ -533,7 +524,7 @@ func TestOldMirrorOnDoesNotUndoARecordlessOff(t *testing.T) {
 		t.Fatal(err)
 	}
 	lr.Inject(old)
-	if name, on, at, ok := s.mirrorSwitch(dmChannel, old.ID.Hex(), buzzPrompt(dmChannel, buzzOwner, "mirror on")); ok {
+	if name, on, at, ok := s.mirrorSwitch(dmChannel, old.ID.Hex(), buzzPrompt(dmChannel, s.id.Owner, "mirror on")); ok {
 		_, _ = s.answerMirrorSwitch("s", dmChannel, name, on, at, func(any) error { return nil })
 	}
 	if !mirror.Off(dir) {
@@ -546,14 +537,12 @@ func TestOldMirrorOnDoesNotUndoARecordlessOff(t *testing.T) {
 func ownerDialogServer(t *testing.T) (*Server, string, nostr.SecretKey, *relaytest.Relay) {
 	t.Helper()
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
-	withBuzzSelf(t)
 	lr := agentRelayForTest(t)
 	owner := nostr.Generate()
-	savedOwner, savedPost := buzzOwner, postAnswer
-	t.Cleanup(func() { buzzOwner, postAnswer = savedOwner, savedPost })
-	buzzOwner = owner.Public().Hex()
+	savedPost := postAnswer
+	t.Cleanup(func() { postAnswer = savedPost })
 	postAnswer = func(string, string, time.Duration) (string, error) { return strings.Repeat("f", 64), nil }
-	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t)}, "test")
+	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t), Identity: buzzop.Identity{Agent: testAgent.Agent, Owner: owner.Public().Hex()}}, "test")
 	s.ready = true
 	s.sessions["s"] = &sessionState{}
 	dir, err := dialog.DirFor("alpha")

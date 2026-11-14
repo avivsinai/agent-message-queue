@@ -3,12 +3,10 @@ package acp
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -83,31 +81,6 @@ const (
 	retiredKeep = 256
 )
 
-// buzzRelayKey is the sha256 of the normalized BUZZ_RELAY_URL captured at
-// worker start, and buzzRelayURL that URL; both are "" without a usable URL,
-// and the machine agent then provisions nothing.
-var buzzRelayKey, buzzRelayURL string
-
-// normalizeRelay is a relay URL with its scheme and host lowercased and no
-// trailing slash, query or fragment; "" when it is not an absolute URL.
-func normalizeRelay(raw string) string {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return ""
-	}
-	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host) + strings.TrimRight(u.Path, "/")
-}
-
-// relayKey is the directory key of a relay URL.
-func relayKey(raw string) string {
-	norm := normalizeRelay(raw)
-	if norm == "" {
-		return ""
-	}
-	sum := sha256.Sum256([]byte(norm))
-	return hex.EncodeToString(sum[:])
-}
-
 // channelRecord is the machine agent's record of one session's channel.
 type channelRecord struct {
 	// The route: the relay, the machine agent's key and the channel.
@@ -167,7 +140,7 @@ func channelDirFor(stateDir, relayKey, machine string) string {
 	return filepath.Join(stateDir, "channels", relayKey, machine)
 }
 
-func (s *Server) channelDir() string { return channelDirFor(s.cfg.StateDir, buzzRelayKey, buzzSelf) }
+func (s *Server) channelDir() string { return channelDirFor(s.cfg.StateDir, s.id.RelayKey, s.id.Agent) }
 
 func (s *Server) retiredDir() string { return filepath.Join(s.channelDir(), "retired") }
 
@@ -315,17 +288,17 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) (p pace) {
 	gone := s.machine.goneDaemons
 	s.machine.goneDaemons = nil
 	s.appServers.Store(nil)
-	if !s.cfg.Machine || buzzSelf == "" || s.stopped() || !s.lead(machineName) {
+	if !s.cfg.Machine || s.id.Agent == "" || s.stopped() || !s.lead(machineName) {
 		return pace{next: now.Add(machineScanInterval)}
 	}
 	if due(s.machine.marked, lateReplyInterval, now) {
 		dir := s.agentMarkerDir(machineName)
-		m, _ := readAgentMarker(filepath.Join(dir, buzzSelf+".json"))
-		m.Name, m.DisplayName, m.RelayKey = machineName, buzzAgent.displayName, buzzRelayKey
+		m, _ := readAgentMarker(filepath.Join(dir, s.id.Agent+".json"))
+		m.Name, m.DisplayName, m.RelayKey = machineName, s.id.DisplayName, s.id.RelayKey
 		s.writeAgentMarker(dir, m, now)
 		s.machine.marked = now.UTC().Format(time.RFC3339)
 	}
-	if buzzRelayKey == "" || buzzOwner == "" {
+	if s.id.RelayKey == "" || s.id.Owner == "" {
 		return pace{}
 	}
 	p.watch = s.sessionWatch()
@@ -561,7 +534,7 @@ func (s *Server) provision(b binding.Binding, now time.Time) {
 		if err != nil {
 			return
 		}
-		r = channelRecord{Relay: normalizeRelay(buzzRelayURL), Machine: buzzSelf, Name: b.Name, Identity: b.SessionIdentity(),
+		r = channelRecord{Relay: s.id.RelayURL, Machine: s.id.Agent, Name: b.Name, Identity: b.SessionIdentity(),
 			Label: sessionAgentName(b), Reg: reg, State: channelCreating}
 		if s.save(&r, now) != nil {
 			return
@@ -745,7 +718,7 @@ func (s *Server) findChannels(r channelRecord) (ids []string, ok bool) {
 		if !strings.Contains(got.Description, r.Reg) {
 			continue
 		}
-		owner, known := ownerOf(s.call("channels", "members", "--channel", c.ChannelID))
+		owner, known := s.ownerOf(s.call("channels", "members", "--channel", c.ChannelID))
 		if !known {
 			return nil, false
 		}
@@ -860,11 +833,11 @@ func (s *Server) finishSetup(r *channelRecord, now time.Time) {
 		*done, r.LastError = true, ""
 		return s.save(r, now) == nil
 	}
-	if !step(&r.OwnerAdded, "channels", "add-member", "--channel", r.ChannelID, "--pubkey", buzzOwner, "--role", "admin") {
+	if !step(&r.OwnerAdded, "channels", "add-member", "--channel", r.ChannelID, "--pubkey", s.id.Owner, "--role", "admin") {
 		return
 	}
 	welcome := "AMQ Remote: this channel reaches " + r.Label + ". Write here to talk to that session."
-	if !step(&r.Welcomed, "messages", "send", "--channel", r.ChannelID, "--content", welcome, "--mention", buzzOwner) {
+	if !step(&r.Welcomed, "messages", "send", "--channel", r.ChannelID, "--content", welcome, "--mention", s.id.Owner) {
 		return
 	}
 	if !s.stillServes(*r, now) {
@@ -1290,11 +1263,11 @@ func (s *Server) applyResets(now time.Time) (left bool) {
 // channelRoute returns the active record of channel under this agent's own
 // relay and key directory. A record anywhere else is never read for routing.
 func (s *Server) channelRoute(channel string) (channelRecord, bool) {
-	if channel == "" || buzzRelayKey == "" || buzzSelf == "" {
+	if channel == "" || s.id.RelayKey == "" || s.id.Agent == "" {
 		return channelRecord{}, false
 	}
 	for _, r := range s.activeRecords() {
-		if r.ChannelID == channel && r.State == channelActive && r.Machine == buzzSelf && r.Relay == normalizeRelay(buzzRelayURL) {
+		if r.ChannelID == channel && r.State == channelActive && r.Machine == s.id.Agent && r.Relay == s.id.RelayURL {
 			return r, true
 		}
 	}

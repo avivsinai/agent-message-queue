@@ -46,7 +46,7 @@ type ownerCommand struct {
 // including a "/" line that is not verified as the owner's: that goes to
 // the session as an ordinary message.
 func (s *Server) ownerCommandFor(channel, eventID, prompt string) (cmd ownerCommand, ok bool) {
-	if channel == "" || buzzOwner == "" || !strings.HasPrefix(ownerWords(prompt), "/") {
+	if channel == "" || s.id.Owner == "" || !strings.HasPrefix(ownerWords(prompt), "/") {
 		return cmd, false
 	}
 	name := s.cfg.Pin
@@ -71,7 +71,7 @@ func (s *Server) ownerCommandFor(channel, eventID, prompt string) (cmd ownerComm
 			return cmd, false
 		}
 	}
-	evt, err := ownerEvent(eventID, prompt, channel)
+	evt, err := ownerEvent(s.id.Owner, eventID, prompt, channel)
 	if err != nil {
 		return cmd, false
 	}
@@ -97,7 +97,7 @@ func (s *Server) ownerCommandFor(channel, eventID, prompt string) (cmd ownerComm
 			break
 		}
 		cmd.handle, cmd.agentDir = b.Handle, fsq.AgentBase(b.Root, b.Handle)
-		cmd.id, err = enqueueCommand(name, channel, cmd, b, evt, now)
+		cmd.id, err = enqueueCommand(s.id.Owner, name, channel, cmd, b, evt, now)
 		switch {
 		case errors.Is(err, wakecmd.ErrDuplicate):
 			cmd.refusal = "Already taken."
@@ -111,7 +111,7 @@ func (s *Server) ownerCommandFor(channel, eventID, prompt string) (cmd ownerComm
 // enqueueCommand queues cmd for the wake of b's seat with the signed event
 // evt, after it records the owner and channel that the wake verifies evt
 // against.
-func enqueueCommand(name, channel string, cmd ownerCommand, b binding.Binding, evt nostr.Event, now time.Time) (string, error) {
+func enqueueCommand(owner, name, channel string, cmd ownerCommand, b binding.Binding, evt nostr.Event, now time.Time) (string, error) {
 	raw, err := json.Marshal(evt)
 	if err != nil {
 		return "", err
@@ -120,7 +120,7 @@ func enqueueCommand(name, channel string, cmd ownerCommand, b binding.Binding, e
 	if err != nil {
 		return "", err
 	}
-	if err := dialog.WriteOwner(dir, dialog.Owner{PubKey: buzzOwner, Channel: channel, Target: b.SessionIdentity()}); err != nil {
+	if err := dialog.WriteOwner(dir, dialog.Owner{PubKey: owner, Channel: channel, Target: b.SessionIdentity()}); err != nil {
 		return "", err
 	}
 	return wakecmd.Enqueue(cmd.agentDir, evt.ID.Hex(), wakecmd.Request{Target: b.SessionIdentity(), Text: cmd.text, Event: raw}, now)

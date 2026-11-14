@@ -24,14 +24,14 @@ func TestOwnerSlashCommandIsQueuedForTheWake(t *testing.T) {
 	activeChannel(t, s, b, dmChannel)
 	lr := agentRelayForTest(t)
 	owner := nostr.Generate()
-	buzzOwner = owner.Public().Hex()
+	s.id.Owner = owner.Public().Hex()
 	evt := signedBy(t, owner, "/compact", dmChannel)
 	lr.Inject(evt)
 	saved := commandPoll
 	t.Cleanup(func() { commandPoll = saved })
 	commandPoll = 10 * time.Millisecond
 
-	cmd, ok := s.ownerCommandFor(dmChannel, evt.ID.Hex(), buzzPrompt(dmChannel, buzzOwner, "/compact"))
+	cmd, ok := s.ownerCommandFor(dmChannel, evt.ID.Hex(), buzzPrompt(dmChannel, s.id.Owner, "/compact"))
 	if !ok || cmd.refusal != "" {
 		t.Fatalf("ownerCommandFor = %+v, %v; want a queued command", cmd, ok)
 	}
@@ -66,11 +66,11 @@ func TestOldChannelCannotQueueCommandForReplacementSeat(t *testing.T) {
 	}
 	lr := agentRelayForTest(t)
 	owner := nostr.Generate()
-	buzzOwner = owner.Public().Hex()
+	s.id.Owner = owner.Public().Hex()
 	evt := signedBy(t, owner, "/compact", dmChannel)
 	lr.Inject(evt)
 
-	cmd, ok := s.ownerCommandFor(dmChannel, evt.ID.Hex(), buzzPrompt(dmChannel, buzzOwner, "/compact"))
+	cmd, ok := s.ownerCommandFor(dmChannel, evt.ID.Hex(), buzzPrompt(dmChannel, s.id.Owner, "/compact"))
 	if queued := queuedCommands(t, fsq.AgentBase(replacement.Root, replacement.Handle)); len(queued) != 0 {
 		t.Fatalf("the old channel queued for the replacement seat: ok=%v refusal=%q queue=%+v", ok, cmd.refusal, queued)
 	}

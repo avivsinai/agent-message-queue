@@ -474,8 +474,7 @@ func TestBindingModeFollowsTheBoundSession(t *testing.T) {
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
 	rt := fake.New("fake", "e_1")
 	bound := remoteServer(t, rt, nil)
-	withBuzzSelf(t)
-	s := NewServer(Config{RemoteBinding: true, StateDir: t.TempDir(), HeartbeatInterval: 10 * time.Millisecond, TurnTimeout: time.Second}, "test")
+	s := NewServer(Config{RemoteBinding: true, StateDir: t.TempDir(), HeartbeatInterval: 10 * time.Millisecond, TurnTimeout: time.Second, Identity: testAgent}, "test")
 
 	var said []string
 	emit := func(v any) error {
@@ -509,8 +508,7 @@ func TestRedeliveryAfterRebindStaysOnTheFirstSession(t *testing.T) {
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
 	a, b := fake.New("fake", "e_1"), fake.New("fake", "e_1")
 	serverA, serverB := remoteServer(t, a, nil), remoteServer(t, b, nil)
-	withBuzzSelf(t)
-	s := NewServer(Config{RemoteBinding: true, StateDir: t.TempDir(), TurnTimeout: time.Second, HeartbeatInterval: 10 * time.Millisecond}, "test")
+	s := NewServer(Config{RemoteBinding: true, StateDir: t.TempDir(), TurnTimeout: time.Second, HeartbeatInterval: 10 * time.Millisecond, Identity: testAgent}, "test")
 	eventID := strings.Repeat("a", 64)
 	id, _ := remoteRequestID(eventID)
 	run := func(rt *fake.Runtime, label string) string {
@@ -560,8 +558,7 @@ func TestCodexCarrierRecordsTheClientUserMessageID(t *testing.T) {
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
 	rt := &keyRecorder{Runtime: fake.New("fake", "e_1"), keys: make(chan requests.Key, 1)}
 	bound := remoteServer(t, rt, nil)
-	withBuzzSelf(t)
-	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: t.TempDir(), HeartbeatInterval: 10 * time.Millisecond, TurnTimeout: time.Second}, "test")
+	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: t.TempDir(), HeartbeatInterval: 10 * time.Millisecond, TurnTimeout: time.Second, Identity: testAgent}, "test")
 	if err := binding.WriteNamed(binding.Binding{Name: "alpha", Root: bound.cfg.Root, Target: "fake", NativeSession: "fake", Harness: "codex"}); err != nil {
 		t.Fatal(err)
 	}

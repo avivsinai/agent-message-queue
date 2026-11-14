@@ -348,10 +348,10 @@ func (s *Server) discoverClaims(now time.Time) {
 // claimDirs are the directories that hold this agent's claims: its own, then
 // remote-events for claims written before per-agent directories.
 func (s *Server) claimDirs() []string {
-	if buzzSelf == "" {
+	if s.id.Agent == "" {
 		return []string{s.eventsDir()}
 	}
-	return []string{filepath.Join(s.eventsDir(), buzzSelf), s.eventsDir()}
+	return []string{filepath.Join(s.eventsDir(), s.id.Agent), s.eventsDir()}
 }
 
 // lateClaim is one mailbox event the sweep may post for.

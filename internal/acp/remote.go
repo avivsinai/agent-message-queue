@@ -150,7 +150,7 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 		}
 		// Both carriers name the images of the owner's message as local
 		// files.
-		text = attachImages(b.Root, text)
+		text = attachImages(b.Root, s.id.RelayURL, text)
 		if b.Mailbox() {
 			return s.runMailbox(sessionID, text, eventID, b, turn, emit)
 		}
@@ -426,7 +426,7 @@ func (s *Server) turnBinding(sessionID, eventID string) (binding.Binding, error)
 	if err != nil {
 		return b, err
 	}
-	raw, err := json.Marshal(eventClaim{Binding: b, Name: b.Name, Agent: buzzSelf})
+	raw, err := json.Marshal(eventClaim{Binding: b, Name: b.Name, Agent: s.id.Agent})
 	if err != nil {
 		return binding.Binding{}, err
 	}
@@ -467,7 +467,7 @@ func (c eventClaim) binding() binding.Binding {
 func (s *Server) ownsClaim(c eventClaim, sessionID string) bool {
 	switch {
 	case c.Agent != "":
-		return c.Agent == buzzSelf
+		return c.Agent == s.id.Agent
 	case s.cfg.Helper, s.cfg.Machine:
 		return false
 	case c.Name != "":
@@ -488,10 +488,10 @@ func (s *Server) eventsDir() string { return filepath.Join(s.cfg.StateDir, "remo
 // event whose claim is there and is this agent's stays there. A process with
 // no Buzz identity uses remote-events itself.
 func (s *Server) eventDir(eventID string) string {
-	if buzzSelf == "" {
+	if s.id.Agent == "" {
 		return s.eventsDir()
 	}
-	own := filepath.Join(s.eventsDir(), buzzSelf)
+	own := filepath.Join(s.eventsDir(), s.id.Agent)
 	if eventID != "" && s.ownsLegacyEvent(own, eventID) {
 		return s.eventsDir()
 	}
