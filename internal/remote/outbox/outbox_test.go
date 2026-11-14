@@ -49,8 +49,8 @@ func TestRecordKeepsItsEventAcrossAttemptAndReopen(t *testing.T) {
 	if prepared.Outcome != NotSent || prepared.EventID != first.ID.Hex() || prepared.Seq != 1 || !bytes.Equal(prepared.Event, exact) {
 		t.Fatalf("prepared = %+v", prepared)
 	}
-	if due, err := o.Due(now); err != nil || len(due) != 1 {
-		t.Fatalf("due after prepare = %v, %v", due, err)
+	if left, err := o.Unsettled(); err != nil || len(left) != 1 {
+		t.Fatalf("unsettled after prepare = %v, %v", left, err)
 	}
 	if _, err := o.BeginAttempt("send/reg-1/welcome", now); err != nil {
 		t.Fatal(err)
@@ -60,15 +60,15 @@ func TestRecordKeepsItsEventAcrossAttemptAndReopen(t *testing.T) {
 	if r.Outcome != Unknown || r.Attempts != 1 || !bytes.Equal(r.Event, prepared.Event) {
 		t.Fatalf("after attempt = %+v", r)
 	}
-	if _, err := open().Settle("send/reg-1/welcome", OutcomeOf(nil), "", now); err != nil {
+	if _, err := open().Settle("send/reg-1/welcome", OutcomeOf(nil), "", now, now); err != nil {
 		t.Fatal(err)
 	}
 	r = get()
 	if r.Outcome != Accepted || !bytes.Equal(r.Event, prepared.Event) {
 		t.Fatalf("after settle = %+v", r)
 	}
-	if due, err := open().Due(now.Add(time.Hour)); err != nil || len(due) != 0 {
-		t.Fatalf("due after accept = %v, %v", due, err)
+	if left, err := open().Unsettled(); err != nil || len(left) != 0 {
+		t.Fatalf("unsettled after accept = %v, %v", left, err)
 	}
 	again, err := open().Prepare("send/reg-1/welcome", "reg-1", signed("second"), now)
 	if err != nil {

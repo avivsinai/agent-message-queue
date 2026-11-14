@@ -72,13 +72,6 @@ const (
 	maxReasonBytes = 512
 )
 
-// Retry backoff after a rejected or unknown attempt: retryBackoff, doubling
-// per attempt, at most maxRetryBackoff.
-const (
-	retryBackoff    = 30 * time.Second
-	maxRetryBackoff = 10 * time.Minute
-)
-
 // Record is one operation: the signed event owed for Key and what is known
 // about sending it. Times are Unix seconds.
 type Record struct {
@@ -90,7 +83,8 @@ type Record struct {
 	Outcome Outcome         `json:"outcome"`
 	// Attempts counts the sends begun.
 	Attempts int `json:"attempts"`
-	// NextAttempt is when the record is due again.
+	// NextAttempt is the time the caller gave for the next attempt; zero
+	// once accepted. The outbox stores it and never acts on it.
 	NextAttempt int64  `json:"next_attempt"`
 	Reason      string `json:"reason,omitempty"`
 	// Seq is the record's place in preparation order in its directory.
@@ -180,10 +174,10 @@ func (o *Outbox) BeginAttempt(key string, now time.Time) (Record, error) {
 	return r, o.put(r)
 }
 
-// Settle records the outcome of key's last attempt at now. A rejected or
-// unknown record is due again after the backoff; a not_sent record is due
-// now. An accepted record does not change.
-func (o *Outbox) Settle(key string, outcome Outcome, reason string, now time.Time) (Record, error) {
+// Settle records the outcome of key's last attempt at now, and next as the
+// time of its next attempt; the caller owns the retry policy. An accepted
+// record does not change and has no next attempt.
+func (o *Outbox) Settle(key string, outcome Outcome, reason string, now, next time.Time) (Record, error) {
 	switch outcome {
 	case NotSent, Accepted, Rejected, Unknown:
 	default:
@@ -198,18 +192,9 @@ func (o *Outbox) Settle(key string, outcome Outcome, reason string, now time.Tim
 	if len(reason) > maxReasonBytes {
 		reason = strings.ToValidUTF8(reason[:maxReasonBytes], "") + "…"
 	}
-	r.Outcome, r.Reason, r.Settled = outcome, reason, now.Unix()
-	switch outcome {
-	case Accepted:
+	r.Outcome, r.Reason, r.Settled, r.NextAttempt = outcome, reason, now.Unix(), next.Unix()
+	if outcome == Accepted {
 		r.NextAttempt = 0
-	case NotSent:
-		r.NextAttempt = now.Unix()
-	default:
-		wait := retryBackoff
-		for i := 1; i < r.Attempts && wait < maxRetryBackoff; i++ {
-			wait *= 2
-		}
-		r.NextAttempt = now.Add(min(wait, maxRetryBackoff)).Unix()
 	}
 	return r, o.put(r)
 }
@@ -221,22 +206,24 @@ func (o *Outbox) Get(key string) (Record, bool, error) {
 	return o.get(key)
 }
 
-// Due returns the records not accepted whose next attempt is at or before
-// now, in sequence order.
-func (o *Outbox) Due(now time.Time) ([]Record, error) {
+// Unsettled returns every record that is not accepted, in sequence order.
+// The caller reads NextAttempt to tell which are due, and sees the records
+// that are not, so it can hold a later record of a registration behind an
+// earlier one.
+func (o *Outbox) Unsettled() ([]Record, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	all, err := o.scan()
 	if err != nil {
 		return nil, err
 	}
-	var due []Record
+	var open []Record
 	for _, r := range all {
-		if r.Outcome != Accepted && r.NextAttempt <= now.Unix() {
-			due = append(due, r)
+		if r.Outcome != Accepted {
+			open = append(open, r)
 		}
 	}
-	return due, nil
+	return open, nil
 }
 
 // nextSeq returns the next sequence number. The records are its durable
