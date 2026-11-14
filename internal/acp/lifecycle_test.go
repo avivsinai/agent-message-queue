@@ -1,7 +1,6 @@
 package acp
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -33,9 +32,14 @@ func TestPinnedAgentArchivesAndReturnsWithItsBinding(t *testing.T) {
 	var calls []string
 	buzzCall = func(_ time.Duration, args ...string) ([]byte, error) {
 		calls = append(calls, strings.Join(args, " "))
-		// Real Buzz CLI writes return {accepted:true}. bare-archive nil
-		// output is rejected by buzzRun since fix/buzz-write-acceptance.
-		return []byte(`{"accepted":true}`), nil
+		// Real Buzz CLI shapes (verified at buzz-src f3b127e):
+		//   - agents archive / unarchive print ok-shape (agents.rs:117-126,
+		//     156-165). Everything else here (users set-status etc.) prints
+		//     normalize_write_response (event_id+accepted+message).
+		if args[0] == "agents" && (args[1] == "archive" || args[1] == "unarchive") {
+			return []byte(`{"ok":true,"event_id":"e1","action":"` + args[1] + `","target":"t1"}`), nil
+		}
+		return []byte(`{"event_id":"e1","accepted":true,"message":"ok"}`), nil
 	}
 	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t)}, "test")
 
@@ -76,7 +80,10 @@ func TestTwoAgentsOnOnePinEachChangeOnce(t *testing.T) {
 	var calls []string
 	buzzCall = func(_ time.Duration, args ...string) ([]byte, error) {
 		calls = append(calls, buzzSelf[:1]+" "+strings.Join(args[:2], " "))
-		return []byte(`{"accepted":true}`), nil
+		if args[0] == "agents" && (args[1] == "archive" || args[1] == "unarchive") {
+			return []byte(`{"ok":true,"event_id":"e1","action":"` + args[1] + `","target":"t1"}`), nil
+		}
+		return []byte(`{"event_id":"e1","accepted":true,"message":"ok"}`), nil
 	}
 	state := canonicalTempDir(t)
 	a := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: state}, "test")
@@ -138,7 +145,10 @@ func TestIdenticalWorkersChangeTheAgentOnce(t *testing.T) {
 			reentered = true
 			b.lifecycleTick(time.Now()) // b ticks while a's archive runs
 		}
-		return []byte(`{"accepted":true}`), nil
+		if args[0] == "agents" && (args[1] == "archive" || args[1] == "unarchive") {
+			return []byte(`{"ok":true,"event_id":"e1","action":"` + args[1] + `","target":"t1"}`), nil
+		}
+		return []byte(`{"event_id":"e1","accepted":true,"message":"ok"}`), nil
 	}
 
 	if _, err := binding.Retire(binding.RemovedDetached, func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
@@ -293,40 +303,54 @@ func TestHelperDraftsOneSessionPerWindow(t *testing.T) {
 }
 
 // Review finding fix/buzz-write-acceptance: a write the Buzz relay refused
-// (accepted:false on exit 0) is not a delivered write. postWithBuzzCLI used
-// to return the event id anyway; buzzRun used to return nil. accepted()
-// now reports a *notAcceptedError; buzzRun returns it; postWithBuzzCLI
-// returns "" and the error. The error MUST NOT match notSentError: that
-// sentinel means 'never reached the relay' and is the sole marker-revert
-// case in mirrorUnavailable.
+// (accepted:false on exit 0, or ok shape with ok:false) is not a delivered
+// write. postWithBuzzCLI used to return the event id regardless; buzzRun
+// used to return nil regardless. acceptedFor now routes per command shape:
+// normalize_write_response for most writes, {ok:true,...} for agents
+// archive/unarchive. Errors are NOT a *notSentError: a refused write is an
+// ordinary failure and keeps lifecycle markers, the same as a non-zero
+// CLI exit.
 func TestBuzzWriteAcceptanceRefusalsAreFailures(t *testing.T) {
-	t.Run("accepted() turns a refused write into an ordinary error", func(t *testing.T) {
-		err := accepted([]byte(`{"event_id":"deadbeef","accepted":false,"message":"duplicate"}`), nil)
-		if err == nil {
-			t.Fatal("accepted() with accepted:false returned nil")
-		}
-		var na *notAcceptedError
-		if !errors.As(err, &na) {
-			t.Fatalf("accepted() returned %T; want *notAcceptedError", err)
-		}
-		var notSent *notSentError
-		if errors.As(err, &notSent) {
-			t.Fatal("a refused write must NOT be a notSentError: notSentError means 'never reached the relay' and is the only revert case for lifecycle markers")
-		}
-	})
-	t.Run("accepted() still passes an accepted write through", func(t *testing.T) {
-		if err := accepted([]byte(`{"event_id":"deadbeef","accepted":true}`), nil); err != nil {
-			t.Fatalf("accepted() with accepted:true returned %v", err)
-		}
-	})
-	t.Run("buzzRun returns an error on a refused write", func(t *testing.T) {
+	t.Run("refused accepted-shape write via messages send", func(t *testing.T) {
 		saved := buzzCall
 		t.Cleanup(func() { buzzCall = saved })
 		buzzCall = func(time.Duration, ...string) ([]byte, error) {
+			// Real Buzz shape on relay refusal (normalize_write_response).
 			return []byte(`{"event_id":"deadbeef","accepted":false,"message":"duplicate"}`), nil
 		}
+		if err := buzzRun(time.Second, "messages", "send", "--channel", "c", "--content", "hi"); err == nil {
+			t.Fatal("buzzRun accepted a refused messages-send write")
+		}
+	})
+	t.Run("refused ok-shape write via agents archive", func(t *testing.T) {
+		saved := buzzCall
+		t.Cleanup(func() { buzzCall = saved })
+		buzzCall = func(time.Duration, ...string) ([]byte, error) {
+			return []byte(`{"ok":false,"event_id":"deadbeef","action":"archive","target":"t"}`), nil
+		}
 		if err := buzzRun(time.Second, "agents", "archive", buzzSelf, "--reason", "test"); err == nil {
-			t.Fatal("buzzRun accepted a refused write")
+			t.Fatal("buzzRun accepted a refused agents-archive write (ok:false)")
+		}
+	})
+	t.Run("agents archive with real ok:true advances the marker (regression for fixture shape)", func(t *testing.T) {
+		saved := buzzCall
+		t.Cleanup(func() { buzzCall = saved })
+		buzzCall = func(time.Duration, ...string) ([]byte, error) {
+			// Real production shape from buzz-src f3b127e agents.rs:117-126.
+			return []byte(`{"ok":true,"event_id":"e1","action":"archive","target":"t1"}`), nil
+		}
+		if err := buzzRun(time.Second, "agents", "archive", buzzSelf, "--reason", "test"); err != nil {
+			t.Fatalf("real agents-archive ok:true must succeed: %v", err)
+		}
+	})
+	t.Run("unknown subcommand fails closed", func(t *testing.T) {
+		saved := buzzCall
+		t.Cleanup(func() { buzzCall = saved })
+		buzzCall = func(time.Duration, ...string) ([]byte, error) {
+			return []byte(`[]`), nil
+		}
+		if err := buzzRun(time.Second, "channels", "list"); err == nil {
+			t.Fatal("acceptedFor did not fail closed on an unknown command")
 		}
 	})
 }

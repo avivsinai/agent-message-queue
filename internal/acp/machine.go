@@ -756,17 +756,76 @@ func (s *Server) findChannels(r channelRecord) (ids []string, ok bool) {
 	return ids, true
 }
 
-// notAcceptedError is a write the Buzz CLI reported with accepted:false.
-// The relay refused the operation: nothing was published. An event id an
-// older CLI may have printed alongside is no evidence of acceptance.
-// Lifecycle markers must not be advanced on this error.
+// notAcceptedError is a write the Buzz CLI reported with accepted:false,
+// or, for the NIP-IA archive/unarchive commands, a CLI run that did not
+// print their ok:true body.
+// The relay refused the operation: nothing was published by this call.
+// Callers must not advance lifecycle markers on this error.
 type notAcceptedError struct{ out string }
 
 func (e *notAcceptedError) Error() string { return "not accepted: " + e.out }
 
+// accepted reports whether a write command succeeded. The result shape
+// depends on the sub-command:
+//
+//   - normalize_write_response shape {event_id, accepted, message}:
+//     messages send (messages.rs:713), messages edit
+//     (messages.rs:847-865), channels create (channels.rs:738 calls
+//     print_create_response, client.rs:1516-1520), channels archive
+//     (channels.rs:1767-1775), channels unarchive (channels.rs:1777-1785),
+//     channels add-member (channels.rs:1803-1830),
+//     users set-status (users.rs cmd_set_status), agents draft-create
+//     (agents.rs:14-38 calls publish_ephemeral_event, which on accepted
+//     returns {"event_id","accepted":true,"message"} at client.rs:1181).
+//   - ok shape {ok:true, event_id, action, target}: agents archive
+//     (agents.rs:115-126), agents unarchive (agents.rs:151-162).
+//
+// The buzzRun caller passes only the args argv, so the table lets the
+// parser pick a shape per command. A command not in the table fails closed.
+func acceptedFor(args []string, out []byte, err error) error {
+	if err != nil {
+		return err
+	}
+	shape := ""
+	if len(args) >= 2 {
+		switch args[0] + " " + args[1] {
+		case "messages send", "messages edit",
+			"channels create", "channels archive", "channels unarchive", "channels add-member",
+			"users set-status",
+			"agents draft-create":
+			shape = "accepted"
+		case "agents archive", "agents unarchive":
+			shape = "ok"
+		}
+	}
+	switch shape {
+	case "accepted":
+		var res struct {
+			Accepted bool `json:"accepted"`
+		}
+		if json.Unmarshal(out, &res) == nil && res.Accepted {
+			return nil
+		}
+	case "ok":
+		var res struct {
+			OK bool `json:"ok"`
+		}
+		if json.Unmarshal(out, &res) == nil && res.OK {
+			return nil
+		}
+	default:
+		return fmt.Errorf("buzz %s: response shape unknown to acceptedFor: %s",
+			strings.Join(args[:min(len(args), 2)], " "), strings.TrimSpace(string(out)))
+	}
+	return &notAcceptedError{out: strings.TrimSpace(string(out))}
+}
+
 // accepted reports whether a write command succeeded: exit 0 and the relay
 // said accepted:true. An event id alone is no acceptance: the CLI prints the
 // event id of a write the relay refused too.
+// Deprecated: call sites that know the argv should call acceptedFor; kept
+// for the machine lifecycle paths that only check archive/unarchive/etc
+// where the shape is always normalize_write_response.
 func accepted(out []byte, err error) error {
 	if err != nil {
 		return err
