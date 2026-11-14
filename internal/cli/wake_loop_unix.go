@@ -134,6 +134,9 @@ func runWakeLoop(cfg wakeConfig) error {
 	// Touch presence immediately so `amq who` shows agent as active
 	l.touchPresence()
 
+	// A follow-up that came due while no wake ran becomes unread mail now.
+	l.promoteFollowUps()
+
 	// Notify if messages already exist
 	err := l.attemptNotification()
 	if err == nil {
@@ -951,7 +954,17 @@ func (l *wakeLoop) onInboxScanRetry() error {
 	return l.attemptNotification()
 }
 
+// promoteFollowUps delivers due follow-up notices to the inbox the wake
+// watches; the watcher then rings for them like any arrival. A failure is a
+// diagnostic and never stops the wake.
+func (l *wakeLoop) promoteFollowUps() {
+	if err := promoteFollowUpsAtPath(l.cfg.root, l.cfg.me, l.cfg.wakeDoorbellNow()); err != nil {
+		_ = writeWakeDiagnostic(&l.cfg, "amq wake: follow-ups: %v; retrying\n", err)
+	}
+}
+
 func (l *wakeLoop) maintain() error {
+	l.promoteFollowUps()
 	if err := maintainWakeOutputBounds(l.maintenanceOutputs...); err != nil {
 		_ = writeWakeDiagnostic(
 			&l.cfg,

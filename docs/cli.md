@@ -273,6 +273,8 @@ Options:
         Body string, @file, or - / empty to read stdin
   -context string
         JSON context object or @file.json
+  -follow-up duration
+        Notify me if the recipient has not replied after this duration (e.g. 30m)
   -from-session string
         Source session for setup-terminal cross-session sends
   -ignore-session-pin
@@ -482,7 +484,9 @@ obligation whose opener keeps a copy, and a remote file that
 unread mail or such a message names as
 [image: <path>] are never removed, and nothing is removed unless you run
 this command. A size bound can remove an image an agent has not opened
-yet when no unread or open message names it.
+yet when no unread or open message names it. --history-older-than also
+removes unparsable follow-up timers set aside as follow-ups/*.bad; an
+armed follow-up timer is never removed.
 --mailbox uses --root as given and removes <root>/agents/<handle>, with its
 read history (inbox/cur), outbox, and receipts. It refuses (exit 6) while
 inbox/tmp, inbox/new, any dlq leaf, or extensions/ holds an entry, or while a
@@ -494,6 +498,7 @@ is put back if anything arrived. A delivery that stalls longer than that
 between opening the inbox and publishing can still fail or be removed with
 the mailbox. A later run removes a clean tree an interrupted run left there,
 and restores one that holds mail to agents/<handle> so it can be drained.
+Armed follow-up timers do not block removal; the report counts them.
 meta/config.json is not changed: a later local send to the handle recreates
 the mailbox and delivers. Remove the handle from the config to make send warn
 (or refuse with --strict).
@@ -572,6 +577,8 @@ Designed for hook/script integration. Quiet when empty.
 Writes only under <root>/agents/<me>/: inbox/new to inbox/cur (claim),
 receipts/, receipts-pending/, dlq/tmp/, dlq/new/, .presence.lock, and
 presence.json. The presence refresh is best-effort: drain ignores its error.
+A due follow-up timer in follow-ups/ becomes a notice through inbox/tmp/
+into inbox/new/ before the drain, and the timer is removed.
 
 Options:
   -ignore-session-pin

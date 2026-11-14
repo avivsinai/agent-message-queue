@@ -91,7 +91,7 @@ func TestAcquiredExecutionCleanupAllowsAReplacementGeneration(t *testing.T) {
 			}
 			plan := AgentPlan{Handle: "codex", LaunchNonce: nextNonce, AdapterMode: ticket.Mode, Cwd: ticket.Cwd,
 				ResumePolicy: ResumeEnabled, PreSpawnAcquire: true, Argv: ticket.TargetArgv, DynamicArgv: ticket.DynamicArgv}
-			planned := []plannedAgent{{plan: plan, adapter: NewCodexAdapter(ticket.TargetArgv[0]), providerVersion: CodexDaemonVersion}}
+			planned := []plannedAgent{{plan: plan, adapter: NewCodexAdapter(ticket.TargetArgv[0]), providerVersion: CodexDaemonMinimumVersion}}
 			if err := writeExecutionTickets(ReconcileRequest{Root: fixture.root, ProjectRoot: fixture.project}, lease, planned, fixture.amq, CommandsBackendName, CommandsProfile().Identity()); err != nil {
 				t.Fatalf("later generation remains wedged: %v", err)
 			}
@@ -138,7 +138,7 @@ func TestCodexDaemonCaptureFromBeforeRebootStillBinds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record := ConversationRecord{Handle: "codex", LaunchNonce: nonce, ProviderVersion: CodexDaemonVersion, Identity: ConversationIdentity{Provider: CodexProvider, ID: testConversationID}}
+	record := ConversationRecord{Handle: "codex", LaunchNonce: nonce, ProviderVersion: CodexDaemonMinimumVersion, Identity: ConversationIdentity{Provider: CodexProvider, ID: testConversationID}}
 	if err := validateCodexConversationCapture(fixture.root, capture.payload, record); err != nil {
 		t.Fatalf("capture from before the reboot: %v", err)
 	}

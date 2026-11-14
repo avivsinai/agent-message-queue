@@ -1,6 +1,7 @@
 package launch
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,12 +13,10 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
-// CodexDaemonVersion is the one Codex release a new native execution runs on.
-const CodexDaemonVersion = "0.167.0"
-
-// codexDaemonMinimumVersion is the oldest release whose native tickets and
-// evidence remain readable, so inspection and cleanup survive an upgrade.
-const codexDaemonMinimumVersion = "0.167.0"
+// CodexDaemonMinimumVersion is the oldest release whose native tickets and
+// evidence stay readable, and the first whose explicit --remote template
+// was verified.
+const CodexDaemonMinimumVersion = "0.167.0"
 
 // ErrCodexConversationProvenance marks a daemon-captured conversation whose
 // capturing endpoint does not prove its thread. Resume refuses it rather than
@@ -252,9 +251,30 @@ func codexDaemonArgumentsReason(args []string) string {
 }
 
 // codexDaemonVersionReadable admits a strict release at or above
-// codexDaemonMinimumVersion. Only CodexDaemonVersion runs a new execution.
+// CodexDaemonMinimumVersion.
 func codexDaemonVersionReadable(version string) bool {
-	return releaseAtLeast(version, codexDaemonMinimumVersion)
+	return releaseAtLeast(version, CodexDaemonMinimumVersion)
+}
+
+// DaemonSeatReason reports the CLI's answer to "can this Codex run the
+// daemon template AMQ plans" by reading the already-run probe of
+// `codex resume --help`. The returned reason is the plan's refusal text;
+// empty means the CLI admits the template.
+//
+// The CLI's own version tells us only whether the floor release is
+// present; the daemon's reported release is asked next, separately.
+func (adapter *CodexAdapter) DaemonSeatReason(ctx context.Context) (AdapterCapabilities, string) {
+	capabilities, resumeHelp := adapter.probeCapabilities(ctx)
+	if !capabilities.Available {
+		return capabilities, "the Codex CLI cannot be probed: " + capabilities.Reason
+	}
+	if !codexDaemonVersionReadable(capabilities.ProviderVersion) {
+		return capabilities, "Codex " + capabilities.ProviderVersion + " is not a release at or above " + CodexDaemonMinimumVersion + ", the first whose --remote attaches a seat to the local daemon"
+	}
+	if !strings.Contains(string(resumeHelp), "--remote") || !strings.Contains(string(resumeHelp), "unix://PATH") {
+		return capabilities, "codex resume --help does not list --remote with a unix://PATH address"
+	}
+	return capabilities, ""
 }
 
 func validateCodexDaemonExecutable(ticket ExecutionTicket) error {

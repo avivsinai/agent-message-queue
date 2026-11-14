@@ -22,9 +22,10 @@ const mailboxRemovalSettle = 250 * time.Millisecond
 // Removed: this run deleted the live mailbox. Restored: this run moved a
 // leftover back to agents/<handle>, which exists at the end. Recovered:
 // leftovers this run deleted (a dry run: would delete). Preserved: where a
-// tree was kept. Refusal: why the run exited 6. Wake, Inbox, DLQ, and
-// Extensions describe agents/<handle>: the live mailbox, or the restored
-// tree when Restored is set.
+// tree was kept. Refusal: why the run exited 6. Wake, Inbox, DLQ,
+// Extensions, and FollowUps (armed timers, removed with the mailbox)
+// describe agents/<handle>: the live mailbox, or the restored tree when
+// Restored is set.
 type mailboxCleanupReport struct {
 	Handle     string              `json:"handle"`
 	Root       string              `json:"root"`
@@ -36,6 +37,7 @@ type mailboxCleanupReport struct {
 	Inbox      *mailboxInboxCounts `json:"inbox,omitempty"`
 	DLQ        *mailboxDLQCounts   `json:"dlq,omitempty"`
 	Extensions []string            `json:"extensions,omitempty"`
+	FollowUps  int                 `json:"follow_ups,omitempty"`
 	Path       string              `json:"path"`
 	Recovered  []string            `json:"recovered,omitempty"`
 	Restored   string              `json:"restored,omitempty"`
@@ -65,11 +67,13 @@ const (
 	mailboxRefusalBusy       = "busy"
 )
 
-// mailboxState is what decides whether one mailbox tree may go.
+// mailboxState is what decides whether one mailbox tree may go. FollowUps is
+// reported and never refuses.
 type mailboxState struct {
 	Inbox      mailboxInboxCounts
 	DLQ        mailboxDLQCounts
 	Extensions []string
+	FollowUps  int
 	Wake       wakeLockInspection
 }
 
@@ -255,6 +259,7 @@ func (c *mailboxCleanup) apply(s *mailboxSurvey) {
 		return
 	}
 	c.report.Inbox, c.report.DLQ, c.report.Extensions, c.report.Wake = nil, nil, nil, ""
+	c.report.FollowUps = 0
 }
 
 // refuseLiveBlocked refuses for a live mailbox that cannot go, naming a
@@ -471,6 +476,7 @@ func (c *mailboxCleanup) refuseUnsafe(err error) error {
 func (c *mailboxCleanup) record(state mailboxState) {
 	inbox, dlq := state.Inbox, state.DLQ
 	c.report.Inbox, c.report.DLQ, c.report.Extensions = &inbox, &dlq, state.Extensions
+	c.report.FollowUps = state.FollowUps
 	c.report.Wake = string(state.Wake.Status)
 }
 
@@ -503,6 +509,9 @@ func (c *mailboxCleanup) writeTextActions() error {
 		}
 	}
 	if c.report.Removed || (c.dryRun && !c.report.Absent) {
+		if c.report.FollowUps > 0 {
+			return writeStdout("%s empty mailbox %s with %d armed follow-up(s)\n", verb, c.report.Path, c.report.FollowUps)
+		}
 		return writeStdout("%s empty mailbox %s\n", verb, c.report.Path)
 	}
 	return nil
@@ -597,6 +606,15 @@ func inspectMailboxDir(root, parent *fsq.DeliveryRoot, handle, name string, orig
 	}
 	if state.Extensions, err = listMailboxEntries(mailbox, "extensions"); err != nil {
 		return state, err
+	}
+	followUps, err := listMailboxEntries(mailbox, string(fsq.MailboxFollowUps))
+	if err != nil {
+		return state, err
+	}
+	for _, name := range followUps {
+		if !strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".json") {
+			state.FollowUps++
+		}
 	}
 	lockPath := filepath.Join(mailbox.Base(), wakeLockFileName)
 	state.Wake = inspectWakeLockWithReader(root.Base(), handle, lockPath, func() ([]byte, os.FileInfo, error) {

@@ -60,7 +60,7 @@ func TestCleanupIncompleteNativeExecution(t *testing.T) {
 				state, reason = launch.ExecutionPending, ""
 			}
 			ticket, err := launch.NewExecutionTicket(launch.ExecutionTicketRequest{Handle: "codex", LaunchNonce: nonce,
-				Mode: plan.AdapterMode, Provider: launch.CodexProvider, ProviderVersion: launch.CodexDaemonVersion,
+				Mode: plan.AdapterMode, Provider: launch.CodexProvider, ProviderVersion: launch.CodexDaemonMinimumVersion,
 				PreSpawnAcquire: true, Backend: launch.CommandsBackendName, Profile: launch.CommandsProfile().Identity(),
 				ProjectRoot: project, SessionRoot: session, Cwd: project, ProviderExecutable: provider, AMQExecutable: amq,
 				TargetArgv: plan.Argv, DynamicArgv: plan.DynamicArgv, State: state, Reason: reason})
