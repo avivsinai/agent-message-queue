@@ -29,7 +29,9 @@ func runDrain(args []string) error {
 		"",
 		"Writes only under <root>/agents/<me>/: inbox/new to inbox/cur (claim),",
 		"receipts/, receipts-pending/, dlq/tmp/, dlq/new/, .presence.lock, and",
-		"presence.json. The presence refresh is best-effort: drain ignores its error.")
+		"presence.json. The presence refresh is best-effort: drain ignores its error.",
+		"A due follow-up timer in follow-ups/ becomes a notice through inbox/tmp/",
+		"into inbox/new/ before the drain, and the timer is removed.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {

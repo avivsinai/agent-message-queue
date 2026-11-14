@@ -43,6 +43,9 @@ const (
 	// coopWaitPoll is how often the waiter looks at the inbox, its owner
 	// file and its binding. It reads the wake settings when mail is unread.
 	coopWaitPoll = time.Second
+	// coopWaitFollowUpEvery bounds how often the waiter promotes due
+	// follow-ups into the inbox it watches.
+	coopWaitFollowUpEvery = 30 * time.Second
 )
 
 // coopWaitState's ClaudeSession is the waiter's session key: the Claude
@@ -126,6 +129,7 @@ func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 		layers    wakeSettingsLayers
 		debounced bool
 		inbox     coopInbox
+		promoted  time.Time
 	)
 	defer func() {
 		if release != nil {
@@ -150,6 +154,12 @@ func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 		wait := coopWaitPoll
 		var due []string
 		if release != nil && !coopHookWakeRings(root, me) {
+			if now := time.Now(); now.Sub(promoted) >= coopWaitFollowUpEvery {
+				promoted = now
+				// The hook's stderr is the ring text, so a failure stays
+				// silent here; the next drain reports it.
+				_ = promoteFollowUpsAtPath(root, me, now)
+			}
 			pending, err := inbox.pending(root, me)
 			if err == nil && len(pending) > 0 {
 				var settings wakeSettings

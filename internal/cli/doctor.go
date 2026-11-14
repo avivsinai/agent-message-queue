@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -335,6 +336,7 @@ func runDoctor(args []string) error {
 			if a.DLQCount > 0 {
 				line += fmt.Sprintf(", %d DLQ", a.DLQCount)
 			}
+			line += followUpRowNote(a, time.Now())
 			line += fmt.Sprintf(", presence %s (%.0fs ago)", a.PresenceStatus, a.PresenceAgeSeconds)
 			if a.PresenceSource != "" {
 				line += ", source " + a.PresenceSource

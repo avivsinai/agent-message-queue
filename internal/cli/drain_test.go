@@ -493,7 +493,7 @@ func TestRunDrainWritesOnlyItsDocumentedSet(t *testing.T) {
 		if rel == "agents/alice" {
 			return true // the parent of presence.json and .presence.lock
 		}
-		for _, p := range []string{"inbox/new", "inbox/cur", "receipts", "receipts-pending", "dlq/tmp", "dlq/new", ".presence.lock", "presence.json"} {
+		for _, p := range []string{"inbox/tmp", "inbox/new", "inbox/cur", "receipts", "receipts-pending", "dlq/tmp", "dlq/new", "follow-ups", ".presence.lock", "presence.json"} {
 			p = "agents/alice/" + p
 			if rel == p || strings.HasPrefix(rel, p+"/") {
 				return true
