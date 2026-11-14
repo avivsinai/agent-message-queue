@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -42,6 +43,10 @@ const (
 	grantFile = "grant.json"
 	// MaxNameLen bounds the agent name in runes.
 	MaxNameLen = 64
+	// MaxValidity is the longest window of a machine grant. The command that
+	// asks for a grant and the command that signs one both hold it, so a
+	// request file cannot ask the owner for more.
+	MaxValidity = 365 * 24 * time.Hour
 )
 
 var pubkeyRe = regexp.MustCompile(`^[0-9a-f]{64}$`)

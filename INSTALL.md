@@ -299,7 +299,7 @@ and `arm64`. `amq-keepalive` is only a release asset.
 | `amq-acp` | Preview ACP v2 stdio companion. See [amq-acp](cmd/amq-acp/README.md). |
 | `amq-remote` | Remote-session companion. See [amq-remote](cmd/amq-remote/README.md). |
 | `amq-board` | Read-only fleet board: what waits on you, what is in flight, blocked, or unclaimed, and each agent's liveness. See [amq-board](cmd/amq-board/README.md). |
-| `amq-owner-sign` | The owner's signer for a strict relay share; the owner key stays in its process. See [the strict share](cmd/amq-remote/README.md#strict-share-in-one-owner-step). |
+| `amq-owner-sign` | The owner's signer for a strict relay share or the machine agent's grant; the owner key stays in its process. See [the strict share](cmd/amq-remote/README.md#strict-share-in-one-owner-step). |
 
 To install a companion from its release asset, verify its entry in
 `checksums.txt` before you extract it. Asset names follow

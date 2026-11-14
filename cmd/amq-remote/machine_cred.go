@@ -19,8 +19,8 @@ import (
 const machineUsage = `Usage: amq-remote machine request [--valid-for DURATION] [--name NAME] [--agent PUBKEY]
        amq-remote machine enroll --grant FILE`
 
-// The machine grant window is bounded like every NIP-OA grant here: at
-// least 1 hour, at most 90 days, which is also the default.
+// The machine grant window is at least 1 hour and at most
+// machinecred.MaxValidity; the default is 90 days.
 const (
 	machineMinValidity     = time.Hour
 	machineDefaultValidity = 2160 * time.Hour
@@ -54,7 +54,7 @@ func machineCommand(args []string, stdout, stderr io.Writer) int {
 func machineRequest(args []string, stdout, stderr io.Writer) (int, error) {
 	fs := flag.NewFlagSet("machine request", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	validFor := fs.Duration("valid-for", machineDefaultValidity, "how long the grant lasts (1h to 2160h)")
+	validFor := fs.Duration("valid-for", machineDefaultValidity, "how long the grant lasts (1h to 8760h, default 2160h)")
 	name := fs.String("name", "", "agent name in the request (default \"AMQ Remote @ <host>\")")
 	agent := fs.String("agent", "", "agent pubkey to renew when this machine has more than one")
 	if err := fs.Parse(args); err != nil {
@@ -67,8 +67,8 @@ func machineRequest(args []string, stdout, stderr io.Writer) (int, error) {
 	if fs.NArg() != 0 {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "unexpected argument %q\n%s", fs.Arg(0), machineUsage)
 	}
-	if *validFor < machineMinValidity || *validFor > machineDefaultValidity {
-		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--valid-for must be 1h to 2160h, got %s", *validFor)
+	if *validFor < machineMinValidity || *validFor > machinecred.MaxValidity {
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--valid-for must be 1h to %s, got %s", machinecred.MaxValidity, *validFor)
 	}
 	if *name == "" {
 		*name = defaultMachineName()

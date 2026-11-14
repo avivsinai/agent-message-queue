@@ -95,7 +95,7 @@ endpoint is down.
 `~/.amq/remote/machine/<agent pubkey>/`, or reuses the one key there (pass
 `--agent` when there is more than one), and prints a grant request for
 `amq-owner-sign --machine FILE --out FILE --relay URL`, which the owner runs in
-their own terminal. `--valid-for` is 1h to 2160h (90 days, the default).
+their own terminal. `--valid-for` is 1h to 8760h (one year); the default is 2160h (90 days).
 `machine enroll --grant FILE` checks the signed grant against the agent key
 and stores it; it prints the agent key, the owner key and the end date. The
 grant lets the agent key act as the owner's Buzz agent for every event kind,

@@ -261,8 +261,9 @@ func signWriteAndPublish(p signPlan, o options, confirm func(body string) (bool,
 	return nil
 }
 
-// machinePlan reads a machine request, refuses a grant end that has passed,
-// and shows the owner what the one grant allows.
+// machinePlan reads a machine request, refuses a grant end that has passed
+// or is more than machinecred.MaxValidity away, and shows the owner what the
+// one grant allows.
 func machinePlan(o options, stdout io.Writer) (signPlan, error) {
 	raw, err := os.ReadFile(o.machine)
 	if err != nil {
@@ -279,6 +280,9 @@ func machinePlan(o options, stdout io.Writer) (signPlan, error) {
 	until := time.Unix(end, 0).UTC().Format(time.RFC3339)
 	if end <= time.Now().Unix() {
 		return signPlan{}, fmt.Errorf("%s: the grant ends at %s, which has passed; run `amq-remote machine request` again", o.machine, until)
+	}
+	if end > time.Now().Add(machinecred.MaxValidity).Unix() {
+		return signPlan{}, fmt.Errorf("%s: the grant ends at %s, more than one year from now; run `amq-remote machine request` with a shorter --valid-for", o.machine, until)
 	}
 	policyName := o.name
 	if !o.nameSet {
