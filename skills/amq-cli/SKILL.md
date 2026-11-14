@@ -113,6 +113,11 @@ honestly: withdrawing a request does not mean its feature shipped.
 The last `--refs` entry is the direct reply target; a list of refs is lineage,
 not a batch-close operation. Close independent requests separately.
 
+`amq send --follow-up 30m` delivers one notice to the sender's own inbox if the
+recipient has not replied to that message when the time passes; a live wake,
+the wait hook, or the next `drain`, `read`, or `monitor` checks it, and any
+reply from the recipient cancels it.
+
 An unanswered message is a reply obligation, not evidence that work started.
 Use the host harness's task and turn records when activity matters. Keep
 declared task state, actual execution, approval waits, and delivery presence

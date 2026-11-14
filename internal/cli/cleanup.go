@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/followup"
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
@@ -67,7 +68,9 @@ func runCleanup(args []string) error {
 		"unread mail or such a message names as",
 		"[image: <path>] are never removed, and nothing is removed unless you run",
 		"this command. A size bound can remove an image an agent has not opened",
-		"yet when no unread or open message names it.",
+		"yet when no unread or open message names it. --history-older-than also",
+		"removes unparsable follow-up timers set aside as follow-ups/*.bad; an",
+		"armed follow-up timer is never removed.",
 		"--mailbox uses --root as given and removes <root>/agents/<handle>, with its",
 		"read history (inbox/cur), outbox, and receipts. It refuses (exit 6) while",
 		"inbox/tmp, inbox/new, any dlq leaf, or extensions/ holds an entry, or while a",
@@ -79,6 +82,7 @@ func runCleanup(args []string) error {
 		"between opening the inbox and publishing can still fail or be removed with",
 		"the mailbox. A later run removes a clean tree an interrupted run left there,",
 		"and restores one that holds mail to agents/<handle> so it can be drained.",
+		"Armed follow-up timers do not block removal; the report counts them.",
 		"meta/config.json is not changed: a later local send to the handle recreates",
 		"the mailbox and delivers. Remove the handle from the config to make send warn",
 		"(or refuse with --strict).",
@@ -223,6 +227,13 @@ func runCleanup(args []string) error {
 		}
 		if historyCandidates, err = keepClosersOfKeptOpeners(root, historyCandidates, closers); err != nil {
 			return err
+		}
+		if !cutoff.IsZero() {
+			bad, err := findQuarantinedFollowUps(root, cutoff)
+			if err != nil {
+				return err
+			}
+			historyCandidates = append(historyCandidates, bad...)
 		}
 	}
 	candidates := append([]string{}, tmpCandidates...)
@@ -467,6 +478,39 @@ var imageReference = regexp.MustCompile(`\[image: ([^\]\n]+)\]`)
 // unread mail first, then read mail and sent copies.
 func historyMessageDirs(root, agent string) []string {
 	return []string{fsq.AgentInboxNew(root, agent), fsq.AgentInboxCur(root, agent), fsq.AgentOutboxSent(root, agent)}
+}
+
+// findQuarantinedFollowUps returns the follow-up timer files that could not
+// be parsed and were set aside, modified before cutoff. An armed timer is
+// never a candidate: an overdue one resolves at the next promotion.
+func findQuarantinedFollowUps(root string, cutoff time.Time) ([]fsq.HistoryFile, error) {
+	agents, err := fsq.ListAgents(root)
+	if os.IsNotExist(err) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	var found []fsq.HistoryFile
+	for _, agent := range agents {
+		dir := fsq.AgentFollowUps(root, agent)
+		entries, err := os.ReadDir(dir)
+		if os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return nil, err
+		}
+		for _, e := range entries {
+			if !e.Type().IsRegular() || !strings.HasSuffix(e.Name(), followup.QuarantineSuffix) {
+				continue
+			}
+			info, err := e.Info()
+			if err != nil || !info.ModTime().Before(cutoff) {
+				continue
+			}
+			found = append(found, fsq.HistoryFile{Path: filepath.Join(dir, e.Name()), Agent: agent, Size: info.Size(), Created: info.ModTime()})
+		}
+	}
+	return found, nil
 }
 
 // referencedRemoteFiles are the names of the remote files that an unread

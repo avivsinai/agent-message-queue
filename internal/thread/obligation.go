@@ -571,6 +571,12 @@ func isTerminal(msg *Entry) bool {
 	return slices.ContainsFunc(msg.Labels, func(label string) bool { return slices.Contains(closingLabels, label) })
 }
 
+// RequesterCloses reports whether a message the requester sent with labels
+// closes its own request of openerKind, as a withdrawn request does.
+func RequesterCloses(openerKind string, labels []string) bool {
+	return closesObligation(openerKind, false, &Entry{Labels: labels})
+}
+
 // closesObligation applies the closer table: which kinds and labels from the
 // owner or the requester close an opener of the given kind.
 func closesObligation(openerKind string, fromOwner bool, msg *Entry) bool {

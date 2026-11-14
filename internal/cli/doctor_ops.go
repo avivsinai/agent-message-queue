@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
+	"github.com/avivsinai/agent-message-queue/internal/followup"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
@@ -76,6 +77,11 @@ type opsAgent struct {
 	OldestDLQAgeSeconds float64 `json:"oldest_dlq_age_seconds"`
 	// DLQCountError is UnreadCountError for the DLQ.
 	DLQCountError string `json:"dlq_count_error,omitempty"`
+	// Follow-ups this agent armed as a sender: all of them, those already
+	// due, and the earliest due time.
+	FollowUpsPending int    `json:"follow_ups_pending,omitempty"`
+	FollowUpsOverdue int    `json:"follow_ups_overdue,omitempty"`
+	NextFollowUpDue  string `json:"next_follow_up_due,omitempty"`
 	agentRegistrationJSON
 	PresenceStatus       string                   `json:"presence_status"`
 	PresenceAgeSeconds   float64                  `json:"presence_age_seconds"`
@@ -263,6 +269,7 @@ func runOpsChecksWithSchema(
 		mailboxPresent := dirExists(fsq.AgentBase(root, handle))
 		agent.UnreadCount, agent.OldestUnreadAgeSeconds, agent.UnreadCountError = opsMailboxCount(fsq.AgentInboxNew(root, handle), mailboxPresent, now)
 		agent.DLQCount, agent.OldestDLQAgeSeconds, agent.DLQCountError = opsMailboxCount(fsq.AgentDLQNew(root, handle), mailboxPresent, now)
+		opsFollowUps(&agent, root, now)
 
 		// Presence
 		recentActivity := false
@@ -518,6 +525,53 @@ func opsAgentRows(root string, scope agentInventoryScope) []inventoryAgent {
 		}
 	}
 	return rows
+}
+
+// opsFollowUps fills the follow-up fields of agent's row. It only reads; a
+// mailbox whose timers cannot be read reports none.
+func opsFollowUps(agent *opsAgent, root string, now time.Time) {
+	if _, err := os.Lstat(fsq.AgentFollowUps(root, agent.Handle)); err != nil {
+		return
+	}
+	identity, err := fsq.SnapshotDeliveryRoot(root)
+	if err != nil {
+		return
+	}
+	deliveryRoot, err := fsq.OpenDeliveryRoot(root, identity)
+	if err != nil {
+		return
+	}
+	defer func() { _ = deliveryRoot.Close() }()
+	timers, err := followup.List(deliveryRoot, agent.Handle)
+	if err != nil || len(timers) == 0 {
+		return
+	}
+	agent.FollowUpsPending = len(timers)
+	for _, t := range timers {
+		if !t.Due.After(now) {
+			agent.FollowUpsOverdue++
+		}
+	}
+	agent.NextFollowUpDue = timers[0].Due.Format(time.RFC3339)
+}
+
+// followUpRowNote is the follow-up part of an agent's ops text row.
+func followUpRowNote(a opsAgent, now time.Time) string {
+	if a.FollowUpsPending == 0 {
+		return ""
+	}
+	if a.FollowUpsOverdue > 0 {
+		return fmt.Sprintf(", %d follow-ups (%d overdue)", a.FollowUpsPending, a.FollowUpsOverdue)
+	}
+	due, err := time.Parse(time.RFC3339, a.NextFollowUpDue)
+	if err != nil {
+		return fmt.Sprintf(", %d follow-ups", a.FollowUpsPending)
+	}
+	wait := due.Sub(now).Round(time.Second).String()
+	if due.Sub(now) >= time.Minute {
+		wait = strings.TrimSuffix(due.Sub(now).Round(time.Minute).String(), "0s")
+	}
+	return fmt.Sprintf(", %d follow-ups (next due in %s)", a.FollowUpsPending, wait)
 }
 
 // opsMailboxCount counts the messages of one mailbox directory and the age of

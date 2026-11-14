@@ -41,9 +41,10 @@ func drainInboxItemsWithClaimHook(
 	return items, err
 }
 
-// drainInboxItemsPinned first writes receipts that earlier claims still owe,
-// then claims new messages. Repair never returns items, so an already claimed
-// message is not delivered twice.
+// drainInboxItemsPinned first delivers due follow-up notices, so this batch
+// shows them, and writes receipts that earlier claims still owe, then claims
+// new messages. Repair never returns items, so an already claimed message is
+// not delivered twice.
 func drainInboxItemsPinned(
 	deliveryRoot *fsq.DeliveryRoot,
 	root, me string,
@@ -52,6 +53,7 @@ func drainInboxItemsPinned(
 	validator *headerValidator,
 	afterClaim func(string) error,
 ) ([]inboxItem, error) {
+	promoteFollowUps(deliveryRoot, me)
 	repairErr := receipt.RepairPending(deliveryRoot, me)
 	items, err := claimInboxItemsPinned(deliveryRoot, root, me, includeBody, limit, validator, afterClaim)
 	return items, joinOutcomeErr(err, repairErr)

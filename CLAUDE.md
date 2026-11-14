@@ -130,6 +130,7 @@ internal/dialogguard/         Wake dialog guard marker, hook command, and Claude
 internal/execidentity/        AMQ identity of each process coop exec became
 internal/exitcode/            Command exit codes and the errors that carry them
 internal/format/              JSON frontmatter plus Markdown message serialization
+internal/followup/            Follow-up timers a sender arms and their one notice
 internal/fsq/                 Maildir delivery, atomic operations, and scans
 internal/harness/             Per-harness facts: names, resume flags, wake typing
 internal/hookfile/            Byte-surgery hooks-file editor with a per-file lock
@@ -167,6 +168,7 @@ Mailbox layout:
 <root>/agents/<agent>/outbox/sent/
 <root>/agents/<agent>/receipts/
 <root>/agents/<agent>/receipts-pending/
+<root>/agents/<agent>/follow-ups/
 <root>/agents/<agent>/dlq/{tmp,new,cur}/
 <root>/bridge/{host-id,identity,trusted/<host>,outbox,drop,receipts}/
 ```
@@ -190,6 +192,11 @@ payload and fails, and the next `drain`, `read`, or `monitor` writes the
 receipt without delivering the message again. A crash between the claim and
 the receipt write, or a failed park (for example a full disk), still leaves
 that receipt unwritten.
+
+**Follow-ups**: `amq send --follow-up 30m` delivers one notice to the sender's
+own inbox if the recipient has not replied to that message when the time
+passes; a live wake, the wait hook, or the next `drain`, `read`, or `monitor`
+checks it, and any reply from the recipient cancels it.
 
 **Sessions**: Named sessions are child queue roots. A participating shell is
 pinned by `AM_ROOT`, `AM_BASE_ROOT`, and `AM_SESSION`; AMQ-managed identity
@@ -281,6 +288,9 @@ whitespace-only input is a usage error unless `--allow-empty` is explicit.
 | `brainstorm` | - | normal | Explore options. |
 | `status` | - | low | Report progress or state. |
 | `todo` | `status` | normal | Assign work. |
+
+A todo is finished with `amq reply --kind status --labels done`; the requester
+cancels a request with `--kind decision --labels withdrawn`.
 
 When work starts, reply with `kind=status` and an ETA. Review responses remain
 `normal` by default. Use `--priority urgent` on `send` or `reply` for a

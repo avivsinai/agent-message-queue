@@ -129,6 +129,7 @@ func runRead(args []string) error {
 
 	// Receipts that earlier claims still owe are written before this read
 	// claims anything; a repair failure leaves them owed and fails the read.
+	promoteFollowUps(deliveryRoot, common.Me)
 	repairErr := receipt.RepairPending(deliveryRoot, common.Me)
 
 	// Move to cur only after successful parse

@@ -33,6 +33,7 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 	refsFlag := fs.String("refs", "", "Comma-separated related message ids")
 	waitForFlag := fs.String("wait-for", "", "Wait for receipt stage after send (drained, dlq)")
 	waitTimeoutFlag := fs.Duration("wait-timeout", 120*time.Second, "Timeout for --wait-for (0 = wait forever)")
+	followUpFlag := fs.Duration("follow-up", 0, "Notify me if the recipient has not replied after this duration (e.g. 30m)")
 
 	// Co-op mode flags
 	priorityFlag := fs.String("priority", "", "Message priority: urgent, normal, low (default when --kind is set: low for status, normal otherwise)")
@@ -114,6 +115,12 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 		if *waitTimeoutFlag < 0 {
 			return UsageError("--wait-timeout must be >= 0")
 		}
+	}
+	if *followUpFlag < 0 {
+		return UsageError("--follow-up must be >= 0")
+	}
+	if *followUpFlag > 0 && len(recipients) != 1 {
+		return UsageError("--follow-up requires exactly one recipient (got %d)", len(recipients))
 	}
 
 	// Determine delivery root: local, cross-session, or cross-project.
@@ -241,6 +248,18 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 		peerBaseRoot = routePlan.PeerBaseRoot
 		targetSession = routePlan.TargetSession
 		sourceProject = routePlan.SourceProject
+	}
+	// A follow-up watches the sender's own mailbox, so the reply must route
+	// back to it. A base-root sender stamps no reply route for a session of
+	// its own project, and the reply stays in that session.
+	if *followUpFlag > 0 && targetSession != "" {
+		senderSession := ""
+		if sourceSession != "" || classifyRoot(root) != "" {
+			senderSession = sourceSessionName(root, sourceSession)
+		}
+		if replyRouteFor(me, senderSession, targetProject, targetSession) == "" {
+			return UsageError("--follow-up cannot see a reply from session %q: a reply to a base-root sender lands in that session, not in your mailbox; send from a session (--from-session) instead", targetSession)
+		}
 	}
 
 	// Snapshot the physical roots at the authorization boundary. Opening the
@@ -516,6 +535,7 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 		explainPeerDeliveryError: explainPeerDeliveryError,
 		waitFor:                  waitFor,
 		waitTimeout:              *waitTimeoutFlag,
+		followUp:                 *followUpFlag,
 		waitTimeoutHint: fmt.Sprintf(" (delivery session %s, root %s); run %s to diagnose mailbox divergence",
 			targetDisplay, deliveryRoot, doctorRootCommandForOS(deliveryRoot, configAuthorityBaseRoot, runtime.GOOS, "--ops")),
 		json:                       common.JSON,

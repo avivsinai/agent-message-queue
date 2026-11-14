@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/followup"
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
@@ -55,6 +56,10 @@ type outgoingMessage struct {
 	// explainPeerDeliveryError, when set, may replace an uncommitted peer
 	// delivery error with a diagnosis; nil keeps the delivery error.
 	explainPeerDeliveryError func(recipient string) error
+
+	// followUp, when positive, arms a follow-up timer in the sender's mailbox
+	// for the one recipient.
+	followUp time.Duration
 
 	waitFor     string
 	waitTimeout time.Duration
@@ -181,6 +186,12 @@ func deliverOutgoing(m outgoingMessage) error {
 		outboxErr = err
 	}
 
+	var followUp *followUpResult
+	var followUpErr error
+	if m.followUp > 0 {
+		followUp, followUpErr = armFollowUp(m, id, now)
+	}
+
 	var waitResult *waitForResult
 	var waitErr error
 	if m.waitFor != "" {
@@ -222,10 +233,13 @@ func deliverOutgoing(m outgoingMessage) error {
 		if waitResult != nil {
 			out["wait"] = waitResult
 		}
+		if followUp != nil {
+			out["follow_up"] = followUp
+		}
 		if err := writeJSON(os.Stdout, out); err != nil {
 			return err
 		}
-		return waitErr
+		return joinOutcomeErr(waitErr, followUpErr)
 	}
 
 	if outboxErr != nil {
@@ -249,9 +263,42 @@ func deliverOutgoing(m outgoingMessage) error {
 				return err
 			}
 		}
-		return waitErr
+	} else if err := writeStdout("%s %s to %s (session: %s, root: %s)\n", m.verb, id, strings.Join(m.recipients, ","), m.displaySession, m.deliveryRoot); err != nil {
+		return err
 	}
-	return writeStdout("%s %s to %s (session: %s, root: %s)\n", m.verb, id, strings.Join(m.recipients, ","), m.displaySession, m.deliveryRoot)
+	if followUp != nil && followUpErr == nil {
+		if err := writeStdout("Follow-up due %s if %s has not replied.\n", followUp.Due, m.recipients[0]); err != nil {
+			return err
+		}
+	}
+	return joinOutcomeErr(waitErr, followUpErr)
+}
+
+// followUpResult reports an armed follow-up, or why a delivered message has
+// none.
+type followUpResult struct {
+	Due      string `json:"due,omitempty"`
+	After    string `json:"after,omitempty"`
+	NoticeID string `json:"notice_id,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+// armFollowUp writes the follow-up timer of the delivered message id, sent
+// at now, in the sender's mailbox: the reply it waits for lands there.
+func armFollowUp(m outgoingMessage, id string, now time.Time) (*followUpResult, error) {
+	timer, err := followup.New(id, m.recipients[0], m.thread, m.subject, m.kind, now, m.followUp)
+	if err == nil {
+		timer.TargetSession, timer.TargetProject = m.targetSession, m.targetProject
+		err = followup.Write(m.sourceFS, m.me, timer)
+	}
+	if err != nil {
+		return &followUpResult{Error: err.Error()}, fmt.Errorf("%s %s was delivered, but its follow-up was not armed: %w", m.command, id, err)
+	}
+	return &followUpResult{
+		Due:      timer.Due.Format(time.RFC3339),
+		After:    m.followUp.String(),
+		NoticeID: timer.NoticeID,
+	}, nil
 }
 
 // replyRouteFor stamps reply_to only on messages that cross a session or
