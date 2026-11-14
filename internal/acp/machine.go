@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -262,17 +264,44 @@ func (s *Server) machineCtx() context.Context {
 	return nil
 }
 
+// lifeCtx is the machine worker's context, or the background context before
+// its first tick.
+func (s *Server) lifeCtx() context.Context {
+	if ctx := s.machineCtx(); ctx != nil {
+		return ctx
+	}
+	return context.Background()
+}
+
 // call runs one buzz command for the machine lifecycle. A call cut off by
 // the worker's stop fails like a timeout: its outcome is unknown.
 func (s *Server) call(args ...string) ([]byte, error) {
-	ctx := s.machineCtx()
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx := s.lifeCtx()
 	if ctx.Err() != nil {
 		return nil, &buzzcli.NotSentError{Err: errMachineStopped}
 	}
 	return machineCall(ctx, s.cfg.PostTimeout, args...)
+}
+
+// lifecycleExec is the Exec of s.buzz: it runs one invocation through call,
+// so the worker's context bounds it whatever ctx the operation got. The
+// lifecycle sends no stdin; an invocation with stdin is not sent.
+func (s *Server) lifecycleExec(_ context.Context, stdin io.Reader, args ...string) ([]byte, error) {
+	if stdin != nil {
+		return nil, &buzzcli.NotSentError{Err: errors.New("the machine lifecycle sends no stdin")}
+	}
+	return s.call(args...)
+}
+
+// retiredKey names an intention of the retired record r: what, r's reg, and
+// when r left its slot in Unix seconds, 0 when RetiredAt is empty or
+// unreadable.
+func retiredKey(what string, r channelRecord) buzzop.Key {
+	var at int64
+	if t, err := time.Parse(time.RFC3339, r.RetiredAt); err == nil {
+		at = t.Unix()
+	}
+	return buzzop.Key(what + "/" + r.Reg + "/" + strconv.FormatInt(at, 10))
 }
 
 // machineTick runs in the worker that leads the machine identity, until
@@ -602,44 +631,12 @@ func (s *Server) stillServes(r channelRecord, now time.Time) bool {
 	return true
 }
 
-// createOutcome is what one channels create proves.
-type createOutcome int
-
-const (
-	createAccepted createOutcome = iota
-	createRefused
-	createUncertain
-)
-
-// classifyCreate reads a create's result. Accepted needs exit 0 with
-// accepted:true and a channel id. Only an outcome that proves no channel was
-// made (not sent, or rejected) is a refusal; anything else may have made one.
-func classifyCreate(out []byte, err error) (createOutcome, string, string) {
-	r := buzzcli.Classify(buzzcli.ShapeAccepted, out, err)
-	if err != nil {
-		if r.Outcome == buzzop.NotSent || r.Outcome == buzzop.Rejected {
-			return createRefused, "", r.Reason
-		}
-		return createUncertain, "", r.Reason
-	}
-	var created struct {
-		ChannelID string `json:"channel_id"`
-	}
-	switch {
-	case r.Outcome == buzzop.Unknown || json.Unmarshal(out, &created) != nil:
-		return createUncertain, "", "buzz channels create: unreadable output"
-	case r.Outcome == buzzop.Rejected:
-		return createRefused, "", "buzz channels create: the relay refused it: " + r.Reason
-	case !uuidRe.MatchString(created.ChannelID):
-		return createUncertain, "", "buzz channels create: no channel id in its output"
-	}
-	return createAccepted, strings.ToLower(created.ChannelID), ""
-}
-
 // create counts and sends one channels create. The count and the pending
 // mark are written before the call, and the outcome after it, so a worker
-// that stops in between leaves the create unresolved. It reports whether a
-// channel id is known.
+// that stops in between leaves the create unresolved. Only an outcome that
+// proves no channel was made (not sent, or rejected) fails the record;
+// anything else may have made one, so the record is in doubt. It reports
+// whether a channel id is known.
 func (s *Server) create(r *channelRecord, now time.Time) bool {
 	if r.Doubted || r.Creates >= channelCreateTries || !s.stillServes(*r, now) {
 		return false
@@ -649,22 +646,21 @@ func (s *Server) create(r *channelRecord, now time.Time) bool {
 	if s.save(r, now) != nil {
 		return false
 	}
-	out, err := s.call("channels", "create", "--name", r.Label, "--type", "stream",
-		"--visibility", "private", "--description", "amq-remote "+r.Reg)
-	outcome, id, reason := classifyCreate(out, err)
+	c := s.buzz.CreateChannel(s.lifeCtx(), buzzop.ChannelSpec{Key: buzzop.Key("create/" + r.Reg),
+		Name: r.Label, About: "amq-remote " + r.Reg})
 	r.Pending = false
-	switch outcome {
-	case createAccepted:
-		r.ChannelID, r.LastError = id, ""
-	case createRefused:
-		r.State, r.LastError = channelFailed, reason
+	switch c.Outcome {
+	case buzzop.Accepted:
+		r.ChannelID, r.LastError = c.ChannelID, ""
+	case buzzop.NotSent, buzzop.Rejected:
+		r.State, r.LastError = channelFailed, c.Reason
 	default:
-		r.State, r.Doubted, r.LastError = channelUncertain, true, reason
+		r.State, r.Doubted, r.LastError = channelUncertain, true, c.Reason
 	}
 	if s.save(r, now) != nil {
 		return false
 	}
-	return outcome == createAccepted
+	return c.Outcome == buzzop.Accepted
 }
 
 // lookup looks for the channel an uncertain create of r may have made, and
@@ -691,20 +687,18 @@ func (s *Server) lookup(r *channelRecord, now time.Time) bool {
 // returns those named r.Label that it owns and whose description holds
 // r.Reg. The list does not promise a description, so each candidate is read
 // with channels get. ok is false when any read failed, which proves nothing.
+//
+// The members of a candidate are read only once its description holds
+// r.Reg, so a channel of another registration never makes the answer
+// unknown. That is why each candidate is read here with channels get and
+// channels members, not with one ChannelFacts.
 func (s *Server) findChannels(r channelRecord) (ids []string, ok bool) {
-	out, err := s.call("channels", "list", "--member", "--visibility", "private")
-	var listed []struct {
-		ChannelID string `json:"channel_id"`
-		Name      string `json:"name"`
-	}
-	if err != nil || json.Unmarshal(out, &listed) != nil {
+	listed, err := s.buzz.FindChannels(s.lifeCtx(), r.Label)
+	if err != nil {
 		return nil, false
 	}
-	for _, c := range listed {
-		if c.Name != r.Label || !uuidRe.MatchString(c.ChannelID) {
-			continue
-		}
-		out, err := s.call("channels", "get", "--channel", c.ChannelID)
+	for _, id := range listed {
+		out, err := s.call("channels", "get", "--channel", id)
 		var got struct {
 			Description string `json:"description"`
 		}
@@ -714,20 +708,15 @@ func (s *Server) findChannels(r channelRecord) (ids []string, ok bool) {
 		if !strings.Contains(got.Description, r.Reg) {
 			continue
 		}
-		owner, known := s.ownerOf(s.call("channels", "members", "--channel", c.ChannelID))
+		owner, known := s.ownerOf(s.call("channels", "members", "--channel", id))
 		if !known {
 			return nil, false
 		}
 		if owner {
-			ids = append(ids, strings.ToLower(c.ChannelID))
+			ids = append(ids, strings.ToLower(id))
 		}
 	}
 	return ids, true
-}
-
-// accepted is buzzcli.WriteError for a write that prints the write response.
-func accepted(out []byte, err error) error {
-	return buzzcli.WriteError(buzzcli.ShapeAccepted, out, err)
 }
 
 // acceptedFor reports whether the CLI write named by args succeeded. The
@@ -770,7 +759,7 @@ func (s *Server) finishSetup(r *channelRecord, now time.Time) {
 	if r.LastError != "" && !due(r.LastTry, channelStepGap, now) {
 		return
 	}
-	step := func(done *bool, args ...string) bool {
+	step := func(done *bool, write func() buzzop.Result) bool {
 		if *done {
 			return true
 		}
@@ -778,19 +767,25 @@ func (s *Server) finishSetup(r *channelRecord, now time.Time) {
 			return false
 		}
 		r.LastTry = now.UTC().Format(time.RFC3339)
-		if err := accepted(s.call(args...)); err != nil {
-			r.LastError = err.Error()
+		if res := write(); res.Outcome != buzzop.Accepted {
+			r.LastError = res.Reason
 			_ = s.save(r, now)
 			return false
 		}
 		*done, r.LastError = true, ""
 		return s.save(r, now) == nil
 	}
-	if !step(&r.OwnerAdded, "channels", "add-member", "--channel", r.ChannelID, "--pubkey", s.id.Owner, "--role", "admin") {
+	ctx := s.lifeCtx()
+	if !step(&r.OwnerAdded, func() buzzop.Result {
+		return s.buzz.AddMember(ctx, buzzop.Key("member/"+r.Reg+"/"+s.id.Owner), r.ChannelID, s.id.Owner, "admin")
+	}) {
 		return
 	}
 	welcome := "AMQ Remote: this channel reaches " + r.Label + ". Write here to talk to that session."
-	if !step(&r.Welcomed, "messages", "send", "--channel", r.ChannelID, "--content", welcome, "--mention", s.id.Owner) {
+	if !step(&r.Welcomed, func() buzzop.Result {
+		return s.buzz.Send(ctx, buzzop.Message{Key: buzzop.Key("welcome/" + r.Reg), Channel: r.ChannelID,
+			Content: welcome, Mention: s.id.Owner})
+	}) {
 		return
 	}
 	if !s.stillServes(*r, now) {
@@ -996,14 +991,15 @@ func (s *Server) cleanRetired(r channelRecord, now time.Time) {
 		return
 	}
 	r.LastTry = now.UTC().Format(time.RFC3339)
-	fail := func(err error) {
-		r.LastError = err.Error()
+	fail := func(reason string) {
+		r.LastError = reason
 		_ = s.save(&r, now)
 	}
+	ctx := s.lifeCtx()
 	if r.inDoubt() {
 		ids, ok := s.findChannels(r)
 		if !ok {
-			fail(errors.New("could not look for the channel of an uncertain create"))
+			fail("could not look for the channel of an uncertain create")
 			return
 		}
 		if len(ids) == 0 {
@@ -1025,14 +1021,15 @@ func (s *Server) cleanRetired(r channelRecord, now time.Time) {
 		if r.RetiredBy == retiredDetached {
 			text = "Disconnected: " + r.Label + ". This channel no longer reaches it until the session connects again."
 		}
-		_ = accepted(s.call("messages", "send", "--channel", r.ChannelID, "--content", text))
+		_ = s.buzz.Send(ctx, buzzop.Message{Key: retiredKey("ended", r), Channel: r.ChannelID, Content: text})
 	}
 	for len(r.Orphans) > 0 {
 		if s.stopped() {
 			return
 		}
-		if err := accepted(s.call("channels", "archive", "--channel", r.Orphans[0])); err != nil {
-			fail(err)
+		key := buzzop.Key("archive-orphan/" + r.Reg + "/" + r.Orphans[0])
+		if res := s.buzz.SetArchived(ctx, key, r.Orphans[0], true); res.Outcome != buzzop.Accepted {
+			fail(res.Reason)
 			return
 		}
 		r.Orphans = r.Orphans[1:]
@@ -1048,8 +1045,8 @@ func (s *Server) cleanRetired(r channelRecord, now time.Time) {
 		if s.save(&r, now) != nil {
 			return
 		}
-		if err := accepted(s.call("channels", "archive", "--channel", r.ChannelID)); err != nil {
-			fail(err)
+		if res := s.buzz.SetArchived(ctx, retiredKey("archive", r), r.ChannelID, true); res.Outcome != buzzop.Accepted {
+			fail(res.Reason)
 			return
 		}
 	}
@@ -1140,8 +1137,8 @@ func (s *Server) restore(b binding.Binding, now time.Time) bool {
 			return true
 		}
 		r.LastTry = now.UTC().Format(time.RFC3339)
-		if err := accepted(s.call("channels", "unarchive", "--channel", r.ChannelID)); err != nil && !notArchived(err) {
-			r.LastError = err.Error()
+		if res := s.buzz.SetArchived(s.lifeCtx(), retiredKey("unarchive", r), r.ChannelID, false); res.Outcome != buzzop.Accepted && !notArchived(res) {
+			r.LastError = res.Reason
 			_ = s.save(&r, now)
 			return true
 		}
@@ -1160,7 +1157,8 @@ func (s *Server) restore(b binding.Binding, now time.Time) bool {
 	// A leftover retired copy (a stop before this removal is durable) is
 	// dropped by sweepRetired: the active record of its reg supersedes it.
 	_ = s.removeDurably(retiredPath)
-	_ = accepted(s.call("messages", "send", "--channel", r.ChannelID, "--content", "Connected again: "+r.Label+"."))
+	_ = s.buzz.Send(s.lifeCtx(), buzzop.Message{Key: retiredKey("returned", r), Channel: r.ChannelID,
+		Content: "Connected again: " + r.Label + "."})
 	return true
 }
 
@@ -1169,8 +1167,8 @@ func (s *Server) restore(b binding.Binding, now time.Time) bool {
 // archive recorded as sent never reached the relay, or the channel was
 // unarchived since. A failure that proves nothing, such as a timeout, is not
 // one.
-func notArchived(err error) bool {
-	return err != nil && strings.Contains(strings.ToLower(err.Error()), "channel is not archived")
+func notArchived(res buzzop.Result) bool {
+	return res.Outcome != buzzop.Accepted && strings.Contains(strings.ToLower(res.Reason), "channel is not archived")
 }
 
 // resetRequest asks the leader to retire the record with Reg and make a
