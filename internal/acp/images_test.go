@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
 )
 
 // imagePrompt is a buzz-acp prompt whose event carries one imeta tag.
@@ -170,9 +172,9 @@ func TestAttachImagesStopsADownloadPastTheCap(t *testing.T) {
 	if err := os.WriteFile(cli, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv(envBuzzCLI, cli)
-	savedID := buzzIdentity
-	buzzIdentity = []string{"BUZZ_PRIVATE_KEY=test"}
+	t.Setenv(buzzcli.EnvCLI, cli)
+	savedID := buzzPort
+	buzzPort = buzzcli.New([]string{"BUZZ_PRIVATE_KEY=test"})
 	sha := strings.Repeat("e", 64)
 	root, prompt := canonicalTempDir(t), imagePrompt("https://relay.example/"+sha+".png", sha, 100)
 	done := make(chan string, 1)
@@ -183,7 +185,7 @@ func TestAttachImagesStopsADownloadPastTheCap(t *testing.T) {
 	t.Cleanup(func() {
 		if !timedOut {
 			<-done
-			buzzIdentity = savedID
+			buzzPort = savedID
 			return
 		}
 		if raw, err := os.ReadFile(pidFile); err == nil {
@@ -194,7 +196,7 @@ func TestAttachImagesStopsADownloadPastTheCap(t *testing.T) {
 			}
 		}
 		<-done
-		buzzIdentity = savedID
+		buzzPort = savedID
 	})
 	select {
 	case got := <-done:

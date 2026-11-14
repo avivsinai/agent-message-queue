@@ -17,6 +17,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/mirror"
 )
@@ -710,7 +711,7 @@ func (s *Server) mirrorSend(dir string, t dialogTarget, b binding.Binding, st *m
 			i++
 			continue
 		}
-		if neverSent(err) {
+		if buzzcli.NeverSent(err) {
 			s.mirrorBackOff(t.name, now)
 			return false
 		}
@@ -822,7 +823,7 @@ func (s *Server) mirrorPost(claim string, t dialogTarget, b binding.Binding, tur
 		return "", err
 	}
 	id, err := postAnswer(t.channel, p.Text, s.cfg.PostTimeout)
-	if neverSent(err) {
+	if buzzcli.NeverSent(err) {
 		_ = os.Remove(claim)
 		return "", err
 	}
@@ -972,10 +973,10 @@ func fromBuzz(b binding.Binding, id string) bool {
 
 // mirrorUnavailable posts the note once for each locator that cannot be
 // read. The note is recorded before it is posted, so it is attempted at
-// most once per locator; only a post proved not sent (notSentError) is
-// tried again. A relay refusal (accepted:false, *notAcceptedError) is an
-// ordinary failure and keeps the marker: re-posting against a refusing
-// relay would loop.
+// most once per locator; only a post proved not sent (buzzcli.NeverSent) is
+// tried again. A relay refusal (accepted:false,
+// *buzzcli.NotAcceptedError) is an ordinary failure and keeps the marker:
+// re-posting against a refusing relay would loop.
 func (s *Server) mirrorUnavailable(dir string, st *mirrorFile, key string, off bool) {
 	if off || st.Noted != nil && *st.Noted == key {
 		return
@@ -987,7 +988,7 @@ func (s *Server) mirrorUnavailable(dir string, st *mirrorFile, key string, off b
 		return
 	}
 	_, err := postAnswer(st.Channel, mirrorNote, s.cfg.PostTimeout)
-	if neverSent(err) {
+	if buzzcli.NeverSent(err) {
 		st.Noted = was
 	}
 }

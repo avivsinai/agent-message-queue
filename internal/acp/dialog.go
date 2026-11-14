@@ -22,6 +22,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzevent"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
@@ -131,7 +132,7 @@ var readReactions = reactionsWithBuzzCLI
 // reactionsWithBuzzCLI runs `buzz reactions get --event <id>`, which prints
 // {"reactions":[{"emoji","count","pubkeys"}]}.
 func reactionsWithBuzzCLI(eventID string, budget time.Duration) ([]reaction, error) {
-	out, err := runBuzzCLI(budget, nil, "reactions", "get", "--event", eventID)
+	out, err := buzzPort.Run(budget, nil, "reactions", "get", "--event", eventID)
 	if err != nil {
 		return nil, err
 	}
@@ -159,10 +160,11 @@ func reacted(rs []reaction, owner, emoji string) bool {
 var editMessage = editWithBuzzCLI
 
 // editWithBuzzCLI runs `buzz messages edit --event <id> --content <text>`.
-// A refused edit (accepted:false on exit 0) returns a *notAcceptedError.
+// A refused edit (accepted:false on exit 0) returns a
+// *buzzcli.NotAcceptedError.
 func editWithBuzzCLI(eventID, content string, budget time.Duration) error {
-	out, err := runBuzzCLI(budget, nil, "messages", "edit", "--event", eventID, "--content", content)
-	return writeError(shapeAccepted, out, err)
+	out, err := buzzPort.Run(budget, nil, "messages", "edit", "--event", eventID, "--content", content)
+	return buzzcli.WriteError(buzzcli.ShapeAccepted, out, err)
 }
 
 // dialogPost is the record of one posted dialog.
@@ -674,7 +676,7 @@ func (s *Server) postDialog(path string, t dialogTarget, req dialog.Request) {
 		return
 	}
 	id, err := postAnswer(t.channel, p.Text, s.cfg.PostTimeout)
-	if neverSent(err) {
+	if buzzcli.NeverSent(err) {
 		_ = os.Remove(path)
 		return
 	}

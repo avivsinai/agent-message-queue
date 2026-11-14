@@ -19,6 +19,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 )
@@ -269,7 +270,7 @@ func (s *Server) call(args ...string) ([]byte, error) {
 		ctx = context.Background()
 	}
 	if ctx.Err() != nil {
-		return nil, &notSentError{errMachineStopped}
+		return nil, &buzzcli.NotSentError{Err: errMachineStopped}
 	}
 	return machineCall(ctx, s.cfg.PostTimeout, args...)
 }
@@ -614,7 +615,7 @@ const (
 // accepted:true and a channel id. Only an outcome that proves no channel was
 // made (not sent, or rejected) is a refusal; anything else may have made one.
 func classifyCreate(out []byte, err error) (createOutcome, string, string) {
-	r := buzzResult(shapeAccepted, out, err)
+	r := buzzcli.Classify(buzzcli.ShapeAccepted, out, err)
 	if err != nil {
 		if r.Outcome == buzzop.NotSent || r.Outcome == buzzop.Rejected {
 			return createRefused, "", r.Reason
@@ -724,118 +725,9 @@ func (s *Server) findChannels(r channelRecord) (ids []string, ok bool) {
 	return ids, true
 }
 
-// notAcceptedError is a write the Buzz CLI reported with accepted:false,
-// or, for the NIP-IA archive/unarchive commands, a CLI run that did not
-// print their ok:true body.
-// The relay refused the operation: nothing was published by this call.
-// Callers must not advance lifecycle markers on this error.
-type notAcceptedError struct{ out string }
-
-func (e *notAcceptedError) Error() string { return "not accepted: " + e.out }
-
-// writeShape is what a buzz CLI write prints when it ran (block/buzz
-// f3b127e buzz-cli).
-type writeShape int
-
-const (
-	// shapeAccepted is the write response {event_id, accepted, message}.
-	shapeAccepted writeShape = iota
-	// shapeOK is {ok, event_id, action, target}, printed by agents archive
-	// and agents unarchive after the submit returned without error. They do
-	// not print the relay's accepted flag; exit 0 with ok:true is the
-	// strongest signal they give.
-	shapeOK
-)
-
-// buzzResult classifies what one buzz CLI write returned: its stdout, and
-// the error of the run or of the wrapper that made it.
-//
-//   - NotSent: no Buzz identity, or a run that failed before the CLI
-//     started (*notSentError). Nothing reached the relay.
-//   - Rejected: the relay refused this attempt: exit 1 (bad input), exit 3
-//     (auth), a *notAcceptedError, or exit 0 with accepted:false (ok:false
-//     for shapeOK).
-//   - Accepted: exit 0 with accepted:true (ok:true for shapeOK). An event id
-//     alone is no acceptance: the CLI prints the event id of a refused write
-//     too.
-//   - Unknown: anything else may have taken effect: a run cut off (a timeout
-//     or a signal), any other failure after the CLI started, output past its
-//     limit, or exit 0 whose output does not carry the flag.
-//
-// Reason is the error's text, else the trimmed stdout. EventID is the
-// event_id the output names, if any.
-func buzzResult(shape writeShape, out []byte, err error) buzzop.Result {
-	if err != nil {
-		r := buzzop.Result{Outcome: buzzop.Unknown, Reason: err.Error()}
-		var refused *notAcceptedError
-		var exit *buzzExitError
-		switch {
-		case neverSent(err):
-			r.Outcome = buzzop.NotSent
-		case errors.As(err, &refused), errors.As(err, &exit) && (exit.code == 1 || exit.code == 3):
-			r.Outcome = buzzop.Rejected
-		}
-		return r
-	}
-	r := buzzop.Result{Outcome: buzzop.Unknown, Reason: strings.TrimSpace(string(out))}
-	var flag *bool
-	if shape == shapeOK {
-		var res struct {
-			OK *bool `json:"ok"`
-		}
-		if json.Unmarshal(out, &res) == nil {
-			flag = res.OK
-		}
-	} else {
-		var res struct {
-			Accepted *bool `json:"accepted"`
-		}
-		if json.Unmarshal(out, &res) == nil {
-			flag = res.Accepted
-		}
-	}
-	switch {
-	case flag == nil:
-		return r
-	case !*flag:
-		r.Outcome = buzzop.Rejected
-	default:
-		r.Outcome, r.Reason = buzzop.Accepted, ""
-	}
-	var named struct {
-		EventID string `json:"event_id"`
-	}
-	if json.Unmarshal(out, &named) == nil {
-		r.EventID = named.EventID
-	}
-	return r
-}
-
-// neverSent reports that err proves the write did not reach the relay: no
-// Buzz identity, or a run that failed before the CLI started.
-func neverSent(err error) bool {
-	var notSent *notSentError
-	return errors.Is(err, errNoBuzzIdentity) || errors.As(err, &notSent)
-}
-
-// writeError is a write's error for a caller that acts only on success: nil
-// when it was accepted, the run's own error when it failed, else a
-// *notAcceptedError with the output. A refusal and an output without the
-// flag both are not accepted.
-func writeError(shape writeShape, out []byte, err error) error {
-	switch r := buzzResult(shape, out, err); {
-	case r.Outcome == buzzop.Accepted:
-		return nil
-	case err != nil:
-		return err
-	default:
-		return &notAcceptedError{out: r.Reason}
-	}
-}
-
-// accepted is writeError for a write that prints the write response.
+// accepted is buzzcli.WriteError for a write that prints the write response.
 func accepted(out []byte, err error) error {
-	return writeError(shapeAccepted, out, err)
+	return buzzcli.WriteError(buzzcli.ShapeAccepted, out, err)
 }
 
 // acceptedFor reports whether the CLI write named by args succeeded. The
@@ -859,9 +751,9 @@ func acceptedFor(args []string, out []byte, err error) error {
 			"channels create", "channels archive", "channels unarchive", "channels add-member",
 			"users set-status",
 			"agents draft-create":
-			return writeError(shapeAccepted, out, nil)
+			return buzzcli.WriteError(buzzcli.ShapeAccepted, out, nil)
 		case "agents archive", "agents unarchive":
-			return writeError(shapeOK, out, nil)
+			return buzzcli.WriteError(buzzcli.ShapeOK, out, nil)
 		}
 	}
 	return fmt.Errorf("buzz %s: response shape unknown to acceptedFor: %s",

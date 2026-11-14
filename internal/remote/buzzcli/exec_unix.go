@@ -1,6 +1,6 @@
 //go:build !windows && !aix
 
-package acp
+package buzzcli
 
 import "golang.org/x/sys/unix"
 

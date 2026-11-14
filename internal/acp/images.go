@@ -20,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
 )
 
 // An image the owner attaches in Buzz reaches the session as a local file.
@@ -187,10 +188,10 @@ func blobSHA(raw string) string {
 }
 
 // mediaGet downloads one relay file as the agent and fails with
-// errBuzzOutputLimit past limit bytes. A variable so tests can serve files
-// without a relay.
+// buzzcli.ErrOutputLimit past limit bytes. A variable so tests can serve
+// files without a relay.
 var mediaGet = func(budget time.Duration, limit int, rawURL string) ([]byte, error) {
-	return runBuzzCLIBounded(context.Background(), budget, nil, limit, "media", "get", rawURL)
+	return buzzPort.RunBounded(context.Background(), budget, nil, limit, "media", "get", rawURL)
 }
 
 // storeImage returns the stored file of m: the file already stored under its
@@ -225,7 +226,7 @@ func storeImage(root, relayURL, dir string, m eventMedia, deadline time.Time) (s
 		return "", errors.New("no time left to download it")
 	}
 	data, err := mediaGet(budget, remoteFileMax, m.url)
-	if errors.Is(err, errBuzzOutputLimit) {
+	if errors.Is(err, buzzcli.ErrOutputLimit) {
 		return "", errors.New("it is over the 20 MiB limit")
 	}
 	if err != nil {
