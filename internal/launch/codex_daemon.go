@@ -13,10 +13,9 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
-// CodexDaemonMinimumVersion is the first release whose explicit --remote
-// template was verified; the oldest whose native tickets and evidence stay
-// readable. Newer strict releases are admitted when the running Codex
-// itself confirms the facts AMQ needs (DaemonSeatReason below).
+// CodexDaemonMinimumVersion is the oldest release whose native tickets and
+// evidence stay readable, and the first whose explicit --remote template
+// was verified.
 const CodexDaemonMinimumVersion = "0.167.0"
 
 // ErrCodexConversationProvenance marks a daemon-captured conversation whose
@@ -258,27 +257,21 @@ func codexDaemonVersionReadable(version string) bool {
 }
 
 // DaemonSeatReason reports the CLI's answer to "can this Codex run the
-// daemon template AMQ plans" by probing `codex --help` and
-// `codex resume --help`. The probe sits next to Capabilities so the
-// resume help text is shared, never re-invoked; a returned non-empty
-// string is the one-line refusal reason to put in the plan.
+// daemon template AMQ plans" by reading the already-run probe of
+// `codex resume --help`. The returned reason is the plan's refusal text;
+// empty means the CLI admits the template.
 //
-// The empty reason means the seat MAY run through the shared daemon;
-// admission in codexlaunch still re-checks the running daemon's reported
-// release and the hook/config probes.
+// The CLI's own version tells us only whether the floor release is
+// present; the daemon's reported release is asked next, separately.
 func (adapter *CodexAdapter) DaemonSeatReason(ctx context.Context) (AdapterCapabilities, string) {
-	capabilities := adapter.Capabilities(ctx)
+	capabilities, resumeHelp := adapter.probeCapabilities(ctx)
 	if !capabilities.Available {
 		return capabilities, "the Codex CLI cannot be probed: " + capabilities.Reason
 	}
 	if !codexDaemonVersionReadable(capabilities.ProviderVersion) {
 		return capabilities, "Codex " + capabilities.ProviderVersion + " is not a release at or above " + CodexDaemonMinimumVersion + ", the first whose --remote attaches a seat to the local daemon"
 	}
-	resumeHelp, err := adapter.probe.Output(ctx, capabilities.Executable, "resume", "--help")
-	if err != nil {
-		return capabilities, "the Codex CLI cannot be probed: resume --help returned " + err.Error()
-	}
-	if !strings.Contains(string(resumeHelp), "--remote") || !strings.Contains(string(resumeHelp), "unix://") {
+	if !strings.Contains(string(resumeHelp), "--remote") || !strings.Contains(string(resumeHelp), "unix://PATH") {
 		return capabilities, "codex resume --help does not list --remote with a unix://PATH address"
 	}
 	return capabilities, ""

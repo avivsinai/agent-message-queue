@@ -105,7 +105,7 @@ func daemonResumeEndpoint(executable string, request launch.ResumeRequest) (remo
 		reason, reviewer, version = admission(executable, endpoint, request.Cwd)
 	}
 	if reason == "" {
-		reason = threadReasonWithVersion(endpoint.socket, request.Conversation.ID, request.Cwd, version)
+		reason = threadReason(endpoint.socket, request.Conversation.ID, request.Cwd, version)
 	}
 	return endpoint.remote, reviewer, provenanceRefusal(reason)
 }
@@ -119,10 +119,9 @@ func endpointReason(capture launch.ConversationCapture, sock string) string {
 	return ""
 }
 
-// threadReasonWithVersion requires the daemon at sock to read the thread
-// in its launch directory. version is the release admission observed on
-// this run's CLI probe, threaded in instead of the pinned floor.
-func threadReasonWithVersion(sock, thread, cwd, version string) string {
+// threadReason requires the daemon at sock, at the release admission
+// observed, to read the thread in its launch directory.
+func threadReason(sock, thread, cwd, version string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	got, err := codex.ReadThread(ctx, sock, thread, version)
@@ -355,7 +354,7 @@ func Acquire(root *fsq.DeliveryRoot, ticket launch.ExecutionTicket) (launch.Capt
 		}
 		reason := endpointReason(capture, sock)
 		if reason == "" {
-			reason = threadReasonWithVersion(sock, thread, ticket.Cwd, version)
+			reason = threadReason(sock, thread, ticket.Cwd, version)
 		}
 		if err := provenanceRefusal(reason); err != nil {
 			return launch.CaptureEvidence{}, fmt.Errorf("%w: %w", launch.ErrIdentityNotRequested, err)

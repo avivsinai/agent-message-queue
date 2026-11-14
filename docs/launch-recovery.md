@@ -141,25 +141,27 @@ again under the lease. It leaves all Codex threads, evidence, routing records,
 conversations, and launch journals untouched. Cleanup does not require the old
 executable or daemon to remain available. Tickets and evidence from an earlier
 supported Codex release stay readable after an upgrade, so inspection and
-cleanup still work; only the current release runs a new or recovered
-execution. Recovery refusals use exit 6 and name the retry or cleanup command.
+cleanup still work. A release at or above 0.167.0 runs a new or recovered
+execution when the daemon reports the same release as the CLI. After a Codex
+upgrade a managed seat is terminal-only until the owner restarts the daemon;
+AMQ restarts nothing. Recovery refusals use exit 6 and name the retry or
+cleanup command.
 
 Every execution attempt, including recovery, checks inherited native-backend
 exclusions and runs the full startup admission on the bound daemon before
-publishing routing: provider-version probe, sign-in, daemon-version probe,
-hook trust, terminal instructions, managed update requirements, and the
-seat's `--remote` matching the verified local socket. The daemon's reported
-release must equal the CLI's, read live; the floor release for the daemon
-template is `0.167.0`. A recovered
-execution that fails admission keeps its acquired thread; it never creates a
-replacement.
+publishing routing: provider release, sign-in, directory trust, daemon
+release, hook trust, terminal instructions, managed update requirements,
+and the seat's `--remote` matching the verified local socket. The daemon's
+reported release must equal the CLI's, read live; the floor release for
+the daemon template is `0.167.0`. A recovered execution that fails admission
+keeps its acquired thread; it never creates a replacement.
 
 A conversation resumes on the backend that created it; launch never moves it
 implicitly. A conversation captured by notify resumes embedded. One whose
 capture is `codex_daemon_thread_v1` resumes on the daemon when the launch
 options are admitted, the daemon is eligible, the daemon listens at the socket
 that captured the thread, and it reads the thread in the launch directory at
-the verified version on the same session. The socket path is fixed by the
+in the launch directory at the release of the installed Codex on the same session. The socket path is fixed by the
 canonical `CODEX_HOME`. A restarted daemon at that socket is a successor; a
 daemon at another socket is not, even when it answers with the same thread.
 Static admission, including executable containment, completes before any probe

@@ -88,17 +88,21 @@ func (adapter *CodexAdapter) ValidateCommittedConfig(request CommittedConfigRequ
 	return validateCommittedConfig(request, codexEnvRules(), codexArgRules())
 }
 
-func (adapter *CodexAdapter) Capabilities(ctx context.Context) AdapterCapabilities {
+// probe returns the Codex CLI's standard capability report, plus the
+// `codex resume --help` text its daemon-attach grammar check reads once;
+// the help is reused so no subprocess is called twice. Capabilities ignores
+// the help text; DaemonSeatReason reads it.
+func (adapter *CodexAdapter) probeCapabilities(ctx context.Context) (AdapterCapabilities, []byte) {
 	result := AdapterCapabilities{Provider: CodexProvider, Mode: adapter.Mode()}
 	executable, err := adapter.probe.LookPath(adapter.executable)
 	if err != nil {
 		result.Reason = "executable_not_found"
-		return result
+		return result, nil
 	}
 	version, err := adapter.probe.Output(ctx, executable, "--version")
 	if err != nil {
 		result.Reason = "version_probe_failed"
-		return result
+		return result, nil
 	}
 	help, helpErr := adapter.probe.Output(ctx, executable, "--help")
 	resumeHelp, resumeErr := adapter.probe.Output(ctx, executable, "resume", "--help")
@@ -106,7 +110,7 @@ func (adapter *CodexAdapter) Capabilities(ctx context.Context) AdapterCapabiliti
 		!strings.Contains(string(help), "resume") ||
 		!strings.Contains(string(resumeHelp), "[SESSION_ID]") {
 		result.Reason = "identity_contract_unsupported"
-		return result
+		return result, nil
 	}
 	result.Available = true
 	result.Executable = executable
@@ -114,15 +118,20 @@ func (adapter *CodexAdapter) Capabilities(ctx context.Context) AdapterCapabiliti
 	if result.ProviderVersion == "" {
 		result.Available = false
 		result.Reason = "version_probe_failed"
-		return result
+		return result, nil
 	}
 	result.Fresh = true
 	result.Resume = true
 	if !codexCaptureVersionSupported(result.ProviderVersion) {
 		result.Reason = "capture_version_unsupported"
-		return result
+		return result, nil
 	}
 	result.Capture = true
+	return result, resumeHelp
+}
+
+func (adapter *CodexAdapter) Capabilities(ctx context.Context) AdapterCapabilities {
+	result, _ := adapter.probeCapabilities(ctx)
 	return result
 }
 
