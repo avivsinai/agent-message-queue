@@ -8,6 +8,18 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.144.0](https://github.com/avivsinai/agent-message-queue/compare/v0.143.3...v0.144.0) (2026-11-14)
+
+
+### Features
+
+* **send:** a sender is told when a request gets no reply in time ([#1490](https://github.com/avivsinai/agent-message-queue/issues/1490)) ([6d73a30](https://github.com/avivsinai/agent-message-queue/commit/6d73a30dc56fc95d17595654386d8c3ce9198862))
+
+
+### Bug Fixes
+
+* **launch:** a managed Codex seat uses the shared daemon on any Codex from 0.167.0 ([#1493](https://github.com/avivsinai/agent-message-queue/issues/1493)) ([e19b63d](https://github.com/avivsinai/agent-message-queue/commit/e19b63d32c30ff40a4a1bf6ccd36aab9d997ff56))
+
 ## [0.143.3](https://github.com/avivsinai/agent-message-queue/compare/v0.143.2...v0.143.3) (2026-11-14)
 
 
