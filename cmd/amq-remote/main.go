@@ -49,6 +49,11 @@ Commands:
   share --session ID       Mint the session body key and print its NIP-OA
                            preimage for the owner to sign (--renew reprints,
                            --tag-file enrolls the signed tag)
+  machine request [--valid-for D] [--name N] [--agent K]
+                           Make or reuse this machine's agent key and print
+                           its grant request for amq-owner-sign --machine
+  machine enroll --grant FILE
+                           Enroll the owner-signed machine grant
   attach --self            Bind your AMQ Remote Buzz agent to the session this
                            runs in (starts the endpoint when none runs)
   detach --self|--name N|--all
@@ -289,6 +294,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "share":
 		code, err = share(rest, stdout, stderr)
 		return finish(stdout, stderr, nil, false, code, err)
+	case "machine":
+		return machineCommand(rest, stdout, stderr)
 	case "attach":
 		code, err = attach(rest, stdout, stderr, probe)
 	case "detach":

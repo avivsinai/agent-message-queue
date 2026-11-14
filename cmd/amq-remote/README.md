@@ -51,6 +51,8 @@ amq-remote cancel REQUEST_REF
 amq-remote requests
 amq-remote requests release REQUEST_REF [--yes]
 amq-remote share --session ID
+amq-remote machine request [--valid-for DURATION] [--name NAME] [--agent PUBKEY]
+amq-remote machine enroll --grant FILE
 amq-remote attach --self [--native | --link NAME]
 amq-remote detach --self | --name NAME | --all
 amq-remote bindings
@@ -89,6 +91,15 @@ the endpoint has no record yet. `requests` does not use that socket: it reads
 the local request store and the sender spool directly, including while the
 endpoint is down.
 `share` mints or enrolls a session body key and does not start the endpoint.
+`machine request` makes the machine agent's key under
+`~/.amq/remote/machine/<agent pubkey>/`, or reuses the one key there (pass
+`--agent` when there is more than one), and prints a grant request for
+`amq-owner-sign --machine FILE --out FILE --relay URL`, which the owner runs in
+their own terminal. `--valid-for` is 1h to 2160h (90 days, the default).
+`machine enroll --grant FILE` checks the signed grant against the agent key
+and stores it; it prints the agent key, the owner key and the end date. The
+grant lets the agent key act as the owner's Buzz agent for every event kind,
+and it ends at the printed date.
 `version` prints `amq-remote <version>`. The `claude` commands install and
 remove the Claude Code hooks (see [Claude Code](#claude-code)); the usage
 banner does not list them.
