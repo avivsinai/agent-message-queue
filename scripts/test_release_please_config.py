@@ -59,6 +59,15 @@ def test_release_please_workflow_is_pr_only_and_staged() -> None:
     # Run 40179756056: requesting Issues write rejected the App token. The
     # installed App uses Contents and Pull requests; PR write covers labels.
     assert "permission-issues:" not in workflow
+    # Run 43482410324 (v0.143.0, 2026-11-13): the dispatch re-run publish
+    # skipped release.yml's push-only label step, so release-please.yml had to
+    # flip the label itself for the first time and 403'd. labels on a PR need
+    # pull-requests: write; issues: write does not cover them.
+    top_permissions = workflow[
+        workflow.index("\npermissions:\n") : workflow.index("\nconcurrency:")
+    ]
+    assert "pull-requests: write" in top_permissions
+    assert "issues:" not in top_permissions
     assert "cancel-in-progress: false" in workflow
     assert 'workflows: ["Release"]' in workflow
     assert "branches: [main]" not in workflow

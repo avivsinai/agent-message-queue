@@ -15,10 +15,11 @@ on:
     workflows: ["Release"]
     types: [completed]
 
+# A label on a pull request needs pull-requests: write; issues: write does
+# not grant it (GitHub separation of scopes).
 permissions:
   contents: read
-  issues: write
-  pull-requests: read
+  pull-requests: write
 
 concurrency:
   group: >-
