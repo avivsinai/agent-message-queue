@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.143.2](https://github.com/avivsinai/agent-message-queue/compare/v0.143.1...v0.143.2) (2026-11-14)
+
+
+### Bug Fixes
+
+* **remote:** the machine agent runs only a file named exactly buzz ([e4dea70](https://github.com/avivsinai/agent-message-queue/commit/e4dea70dd835399d66ba1c88673b6b3e56f616e8))
+* **remote:** the machine agent runs only a file named exactly buzz ([#1486](https://github.com/avivsinai/agent-message-queue/issues/1486)) ([e4dea70](https://github.com/avivsinai/agent-message-queue/commit/e4dea70dd835399d66ba1c88673b6b3e56f616e8))
+
 ## [0.143.1](https://github.com/avivsinai/agent-message-queue/compare/v0.143.0...v0.143.1) (2026-11-14)
 
 
