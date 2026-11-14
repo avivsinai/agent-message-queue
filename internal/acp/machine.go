@@ -767,11 +767,10 @@ const (
 func buzzResult(shape writeShape, out []byte, err error) buzzop.Result {
 	if err != nil {
 		r := buzzop.Result{Outcome: buzzop.Unknown, Reason: err.Error()}
-		var notSent *notSentError
 		var refused *notAcceptedError
 		var exit *buzzExitError
 		switch {
-		case errors.Is(err, errNoBuzzIdentity), errors.As(err, &notSent):
+		case neverSent(err):
 			r.Outcome = buzzop.NotSent
 		case errors.As(err, &refused), errors.As(err, &exit) && (exit.code == 1 || exit.code == 3):
 			r.Outcome = buzzop.Rejected
@@ -810,6 +809,13 @@ func buzzResult(shape writeShape, out []byte, err error) buzzop.Result {
 		r.EventID = named.EventID
 	}
 	return r
+}
+
+// neverSent reports that err proves the write did not reach the relay: no
+// Buzz identity, or a run that failed before the CLI started.
+func neverSent(err error) bool {
+	var notSent *notSentError
+	return errors.Is(err, errNoBuzzIdentity) || errors.As(err, &notSent)
 }
 
 // writeError is a write's error for a caller that acts only on success: nil

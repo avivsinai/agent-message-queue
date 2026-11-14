@@ -674,7 +674,7 @@ func (s *Server) postDialog(path string, t dialogTarget, req dialog.Request) {
 		return
 	}
 	id, err := postAnswer(t.channel, p.Text, s.cfg.PostTimeout)
-	if buzzResult(shapeAccepted, nil, err).Outcome == buzzop.NotSent {
+	if neverSent(err) {
 		_ = os.Remove(path)
 		return
 	}

@@ -446,7 +446,7 @@ func (s *Server) recordFinal(eventID, result string, err error) string {
 	}
 	state := finalPostAccepted
 	switch {
-	case buzzResult(shapeAccepted, nil, err).Outcome == buzzop.NotSent:
+	case neverSent(err):
 		state = finalPostUnsent
 	case err != nil:
 		state = finalPostUncertain

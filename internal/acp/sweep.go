@@ -13,7 +13,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
-	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 )
 
 // lateReplyInterval is how often an open ACP stream sweeps for late replies.
@@ -442,7 +441,7 @@ func (s *Server) resendFinal(c *lateClaim) {
 			return err
 		}
 		result, err := s.post(c.channel, text)
-		if buzzResult(shapeAccepted, nil, err).Outcome == buzzop.NotSent {
+		if neverSent(err) {
 			if err := os.Rename(sending, unsent); err != nil {
 				return err
 			}
