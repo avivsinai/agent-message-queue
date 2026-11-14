@@ -973,8 +973,11 @@ func fromBuzz(b binding.Binding, id string) bool {
 }
 
 // mirrorUnavailable posts the note once for each locator that cannot be
-// read. The note is recorded before it is posted, so it is posted at most
-// once; a post proved not sent is tried again.
+// read. The note is recorded before it is posted, so it is attempted at
+// most once per locator; only a post proved not sent (notSentError) is
+// tried again. A relay refusal (accepted:false, *notAcceptedError) is an
+// ordinary failure and keeps the marker: re-posting against a refusing
+// relay would loop.
 func (s *Server) mirrorUnavailable(dir string, st *mirrorFile, key string, off bool) {
 	if off || st.Noted != nil && *st.Noted == key {
 		return

@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -32,7 +33,9 @@ func TestPinnedAgentArchivesAndReturnsWithItsBinding(t *testing.T) {
 	var calls []string
 	buzzCall = func(_ time.Duration, args ...string) ([]byte, error) {
 		calls = append(calls, strings.Join(args, " "))
-		return nil, nil
+		// Real Buzz CLI writes return {accepted:true}. bare-archive nil
+		// output is rejected by buzzRun since fix/buzz-write-acceptance.
+		return []byte(`{"accepted":true}`), nil
 	}
 	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t)}, "test")
 
@@ -73,7 +76,7 @@ func TestTwoAgentsOnOnePinEachChangeOnce(t *testing.T) {
 	var calls []string
 	buzzCall = func(_ time.Duration, args ...string) ([]byte, error) {
 		calls = append(calls, buzzSelf[:1]+" "+strings.Join(args[:2], " "))
-		return nil, nil
+		return []byte(`{"accepted":true}`), nil
 	}
 	state := canonicalTempDir(t)
 	a := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: state}, "test")
@@ -135,7 +138,7 @@ func TestIdenticalWorkersChangeTheAgentOnce(t *testing.T) {
 			reentered = true
 			b.lifecycleTick(time.Now()) // b ticks while a's archive runs
 		}
-		return nil, nil
+		return []byte(`{"accepted":true}`), nil
 	}
 
 	if _, err := binding.Retire(binding.RemovedDetached, func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
@@ -243,7 +246,7 @@ func recordHelperCalls(calls *[]string, control string) func(time.Duration, ...s
 		case "channels add-member":
 			return []byte(`{"accepted":true}`), nil
 		}
-		return nil, nil
+		return []byte(`{"accepted":true}`), nil
 	}
 }
 
@@ -287,4 +290,43 @@ func TestHelperDraftsOneSessionPerWindow(t *testing.T) {
 	if got := drafts(); !slices.Equal(got, []string{"alpha", "beta"}) {
 		t.Fatalf("drafts after the next window = %q; want beta next", got)
 	}
+}
+
+// Review finding fix/buzz-write-acceptance: a write the Buzz relay refused
+// (accepted:false on exit 0) is not a delivered write. postWithBuzzCLI used
+// to return the event id anyway; buzzRun used to return nil. accepted()
+// now reports a *notAcceptedError; buzzRun returns it; postWithBuzzCLI
+// returns "" and the error. The error MUST NOT match notSentError: that
+// sentinel means 'never reached the relay' and is the sole marker-revert
+// case in mirrorUnavailable.
+func TestBuzzWriteAcceptanceRefusalsAreFailures(t *testing.T) {
+	t.Run("accepted() turns a refused write into an ordinary error", func(t *testing.T) {
+		err := accepted([]byte(`{"event_id":"deadbeef","accepted":false,"message":"duplicate"}`), nil)
+		if err == nil {
+			t.Fatal("accepted() with accepted:false returned nil")
+		}
+		var na *notAcceptedError
+		if !errors.As(err, &na) {
+			t.Fatalf("accepted() returned %T; want *notAcceptedError", err)
+		}
+		var notSent *notSentError
+		if errors.As(err, &notSent) {
+			t.Fatal("a refused write must NOT be a notSentError: notSentError means 'never reached the relay' and is the only revert case for lifecycle markers")
+		}
+	})
+	t.Run("accepted() still passes an accepted write through", func(t *testing.T) {
+		if err := accepted([]byte(`{"event_id":"deadbeef","accepted":true}`), nil); err != nil {
+			t.Fatalf("accepted() with accepted:true returned %v", err)
+		}
+	})
+	t.Run("buzzRun returns an error on a refused write", func(t *testing.T) {
+		saved := buzzCall
+		t.Cleanup(func() { buzzCall = saved })
+		buzzCall = func(time.Duration, ...string) ([]byte, error) {
+			return []byte(`{"event_id":"deadbeef","accepted":false,"message":"duplicate"}`), nil
+		}
+		if err := buzzRun(time.Second, "agents", "archive", buzzSelf, "--reason", "test"); err == nil {
+			t.Fatal("buzzRun accepted a refused write")
+		}
+	})
 }

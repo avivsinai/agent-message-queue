@@ -215,10 +215,15 @@ func agentRelay(url, secret, authTag string) relay.Config {
 
 // postWithBuzzCLI runs `buzz messages send --channel <channel> --content -`
 // with only the agent identity and a minimal environment, and returns the
-// event_id the CLI prints.
+// event_id the CLI prints. A refused write (accepted:false, exit 0) still
+// prints event_id, so this function calls accepted() first and
+// returns a *notAcceptedError when the relay refused.
 func postWithBuzzCLI(channel, content string, budget time.Duration) (string, error) {
 	out, err := runBuzzCLI(budget, strings.NewReader(content), "messages", "send", "--channel", channel, "--content", "-")
 	if err != nil {
+		return "", err
+	}
+	if err := accepted(out, nil); err != nil {
 		return "", err
 	}
 	var sent struct {

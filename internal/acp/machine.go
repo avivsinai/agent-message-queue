@@ -756,6 +756,14 @@ func (s *Server) findChannels(r channelRecord) (ids []string, ok bool) {
 	return ids, true
 }
 
+// notAcceptedError is a write the Buzz CLI reported with accepted:false.
+// The relay refused the operation: nothing was published. An event id an
+// older CLI may have printed alongside is no evidence of acceptance.
+// Lifecycle markers must not be advanced on this error.
+type notAcceptedError struct{ out string }
+
+func (e *notAcceptedError) Error() string { return "not accepted: " + e.out }
+
 // accepted reports whether a write command succeeded: exit 0 and the relay
 // said accepted:true. An event id alone is no acceptance: the CLI prints the
 // event id of a write the relay refused too.
@@ -767,7 +775,7 @@ func accepted(out []byte, err error) error {
 		Accepted bool `json:"accepted"`
 	}
 	if json.Unmarshal(out, &res) != nil || !res.Accepted {
-		return fmt.Errorf("not accepted: %s", strings.TrimSpace(string(out)))
+		return &notAcceptedError{out: strings.TrimSpace(string(out))}
 	}
 	return nil
 }

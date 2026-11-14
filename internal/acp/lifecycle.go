@@ -343,10 +343,11 @@ var machineCall = func(ctx context.Context, budget time.Duration, args ...string
 	return runBuzzCLIContext(ctx, budget, nil, args...)
 }
 
-// buzzRun is buzzCall when only the outcome matters.
+// buzzRun is buzzCall for one CLI write whose outcome matters. The relay's
+// accepted:false, even on exit 0, is a failed write.
 func buzzRun(budget time.Duration, args ...string) error {
-	_, err := buzzCall(budget, args...)
-	return err
+	out, err := buzzCall(budget, args...)
+	return accepted(out, err)
 }
 
 // lifecycleTick keeps a pinned agent's Buzz identity in step with its
