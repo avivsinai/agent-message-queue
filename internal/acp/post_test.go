@@ -129,6 +129,31 @@ func TestBuzzCLIOnlyVerifiedBundle(t *testing.T) {
 		}
 		refused(t, link, home)
 	})
+	// Field defect 2026-11-14: Buzz Desktop 1.0.2 ships
+	// /Applications/Buzz.app/Contents/MacOS/Buzz (only the GUI binary, no
+	// "buzz" CLI). On a case-insensitive volume the path lookup for "buzz"
+	// resolves to "Buzz", EvalSymlinks returns the path as given, and the
+	// key went to the wrong program. The new entry-name check rejects it.
+	// The pre-fix failure of this row only reproduces on a case-insensitive
+	// volume (macOS, this Mac); on an ext4 Linux runner the path lookup
+	// already failed and bundledBuzz returned "" for the wrong reason.
+	t.Run("an entry Buzz without buzz is not the CLI", func(t *testing.T) {
+		sys, home := realDir(t), realDir(t)
+		wrongBin := filepath.Join(sys, "Buzz.app", "Contents", "MacOS", "Buzz")
+		if err := os.MkdirAll(filepath.Dir(wrongBin), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(wrongBin, []byte("#!/bin/sh\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if got := bundledBuzz(filepath.Join(sys, "Buzz.app")); got != "" {
+			t.Fatalf("bundledBuzz = %q; want \"\" (entry Buzz, no buzz)", got)
+		}
+		want := writeBundle(t, filepath.Join(home, "Applications"))
+		if got, err := buzzCLIFrom(sys, home); err != nil || got != want {
+			t.Fatalf("buzzCLIFrom = %q, %v; want the home CLI %q", got, err, want)
+		}
+	})
 }
 
 // Regression: #961, a Buzz CLI whose child kept

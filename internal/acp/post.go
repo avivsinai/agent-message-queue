@@ -366,8 +366,28 @@ func buzzCLIFrom(systemApps, home string) (string, error) {
 // CLI is a regular file, and this process can execute it. The installation and
 // its parent directories are trusted against concurrent replacement: pathname
 // validation is not atomic with exec.
+//
+// The CLI file is named exactly "buzz" (byte for byte). A file whose name
+// differs only in case (for example the Buzz Desktop GUI binary "Buzz") is
+// another program and never gets the key, so the entry is looked up in the
+// directory listing, not by a case-insensitive path resolution.
 func bundledBuzz(app string) string {
-	path := filepath.Join(app, "Contents", "MacOS", "buzz")
+	macos := filepath.Join(app, "Contents", "MacOS")
+	entries, err := os.ReadDir(macos)
+	if err != nil {
+		return ""
+	}
+	found := false
+	for _, e := range entries {
+		if e.Name() == "buzz" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return ""
+	}
+	path := filepath.Join(macos, "buzz")
 	real, err := filepath.EvalSymlinks(path)
 	if err != nil || real != filepath.Clean(path) {
 		return ""
