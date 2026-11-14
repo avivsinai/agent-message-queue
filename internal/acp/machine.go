@@ -690,8 +690,7 @@ func (s *Server) lookup(r *channelRecord, now time.Time) bool {
 //
 // The members of a candidate are read only once its description holds
 // r.Reg, so a channel of another registration never makes the answer
-// unknown. That is why each candidate is read here with channels get and
-// channels members, not with one ChannelFacts.
+// unknown.
 func (s *Server) findChannels(r channelRecord) (ids []string, ok bool) {
 	listed, err := s.buzz.FindChannels(s.lifeCtx(), r.Label)
 	if err != nil {

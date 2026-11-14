@@ -119,37 +119,3 @@ func (o Ops) FindChannels(ctx context.Context, name string) ([]string, error) {
 	}
 	return ids, nil
 }
-
-// ChannelFacts reads channel's name, description and member roles. The CLI
-// does not say whether a channel is private or archived, so both stay
-// TriUnknown. A failed run or unreadable output is an error, which proves
-// nothing.
-func (o Ops) ChannelFacts(ctx context.Context, channel string) (buzzop.ChannelFacts, error) {
-	out, err := o.Exec(ctx, nil, "channels", "get", "--channel", channel)
-	if err != nil {
-		return buzzop.ChannelFacts{}, err
-	}
-	var got struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
-	}
-	if err := json.Unmarshal(out, &got); err != nil {
-		return buzzop.ChannelFacts{}, fmt.Errorf("buzz channels get: unreadable output: %w", err)
-	}
-	out, err = o.Exec(ctx, nil, "channels", "members", "--channel", channel)
-	if err != nil {
-		return buzzop.ChannelFacts{}, err
-	}
-	var members []struct {
-		PubKey string `json:"pubkey"`
-		Role   string `json:"role"`
-	}
-	if err := json.Unmarshal(out, &members); err != nil {
-		return buzzop.ChannelFacts{}, fmt.Errorf("buzz channels members: unreadable output: %w", err)
-	}
-	f := buzzop.ChannelFacts{Channel: channel, Name: got.Name, About: got.Description, Roles: map[string]string{}}
-	for _, m := range members {
-		f.Roles[m.PubKey] = m.Role
-	}
-	return f, nil
-}
