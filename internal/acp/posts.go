@@ -17,7 +17,6 @@ type posts interface {
 	Send(ctx context.Context, m buzzop.Message) buzzop.Result
 	Edit(ctx context.Context, key buzzop.Key, channel, eventID, content string) buzzop.Result
 	Reactions(ctx context.Context, eventID string) ([]buzzop.Reaction, error)
-	Media(ctx context.Context, url string, limit int) ([]byte, error)
 }
 
 // cliPosts are posts through the buzz CLI. The CLI chooses each event, so
@@ -52,10 +51,6 @@ func (c cliPosts) Reactions(ctx context.Context, eventID string) ([]buzzop.React
 		out[i] = buzzop.Reaction(r)
 	}
 	return out, nil
-}
-
-func (c cliPosts) Media(ctx context.Context, url string, limit int) ([]byte, error) {
-	return mediaGet(c.budget(ctx), limit, url)
 }
 
 // cliResult is the outcome of a CLI write that returned event id and err:
