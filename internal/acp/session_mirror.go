@@ -2,6 +2,7 @@ package acp
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,7 +18,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
-	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/mirror"
 )
@@ -711,7 +712,7 @@ func (s *Server) mirrorSend(dir string, t dialogTarget, b binding.Binding, st *m
 			i++
 			continue
 		}
-		if buzzcli.NeverSent(err) {
+		if notSent(err) {
 			s.mirrorBackOff(t.name, now)
 			return false
 		}
@@ -805,6 +806,13 @@ func mirrorPosted(claim string) bool {
 	return found && c.Event != ""
 }
 
+// mirrorKey names one post or edit (what) of a turn's mirror post in binding
+// name. shown, the turn's fingerprint, and its timestamps fix the text, so
+// two texts never share a key.
+func mirrorKey(name, what string, turn mirror.Turn, shown string) buzzop.Key {
+	return buzzop.Key(fmt.Sprintf("mirror/%s/%s/%s/%s/%d/%d", name, turn.ID, what, shown, turn.StartTS, turn.LastTS))
+}
+
 // mirrorPost claims turn's post, posts it and records its event id. A turn
 // already claimed is not posted. It returns the event id the claim holds.
 func (s *Server) mirrorPost(claim string, t dialogTarget, b binding.Binding, turn mirror.Turn, now time.Time) (string, error) {
@@ -822,19 +830,19 @@ func (s *Server) mirrorPost(claim string, t dialogTarget, b binding.Binding, tur
 		}
 		return "", err
 	}
-	id, err := postAnswer(t.channel, p.Text, s.cfg.PostTimeout)
-	if buzzcli.NeverSent(err) {
+	r := s.posts.Send(context.Background(), buzzop.Message{Key: mirrorKey(t.name, "post", turn, p.Shown),
+		Channel: t.channel, Content: p.Text})
+	if r.Outcome == buzzop.NotSent {
 		_ = os.Remove(claim)
-		return "", err
 	}
-	if err != nil {
-		return "", err
+	if r.Outcome != buzzop.Accepted {
+		return "", resultError(r)
 	}
-	if id == "" {
+	if r.EventID == "" {
 		return "", errors.New("buzz messages send gave no event id")
 	}
-	p.Event = id
-	return id, writeMirrorClaim(claim, p)
+	p.Event = r.EventID
+	return r.EventID, writeMirrorClaim(claim, p)
 }
 
 // mirrorProgress edits the post of the running turn when what it shows
@@ -856,7 +864,7 @@ func (s *Server) mirrorProgress(claim string, t dialogTarget, b binding.Binding,
 		return false, errMirrorWait
 	}
 	text := mirror.Render(turn)
-	if err := editMessage(c.Event, text, s.cfg.PostTimeout); err != nil {
+	if err := resultError(s.posts.Edit(context.Background(), mirrorKey(t.name, "edit", turn, shown), c.Channel, c.Event, text)); err != nil {
 		return false, err
 	}
 	c.Text, c.Shown, c.Running, c.Halted, c.Edits, c.EditedAt = text, shown, true, turn.Halted, c.Edits+1, now.UnixMilli()
@@ -884,7 +892,7 @@ func (s *Server) mirrorEdit(claim string, t dialogTarget, b binding.Binding, ev 
 		return false, errMirrorWait
 	}
 	text := mirror.Render(turn)
-	if err := editMessage(p.Event, text, s.cfg.PostTimeout); err != nil {
+	if err := resultError(s.posts.Edit(context.Background(), mirrorKey(t.name, "edit", turn, shown), p.Channel, p.Event, text)); err != nil {
 		return false, err
 	}
 	p.Text, p.Shown, p.Running, p.Halted, p.EditedAt = text, shown, false, turn.Halted, now.UnixMilli()
@@ -973,10 +981,9 @@ func fromBuzz(b binding.Binding, id string) bool {
 
 // mirrorUnavailable posts the note once for each locator that cannot be
 // read. The note is recorded before it is posted, so it is attempted at
-// most once per locator; only a post proved not sent (buzzcli.NeverSent) is
-// tried again. A relay refusal (accepted:false,
-// *buzzcli.NotAcceptedError) is an ordinary failure and keeps the marker:
-// re-posting against a refusing relay would loop.
+// most once per locator; only a post proved not sent (buzzop.NotSent) is
+// tried again. A relay refusal (buzzop.Rejected) is an ordinary failure and
+// keeps the marker: re-posting against a refusing relay would loop.
 func (s *Server) mirrorUnavailable(dir string, st *mirrorFile, key string, off bool) {
 	if off || st.Noted != nil && *st.Noted == key {
 		return
@@ -987,8 +994,7 @@ func (s *Server) mirrorUnavailable(dir string, st *mirrorFile, key string, off b
 		st.Noted = was
 		return
 	}
-	_, err := postAnswer(st.Channel, mirrorNote, s.cfg.PostTimeout)
-	if buzzcli.NeverSent(err) {
+	if s.posts.Send(context.Background(), buzzop.Message{Channel: st.Channel, Content: mirrorNote}).Outcome == buzzop.NotSent {
 		st.Noted = was
 	}
 }

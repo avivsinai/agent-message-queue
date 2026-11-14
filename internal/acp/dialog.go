@@ -146,7 +146,7 @@ func reactionsWithBuzzCLI(eventID string, budget time.Duration) ([]reaction, err
 }
 
 // reacted reports whether owner reacted with emoji.
-func reacted(rs []reaction, owner, emoji string) bool {
+func reacted(rs []buzzop.Reaction, owner, emoji string) bool {
 	for _, r := range rs {
 		if strings.TrimSpace(r.Emoji) == emoji && slices.Contains(r.PubKeys, owner) {
 			return true
@@ -628,7 +628,7 @@ func (s *Server) dialogStep(t dialogTarget, dir string, req dialog.Request, now 
 		return
 	}
 	s.dialogs.polled[req.ID] = now
-	rs, err := readReactions(p.Event, s.cfg.PostTimeout)
+	rs, err := s.posts.Reactions(context.Background(), p.Event)
 	if err != nil {
 		return
 	}
@@ -640,7 +640,7 @@ func (s *Server) dialogStep(t dialogTarget, dir string, req dialog.Request, now 
 // reactionOption is the option the owner's reaction picks: ❌ the deny
 // option, which beats ✅, option 1. A reaction never answers a dialog
 // without that option; 0 means no answer.
-func reactionOption(req dialog.Request, rs []reaction, owner string) int {
+func reactionOption(req dialog.Request, rs []buzzop.Reaction, owner string) int {
 	if reacted(rs, owner, "❌") {
 		for _, o := range req.Options {
 			if o.Deny {
@@ -675,15 +675,16 @@ func (s *Server) postDialog(path string, t dialogTarget, req dialog.Request) {
 	if won, err := createExclusive(path, raw); err != nil || !won {
 		return
 	}
-	id, err := postAnswer(t.channel, p.Text, s.cfg.PostTimeout)
-	if buzzcli.NeverSent(err) {
+	r := s.posts.Send(context.Background(), buzzop.Message{Key: buzzop.Key("dialog/" + t.name + "/" + req.ID),
+		Channel: t.channel, Content: p.Text})
+	if r.Outcome == buzzop.NotSent {
 		_ = os.Remove(path)
 		return
 	}
-	if err != nil || id == "" {
+	if r.Outcome != buzzop.Accepted || r.EventID == "" {
 		return
 	}
-	p.Event = id
+	p.Event = r.EventID
 	_ = s.writeDialogPost(path, p)
 }
 
@@ -716,7 +717,8 @@ func (s *Server) dialogClose(name, dir string, open map[string]bool, now time.Ti
 		if bo, ok := s.dialogs.edits[id]; ok && now.Before(bo.until) {
 			continue
 		}
-		if p.Event != "" && editMessage(p.Event, p.Text+"\n\n"+outcomeLine(res), s.cfg.PostTimeout) != nil {
+		if p.Event != "" && s.posts.Edit(context.Background(), buzzop.Key("dialog/"+name+"/"+id+"/closed"),
+			p.Channel, p.Event, p.Text+"\n\n"+outcomeLine(res)).Outcome != buzzop.Accepted {
 			s.dialogEditBackOff(id, now)
 			continue
 		}
