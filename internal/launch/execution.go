@@ -435,9 +435,13 @@ func validateCodexNotifyTargetArgv(ticket ExecutionTicket) error {
 		return err
 	}
 	identitySlots := make(map[int]bool)
+	mailboxesSlots := make(map[int]bool)
 	for _, dynamic := range ticket.DynamicArgv {
-		if dynamic.Kind == DynamicArgCodexIdentity {
+		switch dynamic.Kind {
+		case DynamicArgCodexIdentity:
 			identitySlots[dynamic.Index] = true
+		case DynamicArgCodexMailboxesPath:
+			mailboxesSlots[dynamic.Index] = true
 		}
 	}
 	count := 0
@@ -453,9 +457,20 @@ func validateCodexNotifyTargetArgv(ticket ExecutionTicket) error {
 			return fmt.Errorf("codex notify override does not match the execution ticket")
 		}
 		value := ticket.TargetArgv[i+1]
-		if value == expected {
+		switch {
+		case value == expected:
 			count++
-		} else if !identitySlots[i+1] && !validCodexConfigOverride(value) {
+		case identitySlots[i+1]:
+		case mailboxesSlots[i+1]:
+			// Filled writable-roots array: the slot carries the path AMQ
+			// computed from the ticket's queue root. Its value depends on
+			// the seat's AM_ROOT at exec, so this validation is only the
+			// shape check. ResolveExecutionArgv refuses an unfilled slot.
+			want := codexMailboxesArgPrefix + CodexMailboxesToken
+			if value != want && !strings.HasPrefix(value, codexMailboxesArgPrefix+"[\"") {
+				return fmt.Errorf("codex mailboxes slot %d carries neither the token nor a filled TOML array value", i+1)
+			}
+		case !validCodexConfigOverride(value):
 			return fmt.Errorf("codex notify execution ticket contains unsupported configuration override")
 		}
 		i++
@@ -1155,6 +1170,12 @@ func ResolveExecutionArgv(ticket ExecutionTicket, env []string) ([]string, error
 			argv[dynamic.Index] = ticket.ConversationID
 		case DynamicArgCodexIdentity:
 			filled, err := fillCodexIdentitySlot(ticket.TargetArgv, dynamic.Index, env)
+			if err != nil {
+				return nil, err
+			}
+			argv[dynamic.Index] = filled
+		case DynamicArgCodexMailboxesPath:
+			filled, err := fillCodexMailboxesSlot(ticket.TargetArgv, dynamic.Index, env, ticket.SessionRoot)
 			if err != nil {
 				return nil, err
 			}

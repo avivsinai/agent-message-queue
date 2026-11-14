@@ -2,6 +2,7 @@ package launch
 
 import (
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 )
@@ -48,6 +49,16 @@ func codexIdentitySlots(argv []string) ([]string, []DynamicArg) {
 		argv = append(argv, "-c", codexIdentitySetPrefix+key+"="+codexIdentityPlaceholder)
 		dynamic = append(dynamic, DynamicArg{Index: len(argv) - 1, Kind: DynamicArgCodexIdentity})
 	}
+	// The sandbox-workspace-write token the user supplies stays a literal
+	// string `sandbox_workspace_write.writable_roots=["__AMQ_MAILBOXES__"]`.
+	// At exec time the wrapper fills in this seat's canonical `<root>/agents`
+	// path; the trust digest binds the kind, not the path, so two seats that
+	// differ only in queue root share a digest (see plan.go trustProjection).
+	for i := 1; i < len(argv); i++ {
+		if argv[i-1] == "-c" && argv[i] == codexMailboxesArgPrefix+CodexMailboxesToken {
+			dynamic = append(dynamic, DynamicArg{Index: i, Kind: DynamicArgCodexMailboxesPath})
+		}
+	}
 	return argv, dynamic
 }
 
@@ -82,4 +93,36 @@ func fillCodexIdentitySlot(argv []string, index int, env []string) (string, erro
 		}
 	}
 	return "", fmt.Errorf("this Codex seat has no %s, so its amq commands would have no AMQ identity", key)
+}
+
+// fillCodexMailboxesSlot returns the writable_roots array whose one basic string
+// is the seat's canonical queue-root agents directory. The root comes from
+// the execution envelope's AM_ROOT (the same environment the identity slots
+// read); ticket.SessionRoot is the fallback. A refusal names AM_ROOT: nothing
+// launches with the token unfilled.
+func fillCodexMailboxesSlot(argv []string, index int, env []string, sessionRoot string) (string, error) {
+	if index < 1 || index >= len(argv) || argv[index-1] != "-c" {
+		return "", fmt.Errorf("codex mailbox slot %d is invalid", index)
+	}
+	if argv[index] != codexMailboxesArgPrefix+CodexMailboxesToken {
+		return "", fmt.Errorf("codex mailbox slot %d does not carry the %s token", index, CodexMailboxesToken)
+	}
+	root := ""
+	for _, entry := range env {
+		if v, ok := strings.CutPrefix(entry, "AM_ROOT="); ok {
+			root = v
+			break
+		}
+	}
+	if root == "" {
+		root = sessionRoot
+	}
+	if root == "" {
+		return "", fmt.Errorf("codex mailboxes slot %d is unfilled: AM_ROOT is missing in the execution environment and the ticket named no session root", index)
+	}
+	resolved, err := resolvedPath(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve the queue root for codex mailboxes slot %d: %v", index, err)
+	}
+	return codexMailboxesArgPrefix + "[" + tomlBasicString(filepath.Join(resolved, "agents")) + "]", nil
 }

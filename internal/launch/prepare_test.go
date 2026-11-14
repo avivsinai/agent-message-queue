@@ -467,7 +467,7 @@ func TestPrepareAdmitsCodexWorkspaceWriteSandboxPins(t *testing.T) {
 	for _, override := range ProviderStaticInputCapabilities(CodexProvider).ConfigOverrides {
 		advertised[override.Key] = override.AllowedValues
 	}
-	if !slices.Equal(advertised["sandbox_workspace_write.writable_roots"], []string{"[]"}) ||
+	if !slices.Equal(advertised["sandbox_workspace_write.writable_roots"], []string{"[]", `["__AMQ_MAILBOXES__"]`}) ||
 		!slices.Equal(advertised["sandbox_workspace_write.network_access"], []string{"true", "false"}) {
 		t.Fatalf("codex config overrides = %v", advertised)
 	}

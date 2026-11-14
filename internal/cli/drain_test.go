@@ -520,3 +520,112 @@ func TestRunDrainWritesOnlyItsDocumentedSet(t *testing.T) {
 		}
 	}
 }
+
+// latestOnDiskMessageID returns the newest message id in an agent's inbox/cur
+// (or inbox/new if nothing has been read yet). It is the answer to
+// "runReply --id" for the just-received message.
+func latestOnDiskMessageID(t *testing.T, root, handle string) string {
+	t.Helper()
+	for _, dir := range []string{fsq.AgentInboxCur(root, handle), fsq.AgentInboxNew(root, handle)} {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		newest := ""
+		var newestMod time.Time
+		for _, e := range entries {
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			if info.ModTime().After(newestMod) {
+				newest, newestMod = e.Name(), info.ModTime()
+			}
+		}
+		if newest != "" {
+			return strings.TrimSuffix(newest, ".md")
+		}
+	}
+	t.Fatal("no message found on disk for", handle)
+	return ""
+}
+
+// A sandbox that grants write access to exactly `<root>/agents` (the fixed
+// token a Codex seat can pin as sandbox_workspace_write.writable_roots)
+// relies on `amq send` and `amq reply` writing only under the mailbox
+// root: the recipient's inbox, the sender's outbox, and the receipts /
+// presence dirs of both. Anything under meta/, extensions/, HOME or
+// another path in the queue root must be untouched. If this row ever
+// fails the token has leaked a write outside the sandbox.
+func TestRunSendAndReplyWriteOnlyUnderAgents(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	for _, agent := range []string{"alice", "qa"} {
+		if err := fsq.EnsureAgentDirs(root, agent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	configureSendTestRoot(t, root, "alice", "qa")
+
+	type stamp struct {
+		mod  time.Time
+		size int64
+	}
+	snapshot := func() map[string]stamp {
+		out := map[string]stamp{}
+		if err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			rel, _ := filepath.Rel(root, path)
+			out[filepath.ToSlash(rel)] = stamp{info.ModTime(), info.Size()}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	isWritableInsideAgents := func(rel string) bool {
+		return strings.HasPrefix(rel, "agents/")
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	before := snapshot()
+	if err := runSend([]string{
+		"--root", root, "--me", "alice", "--to", "qa",
+		"--subject", "probe", "--body", "needle",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	after := snapshot()
+	for rel, info := range after {
+		if old, ok := before[rel]; (!ok || old != info) && !isWritableInsideAgents(rel) {
+			t.Errorf("amq send changed %q outside agents/", rel)
+		}
+	}
+
+	// Now reply as qa -> alice, and check again.
+	time.Sleep(10 * time.Millisecond)
+	before = after
+	// The --id of the just-received message in qa's inbox. Find it from the
+	// recipient's inbox/cur since amq delivered it to qa/inbox/new or /cur.
+	id := latestOnDiskMessageID(t, root, "qa")
+	if err := runReply([]string{
+		"--root", root, "--me", "qa", "--id", id,
+		"--body", "answer",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	after = snapshot()
+	for rel, info := range after {
+		if old, ok := before[rel]; (!ok || old != info) && !isWritableInsideAgents(rel) {
+			t.Errorf("amq reply changed %q outside agents/", rel)
+		}
+	}
+}
