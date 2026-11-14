@@ -15,6 +15,8 @@ import (
 	"unicode/utf8"
 
 	"fiatjaf.com/nostr"
+
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 )
 
 // Event kinds a machine agent publishes or reads.
@@ -180,54 +182,24 @@ func ReactionsFilter(eventIDs []string) (nostr.Filter, error) {
 	return nostr.Filter{Kinds: []nostr.Kind{KindReaction}, Tags: nostr.TagMap{"e": ids}}, nil
 }
 
-// Tri is a fact that is known true, known false, or not known. The zero
-// value is TriUnknown.
-type Tri int
-
-const (
-	TriUnknown Tri = iota
-	TriNo
-	TriYes
-)
-
-// ChannelFacts is what the relay-signed state of one channel says. A fact
-// whose event was not read stays TriUnknown, empty or nil.
-type ChannelFacts struct {
-	Channel  string
-	Name     string
-	About    string
-	Creator  string
-	Private  Tri
-	Archived Tri
-	// Roles maps each pubkey of the 39001 to its role.
-	Roles map[string]string
-	// Members are the pubkeys of the 39002.
-	Members []string
-	// MetaEvent, AdminsEvent and MembersEvent are the ids of the 39000,
-	// 39001 and 39002 the facts were read from.
-	MetaEvent    string
-	AdminsEvent  string
-	MembersEvent string
-}
-
 // Facts reads channel's facts from relay-signed state events: at most one
 // 39000, one 39001 and one 39002 (the caller keeps the newest of each).
 // Each event fills only the fields of its kind. Every event must be
 // authored by relaySelf and carry the d tag channel; otherwise Facts returns
 // an error and no facts. The caller passes events whose id and signature
 // were verified on receipt.
-func Facts(channel, relaySelf string, events ...nostr.Event) (ChannelFacts, error) {
-	f := ChannelFacts{Channel: channel}
+func Facts(channel, relaySelf string, events ...nostr.Event) (buzzop.ChannelFacts, error) {
+	f := buzzop.ChannelFacts{Channel: channel}
 	seen := map[nostr.Kind]bool{}
 	for _, evt := range events {
 		if evt.PubKey.Hex() != relaySelf {
-			return ChannelFacts{}, fmt.Errorf("group state event %s is not authored by the relay key", evt.ID.Hex())
+			return buzzop.ChannelFacts{}, fmt.Errorf("group state event %s is not authored by the relay key", evt.ID.Hex())
 		}
 		if d := evt.Tags.Find("d"); d == nil || d[1] != channel {
-			return ChannelFacts{}, fmt.Errorf("group state event %s is not for channel %s", evt.ID.Hex(), channel)
+			return buzzop.ChannelFacts{}, fmt.Errorf("group state event %s is not for channel %s", evt.ID.Hex(), channel)
 		}
 		if seen[evt.Kind] {
-			return ChannelFacts{}, fmt.Errorf("more than one kind %d event for channel %s", evt.Kind, channel)
+			return buzzop.ChannelFacts{}, fmt.Errorf("more than one kind %d event for channel %s", evt.Kind, channel)
 		}
 		seen[evt.Kind] = true
 		switch evt.Kind {
@@ -250,7 +222,7 @@ func Facts(channel, relaySelf string, events ...nostr.Event) (ChannelFacts, erro
 				}
 			}
 		default:
-			return ChannelFacts{}, fmt.Errorf("event kind %d is not group state", evt.Kind)
+			return buzzop.ChannelFacts{}, fmt.Errorf("event kind %d is not group state", evt.Kind)
 		}
 	}
 	return f, nil
@@ -258,17 +230,17 @@ func Facts(channel, relaySelf string, events ...nostr.Event) (ChannelFacts, erro
 
 // readMetadata fills f from a 39000: private or public, archived only while
 // the archived tag is true, the creator from P, and name and about.
-func readMetadata(f *ChannelFacts, evt nostr.Event) {
+func readMetadata(f *buzzop.ChannelFacts, evt nostr.Event) {
 	f.MetaEvent = evt.ID.Hex()
-	f.Archived = TriNo
+	f.Archived = buzzop.TriNo
 	for _, t := range evt.Tags {
 		switch {
 		case len(t) >= 1 && t[0] == "private":
-			f.Private = TriYes
-		case len(t) >= 1 && t[0] == "public" && f.Private != TriYes:
-			f.Private = TriNo
+			f.Private = buzzop.TriYes
+		case len(t) >= 1 && t[0] == "public" && f.Private != buzzop.TriYes:
+			f.Private = buzzop.TriNo
 		case len(t) >= 2 && t[0] == "archived" && t[1] == "true":
-			f.Archived = TriYes
+			f.Archived = buzzop.TriYes
 		case len(t) >= 2 && t[0] == "P":
 			f.Creator = t[1]
 		case len(t) >= 2 && t[0] == "name":

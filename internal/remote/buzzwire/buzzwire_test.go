@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"fiatjaf.com/nostr"
+
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 )
 
 // Channel, keys and tag lists of the live gate run on 2026-11-14.
@@ -43,7 +45,7 @@ func TestBuildersAndParsers(t *testing.T) {
 		{"p", gateAgent, "owner"}, {"p", gateOwner, "admin"}})
 	members := state(KindGroupMembers, nostr.Tags{{"d", gateChannel}, {"t", "stream"}, {"P", gateAgent},
 		{"p", gateAgent, "", "owner"}, {"p", gateOwner, "", "admin"}})
-	facts := func(metaTags nostr.Tags) ChannelFacts {
+	facts := func(metaTags nostr.Tags) buzzop.ChannelFacts {
 		t.Helper()
 		f, err := Facts(gateChannel, relayKey.Hex(), state(KindGroupMetadata, metaTags), admins, members)
 		if err != nil {
@@ -52,14 +54,14 @@ func TestBuildersAndParsers(t *testing.T) {
 		f.MetaEvent, f.AdminsEvent, f.MembersEvent = "", "", ""
 		return f
 	}
-	wantFacts := ChannelFacts{
+	wantFacts := buzzop.ChannelFacts{
 		Channel: gateChannel, Name: "amq-w0-gate-e4788682", About: "amq-w0-gate " + gateChannel, Creator: gateAgent,
-		Private: TriYes, Archived: TriNo,
+		Private: buzzop.TriYes, Archived: buzzop.TriNo,
 		Roles:   map[string]string{gateAgent: "owner", gateOwner: "admin"},
 		Members: []string{gateAgent, gateOwner},
 	}
 	archivedFacts := wantFacts
-	archivedFacts.Archived = TriYes
+	archivedFacts.Archived = buzzop.TriYes
 	stateFilter, err := GroupStateFilter(relayKey.Hex(), []string{gateChannel})
 	if err != nil {
 		t.Fatal(err)
