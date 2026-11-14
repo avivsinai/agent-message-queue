@@ -16,6 +16,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 )
 
@@ -1468,8 +1469,7 @@ func TestUnsentFinalAnswerIsPostedByTheNextSweep(t *testing.T) {
 	t.Cleanup(func() { postAnswer = saved })
 	postAnswer = func(_, content string, _ time.Duration) (string, error) {
 		if broken {
-			_, err := buzzCLIFrom("/nonexistent", "relative")
-			return "", err
+			return "", &buzzcli.NotSentError{Err: errors.New("buzz CLI not found in Buzz.app; set " + buzzcli.EnvCLI + " to the buzz executable")}
 		}
 		// A crash here leaves the disk as it is now; a restarted sweep
 		// must not see an unsent answer.
@@ -1513,8 +1513,7 @@ func TestFinalPostThatCrashedWhileSendingIsInDoubt(t *testing.T) {
 	t.Cleanup(func() { postAnswer = saved })
 	postAnswer = func(_, content string, _ time.Duration) (string, error) {
 		if broken {
-			_, err := buzzCLIFrom("/nonexistent", "relative")
-			return "", err
+			return "", &buzzcli.NotSentError{Err: errors.New("buzz CLI not found in Buzz.app; set " + buzzcli.EnvCLI + " to the buzz executable")}
 		}
 		posts = append(posts, content)
 		return "id", nil

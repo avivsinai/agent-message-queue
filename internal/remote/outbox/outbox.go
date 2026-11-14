@@ -33,35 +33,20 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/relay"
-)
-
-// Outcome is what is known about a record's last attempt.
-type Outcome string
-
-const (
-	// NotSent: the bytes never reached the transport; they may be sent again.
-	NotSent Outcome = "not_sent"
-	// Accepted: the relay's matching positive acknowledgement was seen.
-	Accepted Outcome = "accepted"
-	// Rejected: the relay refused this attempt; that says nothing about
-	// earlier attempts.
-	Rejected Outcome = "rejected"
-	// Unknown: the event may have taken effect; only an observation of the
-	// relay resolves it.
-	Unknown Outcome = "unknown"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 )
 
 // OutcomeOf maps the result of relay.Conn.Publish to an outcome.
-func OutcomeOf(err error) Outcome {
+func OutcomeOf(err error) buzzop.Outcome {
 	switch {
 	case err == nil:
-		return Accepted
+		return buzzop.Accepted
 	case errors.Is(err, relay.ErrRejected):
-		return Rejected
+		return buzzop.Rejected
 	case errors.Is(err, relay.ErrUnknownDelivery):
-		return Unknown
+		return buzzop.Unknown
 	default:
-		return NotSent
+		return buzzop.NotSent
 	}
 }
 
@@ -80,7 +65,7 @@ type Record struct {
 	Kind    nostr.Kind      `json:"kind"`
 	EventID string          `json:"event_id"`
 	Event   json.RawMessage `json:"event"`
-	Outcome Outcome         `json:"outcome"`
+	Outcome buzzop.Outcome  `json:"outcome"`
 	// Attempts counts the sends begun.
 	Attempts int `json:"attempts"`
 	// NextAttempt is the time the caller gave for the next attempt; zero
@@ -142,7 +127,7 @@ func (o *Outbox) Prepare(key, reg string, evt nostr.Event, now time.Time) (Recor
 	}
 	r := Record{
 		Key: key, Reg: reg, Kind: evt.Kind, EventID: evt.ID.Hex(), Event: raw,
-		Outcome: NotSent, NextAttempt: now.Unix(), Seq: seq, Prepared: now.Unix(),
+		Outcome: buzzop.NotSent, NextAttempt: now.Unix(), Seq: seq, Prepared: now.Unix(),
 	}
 	data, err := encode(r)
 	if err != nil {
@@ -166,34 +151,34 @@ func (o *Outbox) BeginAttempt(key string, now time.Time) (Record, error) {
 	if err != nil {
 		return Record{}, err
 	}
-	if r.Outcome == Accepted {
+	if r.Outcome == buzzop.Accepted {
 		return Record{}, fmt.Errorf("outbox record %q is already accepted", key)
 	}
 	r.Attempts++
-	r.Outcome = Unknown
+	r.Outcome = buzzop.Unknown
 	return r, o.put(r)
 }
 
 // Settle records the outcome of key's last attempt at now, and next as the
 // time of its next attempt; the caller owns the retry policy. An accepted
 // record does not change and has no next attempt.
-func (o *Outbox) Settle(key string, outcome Outcome, reason string, now, next time.Time) (Record, error) {
+func (o *Outbox) Settle(key string, outcome buzzop.Outcome, reason string, now, next time.Time) (Record, error) {
 	switch outcome {
-	case NotSent, Accepted, Rejected, Unknown:
+	case buzzop.NotSent, buzzop.Accepted, buzzop.Rejected, buzzop.Unknown:
 	default:
 		return Record{}, fmt.Errorf("outbox outcome %q is not one of not_sent, accepted, rejected, unknown", outcome)
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	r, err := o.mustGet(key)
-	if err != nil || r.Outcome == Accepted {
+	if err != nil || r.Outcome == buzzop.Accepted {
 		return r, err
 	}
 	if len(reason) > maxReasonBytes {
 		reason = strings.ToValidUTF8(reason[:maxReasonBytes], "") + "…"
 	}
 	r.Outcome, r.Reason, r.Settled, r.NextAttempt = outcome, reason, now.Unix(), next.Unix()
-	if outcome == Accepted {
+	if outcome == buzzop.Accepted {
 		r.NextAttempt = 0
 	}
 	return r, o.put(r)
@@ -219,7 +204,7 @@ func (o *Outbox) Unsettled() ([]Record, error) {
 	}
 	var open []Record
 	for _, r := range all {
-		if r.Outcome != Accepted {
+		if r.Outcome != buzzop.Accepted {
 			open = append(open, r)
 		}
 	}

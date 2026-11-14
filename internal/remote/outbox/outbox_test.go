@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"fiatjaf.com/nostr"
+
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 )
 
 func TestRecordKeepsItsEventAcrossAttemptAndReopen(t *testing.T) {
@@ -46,7 +48,7 @@ func TestRecordKeepsItsEventAcrossAttemptAndReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prepared.Outcome != NotSent || prepared.EventID != first.ID.Hex() || prepared.Seq != 1 || !bytes.Equal(prepared.Event, exact) {
+	if prepared.Outcome != buzzop.NotSent || prepared.EventID != first.ID.Hex() || prepared.Seq != 1 || !bytes.Equal(prepared.Event, exact) {
 		t.Fatalf("prepared = %+v", prepared)
 	}
 	if left, err := o.Unsettled(); err != nil || len(left) != 1 {
@@ -57,14 +59,14 @@ func TestRecordKeepsItsEventAcrossAttemptAndReopen(t *testing.T) {
 	}
 
 	r := get()
-	if r.Outcome != Unknown || r.Attempts != 1 || !bytes.Equal(r.Event, prepared.Event) {
+	if r.Outcome != buzzop.Unknown || r.Attempts != 1 || !bytes.Equal(r.Event, prepared.Event) {
 		t.Fatalf("after attempt = %+v", r)
 	}
 	if _, err := open().Settle("send/reg-1/welcome", OutcomeOf(nil), "", now, now); err != nil {
 		t.Fatal(err)
 	}
 	r = get()
-	if r.Outcome != Accepted || !bytes.Equal(r.Event, prepared.Event) {
+	if r.Outcome != buzzop.Accepted || !bytes.Equal(r.Event, prepared.Event) {
 		t.Fatalf("after settle = %+v", r)
 	}
 	if left, err := open().Unsettled(); err != nil || len(left) != 0 {

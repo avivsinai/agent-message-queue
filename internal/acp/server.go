@@ -18,6 +18,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 )
@@ -210,6 +211,9 @@ type Server struct {
 	// machine is the machine leader's pacing, used only by the machine
 	// worker.
 	machine machineState
+	// buzz are the machine lifecycle's Buzz operations; each runs through
+	// call.
+	buzz buzzcli.Ops
 	// dialogs is the dialog poster's state, used only by the worker that
 	// runs dialogTick.
 	dialogs dialogState
@@ -252,13 +256,15 @@ func NewServer(cfg Config, version string) *Server {
 	if cfg.PostTimeout <= 0 {
 		cfg.PostTimeout = defaultPostTimeout
 	}
-	return &Server{
+	s := &Server{
 		cfg:      cfg,
 		id:       cfg.Identity,
 		version:  version,
 		sessions: make(map[string]*sessionState),
 		store:    newSessionStore(cfg),
 	}
+	s.buzz = buzzcli.Ops{Exec: s.lifecycleExec}
+	return s
 }
 
 // responseWriter serializes JSON-RPC writes. Prompt turns respond from

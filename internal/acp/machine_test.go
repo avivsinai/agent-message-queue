@@ -17,6 +17,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 )
@@ -645,7 +646,7 @@ func TestMachineUncertainCreateAdoptsOneChannelAndNeverCreatesAgain(t *testing.T
 		switch args[0] + " " + args[1] {
 		case "channels create":
 			reg = strings.TrimPrefix(args[len(args)-1], "amq-remote ")
-			return nil, &buzzExitError{code: 2, err: fmt.Errorf("buzz channels create: relay timeout")}
+			return nil, &buzzcli.ExitError{Code: 2, Err: fmt.Errorf("buzz channels create: relay timeout")}
 		case "channels list":
 			return []byte(`[{"channel_id":"` + machineChanB + `","name":"other"},{"channel_id":"` + machineChanA + `","name":"` + alpha.Label + `"}]`), nil
 		case "channels get":
@@ -759,7 +760,7 @@ func TestMachineStopEndsTheBatchAndLeavesTheCutCreateUncertain(t *testing.T) {
 	rec.reply = func(args []string) ([]byte, error) {
 		if args[1] == "create" {
 			cancel()
-			return nil, &buzzExitError{code: -1, err: fmt.Errorf("buzz channels create: signal: killed")}
+			return nil, &buzzcli.ExitError{Code: -1, Err: fmt.Errorf("buzz channels create: signal: killed")}
 		}
 		return []byte(`{"accepted":true,"event_id":"ev"}`), nil
 	}

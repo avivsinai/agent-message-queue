@@ -12,6 +12,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 )
 
@@ -23,8 +24,8 @@ func TestPinnedAgentArchivesAndReturnsWithItsBinding(t *testing.T) {
 	if err := binding.WriteNamed(bound); err != nil {
 		t.Fatal(err)
 	}
-	savedIdentity, savedCall := buzzIdentity, buzzCall
-	t.Cleanup(func() { buzzIdentity, buzzCall = savedIdentity, savedCall })
+	savedPort, savedCall := buzzPort, buzzCall
+	t.Cleanup(func() { buzzPort, buzzCall = savedPort, savedCall })
 	recordPosts(t)
 	t.Setenv("BUZZ_PRIVATE_KEY", strings.Repeat("1", 64))
 	id := captureBuzzIdentity()
@@ -307,9 +308,9 @@ func TestHelperDraftsOneSessionPerWindow(t *testing.T) {
 // shape for messages send/edit, channels create/archive/unarchive/add-member,
 // users set-status, agents draft-create; the {ok,event_id,action,target}
 // shape for agents archive/unarchive.
-// The error is intentionally NOT a notSentError: a refused write is a write
-// the relay saw and rejected; callers do not revert lifecycle markers for
-// it, exactly as they do not for a non-zero CLI exit.
+// The error is intentionally NOT a buzzcli.NotSentError: a refused write is
+// a write the relay saw and rejected; callers do not revert lifecycle
+// markers for it, exactly as they do not for a non-zero CLI exit.
 func TestBuzzWriteAcceptanceRefusalsAreFailures(t *testing.T) {
 	t.Run("a refused messages send returns no event id", func(t *testing.T) {
 		if runtime.GOOS == "windows" {
@@ -324,10 +325,10 @@ func TestBuzzWriteAcceptanceRefusalsAreFailures(t *testing.T) {
 		if err := os.WriteFile(cli, []byte(script), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		t.Setenv(envBuzzCLI, cli)
-		saved := buzzIdentity
-		t.Cleanup(func() { buzzIdentity = saved })
-		buzzIdentity = []string{"BUZZ_PRIVATE_KEY=test"}
+		t.Setenv(buzzcli.EnvCLI, cli)
+		saved := buzzPort
+		t.Cleanup(func() { buzzPort = saved })
+		buzzPort = buzzcli.New([]string{"BUZZ_PRIVATE_KEY=test"})
 		id, err := postWithBuzzCLI("chan", "hi", 2*time.Second)
 		if err == nil {
 			t.Fatalf("postWithBuzzCLI on refused messages-send returned id=%q with no error", id)
