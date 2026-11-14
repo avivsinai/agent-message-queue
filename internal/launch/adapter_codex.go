@@ -261,21 +261,16 @@ var codexApprovalsReviewerValues = []string{"user", "auto_review", "guardian_sub
 // Codex applies -c overrides above config.toml, so these pins keep a project
 // or user config from widening a --sandbox workspace-write seat. Writable
 // roots admit the empty array and one fixed token array with the marker
-// __AMQ_MAILBOXES__. The marker is filled with `<AM_ROOT>/agents` at exec
-// time, exactly as the AMQ identity slots are filled. A path list would
-// widen the sandbox through argv; only the empty set and the token are
-// admitted. Both network values are admitted; the digest binds either.
+// __AMQ_MAILBOXES__. The marker is filled with <session root>/agents at exec
+// time. A path list would widen the sandbox through argv; only the empty
+// array and the token are admitted. Both network values are admitted.
 var (
-	codexWritableRootsValues = []string{"[]", `["__AMQ_MAILBOXES__"]`}
+	codexWritableRootsValues = []string{"[]", codexMailboxesToken}
 	codexNetworkAccessValues = []string{"true", "false"}
 )
 
-// CodexMailboxesToken stands in for the filled `<AM_ROOT>/agents` TOML array.
-// The token is a TOML array literal with one string; the plan keeps a
-// DynamicArg at its argv index and the launch wrapper fills the resolved
-// root under AM_ROOT at exec time, so two seats that differ only in queue
-// root share one trust digest.
-const CodexMailboxesToken = `["__AMQ_MAILBOXES__"]`
+// codexMailboxesToken is the admitted writable_roots array literal.
+const codexMailboxesToken = `["__AMQ_MAILBOXES__"]`
 
 // codexMailboxesArgPrefix is the -c key of the writable_roots setting.
 const codexMailboxesArgPrefix = "sandbox_workspace_write.writable_roots="

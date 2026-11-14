@@ -6,103 +6,125 @@ import (
 	"testing"
 )
 
-// The mailbox token fills from AM_ROOT (the queue root). Its trust digest
-// does NOT depend on the path: two seats that differ only in root have the
-// same PIN because the dynamic slot is marked by its kind, not its value.
-func TestCodexMailboxesTokenFillsPerSeatRootWithoutChangingDigest(t *testing.T) {
-	root := t.TempDir()
-	executable := "/bin/sh"
-	args := []string{"-c", "sandbox_workspace_write.writable_roots=[\"__AMQ_MAILBOXES__\"]"}
-	argv := append([]string{executable}, args...)
-	dynamic := expectSingleMailboxesSlot(t, argv)
-	slot := dynamic[0]
-
-	// Build an AgentPlan with a single slot; trust digest pins the kind,
-	// not the path. Different seats that use the same contract and the
-	// same kinds share a digest (so a group audit by trust digest is
-	// useful), with the actual path filled per seat at exec.
-	ticket := ExecutionTicket{Handle: "s", TargetArgv: argv, DynamicArgv: dynamic, SessionRoot: root}
-	digest := "" // projection of this ticket's argv by kind
-	digest2 := ""
-	for i, a := range ticket.TargetArgv {
-		for _, d := range ticket.DynamicArgv {
-			if d.Index == i {
-				a = "<kind:" + string(d.Kind) + ">"
-				break
-			}
+// canonicalMailboxesSlot projects the argument at slot index i by the same rule
+// plan.go uses to build the trust digest. The kind sits in Dynamic; the Value
+// is cleared, mirroring the canonicalArgument{Dynamic: dynamic.Kind} assignment.
+func canonicalMailboxesSlot(plan AgentPlan, i int) canonicalArgument {
+	for _, d := range plan.DynamicArgv {
+		if d.Index == i {
+			return canonicalArgument{Dynamic: d.Kind}
 		}
-		digest += a + "\x00"
 	}
-	for i, a := range ticket.TargetArgv {
-		for _, d := range ticket.DynamicArgv {
-			if d.Index == i {
-				a = "<kind:" + string(d.Kind) + ">"
-				break
-			}
-		}
-		digest2 += a + "\x00"
-	}
-	if digest != digest2 {
-		t.Fatalf("same plan same kinds must produce the same digest: %q vs %q", digest, digest2)
-	}
-
-	// Fill: env names AM_ROOT = <root>; the argv value is the TOML array
-	// with one basic string whose path is <resolved root>/agents.
-	resolved, err := resolvedPath(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := "sandbox_workspace_write.writable_roots=[" + tomlBasicString(resolved+"/agents") + "]"
-	got, err := fillCodexMailboxesSlot(ticket.TargetArgv, slot.Index, []string{"AM_ROOT=" + root}, root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != want {
-		t.Fatalf("filled writable_roots = %q; want %q", got, want)
-	}
-
-	// Skew: another seat on another root gets a different path for the same
-	// kind of slot (digest stayed one; AM_ROOT moved).
-	other2 := t.TempDir()
-	resolved2, err := resolvedPath(other2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want2 := "sandbox_workspace_write.writable_roots=[" + tomlBasicString(resolved2+"/agents") + "]"
-	got2, err := fillCodexMailboxesSlot(ticket.TargetArgv, slot.Index, []string{"AM_ROOT=" + other2}, other2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got2 != want2 {
-		t.Fatalf("second seat must fill its own path: %q vs %q", got2, want2)
-	}
-	if got == got2 {
-		t.Fatal("two distinct roots must fill two distinct paths")
-	}
+	return canonicalArgument{Value: plan.Argv[i]}
 }
 
-func expectSingleMailboxesSlot(t *testing.T, argv []string) []DynamicArg {
-	t.Helper()
-	var slots []DynamicArg
-	for i := 1; i < len(argv); i++ {
-		if argv[i-1] == "-c" && strings.HasPrefix(argv[i], codexMailboxesArgPrefix) {
-			slots = append(slots, DynamicArg{Index: i, Kind: DynamicArgCodexMailboxesPath})
+// A managed Codex seat pinned with workspace-write must never widen its
+// sandbox through a path in argv: the launcher adds one fixed token and AMQ
+// fills it at exec time from each seat's own session root. Two seats that
+// differ only in root share the mailbox-slot contribution to the trust
+// projection (kind codex_mailboxes_path), with no path leaking in.
+func TestCodexSeatWritableRootsTokenBecomesItsMailboxesPath(t *testing.T) {
+	tool, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubDir := t.TempDir()
+	stub := stubDir + "/codex"
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexec /bin/sh -c ': codex stub'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{
+		"--sandbox", "workspace-write",
+		"-c", "sandbox_workspace_write.writable_roots=[\"__AMQ_MAILBOXES__\"]",
+	}
+	root1 := t.TempDir()
+	root2 := t.TempDir()
+	resolved1, err := resolvedPath(root1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved2, err := resolvedPath(root2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := t.TempDir()
+	base1 := PlanRequest{Handle: "s", LaunchNonce: "96969696-9696-4969-8969-969696969696", CommittedArgs: args,
+		ProjectRoot: session, SessionRoot: root1, Cwd: session, AMQExecutable: tool, ResumePolicy: ResumeEnabled}
+	base2 := base1
+	base2.SessionRoot = root2
+	a1, err := NewCodexAdapter(stub).PlanFresh(base1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a2, err := NewCodexAdapter(stub).PlanFresh(base2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slotsOf := func(plan AgentPlan) []DynamicArg {
+		var out []DynamicArg
+		for _, d := range plan.DynamicArgv {
+			if d.Kind == DynamicArgCodexMailboxesPath {
+				out = append(out, d)
+			}
 		}
+		return out
 	}
-	if len(slots) != 1 {
-		t.Fatalf("argv %v carries %d mailbox slots; want 1", argv, len(slots))
+	slots1, slots2 := slotsOf(a1), slotsOf(a2)
+	if len(slots1) != 1 || len(slots2) != 1 {
+		t.Fatalf("mailbox slots: a1=%d a2=%d; want 1 each", len(slots1), len(slots2))
 	}
-	return slots
-}
-
-// Guard against regression: no AM_ROOT and no SessionRoot -> refuse.
-func TestCodexMailboxesTokenRefusesUnfilledWithoutAnyRoot(t *testing.T) {
-	root, err := os.MkdirTemp("", "unused")
-	_ = root
-	_ = err
-	argv := []string{"/usr/local/bin/codex", "-c", codexMailboxesArgPrefix + "[\"__AMQ_MAILBOXES__\"]"}
-	_, err = fillCodexMailboxesSlot(argv, 2, nil, "")
-	if err == nil || !strings.Contains(err.Error(), "AM_ROOT") {
-		t.Fatalf("fillCodexMailboxesSlot with no AM_ROOT returned %v; want a refusal that names AM_ROOT", err)
+	si1, si2 := slots1[0].Index, slots2[0].Index
+	if a1.Argv[si1] != codexMailboxesArgPrefix+codexMailboxesToken {
+		t.Fatalf("a1 slot argv=%q; want the un-filled token", a1.Argv[si1])
+	}
+	if a2.Argv[si2] != codexMailboxesArgPrefix+codexMailboxesToken {
+		t.Fatalf("a2 slot argv=%q; want the un-filled token", a2.Argv[si2])
+	}
+	// The mailbox slot is bound by its kind (create-only invariant of the
+	// trust projection in plan.go), not its path. Compute each seat's
+	// canonicalArgument at its slot index and assert both collapse to the
+	// same kind (codex_mailboxes_path), with the path not present in Value.
+	c1 := canonicalMailboxesSlot(a1, si1)
+	c2 := canonicalMailboxesSlot(a2, si2)
+	if c1.Dynamic != DynamicArgCodexMailboxesPath || c2.Dynamic != DynamicArgCodexMailboxesPath {
+		t.Fatalf("slot canonicalization lost the kind: c1=%+v c2=%+v", c1, c2)
+	}
+	if c1.Value != "" || c2.Value != "" {
+		t.Fatalf("trust projection included the path: c1=%q c2=%q", c1.Value, c2.Value)
+	}
+	// Execute: run through the full ticket pipeline so every trust-template
+	// check fires before the fill.
+	planToExecute := func(plan AgentPlan, seatRoot string) []string {
+		ticket, err := NewExecutionTicket(ExecutionTicketRequest{Handle: plan.Handle, LaunchNonce: "96969696-9696-4969-8969-969696969696",
+			Mode: plan.AdapterMode, Provider: CodexProvider, ProviderVersion: "0.167.0",
+			PreSpawnAcquire: false,
+			Backend: CommandsBackendName, Profile: CommandsProfile().Identity(),
+			ProjectRoot: session, SessionRoot: seatRoot, Cwd: session,
+			ProviderExecutable: plan.Argv[0], AMQExecutable: tool,
+			TargetArgv: plan.Argv, DynamicArgv: plan.DynamicArgv})
+		if err != nil {
+			t.Fatal(err)
+		}
+		resolved, err := ResolveExecutionArgv(ticket, []string{"AM_ME=s", "AM_ROOT=" + seatRoot, "AM_BASE_ROOT=" + seatRoot, "AM_SESSION=", "AM_ROOT_ID=", "AM_BASE_ROOT_ID="})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resolved
+	}
+	out1 := planToExecute(a1, root1)
+	out2 := planToExecute(a2, root2)
+	want1 := codexMailboxesArgPrefix + "[" + tomlBasicString(resolved1+"/agents") + "]"
+	want2 := codexMailboxesArgPrefix + "[" + tomlBasicString(resolved2+"/agents") + "]"
+	if out1[si1] != want1 {
+		t.Errorf("slot for seat 1 resolved to %q; want %q", out1[si1], want1)
+	}
+	if out2[si2] != want2 {
+		t.Errorf("slot for seat 2 resolved to %q; want %q", out2[si2], want2)
+	}
+	if strings.Contains(out1[si1], "__AMQ_MAILBOXES__") {
+		t.Error("token survived past the fill")
+	}
+	if strings.Contains(a1.Argv[si1], resolved1) {
+		t.Error("seat 1's path leaked into plan argv (should only fill at exec)")
 	}
 }

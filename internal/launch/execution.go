@@ -340,6 +340,10 @@ func (ticket ExecutionTicket) Validate() error {
 				return fmt.Errorf("dynamic codex identity slot is invalid")
 			}
 			identityKeys[key] = true
+		case DynamicArgCodexMailboxesPath:
+			if ticket.TargetArgv[dynamic.Index] != codexMailboxesArgPrefix+codexMailboxesToken {
+				return fmt.Errorf("dynamic codex mailbox slot does not hold the token")
+			}
 		default:
 			return fmt.Errorf("dynamic argv[%d] kind is invalid", i)
 		}
@@ -462,14 +466,13 @@ func validateCodexNotifyTargetArgv(ticket ExecutionTicket) error {
 			count++
 		case identitySlots[i+1]:
 		case mailboxesSlots[i+1]:
-			// Filled writable-roots array: the slot carries the path AMQ
-			// computed from the ticket's queue root. Its value depends on
-			// the seat's AM_ROOT at exec, so this validation is only the
-			// shape check. ResolveExecutionArgv refuses an unfilled slot.
-			want := codexMailboxesArgPrefix + CodexMailboxesToken
-			if value != want && !strings.HasPrefix(value, codexMailboxesArgPrefix+"[\"") {
-				return fmt.Errorf("codex mailboxes slot %d carries neither the token nor a filled TOML array value", i+1)
+			// Mailbox slots must hold the un-filled token in the ticket;
+			// `ResolveExecutionArgv` fills a copy, never mutates the ticket.
+			if value != codexMailboxesArgPrefix+codexMailboxesToken {
+				return fmt.Errorf("codex mailboxes slot %d does not hold the token", i+1)
 			}
+		case value == codexMailboxesArgPrefix+codexMailboxesToken:
+			return fmt.Errorf("codex writable-roots token at argv %d has no slot", i+1)
 		case !validCodexConfigOverride(value):
 			return fmt.Errorf("codex notify execution ticket contains unsupported configuration override")
 		}
@@ -1175,7 +1178,7 @@ func ResolveExecutionArgv(ticket ExecutionTicket, env []string) ([]string, error
 			}
 			argv[dynamic.Index] = filled
 		case DynamicArgCodexMailboxesPath:
-			filled, err := fillCodexMailboxesSlot(ticket.TargetArgv, dynamic.Index, env, ticket.SessionRoot)
+			filled, err := fillCodexMailboxesSlot(ticket.TargetArgv, dynamic.Index, ticket.SessionRoot)
 			if err != nil {
 				return nil, err
 			}
