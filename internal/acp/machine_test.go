@@ -597,6 +597,40 @@ func TestMachineRecoveredSlotKeepsTheRetiredOutcome(t *testing.T) {
 	}
 }
 
+// Regression (field, 2026-11-14): a machine stop left retired records whose
+// archive was recorded as sent but never reached the relay. When the same
+// sessions attached again, the relay refused each unarchive with "channel is
+// not archived", the restore kept that as a failure, and the sessions had no
+// channel ("its channel is being made") until a channel reset.
+func TestMachineRestoresAChannelTheRelaySaysIsNotArchived(t *testing.T) {
+	s, rec := machineServer(t)
+	alpha := liveSession(t, "alpha")
+	r := channelRecord{Relay: normalizeRelay(buzzRelayURL), Machine: buzzSelf, ChannelID: machineChanA, Name: "alpha",
+		Identity: alpha.SessionIdentity(), Label: sessionAgentName(alpha), Reg: "reg-alpha", State: channelRetired,
+		RetiredBy: retiredEnded, RetiredFrom: channelActive, OwnerAdded: true, Welcomed: true, Creates: 1,
+		SaidEnded: true, ArchiveSent: true}
+	if err := s.save(&r, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	rec.reply = func(args []string) ([]byte, error) {
+		if args[0]+" "+args[1] == "channels unarchive" {
+			return nil, fmt.Errorf(`buzz channels unarchive: exit status 2: {"error":"relay_error","message":"relay error 400: invalid: channel is not archived","retryable":false}`)
+		}
+		return []byte(`{"accepted":true,"event_id":"ev"}`), nil
+	}
+	tick(s, time.Now())
+	want := []string{
+		"channels unarchive --channel " + machineChanA,
+		"messages send --channel " + machineChanA + " --content Connected again: " + alpha.Label + ".",
+	}
+	if got := rec.list(); !slices.Equal(got, want) {
+		t.Fatalf("buzz calls = %q\nwant %q", got, want)
+	}
+	if got := channelState(t, s, "alpha"); got.State != channelActive || got.ChannelID != machineChanA || got.ArchiveSent {
+		t.Fatalf("restored record = %+v", got)
+	}
+}
+
 // Regression (contract review): the buzz CLI makes a fresh channel id on
 // each create, so a create whose outcome is unknown must never be sent
 // again. The leader looks for the channel instead and adopts the one it
