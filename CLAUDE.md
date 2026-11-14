@@ -129,8 +129,8 @@ internal/config/              Queue and project configuration
 internal/dialogguard/         Wake dialog guard marker, hook command, and Claude guard
 internal/execidentity/        AMQ identity of each process coop exec became
 internal/exitcode/            Command exit codes and the errors that carry them
-internal/format/              JSON frontmatter plus Markdown message serialization
 internal/followup/            Follow-up timers a sender arms and their one notice
+internal/format/              JSON frontmatter plus Markdown message serialization
 internal/fsq/                 Maildir delivery, atomic operations, and scans
 internal/harness/             Per-harness facts: names, resume flags, wake typing
 internal/hookfile/            Byte-surgery hooks-file editor with a per-file lock
