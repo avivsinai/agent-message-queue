@@ -28,12 +28,13 @@ func TestWakeLoopRingsForDueFollowUpOnMaintenanceTick(t *testing.T) {
 	ticks := make(chan time.Time)
 	stop := make(chan struct{})
 	done := make(chan error, 1)
+	agentDir := retainedWakeAgentDirForTest(t, root, "codex")
 	go func() {
 		done <- runWakeLoop(wakeConfig{
 			root:              root,
 			me:                "codex",
 			session:           "session1",
-			retainedAgent:     retainedWakeAgentDirForTest(t, root, "codex"),
+			retainedAgent:     agentDir,
 			wakeOwner:         &wakeOwner{},
 			injectMode:        wakeInjectModeNone,
 			controlStop:       stop,

@@ -266,7 +266,7 @@ func deliverOutgoing(m outgoingMessage) error {
 	} else if err := writeStdout("%s %s to %s (session: %s, root: %s)\n", m.verb, id, strings.Join(m.recipients, ","), m.displaySession, m.deliveryRoot); err != nil {
 		return err
 	}
-	if followUp != nil && followUpErr == nil {
+	if followUp != nil && followUp.Due != "" {
 		if err := writeStdout("Follow-up due %s if %s has not replied.\n", followUp.Due, m.recipients[0]); err != nil {
 			return err
 		}
@@ -291,14 +291,22 @@ func armFollowUp(m outgoingMessage, id string, now time.Time) (*followUpResult, 
 		timer.TargetSession, timer.TargetProject = m.targetSession, m.targetProject
 		err = followup.Write(m.sourceFS, m.me, timer)
 	}
-	if err != nil {
+	var committed *fsq.CommittedDurabilityError
+	if err != nil && !errors.As(err, &committed) {
 		return &followUpResult{Error: err.Error()}, fmt.Errorf("%s %s was delivered, but its follow-up was not armed: %w", m.command, id, err)
 	}
-	return &followUpResult{
+	result := &followUpResult{
 		Due:      timer.Due.Format(time.RFC3339),
 		After:    m.followUp.String(),
 		NoticeID: timer.NoticeID,
-	}, nil
+	}
+	if err != nil {
+		// The timer file is in place and fires; only its durability is
+		// uncertain.
+		result.Error = err.Error()
+		return result, fmt.Errorf("%s %s follow-up is armed, but not yet durable: %w", m.command, id, err)
+	}
+	return result, nil
 }
 
 // replyRouteFor stamps reply_to only on messages that cross a session or

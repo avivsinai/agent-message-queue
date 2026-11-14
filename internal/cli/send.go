@@ -249,18 +249,6 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 		targetSession = routePlan.TargetSession
 		sourceProject = routePlan.SourceProject
 	}
-	// A follow-up watches the sender's own mailbox, so the reply must route
-	// back to it. A base-root sender stamps no reply route for a session of
-	// its own project, and the reply stays in that session.
-	if *followUpFlag > 0 && targetSession != "" {
-		senderSession := ""
-		if sourceSession != "" || classifyRoot(root) != "" {
-			senderSession = sourceSessionName(root, sourceSession)
-		}
-		if replyRouteFor(me, senderSession, targetProject, targetSession) == "" {
-			return UsageError("--follow-up cannot see a reply from session %q: a reply to a base-root sender lands in that session, not in your mailbox; send from a session (--from-session) instead", targetSession)
-		}
-	}
 
 	// Snapshot the physical roots at the authorization boundary. Opening the
 	// capabilities below must prove it got these exact directories.
