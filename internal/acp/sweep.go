@@ -122,7 +122,8 @@ func (s *Server) startLateReplySweep() (stop func()) {
 			wake = newWakeup("dialog", machineScanInterval, idlePoll)
 		}
 		go s.paced(quit, dialogDone, wake, func(now time.Time) pace {
-			if !s.dialogLead() {
+			// With no relay connection nothing is posted or read.
+			if !s.dialogLead() || s.offline() {
 				return pace{next: now.Add(machineScanInterval)}
 			}
 			return s.dialogTick(now)
@@ -136,7 +137,7 @@ func (s *Server) startLateReplySweep() (stop func()) {
 	if s.cfg.Machine {
 		s.mirrors.quit = quit
 		go s.paced(quit, mirrorDone, newWakeup("mirror", mirrorInterval, idlePoll), func(now time.Time) pace {
-			if !s.mirrorLead() {
+			if !s.mirrorLead() || s.offline() {
 				return pace{next: now.Add(mirrorInterval)}
 			}
 			return s.mirrorTick(now)

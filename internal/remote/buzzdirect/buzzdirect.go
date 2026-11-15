@@ -154,6 +154,9 @@ func (p *Port) Replay(ctx context.Context, key buzzop.Key) buzzop.Result {
 //
 // Invariants:
 //   - A write without a key is NotSent: it cannot be made idempotent.
+//   - Input that cannot be built into an event (content over the limit, a
+//     malformed id) is Rejected and nothing is prepared: it is never
+//     accepted as it is, so it must not be sent again.
 //   - The port signs at most one event per key. When key has a record, its
 //     stored event is the one sent and build is not called.
 //   - Only a kind buzzwire.Publishable is prepared or sent.
@@ -188,7 +191,7 @@ func (p *Port) write(ctx context.Context, key buzzop.Key, build func(time.Time) 
 		}
 		evt, err := build(now)
 		if err != nil {
-			return notSent(err.Error())
+			return buzzop.Result{Outcome: buzzop.Rejected, Reason: err.Error()}
 		}
 		if !buzzwire.Publishable(evt.Kind) {
 			return notSent(fmt.Sprintf("kind %d is not published", evt.Kind))
@@ -217,7 +220,7 @@ func (p *Port) write(ctx context.Context, key buzzop.Key, build func(time.Time) 
 	}
 	conn := p.live()
 	if conn == nil {
-		held.Reason = "no relay connection"
+		held.Reason = buzzop.ReasonNoConnection
 		return held
 	}
 	if _, err := p.out.BeginAttempt(string(key), now); err != nil {
@@ -357,7 +360,7 @@ func (p *Port) Lookup(ctx context.Context, eventID string) (bool, error) {
 func (p *Port) read(ctx context.Context, filter nostr.Filter) ([]nostr.Event, error) {
 	conn := p.live()
 	if conn == nil {
-		return nil, errors.New("no relay connection")
+		return nil, errors.New(buzzop.ReasonNoConnection)
 	}
 	ctx, cancel := context.WithTimeout(ctx, p.readTimeout)
 	defer cancel()

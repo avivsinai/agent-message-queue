@@ -18,6 +18,10 @@ const (
 	Unknown Outcome = "unknown"
 )
 
+// ReasonNoConnection is the Reason of an attempt made with no relay
+// connection: nothing was sent.
+const ReasonNoConnection = "no relay connection"
+
 // Result is the outcome of one Buzz write. EventID is the event the write
 // produced, when the transport named it. Reason is the transport's own words
 // for an outcome other than Accepted.

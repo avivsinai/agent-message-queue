@@ -175,9 +175,9 @@ func (directOps) FindChannels(context.Context, string) ([]string, error) {
 	return nil, errors.New("the direct transport finds a channel only by its chosen id")
 }
 
-// noRelayConnection is the reason the direct transport gives for an
-// attempt made with no relay connection: nothing was sent.
-const noRelayConnection = "no relay connection"
+// offline reports whether the direct transport is known to have no relay
+// connection, so no step can be sent or observed.
+func (s *Server) offline() bool { return s.online != nil && !s.online() }
 
 // Lines a record shows while the relay's state does not prove a step.
 const (
@@ -241,9 +241,12 @@ func (s *Server) findChosen(r channelRecord) (ids []string, ok bool) {
 
 // lookupChosen resolves an uncertain create of r on the direct transport.
 // The observation comes first: the chosen channel, when the relay shows it,
-// is adopted. Otherwise the stored create is replayed, the same signed
-// event: its refusal fails r only when the relay does not hold that event.
-// Any outcome that proves nothing waits for the next pass.
+// is adopted. Otherwise the create is made again under the same key: the
+// transport sends the event it stored for that key, or signs the first one
+// when none was prepared, so a registration never has two creates. A
+// refusal fails r only when no event was signed or the relay does not hold
+// it; an accepted create waits for the observation; any other outcome
+// proves nothing and waits for the next pass.
 func (s *Server) lookupChosen(r *channelRecord) {
 	ids, ok := s.findChosen(*r)
 	switch {
@@ -254,17 +257,21 @@ func (s *Server) lookupChosen(r *channelRecord) {
 		r.ChannelID, r.State, r.LastError = ids[0], channelCreating, ""
 		return
 	}
-	ctx := s.lifeCtx()
-	if ctx.Err() != nil {
-		return
-	}
-	ctx, cancel := s.bound(ctx)
-	defer cancel()
-	res := s.direct.Replay(ctx, buzzop.Key("create/"+r.Reg))
+	res := s.buzz.CreateChannel(s.lifeCtx(), s.createSpec(*r)).Result
 	switch res.Outcome {
 	case buzzop.Accepted:
 		r.LastError = waitingForState
 	case buzzop.Rejected:
+		if res.EventID == "" {
+			r.State, r.LastError = channelFailed, res.Reason
+			return
+		}
+		ctx := s.lifeCtx()
+		if ctx.Err() != nil {
+			return
+		}
+		ctx, cancel := s.bound(ctx)
+		defer cancel()
 		found, err := s.direct.Lookup(ctx, res.EventID)
 		switch {
 		case err != nil:
