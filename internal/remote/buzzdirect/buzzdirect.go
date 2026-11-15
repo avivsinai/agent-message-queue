@@ -31,7 +31,7 @@ type Conn interface {
 
 // Config is what one port needs.
 type Config struct {
-	// Identity: Agent, Owner and RelaySelf are used.
+	// Identity: Agent and RelaySelf are used.
 	Identity buzzop.Identity
 	// Secret is the agent key's secret. It signs every event and is never
 	// logged or put in an error.
@@ -164,11 +164,13 @@ func (p *Port) Replay(ctx context.Context, key buzzop.Key) buzzop.Result {
 //   - Accepted means the relay's positive OK for this event id, or a stored
 //     accepted record.
 //   - An attempt whose bytes never left (no connection, a failed
-//     BeginAttempt, a publish refused before it wrote) does not weaken a
-//     record that was unknown: the result and the stored outcome stay
-//     unknown.
-//   - A storage failure after the publish began is Unknown; before it,
-//     NotSent. Its text is the Reason.
+//     BeginAttempt, a publish refused before it wrote) proves nothing new:
+//     the result and the stored outcome are what the earlier attempts left
+//     (not_sent for a record never sent, else unknown or rejected).
+//   - A record that cannot be read is Unknown: nothing says what an earlier
+//     attempt did. A storage failure after the publish began is Unknown
+//     too; a failure to make a new record is NotSent. The storage error is
+//     the Reason.
 //   - The port never retries; a not_sent record is due now, an unknown or
 //     rejected one after retryGap.
 func (p *Port) write(ctx context.Context, key buzzop.Key, build func(time.Time) (nostr.Event, error)) buzzop.Result {
@@ -178,7 +180,7 @@ func (p *Port) write(ctx context.Context, key buzzop.Key, build func(time.Time) 
 	now := p.now()
 	rec, ok, err := p.out.Get(string(key))
 	if err != nil {
-		return notSent("outbox: " + err.Error())
+		return buzzop.Result{Outcome: buzzop.Unknown, Reason: "outbox: " + err.Error()}
 	}
 	if !ok {
 		if build == nil {
@@ -201,11 +203,9 @@ func (p *Port) write(ctx context.Context, key buzzop.Key, build func(time.Time) 
 	if rec.Outcome == buzzop.Accepted {
 		return buzzop.Result{Outcome: buzzop.Accepted, EventID: rec.EventID}
 	}
-	// held is what an attempt that never sends may report.
-	held := buzzop.Result{Outcome: buzzop.NotSent, EventID: rec.EventID}
-	if rec.Outcome == buzzop.Unknown {
-		held.Outcome = buzzop.Unknown
-	}
+	// held is what an attempt that never sends reports: the outcome the
+	// earlier attempts left.
+	held := buzzop.Result{Outcome: rec.Outcome, EventID: rec.EventID}
 	evt, err := rec.SignedEvent()
 	if err != nil {
 		held.Reason = err.Error()
@@ -226,8 +226,8 @@ func (p *Port) write(ctx context.Context, key buzzop.Key, build func(time.Time) 
 	}
 	pubErr := conn.Publish(ctx, evt)
 	r := buzzop.Result{Outcome: outbox.OutcomeOf(pubErr), EventID: rec.EventID, Reason: reason(pubErr)}
-	if r.Outcome == buzzop.NotSent && held.Outcome == buzzop.Unknown {
-		r.Outcome = buzzop.Unknown
+	if r.Outcome == buzzop.NotSent {
+		r.Outcome = held.Outcome
 	}
 	settledAt := p.now()
 	next := settledAt
@@ -290,7 +290,8 @@ func newer(a, b nostr.Event) bool {
 
 // Reactions reads the reactions on eventID up to EOSE: one Reaction per
 // emoji (the event content) with its distinct authors, in first-seen order.
-// The error rule is ChannelFacts's.
+// A reaction targets its last e tag, so one that only names eventID in an
+// earlier e tag is not a reaction on it. The error rule is ChannelFacts's.
 func (p *Port) Reactions(ctx context.Context, eventID string) ([]buzzop.Reaction, error) {
 	filter, err := buzzwire.ReactionsFilter([]string{eventID})
 	if err != nil {
@@ -303,6 +304,9 @@ func (p *Port) Reactions(ctx context.Context, eventID string) ([]buzzop.Reaction
 	var out []buzzop.Reaction
 	index := map[string]int{}
 	for _, evt := range events {
+		if !strings.EqualFold(reactionTarget(evt), eventID) {
+			continue
+		}
 		i, ok := index[evt.Content]
 		if !ok {
 			i = len(out)
@@ -314,6 +318,18 @@ func (p *Port) Reactions(ctx context.Context, eventID string) ([]buzzop.Reaction
 		}
 	}
 	return out, nil
+}
+
+// reactionTarget is the event a reaction targets: the value of its last e
+// tag, or "".
+func reactionTarget(evt nostr.Event) string {
+	target := ""
+	for _, t := range evt.Tags {
+		if len(t) >= 2 && t[0] == "e" {
+			target = t[1]
+		}
+	}
+	return target
 }
 
 // Lookup reports whether the relay stores the event with this id. An error

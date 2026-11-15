@@ -189,6 +189,12 @@ func TestReactionsGroupAuthorsByEmoji(t *testing.T) {
 	a, b := nostr.Generate(), nostr.Generate()
 	f.inject(t, a, 7, nostr.Tags{{"e", post}}, "👍")
 	f.inject(t, b, 7, nostr.Tags{{"e", post}}, "👍")
+	// A reaction on another event that also names post in an earlier e tag
+	// is not a reaction on post: the last e tag is the target. Found in the
+	// lead's pre-merge review of this package (an approval must not be read
+	// from a reaction on a different message).
+	other := nostr.Generate().Public().Hex()
+	f.inject(t, nostr.Generate(), 7, nostr.Tags{{"e", post}, {"e", other}}, "✅")
 
 	got, err := f.port.Reactions(context.Background(), post)
 	if err != nil {
