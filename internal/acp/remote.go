@@ -149,8 +149,12 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 			return r.say(postStatus, r.settle(turnReplied), StopReasonRefusal, text)
 		}
 		// Both carriers name the images of the owner's message as local
-		// files.
-		text = attachImages(b.Root, s.id.RelayURL, text)
+		// files. A standalone turn's message is the owner's event itself.
+		if turn.event != nil {
+			text = unfetchedImages(*turn.event, text)
+		} else {
+			text = attachImages(b.Root, s.id.RelayURL, text)
+		}
 		if b.Mailbox() {
 			return s.runMailbox(sessionID, text, eventID, b, turn, emit)
 		}
@@ -451,6 +455,10 @@ type eventClaim struct {
 	binding.Binding
 	Name  string `json:"name,omitempty"`
 	Agent string `json:"agent,omitempty"`
+	// Decided is the kind of owner decision (decidedMirror, decidedCommand,
+	// decidedDialog) the event was taken as, or "" for a turn. A decided
+	// event is never a turn, and its claim may carry no binding.
+	Decided string `json:"decided,omitempty"`
 }
 
 func (c eventClaim) binding() binding.Binding {

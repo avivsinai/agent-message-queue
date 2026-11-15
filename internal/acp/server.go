@@ -14,13 +14,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"fiatjaf.com/nostr"
+
 	"github.com/avivsinai/agent-message-queue/internal/acp/acpwire"
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
-	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 )
 
 // ProtocolVersion is the live ACP bridge version. Prompt turns remain open
@@ -145,6 +146,9 @@ type turnState struct {
 	// route is the channel this prompt's host context names (machine agent
 	// only; "" when it has none).
 	route string
+	// event is the owner's verified message of a standalone turn (Owner),
+	// set before the turn runs; nil for an ACP prompt.
+	event *nostr.Event
 }
 
 // turnOutcome is how a turn settled. Its value is the reason on the wire.
@@ -225,6 +229,9 @@ type Server struct {
 	// online reports whether the direct transport has a relay connection;
 	// nil means it is not known, and the machine tick runs.
 	online func() bool
+	// owners are a standalone server's owner turns (Owner), run while its
+	// machine workers run.
+	owners ownerTurns
 	// dialogs is the dialog poster's state, used only by the worker that
 	// runs dialogTick.
 	dialogs dialogState
@@ -853,21 +860,15 @@ func (s *Server) beginPrompt(params json.RawMessage) (func(emit func(any) error)
 		if s.cfg.Machine {
 			channel = hostContext(parsed.Prompt)
 		}
-		if name, on, at, ok := s.mirrorSwitch(channel, eventID, text); ok {
+		if d, ok := s.decideOwner(s.acpOwner(channel, eventID, text)); ok {
 			return func(emit func(any) error) (any, *rpcError) {
-				return s.answerMirrorSwitch(parsed.SessionID, channel, name, on, at, emit)
-			}, nil, nil
-		}
-		// The owner's slash command is typed into the terminal; while a
-		// dialog is open it waits, so it is never taken as an answer.
-		if cmd, ok := s.ownerCommandFor(channel, eventID, text); ok {
-			return func(emit func(any) error) (any, *rpcError) {
-				return s.answerCommand(parsed.SessionID, channel, cmd, emit)
-			}, nil, nil
-		}
-		if dir, answer, ok := s.dialogReply(channel, eventID, text); ok {
-			return func(emit func(any) error) (any, *rpcError) {
-				return s.answerDialog(parsed.SessionID, channel, dir, answer, emit)
+				switch d.kind {
+				case decidedMirror:
+					return s.answerMirrorSwitch(parsed.SessionID, channel, d.name, d.on, d.at, emit)
+				case decidedCommand:
+					return s.answerCommand(parsed.SessionID, channel, d.cmd, emit)
+				}
+				return s.answerDialog(parsed.SessionID, channel, d.dir, d.answer, emit)
 			}, nil, nil
 		}
 	}
@@ -1321,25 +1322,21 @@ func (s *Server) steeringDialogReply(params json.RawMessage) (any, bool) {
 	s.mu.Unlock()
 	// A steer whose event id is unreadable verifies nothing.
 	eventID, _ := resolveEventID(parsed.Meta)
-	if name, on, at, ok := s.mirrorSwitch(channel, eventID, text); ok {
-		go func() { s.publish(channel, setMirror(name, on, at)) }()
-		return steeringResult{Outcome: SteeringAnswered}, true
-	}
-	if cmd, ok := s.ownerCommandFor(channel, eventID, text); ok {
-		go func() { s.publish(channel, s.commandReply(channel, cmd)) }()
-		return steeringResult{Outcome: SteeringAnswered}, true
-	}
-	dir, answer, ok := s.dialogReply(channel, eventID, text)
-	if !ok {
-		return nil, false
-	}
-	ack := "Answered."
-	won, err := dialog.WriteAnswer(dir, answer)
+	d, ok := s.decideOwner(s.acpOwner(channel, eventID, text))
 	switch {
-	case err != nil:
+	case !ok:
 		return nil, false
-	case !won:
-		ack = "Already answered."
+	case d.kind != decidedDialog:
+		go func() {
+			ack, _ := s.act(channel, d)
+			s.publish(channel, ack)
+		}()
+		return steeringResult{Outcome: SteeringAnswered}, true
+	}
+	// An answer that cannot be recorded leaves the steer to the session.
+	ack, err := writeAnswer(d.dir, d.answer)
+	if err != nil {
+		return nil, false
 	}
 	go s.publish(channel, ack)
 	return steeringResult{Outcome: SteeringAnswered}, true

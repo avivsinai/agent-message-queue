@@ -3,13 +3,17 @@ package acp
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"fiatjaf.com/nostr"
 
+	"github.com/avivsinai/agent-message-queue/internal/format"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/relay/relaytest"
@@ -18,6 +22,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzdirect"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
+	"github.com/avivsinai/agent-message-queue/internal/remote/mirror"
 	"github.com/avivsinai/agent-message-queue/internal/remote/outbox"
 )
 
@@ -106,6 +111,96 @@ func (f *standaloneFixture) groupState(t *testing.T, channel string) {
 			t.Fatal(err)
 		}
 		f.relay.Inject(evt)
+	}
+}
+
+// ownerSays signs text as the owner's message in channel.
+func (f *standaloneFixture) ownerSays(t *testing.T, channel, text string) buzzop.Inbound {
+	t.Helper()
+	evt := nostr.Event{Kind: 9, Tags: nostr.Tags{{"h", channel}}, Content: text, CreatedAt: nostr.Now()}
+	if err := evt.Sign(f.owner); err != nil {
+		t.Fatal(err)
+	}
+	return buzzop.Inbound{Channel: channel, Event: evt}
+}
+
+// posts are the agent's messages in channel whose content is text.
+func (f *standaloneFixture) posts(channel, text string) int {
+	n := 0
+	for _, evt := range f.relay.Events() {
+		if evt.Kind == 9 && evt.PubKey.Hex() == f.s.id.Agent && evt.Tags.Find("h")[1] == channel && evt.Content == text {
+			n++
+		}
+	}
+	return n
+}
+
+// waitClosed fails the test unless done closes within 5 s.
+func waitClosed(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the owner message was not handled within 5 s")
+	}
+}
+
+// The owner's message in a session's channel reaches the session's AMQ
+// inbox with its signed event, and the session's reply is posted in the
+// channel.
+func TestStandaloneOwnerMessageReachesTheSessionAndItsReplyIsPosted(t *testing.T) {
+	f := standalone(t)
+	b := liveSession(t, "alpha")
+	activeChannel(t, f.s, b, machineChanA)
+	stop, ok := f.s.StartMachine()
+	if !ok {
+		t.Fatal("the machine agent did not start")
+	}
+	t.Cleanup(stop)
+	in := f.ownerSays(t, machineChanA, "what is the build status?")
+
+	done := f.s.Owner(in)
+	var ids []string
+	for deadline := time.Now().Add(5 * time.Second); len(ids) == 0 && time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		ids = inboxPrompts(t, b.Root)
+	}
+	if len(ids) != 1 {
+		t.Fatalf("inbox prompts = %v; want one", ids)
+	}
+	prompt, err := format.ReadMessageFile(filepath.Join(fsq.AgentInboxNew(b.Root, "agent"), ids[0]+".md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, _ := json.Marshal(prompt.Header.Context)
+	if prompt.Header.From != mailboxSender || !strings.HasPrefix(prompt.Body, in.Event.Content+"\n") || !strings.Contains(string(signed), in.Event.ID.Hex()) {
+		t.Fatalf("prompt from %s, context %s, body %q; want the owner's text and signed event from %s", prompt.Header.From, signed, prompt.Body, mailboxSender)
+	}
+	replyAs(t, b.Root, prompt.Header.Thread, ids[0], format.KindAnswer, "green on main")
+	waitClosed(t, done)
+	if n := f.posts(machineChanA, "green on main"); n != 1 {
+		t.Fatalf("%d posts of the reply in the channel; want 1", n)
+	}
+}
+
+// The owner's "mirror off" in a mirrored session's channel switches the
+// mirror off and is acknowledged once; the same message again does nothing.
+func TestStandaloneOwnerMirrorOffIsAcknowledgedOnce(t *testing.T) {
+	f := standalone(t)
+	b := liveSession(t, "alpha")
+	b.Harness = "claude"
+	if err := binding.WriteNamed(b); err != nil {
+		t.Fatal(err)
+	}
+	activeChannel(t, f.s, b, machineChanA)
+	in := f.ownerSays(t, machineChanA, "mirror off")
+
+	waitClosed(t, f.s.Owner(in))
+	waitClosed(t, f.s.Owner(in))
+	if dir, err := mirror.DirFor("alpha"); err != nil || !mirror.Off(dir) {
+		t.Fatalf("the mirror is not off (err %v)", err)
+	}
+	if n := f.posts(machineChanA, mirrorOffReply); n != 1 {
+		t.Fatalf("%d acknowledgements; want 1", n)
 	}
 }
 
