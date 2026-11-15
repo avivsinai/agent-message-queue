@@ -3309,3 +3309,13 @@ func TestNotifyNewMessagesFailedInterruptKeyInjectorRunsOncePerCohort(t *testing
 		t.Fatalf("key injector ran %d times after a new message, want 2", got)
 	}
 }
+
+// Bead agent-message-queue-sfrv: the live readiness check hid the cause of
+// its refusal even though lock inspection had already found it.
+func TestWakeReadinessRefusalNamesTheLockReason(t *testing.T) {
+	current := wakeLockInspection{Status: wakeLockUnverified, Reason: "matching process identity has a non-amq executable name"}
+	err := validateWakeReadyAgainstLock(current, wakeReady{})
+	if err == nil || !strings.Contains(err.Error(), current.Reason) {
+		t.Fatalf("readiness error = %v; want lock reason %q", err, current.Reason)
+	}
+}
