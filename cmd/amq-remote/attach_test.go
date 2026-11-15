@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
 
 	"github.com/avivsinai/agent-message-queue/internal/agentidentity"
 	"github.com/avivsinai/agent-message-queue/internal/amqhome"
@@ -1482,6 +1483,15 @@ func TestAttachSaysTheStandaloneMachineAgentIsNotRunning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	tag, err := bodykey.SignAuthTag([32]byte{31: 7}, agent, bodykey.MachineConditions(time.Now().Add(time.Hour).Unix()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grant, err := machinecred.EncodeGrant(agent, "wss://relay.example", *tag); err != nil {
+		t.Fatal(err)
+	} else if _, err := machinecred.Enroll(home, grant); err != nil {
+		t.Fatal(err)
+	}
 	line := agent[:8] + ": the owner's grant ended 2026-11-01T00:00:00Z; run amq-remote machine request and have the owner sign again."
 	status, _ := json.Marshal(machineStatus{State: "refused", Code: codeAuthorityExpired, Line: line, PID: os.Getpid(), Updated: time.Now().UTC().Format(time.RFC3339)})
 	if err := os.WriteFile(filepath.Join(home, "remote", "machine", agent, machineStatusFile), status, 0o600); err != nil {
@@ -1508,5 +1518,19 @@ func TestAttachSaysTheStandaloneMachineAgentIsNotRunning(t *testing.T) {
 	if text := out.String(); !strings.Contains(text, "The machine agent runs inside amq-remote serve and is not running: "+line) ||
 		strings.Contains(text, "Buzz Desktop") || strings.Contains(text, "amq-acp setup --machine") {
 		t.Fatalf("attach printed %q; want the serve's refusal and no Buzz Desktop step", text)
+	}
+
+	// Found in pre-merge review: the refusal of a serve that no longer runs
+	// was shown as current. A status file whose pid does not run is ignored.
+	status, _ = json.Marshal(machineStatus{State: "refused", Code: codeAuthorityExpired, Line: line, PID: 1 << 30, Updated: time.Now().UTC().Format(time.RFC3339)})
+	if err := os.WriteFile(filepath.Join(home, "remote", "machine", agent, machineStatusFile), status, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if code, err := attach([]string{"--self"}, &out, io.Discard); code != 0 || err != nil {
+		t.Fatalf("attach: code=%d err=%v", code, err)
+	}
+	if text := out.String(); !strings.Contains(text, "is not running: run amq-remote up.") || strings.Contains(text, line) {
+		t.Fatalf("attach printed %q; want run amq-remote up for the status of a serve that no longer runs", text)
 	}
 }

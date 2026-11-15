@@ -80,10 +80,18 @@ func machineOf(now time.Time) agentInfo {
 	}
 	raw, err := fsq.ReadRegularNoFollowBounded(filepath.Join(home, "remote", "machine", info.PubKey, machineStatusFile), maxMarkerBytes)
 	var st machineStatus
-	if err == nil && json.Unmarshal(raw, &st) == nil {
+	if err == nil && json.Unmarshal(raw, &st) == nil && !statusOfDeadServe(st) {
 		info.Status = &st
 	}
 	return info
+}
+
+// statusOfDeadServe reports a status file whose writer is proven gone: its
+// pid does not run. Such a file says nothing about the agent now. A pid
+// whose process runs, or that cannot be checked, keeps the file.
+func statusOfDeadServe(st machineStatus) bool {
+	state, _ := launch.InspectHolder(launch.LocalHolder(st.PID, "", ""))
+	return state == launch.LeaseStale
 }
 
 // standalone reports a machine agent that runs inside amq-remote serve.
