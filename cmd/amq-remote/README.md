@@ -97,7 +97,8 @@ endpoint is down.
 `amq-owner-sign --machine FILE --out FILE --relay URL`, which the owner runs in
 their own terminal. `--valid-for` is 1h to 8760h (one year); the default is 2160h (90 days).
 `machine enroll --grant FILE` checks the signed grant against the agent key
-and stores it; it prints the agent key, the owner key and the end date. The
+and stores it with the relay URL the owner named when signing; it prints the
+agent key, the owner key, the relay and the end date. The
 grant lets the agent key act as the owner's Buzz agent for every event kind,
 and it ends at the printed date.
 `version` prints `amq-remote <version>`. The `claude` commands install and

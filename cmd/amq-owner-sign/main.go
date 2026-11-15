@@ -298,7 +298,7 @@ func machinePlan(o options, stdout io.Writer) (signPlan, error) {
 			if err != nil {
 				return nil, "", err
 			}
-			out, err := machinecred.EncodeGrant(body, *tag)
+			out, err := machinecred.EncodeGrant(body, o.relay, *tag)
 			return out, tag.OwnerPubKey, err
 		},
 		wrote: "wrote the machine grant to",

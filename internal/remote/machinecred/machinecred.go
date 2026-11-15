@@ -7,7 +7,7 @@
 //
 //	remote/machine/<agent_pubkey>/        0700
 //	remote/machine/<agent_pubkey>/body.key 0600, written by bodykey.Mint
-//	remote/machine/<agent_pubkey>/grant.json 0600, {"owner_pubkey","conditions","sig"}
+//	remote/machine/<agent_pubkey>/grant.json 0600, {"owner_pubkey","conditions","sig","relay"}
 //
 // The owner key never reaches this package. The request text and the grant
 // file the owner hands back hold public values only.
@@ -29,6 +29,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
 )
 
@@ -57,6 +58,10 @@ var pubkeyRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 type Credential struct {
 	Key *bodykey.BodyKey
 	Tag bodykey.AuthTag
+	// Relay is the relay URL the owner named when signing. It passes
+	// relay.ValidateURL. It is not covered by the signature: it says where
+	// to connect, and the relay's AUTH decides what the grant is worth.
+	Relay string
 }
 
 // Grant is the file the owner hands back after signing a request.
@@ -65,11 +70,13 @@ type Grant struct {
 	OwnerPubKey string `json:"owner_pubkey"`
 	Conditions  string `json:"conditions"`
 	Sig         string `json:"sig"`
+	Relay       string `json:"relay"`
 }
 
-// EncodeGrant is the grant file content for a tag signed over body.
-func EncodeGrant(body string, tag bodykey.AuthTag) ([]byte, error) {
-	out, err := json.MarshalIndent(Grant{BodyPubKey: body, OwnerPubKey: tag.OwnerPubKey, Conditions: tag.Conditions, Sig: tag.SigHex()}, "", "  ")
+// EncodeGrant is the grant file content for a tag signed over body, for the
+// agent to use on the relay at relayURL.
+func EncodeGrant(body, relayURL string, tag bodykey.AuthTag) ([]byte, error) {
+	out, err := json.MarshalIndent(Grant{BodyPubKey: body, OwnerPubKey: tag.OwnerPubKey, Conditions: tag.Conditions, Sig: tag.SigHex(), Relay: relayURL}, "", "  ")
 	if err != nil {
 		return nil, err
 	}
@@ -82,6 +89,7 @@ type storedGrant struct {
 	OwnerPubKey string `json:"owner_pubkey"`
 	Conditions  string `json:"conditions"`
 	Sig         string `json:"sig"`
+	Relay       string `json:"relay"`
 }
 
 // rel is the path of name below the AMQ home.
@@ -390,14 +398,17 @@ func Enroll(home string, grant []byte) (Credential, error) {
 	if err != nil {
 		return Credential{}, err
 	}
-	raw, err := json.MarshalIndent(storedGrant{OwnerPubKey: tag.OwnerPubKey, Conditions: tag.Conditions, Sig: tag.SigHex()}, "", "  ")
+	if err := relay.ValidateURL(g.Relay); err != nil {
+		return Credential{}, fmt.Errorf("grant file: relay: %w", err)
+	}
+	raw, err := json.MarshalIndent(storedGrant{OwnerPubKey: tag.OwnerPubKey, Conditions: tag.Conditions, Sig: tag.SigHex(), Relay: g.Relay}, "", "  ")
 	if err != nil {
 		return Credential{}, err
 	}
 	if _, err := fsq.WriteStateFile(home, rel(g.BodyPubKey, grantFile), append(raw, '\n'), 0o600); err != nil {
 		return Credential{}, err
 	}
-	return Credential{Key: k, Tag: tag}, nil
+	return Credential{Key: k, Tag: tag, Relay: g.Relay}, nil
 }
 
 // Load reads the agent's key and grant and checks the grant's shape and
@@ -430,5 +441,8 @@ func Load(home, agent string) (Credential, error) {
 	if err != nil {
 		return Credential{}, fmt.Errorf("%s: %w", path, err)
 	}
-	return Credential{Key: k, Tag: tag}, nil
+	if err := relay.ValidateURL(g.Relay); err != nil {
+		return Credential{}, fmt.Errorf("%s: relay: %w", path, err)
+	}
+	return Credential{Key: k, Tag: tag, Relay: g.Relay}, nil
 }

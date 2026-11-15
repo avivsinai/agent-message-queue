@@ -30,7 +30,7 @@ func TestMintRequestSignEnrollLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	grant, err := EncodeGrant(body, *tag)
+	grant, err := EncodeGrant(body, "wss://relay.example", *tag)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,8 +42,8 @@ func TestMintRequestSignEnrollLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cred.Key.PublicKeyHex() != pub || cred.Tag.OwnerPubKey != tag.OwnerPubKey {
-		t.Fatalf("loaded %s / %s", cred.Key.PublicKeyHex(), cred.Tag.OwnerPubKey)
+	if cred.Key.PublicKeyHex() != pub || cred.Tag.OwnerPubKey != tag.OwnerPubKey || cred.Relay != "wss://relay.example" {
+		t.Fatalf("loaded %s / %s / %s", cred.Key.PublicKeyHex(), cred.Tag.OwnerPubKey, cred.Relay)
 	}
 	if err := cred.Tag.Verify(pub); err != nil {
 		t.Fatal(err)

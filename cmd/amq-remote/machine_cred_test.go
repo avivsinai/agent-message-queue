@@ -35,7 +35,7 @@ func TestMachineRequestThenEnroll(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	grant, err := machinecred.EncodeGrant(body, *tag)
+	grant, err := machinecred.EncodeGrant(body, "wss://relay.example", *tag)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,6 +53,7 @@ func TestMachineRequestThenEnroll(t *testing.T) {
 	for _, want := range []string{
 		"agent pubkey: " + body,
 		"owner pubkey: " + tag.OwnerPubKey,
+		"relay: wss://relay.example",
 		"valid until " + time.Unix(end, 0).UTC().Format(time.RFC3339),
 	} {
 		if !strings.Contains(out.String(), want) {

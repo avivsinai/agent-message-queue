@@ -146,6 +146,7 @@ func machineEnroll(args []string, stdout io.Writer) (int, error) {
 	}
 	say(stdout, "agent pubkey: %s", cred.Key.PublicKeyHex())
 	say(stdout, "owner pubkey: %s", cred.Tag.OwnerPubKey)
+	say(stdout, "relay: %s", cred.Relay)
 	say(stdout, "valid until %s", time.Unix(end, 0).UTC().Format(time.RFC3339))
 	return 0, nil
 }

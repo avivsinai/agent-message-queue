@@ -145,7 +145,7 @@ func TestSignsMachineRequestIntoOneGrant(t *testing.T) {
 	if err := tag.SetSigHex(g.Sig); err != nil {
 		t.Fatal(err)
 	}
-	if g.BodyPubKey != body || g.Conditions != bodykey.MachineConditions(notAfter) || g.OwnerPubKey != nostr.GetPublicKey(owner).Hex() || tag.Verify(body) != nil {
+	if g.Relay != "wss://relay.example" || g.BodyPubKey != body || g.Conditions != bodykey.MachineConditions(notAfter) || g.OwnerPubKey != nostr.GetPublicKey(owner).Hex() || tag.Verify(body) != nil {
 		t.Fatalf("grant = %s does not verify for the body with the request's conditions", raw)
 	}
 	if published.Kind != 30177 || published.Tags.GetD() != body || !bytes.Contains([]byte(published.Content), []byte(`"name":"AMQ Remote @ host"`)) {
