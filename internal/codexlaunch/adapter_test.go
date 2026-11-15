@@ -857,7 +857,7 @@ func TestManagedSeatStaysTerminalOnlyBelowFloorOrOnReleaseSkew(t *testing.T) {
 			t.Fatalf("TerminalOnlyReason = %q; want %q", plan.TerminalOnlyReason, wantReason)
 		}
 	})
-	t.Run("CLI newer than daemon is admitted (skew observed live 2026-11-15, bead s4ud)", func(t *testing.T) {
+	t.Run("a CLI newer than the daemon is admitted", func(t *testing.T) {
 		root, project, executable, amq := nativeSeat(t, nativeDaemonOptions{providerVersion: "0.169.0", initializeVersion: func(int32) string { return "0.167.0" }})
 		plan, err := New(executable).PlanFresh(launch.PlanRequest{Handle: "codex", LaunchNonce: "96969696-9696-4969-8969-969696969696", ProjectRoot: project,
 			SessionRoot: root.Base(), Cwd: project, AMQExecutable: amq, ResumePolicy: launch.ResumeEnabled})
@@ -906,9 +906,17 @@ func TestManagedSeatBindsWhenDaemonIsNewerThanCLI(t *testing.T) {
 	if plan.TerminalOnlyReason != "" {
 		t.Fatalf("TerminalOnlyReason must be empty, got %q", plan.TerminalOnlyReason)
 	}
-	ticket, argv := executeNativeAtVersion(t, root, plan, "0.169.0", true)
+	ticket, argv := executeNativeAtVersion(t, root, plan, "0.167.0", true)
 	if ticket.State != launch.ExecutionAcknowledged {
 		t.Fatalf("executeNative ticket state = %q; want ExecutionAcknowledged", ticket.State)
 	}
-	_ = argv
+	expected := daemonTemplate(t, executable, os.Getenv("CODEX_HOME"), project)
+	conversation, err := launch.LoadConversation(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected = append(expected, conversation.Identity.ID)
+	if !slices.Equal(argv, expected) {
+		t.Fatalf("argv = %q, want the daemon template and the thread %q", argv, expected)
+	}
 }

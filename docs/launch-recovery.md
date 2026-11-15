@@ -152,9 +152,9 @@ exclusions and runs the full startup admission on the bound daemon before
 publishing routing: provider release, sign-in, directory trust, daemon
 release, hook trust, terminal instructions, managed update requirements,
 and the seat's `--remote` matching the verified local socket. The daemon's
-reported release must equal the CLI's, read live; the floor release for
-the daemon template is `0.167.0`. A recovered execution that fails admission
-keeps its acquired thread; it never creates a replacement.
+reported release has its own floor `0.167.0`, read live. A recovered
+execution that fails admission keeps its acquired thread; it never creates
+a replacement.
 
 A conversation resumes on the backend that created it; launch never moves it
 implicitly. A conversation captured by notify resumes embedded. One whose

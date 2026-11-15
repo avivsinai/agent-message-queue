@@ -260,18 +260,16 @@ func verifiedDaemonLink(socket string) bool {
 // own -c turns the update check off, so no user setting is needed. reviewer
 // is the automatic approvals reviewer of the daemon's configuration for cwd,
 // which answers approvals before any client sees them; "" for the user.
-// version is the release the running daemon reported (matches the CLI on
-// success); it is threaded into ReadThread/StartThread so the same CLI
-// probe supplies the version for every later call.
+// version is the release the running daemon reported; ReadThread and
+// StartThread check the daemon against it.
 func admission(executable string, endpoint endpoint, cwd string) (reason, reviewer, version string) {
 	home, sock := endpoint.home, endpoint.socket
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	capabilities, reason := launch.NewCodexAdapter(executable).DaemonSeatReason(ctx)
+	_, reason = launch.NewCodexAdapter(executable).DaemonSeatReason(ctx)
 	if reason != "" {
 		return reason, "", ""
 	}
-	version = capabilities.ProviderVersion
 	login := exec.CommandContext(ctx, executable, "login", "status")
 	login.Dir = cwd
 	if err := login.Run(); err != nil {
@@ -284,9 +282,9 @@ func admission(executable string, endpoint endpoint, cwd string) (reason, review
 	if err != nil {
 		return "the Codex daemon did not answer AMQ's startup probe", "", ""
 	}
-	// the daemon's reported release carries the floor; same-tuple with the
-	// CLI is not required because Codex updates its daemon by itself.
-	if state.Version == "" || !launch.CodexDaemonReleaseReadable(state.Version) {
+	// The daemon's release has its own floor. It need not equal the CLI's:
+	// Codex updates the daemon package by itself.
+	if !launch.CodexDaemonReleaseReadable(state.Version) {
 		return "the running Codex daemon reports release \"" + state.Version + "\"; AMQ needs " + launch.CodexDaemonMinimumVersion + " or later", "", ""
 	}
 	version = state.Version
