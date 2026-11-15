@@ -43,11 +43,8 @@ func MoveNewToCur(root *DeliveryRoot, agent, filename string) error {
 				Err:       residue.Err,
 			}
 		}
-		// ENOENT is the advertised meaning of a lost claim race (another
-		// caller already claimed). It must remain bare so callers can
-		// treat it as "not your message" rather than as a delivery fault.
-		// Every other error (typically EACCES) gets the operation and the
-		// path in its wrapping, so the printed line is not a bare errno.
+		// A lost claim race is the bare not-exist error, which callers test.
+		// Any other failure names the claim and both paths.
 		if os.IsNotExist(err) {
 			return err
 		}
