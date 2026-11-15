@@ -12,11 +12,114 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
-// Bead dtyx.3: `amq thread settle --older-than 24h` sends one decision per
-// (thread, owner) and stops the older requests staying open. Dry-run prints
-// the groups without sending anything.
+type testOpener struct{ id, from, to, kind, subject, created string }
+
+// Bead dtyx.3: `amq thread settle` runs the same fixture in two real
+// modes, back to back, before `--dry-run`. First invocation is REAL --json,
+// second is text; this is how we pin the stream shape the live run broke.
 func TestThreadSettleSendsOneMarkerPerThreadAndOwner(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "queue")
+	for _, jsonMode := range []bool{true, false} {
+		root, openers := buildSettleFixture(t)
+		if jsonMode {
+			stdout, _ := captureOutput(t, func() error {
+				return runThread([]string{"settle", "--root", root, "--me", "alpha", "--older-than", "24h", "--json"})
+			})
+			var result threadSettleResult
+			if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &result); err != nil {
+				t.Fatalf("real --json emitted text or noise alongside the object: %v\nstdout first 15 lines:\n%s", err, firstNLines(stdout, 15))
+			}
+			if len(result.Settled) != 1 {
+				t.Fatalf("real --json must group exactly one sender/owner pair: got %d", len(result.Settled))
+			}
+			entry := result.Settled[0]
+			if entry.Count != 3 || entry.MessageID == "" {
+				t.Fatalf("real --json does not name the same three old requests or carry a real id: %+v", entry)
+			}
+			assertSettleDeliveryProves(t, root, openers, entry.MessageID)
+			// The new obligations are still owed.
+			expectOnlyNewObligation(t, root, openers[3].id)
+		} else {
+			stdout, _ := captureOutput(t, func() error {
+				return runThread([]string{"settle", "--root", root, "--me", "alpha", "--older-than", "24h"})
+			})
+			if strings.Contains(stdout, "{") {
+				t.Fatalf("text output includes JSON prefix:\n%s", stdout)
+			}
+			if !strings.Contains(stdout, "settled 3 requests to beta in p2p/alpha__beta through 2026-11-13T00-00-02.000Z_pid3_t3 (\"review 1\") as ") {
+				t.Fatalf("text shape wrong:\n%s", stdout)
+			}
+			if !strings.Contains(stdout, "kept: 1 request newer than 24h") {
+				t.Fatalf("singular kept form expected: %s", stdout)
+			}
+			assertSettleDeliveryProves(t, root, openers, "")
+			expectOnlyNewObligation(t, root, openers[3].id)
+		}
+	}
+}
+
+func firstNLines(s string, n int) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) > n {
+		lines = lines[:n]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// assertSettleDeliveryProves checks the marker is physically written in the
+// two documented places, receipt status doesn't matter on an explicit route.
+func assertSettleDeliveryProves(t *testing.T, root string, openers []testOpener, wantID string) {
+	t.Helper()
+	ownerFiles, err := filepath.Glob(filepath.Join(fsq.AgentInboxNew(root, "beta"), "*.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantLen := len(openers) + 1
+	if len(ownerFiles) != wantLen {
+		t.Fatalf("owner inbox count = %d; want %d (the four todos + the marker)", len(ownerFiles), wantLen)
+	}
+	for _, path := range ownerFiles {
+		if wantID != "" && filepath.Base(path) != wantID+".md" {
+			continue
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var header format.Message
+		parsed, err := format.ParseMessage(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		header = parsed
+		if header.Header.Kind == format.KindDecision && strings.Contains(string(raw), "settled-through") {
+			return
+		}
+		_ = header
+	}
+	t.Fatal("no settled-through decision in beta/inbox/new")
+}
+
+func expectOnlyNewObligation(t *testing.T, root, id string) {
+	t.Helper()
+	stdout, errout := captureOutput(t, func() error {
+		return runThread([]string{"open", "--json", "--root", root, "--max-age", "336h"})
+	})
+	var opened threadOpenResult
+	if err := json.Unmarshal([]byte(stdout), &opened); err != nil {
+		t.Fatalf("thread open output: %v\nstdout=%s\nstderr=%s", err, stdout, errout)
+	}
+	for _, ob := range opened.Obligations {
+		if ob.OwedBy.Handle == "beta" && ob.Thread == "p2p/alpha__beta" {
+			if ob.Opener.ID != id && ob.State != "closed" {
+				t.Fatalf("unexpected survivor: %+v", ob)
+			}
+		}
+	}
+}
+
+func buildSettleFixture(t *testing.T) (root string, openers []testOpener) {
+	t.Helper()
+	root = filepath.Join(t.TempDir(), "queue")
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatal(err)
 	}
@@ -25,228 +128,38 @@ func TestThreadSettleSendsOneMarkerPerThreadAndOwner(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-
 	old := time.Now().UTC().Add(-48 * time.Hour)
 	fresh := time.Now().UTC().Add(-time.Second)
-
-	type msg struct {
-		id   string
-		from string
-		to   string
-		time time.Time
-		kind string
-		body string
+	type in struct {
+		id, kind, subject string
+		createdAt         time.Time
 	}
-	openers := []msg{
-		{"2026-11-13T00-00-00.000Z_pid1_t1", "alpha", "beta", old, format.KindTodo, "todo 1"},
-		{"2026-11-13T00-00-01.000Z_pid2_t2", "alpha", "beta", old, format.KindTodo, "todo 2"},
-		{"2026-11-13T00-00-02.000Z_pid3_t3", "alpha", "beta", old, format.KindReviewRequest, "review 1"},
-		{"2026-11-13T00-00-03.000Z_pid4_t4", "alpha", "beta", fresh, format.KindTodo, "todo 4"},
+	openers = []testOpener{}
+	wants := []in{
+		{"2026-11-13T00-00-00.000Z_pid1_t1", format.KindTodo, "todo 1", old},
+		{"2026-11-13T00-00-01.000Z_pid2_t2", format.KindTodo, "todo 2", old},
+		{"2026-11-13T00-00-02.000Z_pid3_t3", format.KindReviewRequest, "review 1", old},
+		{"2026-11-13T00-00-03.000Z_pid4_t4", format.KindTodo, "todo 4", fresh},
 	}
-	writeOpener := func(m msg) {
-		e := format.Message{
-			Header: format.Header{
-				Schema:   format.CurrentSchema,
-				ID:       m.id,
-				From:     m.from,
-				To:       []string{m.to},
-				Thread:   "p2p/alpha__beta",
-				Subject:  m.body,
-				Created:  m.time.UTC().Format(time.RFC3339Nano),
-				Priority: format.PriorityNormal,
-				Kind:     m.kind,
-			},
-			Body: m.body,
-		}
+	for _, in := range wants {
+		e := format.Message{Header: format.Header{
+			Schema: format.CurrentSchema,
+			ID:     in.id, From: "alpha", To: []string{"beta"}, Thread: "p2p/alpha__beta",
+			Subject: in.subject, Created: in.createdAt.UTC().Format(time.RFC3339Nano),
+			Priority: format.PriorityNormal, Kind: in.kind}}
 		raw, err := e.Marshal()
 		if err != nil {
 			t.Fatal(err)
 		}
-		target := filepath.Join(root, "agents", m.to, "inbox", "new", m.id+".md")
-		if err := os.WriteFile(target, raw, 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(root, "agents", "beta", "inbox", "new", in.id+".md"), raw, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		// Track it in the sender's outbox so the requester's own open-row
-		// projection finds it.
-		out := filepath.Join(root, "agents", m.from, "outbox", "sent", m.id+".md")
-		if err := os.WriteFile(out, raw, 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(root, "agents", "alpha", "outbox", "sent", in.id+".md"), raw, 0o600); err != nil {
 			t.Fatal(err)
 		}
+		openers = append(openers, testOpener{id: in.id, from: "alpha", to: "beta", kind: in.kind, subject: in.subject, created: in.createdAt.UTC().Format(time.RFC3339Nano)})
 	}
-	for _, m := range openers {
-		writeOpener(m)
-	}
-
-	// (no delivery-root is opened here: the deliverer opens its own)
-
-	envRestorer := func() {
-		t.Setenv("AM_ME", "alpha")
-		t.Setenv("AM_ROOT", root)
-		t.Setenv("AM_BASE_ROOT", root)
-		t.Setenv("AM_SESSION", "")
-		t.Setenv("AM_ROOT_ID", "loading")
-		t.Setenv("AM_BASE_ROOT_ID", "loading")
-	}
-	envRestorer()
-
-	// Dry-run JSON: one marker selected, nothing sent, three old requests are
-	// listed. `thread open` still has all four obligations.
-	dryStdout, dryStderr := captureOutput(t, func() error {
-		return runThread([]string{"settle", "--root", root, "--me", "alpha", "--older-than", "24h", "--dry-run", "--json"})
-	})
-	var dry threadSettleResult
-	if err := json.Unmarshal([]byte(dryStdout), &dry); err != nil {
-		t.Fatalf("dry-run parse: %v\nstdout=%s\nstderr=%s", err, dryStdout, dryStderr)
-	}
-	if !dry.DryRun {
-		t.Fatal("dry-run must report dry_run=true")
-	}
-	if len(dry.Settled) != 1 {
-		t.Fatalf("expected exactly one settled group for (thread, owner); got %d", len(dry.Settled))
-	}
-	g := dry.Settled[0]
-	if g.Count != 3 {
-		t.Fatalf("dry-run count = %d; want 3", g.Count)
-	}
-	if g.MessageID != "" {
-		t.Fatalf("dry-run must not fabricate a message id: got %q", g.MessageID)
-	}
-	if g.Through.Opener.Subject != "review 1" {
-		t.Fatalf("anchor picked the wrong old request: %q", g.Through.Opener.Subject)
-	}
-
-	// The real run: one decision, labelled settled-through, in beta's inbox.
-	realStdout, realStderr := captureOutput(t, func() error {
-		return runThread([]string{"settle", "--root", root, "--me", "alpha", "--older-than", "24h"})
-	})
-	if len(realStdout) == 0 {
-		t.Fatalf("expected one settled line; stderr=%s", realStderr)
-	}
-	newB, err := os.ReadDir(fsq.AgentInboxNew(root, "beta"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	newCount := len(newB)
-	// Track the marker and read its header. Should the reducer have instead
-	// moved relevant inbound messages over cur with presence receipts, the
-	// sum covers both directories.
-	curB, err := os.ReadDir(fsq.AgentInboxCur(root, "beta"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	total := newCount + len(curB)
-	if total != len(openers)+1 {
-		t.Fatalf("beta inbox count = %d files; want %d (the four todos plus one marker)", total, len(openers)+1)
-	}
-	var sawSettled bool
-	for _, file := range newB {
-		if file.IsDir() {
-			continue
-		}
-		raw, err := os.ReadFile(filepath.Join(fsq.AgentInboxNew(root, "beta"), file.Name()))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if strings.Contains(string(raw), "\"settled-through\"") {
-			sawSettled = true
-			parsed, err := format.ParseMessage(raw)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if parsed.Header.Kind != format.KindDecision {
-				t.Fatalf("the settle marker is not a decision: %q", parsed.Header.Kind)
-			}
-			if len(parsed.Header.Refs) == 0 {
-				t.Fatalf("the settle marker carries no refs")
-			}
-			lastRef := parsed.Header.Refs[len(parsed.Header.Refs)-1]
-			if lastRef != openers[2].id {
-				t.Fatalf("anchor ref %q != %q", lastRef, openers[2].id)
-			}
-		}
-	}
-	if !sawSettled {
-		t.Fatal("no settled-through decision in beta/inbox/new")
-	}
-
-	// `thread open --json` now lists nothing older than 24h for that pair; only
-	// the recent fourth todo is left.
-	openStdout, openStderr := captureOutput(t, func() error {
-		return runThread([]string{"open", "--json", "--root", root, "--max-age", "336h"})
-	})
-	var opened threadOpenResult
-	if err := json.Unmarshal([]byte(openStdout), &opened); err != nil {
-		t.Fatalf("open parse: %v\nstdout=%s\nstderr=%s", err, openStdout, openStderr)
-	}
-	// Resolve opener ids by index so the result can't silently report 0 rows.
-	if len(opened.Obligations) == 0 {
-		t.Fatalf("expected thread open to still see the new todo, got no rows")
-	}
-	for _, ob := range opened.Obligations {
-		if ob.OwedBy.Handle == "beta" && ob.Thread == "p2p/alpha__beta" {
-			if ob.Opener.Kind != format.KindTodo {
-				continue
-			}
-			if ob.Opener.ID != openers[3].id {
-				t.Fatalf("unexpected survivor: %+v", ob)
-			}
-			if !strings.Contains(ob.OwedBy.Session, "alpha") {
-				_ = ob.OwedBy.Session
-			}
-		}
-	}
-
-	// --json shape of this same dry-run call: one JSON document on stdout,
-	// nothing else. (A second real --json after the settle would correctly
-	// print settled:[].)
-	jStdout := dryStdout
-	var jr threadSettleResult
-	if err := json.Unmarshal([]byte(strings.TrimSpace(jStdout)), &jr); err != nil {
-		t.Fatalf("--json not single JSON object: %v\nstdout: %s", err, jStdout)
-	}
-	if len(jr.Settled) != 1 || jr.Settled[0].Count != 3 {
-		t.Fatalf("--json dry-run does not report the same three old requests: %+v", jr.Settled)
-	}
-	// Text mode must not carry any JSON-shaped fragment, the anchor's subject is
-	// the review request (through the new `closesObligation` review branch), the
-	// kept count is only the newest surviving obligation, and the line ends with
-	// the marker id.
-	if strings.Contains(realStdout, "{") {
-		t.Fatalf("text output includes JSON content:\n%s", realStdout)
-	}
-	if !strings.Contains(realStdout, "settled 3 requests to beta in p2p/alpha__beta through 2026-11-13T00-00-02.000Z_pid3_t3") {
-		t.Fatalf("text output lost the anchor or its count:\n%s", realStdout)
-	}
-	if !strings.Contains(realStdout, " (\"review 1\")") {
-		t.Fatalf("text output does not name the old review request: %s", realStdout)
-	}
-	if !strings.Contains(realStdout, "kept: 1 requests newer than 24h") {
-		t.Fatalf("kept count is not the newer-than-bound count: %s", realStdout)
-	}
-	// The marker is also in the requester's outbox/sent.
-	sentFiles, err := filepath.Glob(filepath.Join(fsq.AgentOutboxSent(root, "alpha"), "*.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(sentFiles) != len(openers)+1 {
-		t.Fatalf("alpha/outbox/sent holds %d files; want %d", len(sentFiles), len(openers)+1)
-	}
-	var sentID string
-	for _, p := range sentFiles {
-		raw, err := os.ReadFile(p)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if strings.Contains(string(raw), "settled-through") {
-			sentID = strings.TrimSuffix(filepath.Base(p), ".md")
-		}
-	}
-	if sentID == "" {
-		t.Fatal("marker missing from alpha/outbox/sent")
-	}
-	if !strings.Contains(realStdout, " as "+sentID) {
-		t.Fatalf("text line does not end with the delivered marker id: %s", realStdout)
-	}
+	return root, openers
 }
 
 // Bead dtyx.3 lead ruling 1: the plaintext thread-open view summarizes

@@ -179,18 +179,18 @@ func runThreadSettle(args []string) error {
 		for _, ob := range g.Openers {
 			openerIDs = append(openerIDs, ob.Opener.ID)
 		}
-		subject := fmt.Sprintf("Settled: %d requests through %q", len(g.Openers), anc.Opener.Subject)
+		subject := fmt.Sprintf("Settled: %d %s through %q", len(g.Openers), pluralRequest(len(g.Openers)), anc.Opener.Subject)
 		body := fmt.Sprintf("These requests from %s need nothing more from you; each one in this thread up to and including %s is closed.\n", me, anc.Opener.ID)
 		for _, ob := range g.Openers {
 			body += fmt.Sprintf("%s  %s  %s\n", ob.Opener.ID, ob.Opener.Kind, ob.Opener.Subject)
 		}
 		to := participantLabel(participant{Session: g.OwnerSession, Handle: g.OwnerHandle})
-		text := fmt.Sprintf("settled %d requests to %s in %s through %s (%q) as %%s",
-			len(g.Openers), to, anc.Opener.Thread, anc.Opener.ID, anc.Opener.Subject)
+		text := fmt.Sprintf("settled %d %s to %s in %s through %s (%q) as %%s",
+			len(g.Openers), pluralRequest(len(g.Openers)), to, anc.Opener.Thread, anc.Opener.ID, anc.Opener.Subject)
 		if *dryRunFlag {
 			if !common.JSON {
-				_ = writeStdout("would settle %d requests to %s in %s through %s (%q)\n",
-					len(g.Openers), to, anc.Opener.Thread, anc.Opener.ID, anc.Opener.Subject)
+				_ = writeStdout("would settle %d %s to %s in %s through %s (%q)\n",
+					len(g.Openers), pluralRequest(len(g.Openers)), to, anc.Opener.Thread, anc.Opener.ID, anc.Opener.Subject)
 			}
 			result.Settled = append(result.Settled, threadSettleEntryJSON{
 				Thread:    g.Thread,
@@ -236,7 +236,9 @@ func runThreadSettle(args []string) error {
 			}
 			continue
 		}
-		_ = writeStdout("%s\n", fmt.Sprintf(text, msgID))
+		if !common.JSON {
+			_ = writeStdout("%s\n", fmt.Sprintf(text, msgID))
+		}
 	}
 	if len(result.Settled) == 0 && firstErr == nil {
 		if !common.JSON {
@@ -255,9 +257,17 @@ func runThreadSettle(args []string) error {
 		return firstErr
 	}
 	if result.Kept > 0 {
-		_ = writeStdout("kept: %d requests newer than %s\n", result.Kept, *olderThanFlag)
+		_ = writeStdout("kept: %d %s newer than %s\n", result.Kept, pluralRequest(result.Kept), *olderThanFlag)
 	}
 	return firstErr
+}
+
+// pluralRequest is `request`/`requests` for the printed case lines.
+func pluralRequest(n int) string {
+	if n == 1 {
+		return "request"
+	}
+	return "requests"
 }
 
 // lessEntries is the (created, id) ordering planner used by Reduction.
