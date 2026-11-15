@@ -136,3 +136,43 @@ func TestClaudeNativeRegistryAdmitsNewerReleaseOnPeerProtocol1(t *testing.T) {
 		t.Fatalf("a protocol mismatch must still classify as the registry mismatch that disables the injector: %v", err)
 	}
 }
+
+// Bead v9zg: a user whose shell sets CLAUDE_CONFIG_DIR chooses that directory
+// as the launch's Claude home and reads its (peer-1) registration from
+// <that dir>/sessions/<pid>.json, not ~/.claude.
+func TestNativeConfigDirSelectsRegistryHome(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	pid := os.Getpid()
+	sessions := filepath.Join(dir, "sessions")
+	if err := os.MkdirAll(sessions, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	reg := claudeNativeRegistry{
+		PID: pid, SessionID: "abc", Name: "s", Cwd: "/tmp", Version: "2.1.325",
+		Protocol: 1, Kind: "interactive", Socket: filepath.Join(dir, "sock"),
+	}
+	raw, _ := json.Marshal(reg)
+	if err := os.WriteFile(filepath.Join(sessions, strconv.Itoa(pid)+".json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prepare, err := prepareClaudeNativeLaunch(&launch.ExecutionTicket{
+		Provider: launch.ClaudeProvider, Mode: launch.AdapterModeMint,
+		ProviderVersion: launch.ClaudeNativeMinimumVersion,
+		ConversationID:  "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		LaunchNonce:     "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		Cwd:             t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("prepare with a custom config dir must now be admitted: %v", err)
+	}
+	if prepare.Home != dir {
+		t.Fatalf("prepare.Home = %q; want the environment's directory %q", prepare.Home, dir)
+	}
+	// The session's own registration named nextCourt(inspect, dir := pid.File)
+	// can then be read at that path.
+	got, err := readClaudeSessionRecord(dir, pid)
+	if err != nil || got.SessionID != "abc" || got.Protocol != 1 {
+		t.Fatalf("the session record path did not follow the directory: got %+v err=%v", got, err)
+	}
+}

@@ -204,7 +204,9 @@ only and a retry), or the opt-in `claude-native` injector.
 
 The opt-in `claude-native` injector sends the fixed AMQ doorbell through the
 launched Claude process's own inbox socket. It supports fresh managed Claude
-Code 2.1.311 or later launches on macOS, without a wrapper. Set the participant's
+Code 2.1.311 or later launches on macOS, without a wrapper. Its session record is
+read from the launch's Claude configuration directory ($CLAUDE_CONFIG_DIR, else
+~/.claude). Set the participant's
 `execution.require_wake` to `true` and
 `execution.wake.injector.mode` to `claude-native` in the Launch API intent.
 Existing AMQ dialog hooks are required. A SessionStart or UserPromptSubmit

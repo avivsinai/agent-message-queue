@@ -12,6 +12,7 @@ import (
 	"strconv"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
 
@@ -82,10 +83,11 @@ func prepareClaudeNativeLaunch(ticket *launch.ExecutionTicket) (*claudeNativeLau
 		!launch.ClaudeNativeVersionSupported(ticket.ProviderVersion) || ticket.ConversationID == "" || ticket.ConversationID != ticket.LaunchNonce || ticket.Wrapper != nil {
 		return nil, fmt.Errorf("claude-native requires a fresh managed Claude %s or later launch without a wrapper", launch.ClaudeNativeMinimumVersion)
 	}
-	if os.Getenv("CLAUDE_CONFIG_DIR") != "" {
-		return nil, fmt.Errorf("claude-native does not support a custom CLAUDE_CONFIG_DIR")
+	dir := os.Getenv("CLAUDE_CONFIG_DIR")
+	if dir != "" && !filepath.IsAbs(dir) {
+		return nil, fmt.Errorf("claude-native needs an absolute CLAUDE_CONFIG_DIR (it is %q)", dir)
 	}
-	home, err := os.UserHomeDir()
+	home, err := harness.UserClaudeConfigDir()
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +95,7 @@ func prepareClaudeNativeLaunch(ticket *launch.ExecutionTicket) (*claudeNativeLau
 	if err != nil {
 		return nil, err
 	}
-	return &claudeNativeLaunch{SessionID: ticket.ConversationID, Cwd: ticket.Cwd, Home: filepath.Join(home, ".claude"), Launch: holder}, nil
+	return &claudeNativeLaunch{SessionID: ticket.ConversationID, Cwd: ticket.Cwd, Home: home, Launch: holder}, nil
 }
 
 func readClaudeNativeLaunch() (*claudeNativeLaunch, error) {
@@ -139,11 +141,11 @@ func acknowledgeClaudeNativeStartup(dirfd int, dir *wakeAgentDir, marker wakeDia
 		!launch.RunsUnderProcess(*marker.Launch) {
 		return false
 	}
-	home, err := os.UserHomeDir()
+	home, err := harness.UserClaudeConfigDir()
 	if err != nil {
 		return false
 	}
-	binding := claudeNativeLaunch{SessionID: marker.SessionID, Cwd: marker.Cwd, Home: filepath.Join(home, ".claude"), Launch: *marker.Launch}
+	binding := claudeNativeLaunch{SessionID: marker.SessionID, Cwd: marker.Cwd, Home: home, Launch: *marker.Launch}
 	if _, err := readClaudeNativeRegistry(binding); err != nil {
 		return false
 	}
