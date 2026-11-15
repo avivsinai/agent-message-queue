@@ -661,7 +661,8 @@ func reactionOption(req dialog.Request, rs []buzzop.Reaction, owner string) int 
 // postDialog claims req's post record, posts it and records the message. A
 // post proved not sent drops the claim so the next tick posts again; any
 // other failure leaves the outcome unknown, and the dialog is not posted
-// again.
+// again. An unknown post that names its event (the direct transport, which
+// replays it) keeps that event, so it is still read and edited.
 func (s *Server) postDialog(path string, t dialogTarget, req dialog.Request) {
 	label := t.label
 	if label == "" {
@@ -681,7 +682,7 @@ func (s *Server) postDialog(path string, t dialogTarget, req dialog.Request) {
 		_ = os.Remove(path)
 		return
 	}
-	if r.Outcome != buzzop.Accepted || r.EventID == "" {
+	if r.EventID == "" || (r.Outcome != buzzop.Accepted && r.Outcome != buzzop.Unknown) {
 		return
 	}
 	p.Event = r.EventID
@@ -746,7 +747,8 @@ func (s *Server) dialogEditBackOff(id string, now time.Time) {
 // DialogPosted reports whether the Buzz agent of binding name posted dialog
 // id and knows the posted message, so the owner can answer it in Buzz. It is
 // false while the dialog is unposted, while its post is in flight, and when
-// the post's outcome is unknown.
+// the post's outcome is unknown with no event named. An unknown post on the
+// direct transport names its event, which is replayed, so it counts.
 func DialogPosted(name, id string) bool {
 	stateDir, err := BindingStateDir()
 	if err != nil {

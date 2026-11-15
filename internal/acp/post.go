@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -223,7 +224,7 @@ func postWithBuzzCLI(channel, content string, budget time.Duration) (string, err
 // reports the outcome for the result meta: "posted", "" when there is no
 // Buzz channel or identity, or the error.
 func (s *Server) publish(channel, text string) string {
-	result, _ := s.post(channel, text)
+	result, _ := s.post(noteKey(), channel, text)
 	return result
 }
 
@@ -245,10 +246,11 @@ const (
 )
 
 // publishFinal is publish for an event's final text: it also records what
-// the post proves. Only a post that failed before the CLI started is
-// unsent, and the late-reply sweep may make it again (resendFinal).
+// the post proves. Only a post that failed before the CLI started, or one
+// the direct transport did not send, is unsent, and the late-reply sweep
+// may make it again (resendFinal) under the same key.
 func (s *Server) publishFinal(eventID, channel, text string) string {
-	result, err := s.post(channel, text)
+	result, err := s.post(finalKey(eventID), channel, text)
 	if eventID == "" || channel == "" || strings.TrimSpace(text) == "" {
 		return result
 	}
@@ -262,7 +264,7 @@ func (s *Server) recordFinal(eventID, result string, err error) string {
 	}
 	state := finalPostAccepted
 	switch {
-	case buzzcli.NeverSent(err):
+	case buzzcli.NeverSent(err), notSent(err):
 		state = finalPostUnsent
 	case err != nil:
 		state = finalPostUncertain
@@ -273,12 +275,18 @@ func (s *Server) recordFinal(eventID, result string, err error) string {
 	return result
 }
 
-// post is publish that also returns the post's error.
-func (s *Server) post(channel, text string) (string, error) {
+// post is publish that also returns the post's error. key names the post
+// on the direct transport; the buzz CLI ignores it.
+func (s *Server) post(key buzzop.Key, channel, text string) (string, error) {
 	if channel == "" || strings.TrimSpace(text) == "" {
 		return "", nil
 	}
-	_, err := postAnswer(channel, text, s.cfg.PostTimeout)
+	var err error
+	if s.direct != nil {
+		err = resultError(s.posts.Send(context.Background(), buzzop.Message{Key: key, Channel: channel, Content: text}))
+	} else {
+		_, err = postAnswer(channel, text, s.cfg.PostTimeout)
+	}
 	switch {
 	case err == nil:
 		return "posted", nil

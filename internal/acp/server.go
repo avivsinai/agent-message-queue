@@ -211,12 +211,20 @@ type Server struct {
 	// machine is the machine leader's pacing, used only by the machine
 	// worker.
 	machine machineState
-	// buzz are the machine lifecycle's Buzz operations; each runs through
-	// call.
-	buzz buzzcli.Ops
+	// buzz are the machine lifecycle's Buzz operations: the buzz CLI, each
+	// run through call, or the direct transport (NewStandalone).
+	buzz lifecycle
 	// posts are the Buzz writes and reads of dialogs, the session mirror
 	// and the hook warnings.
 	posts posts
+	// direct is the relay transport of a standalone server, nil on the buzz
+	// CLI. A step that only the relay can serve (a chosen channel id, an
+	// observation of relay-signed state, a keyed post) runs only when it is
+	// set.
+	direct Transport
+	// online reports whether the direct transport has a relay connection;
+	// nil means it is not known, and the machine tick runs.
+	online func() bool
 	// dialogs is the dialog poster's state, used only by the worker that
 	// runs dialogTick.
 	dialogs dialogState

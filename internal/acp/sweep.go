@@ -122,7 +122,8 @@ func (s *Server) startLateReplySweep() (stop func()) {
 			wake = newWakeup("dialog", machineScanInterval, idlePoll)
 		}
 		go s.paced(quit, dialogDone, wake, func(now time.Time) pace {
-			if !s.dialogLead() {
+			// With no relay connection nothing is posted or read.
+			if !s.dialogLead() || s.offline() {
 				return pace{next: now.Add(machineScanInterval)}
 			}
 			return s.dialogTick(now)
@@ -136,7 +137,7 @@ func (s *Server) startLateReplySweep() (stop func()) {
 	if s.cfg.Machine {
 		s.mirrors.quit = quit
 		go s.paced(quit, mirrorDone, newWakeup("mirror", mirrorInterval, idlePoll), func(now time.Time) pace {
-			if !s.mirrorLead() {
+			if !s.mirrorLead() || s.offline() {
 				return pace{next: now.Add(mirrorInterval)}
 			}
 			return s.mirrorTick(now)
@@ -441,8 +442,8 @@ func (s *Server) resendFinal(c *lateClaim) {
 		if err := fsq.SyncDir(filepath.Dir(sending)); err != nil {
 			return err
 		}
-		result, err := s.post(c.channel, text)
-		if buzzcli.NeverSent(err) {
+		result, err := s.post(finalKey(c.eventID), c.channel, text)
+		if buzzcli.NeverSent(err) || notSent(err) {
 			if err := os.Rename(sending, unsent); err != nil {
 				return err
 			}

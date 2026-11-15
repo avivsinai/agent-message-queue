@@ -211,6 +211,9 @@ type agentMarker struct {
 	// RelayKey is the machine agent's relay key (machine.go), so a reader
 	// finds its channel records.
 	RelayKey string `json:"relay_key,omitempty"`
+	// Host is "standalone" for a machine agent that runs on the direct
+	// relay transport, outside Buzz Desktop; empty otherwise.
+	Host string `json:"host,omitempty"`
 	// Serves is the binding as last seen bound.
 	Serves *binding.Binding `json:"serves,omitempty"`
 	// Archived is the state the relay last accepted for this identity.
