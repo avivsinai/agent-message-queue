@@ -1052,6 +1052,11 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
+	if roots, rootErr := c.linkRoots(); rootErr != nil {
+		return protocol.ExitActionRequired, rootErr
+	} else if err := removeDetachedLinkShares(roots, append(removed, keptOff...)); err != nil {
+		return protocol.ExitActionRequired, err
+	}
 	if c.json {
 		if removed == nil {
 			removed = []string{}
