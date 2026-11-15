@@ -136,6 +136,51 @@ func TestSubscribeDeliversVerifiedMatchingEvents(t *testing.T) {
 	}
 }
 
+// Live check on the real relay, bead agent-message-queue-vosl: the relay
+// answers CLOSE with CLOSED, and a subscription asked again under the same
+// label right after a Close was ended by that frame, so the owner's
+// messages never arrived.
+func TestSubscribeAgainAfterCloseStaysOpen(t *testing.T) {
+	body, tag := testIdentity(t)
+	_, srv, url := relaytest.Start(body.PublicKeyHex(), tag)
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	conn, err := relay.Connect(ctx, relay.Config{URL: url, Secret: body.Secret(), AuthTag: tag})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	first, err := conn.Subscribe(ctx, "msg", nostr.Filter{Kinds: []nostr.Kind{9}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Close()
+	second, err := conn.Subscribe(ctx, "msg", nostr.Filter{Kinds: []nostr.Kind{9}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evt := nostr.Event{CreatedAt: nostr.Now(), Kind: 9, Content: "live"}
+	if err := evt.Sign(body.Secret()); err != nil {
+		t.Fatal(err)
+	}
+	// The relay handles frames in order, so its CLOSED for the first
+	// subscription is sent before this event.
+	if err := conn.Publish(ctx, evt); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-second.Events:
+		if got.Content != "live" {
+			t.Fatalf("event = %q, want live", got.Content)
+		}
+	case <-second.Done():
+		t.Fatalf("the second subscription ended: %v", second.Err())
+	case <-ctx.Done():
+		t.Fatal("no event on the second subscription")
+	}
+}
+
 // codex slice 1 review r2 #3: a grant that expired just after the minute
 // check left the connection usable for up to another minute. The
 // connection now closes at the signed not-after and refuses to publish.

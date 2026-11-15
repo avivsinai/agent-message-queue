@@ -147,6 +147,10 @@ func (r *Relay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			if reason == "" {
 				r.store(e.Event)
 			}
+		case *nostr.CloseEnvelope:
+			// The relay AMQ Remote runs against answers CLOSE with CLOSED.
+			closed, _ := nostr.ClosedEnvelope{SubscriptionID: string(*e), Reason: "closed"}.MarshalJSON()
+			send(closed)
 		case *nostr.ReqEnvelope:
 			if r.BeforeReq != nil {
 				r.BeforeReq(e.Filters)
