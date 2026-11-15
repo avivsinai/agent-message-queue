@@ -2,7 +2,6 @@ package acp
 
 import (
 	"errors"
-	"strings"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/harness"
@@ -134,11 +133,8 @@ func liveAgain(b binding.Binding, now time.Time) (binding.Binding, bool) {
 	var holder launch.HolderIdentity
 	switch {
 	case b.Harness == harness.Pi:
-		handle := b.Handle
-		if !b.Mailbox() {
-			handle = strings.TrimPrefix(b.Target, "pi:")
-		}
-		pid, session, _, live := piLiveBridge(b.Root, handle, now)
+		root, piHandle := b.PiSeat()
+		pid, session, _, live := piLiveBridge(root, piHandle, now)
 		if !live || session != id {
 			return b, false
 		}

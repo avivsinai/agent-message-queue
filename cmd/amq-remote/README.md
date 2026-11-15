@@ -430,10 +430,12 @@ Protocol: [`amq.remote.link/1`](../../docs/remote-link-protocol.md).
 3. In the session to share, from any AMQ root or none, run
    `amq-remote attach --self --link NAME` (`--consent passkey` by default, or
    `local`; `--tools read` by default). The share names the session's
-   binding and runs through the endpoint of the link's root. When the server
-   lists the tool profiles it grants in its link info, `--tools` must be one
-   of them. A pi session is driven only by the endpoint of its own AMQ root,
-   so its link must live there: link that root with `--root`.
+   binding and runs through the endpoint of the link's root. One link in the
+   machine root serves every session on the machine, including pi seats in
+   project roots: the session's own AMQ root (its queue) is recorded in the
+   pi adapter's config, while its binding runs through the link's endpoint.
+   When the server lists the tool profiles it grants in its link info,
+   `--tools` must be one of them.
 4. `serve` (under `up`) keeps the link up and offers each request revision
    until the server acknowledges it. A revision the server holds with another
    digest is a conflict: never sent again, counted in `link status`.

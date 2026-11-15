@@ -256,6 +256,30 @@ func ACPFactory(_ context.Context, cfg registry.FactoryConfig) (core.Attachment,
 	return build(cfg, acpWire)
 }
 
+// Handle is the handle an adapter config names.
+func Handle(raw json.RawMessage) (string, error) {
+	var c config
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &c); err != nil {
+			return "", fmt.Errorf("parse pi config: %w", err)
+		}
+	}
+	if c.Handle == "" {
+		return "", fmt.Errorf("pi config: handle is required")
+	}
+	if err := fsq.ValidateHandle(c.Handle); err != nil {
+		return "", fmt.Errorf("pi config: invalid handle: %v", err)
+	}
+	return c.Handle, nil
+}
+
+// Config is the adapter config of the pi session of handle in root; an empty
+// root means the endpoint's own root.
+func Config(handle, root string) json.RawMessage {
+	raw, _ := json.Marshal(config{Handle: handle, Root: root})
+	return raw
+}
+
 func build(cfg registry.FactoryConfig, names wireNames) (core.Attachment, error) {
 	var c config
 	if len(cfg.Config) > 0 {

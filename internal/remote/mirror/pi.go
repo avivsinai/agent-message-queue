@@ -38,16 +38,13 @@ const piActivityVersion = 2
 // the mirror already reads (saved), else, the first time, the file of the
 // session the binding was shared for.
 func piLocate(b binding.Binding, saved string) string {
-	handle := b.Handle
-	if !b.Mailbox() {
-		handle = strings.TrimPrefix(b.Target, "pi:")
-	}
-	if _, session, activity, ok := pi.LiveBridge(b.Root, handle, time.Now()); ok {
+	root, handle := b.PiSeat()
+	if _, session, activity, ok := pi.LiveBridge(root, handle, time.Now()); ok {
 		switch {
 		case activity < piActivityVersion:
 			return ""
 		case session != "":
-			return pi.ActivityFile(b.Root, handle, session)
+			return pi.ActivityFile(root, handle, session)
 		}
 	}
 	if saved != "" {

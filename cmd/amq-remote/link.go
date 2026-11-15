@@ -326,7 +326,7 @@ func (ls *linkSet) bindings(run *linkRun, pin linkio.Pin) []linkio.Binding {
 			Binding: sh.Binding, TargetID: b.Target, Epoch: s.Epoch, NativeSessionID: b.NativeSession,
 			Labels: linkio.Labels{
 				Device: pin.DeviceName, Session: nonEmpty(b.Display, nonEmpty(s.DisplayName, b.Target)),
-				Harness: s.Harness, Project: s.Project,
+				Harness: s.Harness, Project: nonEmpty(s.Project, b.Cwd),
 			},
 			Harness: s.Harness, DisplayName: nonEmpty(b.Display, s.DisplayName), Attachment: s.Attachment,
 			Consent: sh.Consent, Tools: sh.Tools, Capabilities: caps,
