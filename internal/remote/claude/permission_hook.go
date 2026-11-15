@@ -706,11 +706,15 @@ func writeDecision(stdout io.Writer, value string, sessionRules []json.RawMessag
 //     Code writes itself (syntheticModel, an API error) proves nothing;
 //   - an interrupt of the chain, which Esc and a reject write.
 //
-// The proofs hold only for lines written after the dialog opened, so the
-// watch arms only when it read the transcript as the dialog opened. A
-// transcript first found later may hold an earlier batch with its results;
-// such a watch never answers, and the dialog ends by Buzz, a signal, the
-// parent or the timeout.
+// The proofs hold only for lines that follow the asking call in the
+// transcript. Claude Code may write the asking message after it starts the
+// hook, so the watch arms when it has read that call: as the dialog opens,
+// when the chain's newest assistant message holds a matching call with no
+// result, else at the first matching call it reads later. A call whose
+// input has no hash cannot be told from another, so its watch arms as the
+// dialog opens. A transcript first found later may hold an earlier batch
+// with its results; such a watch never answers, and the dialog ends by
+// Buzz, a signal, the parent or the timeout.
 type toolWatch struct {
 	locate           func() (string, error)
 	path, name, hash string
@@ -718,10 +722,12 @@ type toolWatch struct {
 	// sidechain lines are the chain; otherwise sidechain lines are other
 	// chains'.
 	ownChain bool
-	// armed: lines read from now on were written after the dialog opened.
-	// seen holds the assistant message ids read before them.
-	armed bool
-	seen  map[string]bool
+	// armed: the asking call is read, so the lines read from now on follow
+	// it. opened: the read as the dialog opened is done. seen holds the
+	// assistant message ids read so far, last the newest of them.
+	armed, opened bool
+	seen          map[string]bool
+	last          string
 	// off is the next byte to read; skip drops the first line of a tail
 	// read, which may start mid-line.
 	off  int64
@@ -743,9 +749,24 @@ func newToolWatch(locate func() (string, error), ownChain bool, name string, inp
 	}
 	if w.found() {
 		w.read()
-		w.armed = true
+		w.opened = true
+		w.armed = w.hash == "" || w.asks(w.last)
 	}
 	return w
+}
+
+// asks reports whether the assistant message msg holds a matching call with
+// no result.
+func (w *toolWatch) asks(msg string) bool {
+	if msg == "" {
+		return false
+	}
+	for _, m := range w.pending {
+		if m == msg {
+			return true
+		}
+	}
+	return false
 }
 
 // found reports whether the transcript is located, locating it once.
@@ -796,12 +817,16 @@ func (w *toolWatch) read() bool {
 		if e.Type == "assistant" && e.MessageID != "" && !e.APIError && e.Model != syntheticModel {
 			answered = answered || w.armed && !w.seen[e.MessageID]
 			w.seen[e.MessageID] = true
+			w.last = e.MessageID
 		}
 		answered = answered || w.armed && e.Type == "user" && interrupted(e)
 		for _, u := range e.ToolUses {
 			if w.hash != "" && u.Name == w.name && u.Hash == w.hash {
 				w.pending[u.ID] = e.MessageID
 				w.batch[e.MessageID]++
+				// A matching call written after the dialog opened is the
+				// asking call.
+				w.armed = w.armed || w.opened
 			}
 		}
 		for _, id := range e.ToolResults {

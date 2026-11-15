@@ -29,6 +29,8 @@ var ErrOverflow = errors.New("relay subscription overflowed; resubscribe from yo
 // closed when the relay reports end of stored events, which is an
 // observation, never proof of complete history.
 type Sub struct {
+	// ID is the subscription id on the wire: the caller's label and a
+	// number the connection uses once.
 	ID      string
 	Events  <-chan nostr.Event
 	EOSE    <-chan struct{}
@@ -52,13 +54,16 @@ func (s *Sub) Err() error {
 	return s.err
 }
 
-// Subscribe sends REQ with the given id and filters.
-func (c *Conn) Subscribe(ctx context.Context, id string, filters ...nostr.Filter) (*Sub, error) {
-	if id == "" || len(filters) == 0 {
-		return nil, errors.New("relay subscribe: an id and at least one filter are required")
+// Subscribe sends REQ with the given filters. label names the subscription
+// for a reader. Its id on the wire is never used again on this connection: a
+// relay may answer CLOSE with CLOSED, and that frame must not end a later
+// subscription of the same label.
+func (c *Conn) Subscribe(ctx context.Context, label string, filters ...nostr.Filter) (*Sub, error) {
+	if label == "" || len(filters) == 0 {
+		return nil, errors.New("relay subscribe: a label and at least one filter are required")
 	}
 	s := &Sub{
-		ID: id, conn: c, filters: filters,
+		conn: c, filters: filters,
 		events: make(chan nostr.Event, subBuffer),
 		eose:   make(chan struct{}),
 		done:   make(chan struct{}),
@@ -75,17 +80,15 @@ func (c *Conn) Subscribe(ctx context.Context, id string, filters ...nostr.Filter
 	if c.subs == nil {
 		c.subs = map[string]*Sub{}
 	}
-	if _, dup := c.subs[id]; dup {
-		c.mu.Unlock()
-		return nil, fmt.Errorf("relay subscribe: id %q is already open", id)
-	}
 	if len(c.subs) >= maxSubscriptions {
 		c.mu.Unlock()
 		return nil, errors.New("relay subscribe: too many open subscriptions")
 	}
-	c.subs[id] = s
+	c.subSeq++
+	s.ID = fmt.Sprintf("%s-%d", label, c.subSeq)
+	c.subs[s.ID] = s
 	c.mu.Unlock()
-	frame, err := nostr.ReqEnvelope{SubscriptionID: id, Filters: filters}.MarshalJSON()
+	frame, err := nostr.ReqEnvelope{SubscriptionID: s.ID, Filters: filters}.MarshalJSON()
 	if err == nil && len(frame) > c.cfg.MaxOutbound {
 		err = fmt.Errorf("REQ is %d bytes, over the %d-byte bound", len(frame), c.cfg.MaxOutbound)
 	}

@@ -136,6 +136,7 @@ type Conn struct {
 	mu        sync.Mutex
 	waiters   map[nostr.ID]chan okResult
 	subs      map[string]*Sub
+	subSeq    uint64 // the number of the last subscription id
 	challenge chan string
 	done      chan struct{}
 	readErr   error
