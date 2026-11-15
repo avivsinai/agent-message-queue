@@ -669,6 +669,7 @@ func (run *machineRun) inbound(ctx context.Context, conn *relay.Conn) {
 		stored         bool      // sub's relay has ended its stored events
 		held           []nostr.Event
 		subErr         string // the subscribe error last reported
+		endErr         string // why a subscription ended, as last reported; cleared at an end of stored events
 		overSaid       bool   // too many held was reported since the last end of stored events
 	)
 	end := func() {
@@ -700,6 +701,15 @@ func (run *machineRun) inbound(ctx context.Context, conn *relay.Conn) {
 			want, checked = run.srv.Routes(), now
 			slices.Sort(want)
 			if sub != nil && (isClosed(sub.Done()) || now.Sub(asked) >= machineAskEvery) || !slices.Equal(want, routes) {
+				// A subscription that ended by itself is asked for again,
+				// and its cause is said once: a relay that ends every
+				// subscription must not look like a quiet channel.
+				if sub != nil && isClosed(sub.Done()) {
+					if err := sub.Err(); err != nil && err.Error() != endErr && ctx.Err() == nil {
+						endErr = err.Error()
+						say(run.stderr, "machine agent: the subscription for the owner's messages ended, so it asks again: %v", err)
+					}
+				}
 				end()
 				if len(want) > 0 {
 					s, err := run.subscribe(ctx, conn, want)
@@ -741,7 +751,7 @@ func (run *machineRun) inbound(ctx context.Context, conn *relay.Conn) {
 			if sub == nil {
 				continue
 			}
-			stored, overSaid = true, false
+			stored, overSaid, endErr = true, false, ""
 			slices.SortFunc(held, func(a, b nostr.Event) int {
 				return cmp.Or(cmp.Compare(a.CreatedAt, b.CreatedAt), strings.Compare(a.ID.Hex(), b.ID.Hex()))
 			})
