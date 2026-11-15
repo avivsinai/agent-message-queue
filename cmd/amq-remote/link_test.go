@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
@@ -423,6 +425,119 @@ func TestLinkKeysAddKeepsAKeyDroppedDuringRedeem(t *testing.T) {
 	keys, _ := linkio.LoadConsentKeys(stateDir, "example")
 	if len(keys) != 1 || keys[0].CredentialID != second.CredentialID {
 		t.Errorf("consent keys on disk = %+v, want only the added key", keys)
+	}
+}
+
+// nativeTestTarget reports its own native session while the fake supplies
+// the rest of the attachment behavior.
+type nativeTestTarget struct {
+	*fake.Runtime
+	session string
+}
+
+func (n nativeTestTarget) NativeSessionID() string { return n.session }
+
+// restoreLinkTestBinding writes one pi binding and its live bridge, with
+// the holder recorded as ended and the current process running the same
+// session again.
+func restoreLinkTestBinding(t *testing.T, now time.Time) (binding.Binding, *linkSet) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := canonicalTempDir(t)
+	t.Setenv(binding.EnvPath, filepath.Join(root, "binding.json"))
+	self, err := launch.HolderOf(os.Getpid())
+	if err != nil {
+		t.Skip("no process identity on this platform")
+	}
+	ended := self
+	ended.ProcessStart += "e"
+	b := binding.Binding{Root: root, Target: "pi:chat", NativeSession: "pi-session-1", Harness: "pi", Holder: ended,
+		Seat: binding.Seat{Root: root, Handle: "chat"}, Name: "pi-chat"}
+	if err := binding.WriteNamed(b); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "agents", "chat", "extensions", "pi-bridge")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	live := fmt.Sprintf(`{"protocol":"amq:pi-bridge:v1","live":true,"at":%q,"pid":%d,"bridge_revision":4,"session_id":"pi-session-1"}`, now.Format(time.RFC3339Nano), os.Getpid())
+	if err := os.WriteFile(filepath.Join(dir, "bridge.liveness"), []byte(live), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Join(dir, "bridge.liveness"), now, now); err != nil {
+		t.Fatal(err)
+	}
+	store, err := requests.Open(filepath.Join(root, stateDirName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ep := core.New(core.Config{Store: store})
+	t.Cleanup(func() { _ = ep.Close() })
+	ep.Register(fake.New("pi:chat", "pi-session-1"))
+	ls := &linkSet{root: root, ep: ep, running: map[string]*linkRun{}}
+	ls.running["link"] = &linkRun{link: manifest.Link{Name: "link", Shares: []manifest.LinkShare{{Binding: "pi-chat"}}}}
+	return b, ls
+}
+
+// A live holder whose endpoint reports another native session brings its
+// share to that session without another attach command.
+func TestLinkRestoreFollowsChangedSessionInLiveHolder(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := canonicalTempDir(t)
+	t.Setenv(binding.EnvPath, filepath.Join(root, "binding.json"))
+	self, err := launch.HolderOf(os.Getpid())
+	if err != nil {
+		t.Skip("no process identity on this platform")
+	}
+	b := binding.Binding{Root: root, Target: "pi:chat", NativeSession: "pi:chat", Harness: "pi", Holder: self, Name: "pi-chat"}
+	if err := binding.WriteNamed(b); err != nil {
+		t.Fatal(err)
+	}
+	store, err := requests.Open(filepath.Join(root, stateDirName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	ep := core.New(core.Config{Store: store})
+	defer func() { _ = ep.Close() }()
+	ep.Register(nativeTestTarget{Runtime: fake.New("pi:chat", "pi-session-1"), session: "new-session"})
+	ls := &linkSet{root: root, ep: ep, running: map[string]*linkRun{"link": {link: manifest.Link{Shares: []manifest.LinkShare{{Binding: "pi-chat"}}}}}}
+	ls.restore(time.Now())
+	got, err := binding.ReadNamed("pi-chat")
+	if err != nil || got.NativeSession != "new-session" {
+		t.Fatalf("binding = %+v, %v; want the endpoint's new session", got, err)
+	}
+}
+
+// An ended share is written back when the seat's live pi bridge proves that
+// the current process runs the session the binding recorded.
+func TestLinkRestoreRevivesResumedPiSession(t *testing.T) {
+	now := time.Now()
+	b, ls := restoreLinkTestBinding(t, now)
+	if _, err := binding.Retire(binding.RemovedEnded, func(got binding.Binding) bool { return got.Name == b.Name }); err != nil {
+		t.Fatal(err)
+	}
+	ls.restore(now)
+	got, err := binding.ReadNamed(b.Name)
+	if err != nil || got.NativeSession != b.NativeSession || got.Holder.PID != os.Getpid() || got.Removed != "" {
+		t.Fatalf("restored binding = %+v, %v", got, err)
+	}
+}
+
+// An owner's detached tombstone prevents the same live proof from bringing
+// its share back.
+func TestLinkRestoreLeavesDetachedShareOff(t *testing.T) {
+	now := time.Now()
+	b, ls := restoreLinkTestBinding(t, now)
+	if _, _, err := binding.Detach(func(got binding.Binding) bool { return got.Name == b.Name }, nil); err != nil {
+		t.Fatal(err)
+	}
+	ls.restore(now)
+	if _, err := binding.ReadNamed(b.Name); !errors.Is(err, binding.ErrNone) {
+		t.Fatalf("detached binding came back: %v", err)
 	}
 }
 

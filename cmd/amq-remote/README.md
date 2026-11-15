@@ -529,13 +529,15 @@ Protocol: [`amq.remote.link/1`](../../docs/remote-link-protocol.md).
 7. `amq-remote link status` shows each link's socket, generation, owed
    revisions, conflicts and retired sinks, and for each share whether the
    server sees it now: `shared`, or why not (`session changed`, `not attached
-   now`, `no such binding`) with the step that fixes it. A share is announced
-   only while its session is the one attached; after a session change (a pi
-   `/new`, a reload), run `attach --self --link NAME` again in the new
-   session, which keeps the share's binding name. `amq-remote link remove NAME`
+   now`, `no such binding`, or `ended`) with the step that fixes it. A share
+   is announced only while its session is the one attached. The endpoint
+   follows a session change in a live process and a proved pi resume. A
+   native Claude session resumed in a new process needs
+   `attach --self --link NAME` again, which keeps the share's binding name. `amq-remote link remove NAME`
    retires the link's sink and deletes its device key; the records it created
    settle without network. The server keeps the machine until you unlink it
-   on the server's connections page.
+   on the server's connections page. `detach` removes the share's entry, and
+   a detached session never comes back by itself.
 
 ### Restart after a reboot
 
@@ -1132,7 +1134,10 @@ options as the harness shows them, so the owner reads what the terminal
 shows. ✅ takes the first option, ❌ the deny option, a reply `1`, `2`, ...
 takes that option, `yes` and `no` work as ✅ and ❌, and a dialog that asks for
 text takes any reply. The first answer wins, in Buzz or in the terminal, and
-the message is edited with the outcome.
+the message is edited with the outcome. A Claude Code question with one
+single-select question shows its choices; a reply with the number, or with
+other text, is the answer. A question with more than one part, a multi-select
+question and a plan approval show their text and are answered in the terminal.
 
 Once the Claude hook is installed, every Claude Code session on the machine
 (terminal, desktop app Code tab, IDE) mirrors its dialogs to Buzz, with or

@@ -86,7 +86,7 @@ func (s *Server) reattach(now time.Time) {
 		if !ok {
 			continue
 		}
-		nb, ok := liveAgain(b, now)
+		nb, ok := LiveAgain(b, now)
 		if !ok {
 			continue
 		}
@@ -121,11 +121,11 @@ func (s *Server) endedBinding(r channelRecord, tombs []binding.Binding) (b bindi
 	return binding.Binding{}, false, false
 }
 
-// liveAgain returns b held by the process that proves it runs b's recorded
+// LiveAgain returns b held by the process that proves it runs b's recorded
 // session: the pi process whose bridge, at b's root and handle, names it, or
 // for a Claude mailbox seat the live wake owner of b's root and handle whose
 // own registry entry names it with b's transcript.
-func liveAgain(b binding.Binding, now time.Time) (binding.Binding, bool) {
+func LiveAgain(b binding.Binding, now time.Time) (binding.Binding, bool) {
 	id := b.RecordedSession()
 	if id == "" {
 		return b, false

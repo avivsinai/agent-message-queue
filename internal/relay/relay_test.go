@@ -52,28 +52,27 @@ func TestClientAuthenticatesPublishesAndReconnects(t *testing.T) {
 		return relay.Config{URL: url, Secret: body.Secret(), AuthTag: tag}, nil
 	})
 	relay.SetBackoffForTest(c, 10*time.Millisecond, 50*time.Millisecond)
-	published := make(chan error, 1)
-	var connects int
+	// The relay drops the first authenticated connection, so a publish is
+	// acknowledged only on a later one.
+	published := make(chan struct{}, 1)
 	c.OnConnect = func(ctx context.Context, conn *relay.Conn) {
-		connects++
-		if connects != 2 {
-			return
-		}
 		pctx, pcancel := context.WithTimeout(ctx, 2*time.Second)
 		defer pcancel()
-		published <- conn.Publish(pctx, evt)
+		if conn.Publish(pctx, evt) == nil {
+			select {
+			case published <- struct{}{}:
+			default:
+			}
+		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { _ = c.Run(ctx) }()
 
 	select {
-	case err := <-published:
-		if err != nil {
-			t.Fatalf("publish after reconnect: %v", err)
-		}
+	case <-published:
 	case <-time.After(4 * time.Second):
-		t.Fatalf("auths=%d status=%+v, want a second authentication after the drop", lr.AuthOK.Load(), c.Status())
+		t.Fatalf("auths=%d status=%+v, want a publish after the reconnect", lr.AuthOK.Load(), c.Status())
 	}
 	if lr.AuthOK.Load() < 2 {
 		t.Fatalf("auths=%d, want a second authentication after the drop", lr.AuthOK.Load())
