@@ -145,8 +145,9 @@ command's own message. Do not work around a refusal.
      cannot interrupt a Claude turn."
    - Claude with the hook installed: "Every approval dialog of this session
      shows in its Buzz channel with its options. ✅ or ❌, or a reply with the option
-     number, answers it. The first answer, in Buzz or in the terminal,
-     wins."
+     number, answers it. A question with one single-select question shows
+     its choices; reply with the number or your own text. The first answer,
+     in Buzz or in the terminal, wins."
    - Claude in a machine agent channel: "The channel also shows each turn this
      session finishes; type `mirror off` there, or run `/amq-remote mirror
      off`, to stop it."
