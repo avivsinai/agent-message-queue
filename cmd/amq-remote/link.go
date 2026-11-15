@@ -348,12 +348,24 @@ func writeLinkStatus(stateDir, name string, st linkio.Status) {
 	}
 }
 
-// link dispatches `amq-remote link add|remove|status`.
+// link implements R8: `amq-remote link`, `link --help` and `link -h` print
+// the usage and exit 0; no subcommand is a usage error at 2.
 func link(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe) (any, int, error) {
 	if len(args) == 0 {
 		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "link needs a subcommand: add, keys, local-key, confirm, remove, status, tools or call")
 	}
 	switch args[0] {
+	case "--help", "-h":
+		say(stdout, "Usage of the link commands:\n"+
+			"  amq-remote link add NAME URL --code CODE [--root ROOT]\n"+
+			"  amq-remote link confirm NAME --code CODE\n"+
+			"  amq-remote link keys add NAME --code CODE\n"+
+			"  amq-remote link local-key NAME\n"+
+			"  amq-remote link remove NAME\n"+
+			"  amq-remote link status [--json]\n"+
+			"  amq-remote link tools [--json]\n"+
+			"  amq-remote link call NAME [--json]\n")
+		return nil, 0, nil
 	case "add":
 		return linkAdd(args[1:], stdin, stdout, probe)
 	case "confirm":

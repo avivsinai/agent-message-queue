@@ -7,6 +7,7 @@ package pi
 // extension directory layout, not a fake source.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -1196,5 +1197,42 @@ func stampLivenessRevisionAt(t *testing.T, dir string, at time.Time, revision in
 	}
 	if err := os.Chtimes(path, at, at); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// R1+R5: an adapter told that its session lives in another AMQ root writes
+// under that root only, never under the endpoint's own root.
+func TestAdapterConfigRootRoutesSubmitToSessionRoot(t *testing.T) {
+	srcRoot := t.TempDir()
+	otherRoot := t.TempDir()
+	dir := filepath.Join(otherRoot, "agents", "agent1", "extensions", "pi-bridge")
+	for _, sub := range []string{"requests", "receipts", "events"} {
+		if err := os.MkdirAll(filepath.Join(dir, sub), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stampLivenessRevisionAt(t, dir, fixedNow, 4)
+
+	config := []byte(`{"handle":"agent1","root":"` + otherRoot + `"}`)
+	att, err := Factory(context.Background(), registry.FactoryConfig{Root: srcRoot, Target: "pi:agent1", Config: config})
+	if err != nil {
+		t.Fatalf("Factory: %v", err)
+	}
+	att.(*Attachment).now = func() time.Time { return fixedNow }
+	if att.(*Attachment).dir.dir != dir {
+		t.Fatalf("the adapter picked bridge directory %q; want %q", att.(*Attachment).dir.dir, dir)
+	}
+	req := submitReq(testKey("alt-root"), "hello")
+	// A submit by a fresh request is admitted only when its receipt shows
+	// later, so an 'uncertain, not yet observed' non-admission is allowed
+	// here: the test proves the file was published in the right root.
+	_, _ = att.Submit(req)
+	ref := clientRef(req.Key)
+	inOther := filepath.Join(dir, "requests", refSanitize(ref)+".json")
+	if _, err := os.Stat(inOther); err != nil {
+		t.Fatalf("the request was not written into the session's root %s: %v", otherRoot, err)
+	}
+	if _, err := os.Stat(filepath.Join(srcRoot, "agents", "agent1", "extensions", "pi-bridge", "requests", refSanitize(ref)+".json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a request also appeared under the endpoint's own root %s", srcRoot)
 	}
 }

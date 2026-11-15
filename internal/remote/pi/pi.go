@@ -37,6 +37,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -63,6 +64,10 @@ type config struct {
 	// too old and does not publish its own. The party that declares the
 	// target sets it for a pi build that ships its own extension.
 	UpgradeHint string `json:"upgrade_hint,omitempty"`
+	// Root is this session's AMQ root. It is set when the live seat is in a
+	// project root (different from the endpoint root that registered this adapter).
+	// Empty means the root that registered the adapter, preserving old entries.
+	Root string `json:"root,omitempty"`
 }
 
 // run is one bound request tracked by the adapter. The durable record is
@@ -264,7 +269,14 @@ func build(cfg registry.FactoryConfig, names wireNames) (core.Attachment, error)
 	if err := fsq.ValidateHandle(c.Handle); err != nil {
 		return nil, fmt.Errorf("%s config: invalid handle: %v", names.harness, err)
 	}
-	dir := bridgeDir{dir: bridgePath(cfg.Root, c.Handle, names), names: names}
+	dirRoot := cfg.Root
+	if c.Root != "" {
+		if !filepath.IsAbs(c.Root) || filepath.Clean(c.Root) != c.Root {
+			return nil, fmt.Errorf("pi config: root must be an absolute clean path")
+		}
+		dirRoot = c.Root
+	}
+	dir := bridgeDir{dir: bridgePath(dirRoot, c.Handle, names), names: names}
 	if st, err := os.Stat(dir.dir); err != nil || !st.IsDir() {
 		running := fmt.Sprintf("is the %s extension running for handle %q?", names.dir, c.Handle)
 		if names.harness == acpWire.harness {
