@@ -8,6 +8,18 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.147.0](https://github.com/avivsinai/agent-message-queue/compare/v0.146.1...v0.147.0) (2026-11-15)
+
+
+### Features
+
+* **remote:** one link shares the sessions of every project ([#1511](https://github.com/avivsinai/agent-message-queue/issues/1511)) ([d01e628](https://github.com/avivsinai/agent-message-queue/commit/d01e62863cdc5a672eff2f37bc7a834e98103109))
+
+
+### Bug Fixes
+
+* **launch:** a Codex seat with sandbox or approval options starts while a daemon runs ([#1512](https://github.com/avivsinai/agent-message-queue/issues/1512)) ([09f439a](https://github.com/avivsinai/agent-message-queue/commit/09f439a36baa4170239f8109eb1839aea9965b28))
+
 ## [0.146.1](https://github.com/avivsinai/agent-message-queue/compare/v0.146.0...v0.146.1) (2026-11-15)
 
 
