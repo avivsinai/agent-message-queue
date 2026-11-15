@@ -3,6 +3,7 @@ package fsq
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 )
 
@@ -42,7 +43,15 @@ func MoveNewToCur(root *DeliveryRoot, agent, filename string) error {
 				Err:       residue.Err,
 			}
 		}
-		return err
+		// A lost claim race is the bare not-exist error, which callers test.
+		// Any other failure names the claim and both paths.
+		if os.IsNotExist(err) {
+			return err
+		}
+		return fmt.Errorf("claim %s into %s: %w",
+			root.displayPath(newPath),
+			root.displayPath(curPath),
+			err)
 	}
 
 	// The rename is already visible. Sync the destination first so a crash is
