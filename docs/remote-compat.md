@@ -208,6 +208,12 @@ Reasons for every `false` (source: as cited per row in §3):
   Codex TUI, and clears one on `serverRequest/resolved` or when its turn
   completes, so a late answer is refused. Not live-verified against a running
   Codex terminal.
+- `codex.daemon_pins`: `[live]` 0.167.0 CLI with 0.169.0 daemon:
+  `sandbox`, `approvalPolicy`, `approvalsReviewer` and
+  `config.model_reasoning_effort` given in `thread/start` or `thread/resume`
+  hold after the terminal attaches, after a turn and after a cold resume;
+  `sandbox_workspace_write.*` follows the daemon's configuration; the
+  terminal refuses permission options on a daemon resume.
 - `codex.answer_question`: user-input requests are not projected.
 - `codex.terminal`: the app-server protocol has no PTY concept.
 - `pi.cancel_request`: the reference bridge (revision 3) has no cancel

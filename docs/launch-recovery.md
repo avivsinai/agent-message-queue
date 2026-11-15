@@ -189,15 +189,6 @@ Prepare; Apply does not execute a different plan under the earlier authorization
 
 ## Native resume settings
 
-On a daemon resume the Codex TUI accepts `--model <value>` and `--no-alt-screen`. Settings keep
-their order in the execution ticket, followed by its acquired thread ID and any
-initial prompt.
+A daemon seat's settings have two carriers. The Codex terminal takes `--model <value>` and `--no-alt-screen` in its arguments. It refuses permission settings on a daemon resume, so AMQ sets `--sandbox`, `--ask-for-approval`, `-c approvals_reviewer=...` and `-c model_reasoning_effort=...` on the thread, in the request that starts or resumes it, and refuses the seat when the daemon's answer does not hold them: `codex daemon thread <id> does not hold the seat's pins (<setting>: want <value>, daemon has <value>)`. The execution ticket keeps the settings in their order, followed by the thread ID and any initial prompt; the terminal is started without the ones the thread carries.
 
-The Codex TUI refuses `--sandbox` and `--ask-for-approval` on a daemon resume, so a launch with them keeps the embedded path. A caller's command-line configuration overrides, such as
-`-c approvals_reviewer=...` or `-c model_reasoning_effort=...`, and `--search`
-keep the embedded path too, because their effect on a daemon TUI is not verified.
-Those launches retain the original arguments and explain the terminal-only
-approval capability. Wrappers, environment overlays, bypass
-options, and unverified or duplicate options also retain the embedded path.
-AMQ does not translate reviewer choices into protocol settings or alter saved
-Codex configuration.
+`-c sandbox_workspace_write.network_access=...` and `-c sandbox_workspace_write.writable_roots=[]` are decided by the daemon's own configuration. A seat that pins one runs on the daemon only when that configuration already has the same value; otherwise it keeps the embedded path and says why. `--search`, the mailbox writable root, wrappers, environment overlays and bypass options also keep the embedded path. AMQ does not alter saved Codex configuration, and it does not read the thread's settings again after the terminal attaches: the owner can change them there.

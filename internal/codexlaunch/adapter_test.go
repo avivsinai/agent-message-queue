@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -77,7 +78,7 @@ func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
 			var settings []string
 			var initial *launch.InitialInputRequest
 			if scenario == "publish" {
-				settings = []string{"--model", "gpt-native-test", "--no-alt-screen"}
+				settings = []string{"--model", "gpt-native-test", "--sandbox", "read-only", "--ask-for-approval", "on-request", "-c", "approvals_reviewer=user", "-c", "model_reasoning_effort=low", "--no-alt-screen"}
 				text := "Keep the requested settings."
 				sum := sha256.Sum256([]byte(text))
 				initial = &launch.InitialInputRequest{Kind: launch.InitialInputArgument, Value: text, SHA256: "sha256:" + hex.EncodeToString(sum[:])}
@@ -241,10 +242,17 @@ func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
 				if resolveErr != nil {
 					t.Fatal(resolveErr)
 				}
-				expected := append(daemonTemplate(t, executable, home, project), settings...)
-				expected = append(expected, thread, initial.Value)
+				expected := append(daemonTemplate(t, executable, home, project), "--model", "gpt-native-test", "--no-alt-screen", thread, initial.Value)
 				if !slices.Equal(argv, expected) {
 					t.Fatalf("native settings changed at resume: got %q want %q", argv, expected)
+				}
+				starts := testDaemonCalls(t, home, "thread/start")
+				if len(starts) != 1 || starts[0]["sandbox"] != "read-only" || starts[0]["approvalPolicy"] != "on-request" || starts[0]["approvalsReviewer"] != "user" {
+					t.Fatalf("thread/start calls = %+v; want sandbox, approval and reviewer pins", starts)
+				}
+				config, _ := starts[0]["config"].(map[string]any)
+				if config["model_reasoning_effort"] != "low" {
+					t.Fatalf("thread/start params = %+v; want effort low", starts[0])
 				}
 			}
 			record, err := codexidentity.Lookup(thread, home)
@@ -316,6 +324,10 @@ type nativeDaemonOptions struct {
 	spacedHome bool
 	// automaticReviewer configures Codex's automatic approvals reviewer.
 	automaticReviewer bool
+	// networkAccess is the daemon's workspace-write network setting.
+	networkAccess bool
+	// writableRoots enables a nonempty configured list in config/read.
+	writableRoots bool
 }
 
 // sharedDaemonDir gives the test its own private daemon socket directory,
@@ -344,6 +356,30 @@ func sharedDaemonDir(t *testing.T) {
 }
 
 var sharedDaemonDirs = map[*testing.T]string{}
+
+type recordedDaemonCall struct {
+	method string
+	params map[string]any
+}
+
+var (
+	recordedDaemonCalls = map[*testing.T]map[string][]recordedDaemonCall{}
+	recordedCallsMu     sync.Mutex
+)
+
+// testDaemonCalls returns the daemon calls of one test on one socket.
+func testDaemonCalls(t *testing.T, home, method string) []map[string]any {
+	t.Helper()
+	recordedCallsMu.Lock()
+	defer recordedCallsMu.Unlock()
+	var out []map[string]any
+	for _, call := range recordedDaemonCalls[t][home] {
+		if call.method == method {
+			out = append(out, call.params)
+		}
+	}
+	return out
+}
 
 func nativeDaemon(t *testing.T, cwd string, options ...nativeDaemonOptions) string {
 	var initializes atomic.Int32
@@ -392,10 +428,19 @@ func nativeDaemon(t *testing.T, cwd string, options ...nativeDaemonOptions) stri
 			var request struct {
 				ID     json.RawMessage `json:"id"`
 				Method string          `json:"method"`
+				Params json.RawMessage `json:"params"`
 			}
 			if json.Unmarshal(raw, &request) != nil || len(request.ID) == 0 {
 				continue
 			}
+			var params map[string]any
+			_ = json.Unmarshal(request.Params, &params)
+			recordedCallsMu.Lock()
+			if recordedDaemonCalls[t] == nil {
+				recordedDaemonCalls[t] = map[string][]recordedDaemonCall{}
+			}
+			recordedDaemonCalls[t][home] = append(recordedDaemonCalls[t][home], recordedDaemonCall{request.Method, params})
+			recordedCallsMu.Unlock()
 			result := any(map[string]any{})
 			switch request.Method {
 			case "initialize":
@@ -414,13 +459,22 @@ func nativeDaemon(t *testing.T, cwd string, options ...nativeDaemonOptions) stri
 			case "configRequirements/read":
 				result = map[string]any{"requirements": nil}
 			case "config/read":
-				config := map[string]any{"features": map[string]bool{}}
+				write := map[string]any{"network_access": len(options) != 0 && options[0].networkAccess}
+				if len(options) != 0 && options[0].writableRoots {
+					write["writable_roots"] = []any{"/work"}
+				}
+				config := map[string]any{"features": map[string]bool{}, "sandbox_workspace_write": write}
 				if len(options) != 0 && options[0].automaticReviewer {
 					config["approvals_reviewer"] = "guardian_subagent"
 				}
 				result = map[string]any{"config": config}
-			case "thread/start", "thread/read":
-				result = map[string]any{"thread": map[string]any{"id": "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a6", "cwd": cwd}}
+			case "thread/start", "thread/read", "thread/resume":
+				result = map[string]any{"thread": map[string]any{"id": "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a6", "cwd": cwd},
+					"sandbox":        map[string]any{"type": map[string]string{"read-only": "readOnly", "workspace-write": "workspaceWrite"}[fmt.Sprint(params["sandbox"])]},
+					"approvalPolicy": params["approvalPolicy"], "approvalsReviewer": params["approvalsReviewer"]}
+				if cfg, ok := params["config"].(map[string]any); ok {
+					result.(map[string]any)["reasoningEffort"] = cfg["model_reasoning_effort"]
+				}
 			}
 			reply, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": result})
 			if conn.Write(context.Background(), websocket.MessageText, reply) != nil {
@@ -429,7 +483,12 @@ func nativeDaemon(t *testing.T, cwd string, options ...nativeDaemonOptions) stri
 		}
 	})}
 	go func() { _ = server.Serve(listener) }()
-	t.Cleanup(func() { _ = server.Close() })
+	t.Cleanup(func() {
+		_ = server.Close()
+		recordedCallsMu.Lock()
+		delete(recordedDaemonCalls, t)
+		recordedCallsMu.Unlock()
+	})
 	return home
 }
 
@@ -531,28 +590,29 @@ func TestPublicPrepareRetainsEmbeddedWrappedCodexPlan(t *testing.T) {
 
 // A configuration or search pin stays embedded, and sandbox/approval
 // settings the Codex TUI refuses on a daemon resume do too.
-func TestSettingsTheDaemonTUIRefusesKeepEmbeddedExecution(t *testing.T) {
+func TestSettingsADaemonSeatCannotCarryKeepEmbeddedExecution(t *testing.T) {
 	cases := []struct {
-		args   []string
-		reason string
+		name          string
+		args          []string
+		network       bool
+		writableRoots bool
+		reason        string
 	}{
-		{args: []string{"-c", `approvals_reviewer="user"`}, reason: "command-line configuration or search overrides require verified TUI resume equivalence"},
-		{args: []string{"--search"}, reason: "command-line configuration or search overrides require verified TUI resume equivalence"},
-		// Codex 0.167.0 exits a resume with sandbox or approval options
-		// (bead agent-message-queue-2e2z, observed live on 2026-11-15).
-		{args: []string{"--sandbox", "workspace-write", "--ask-for-approval", "on-request"}, reason: "Codex refuses sandbox and approval options on a daemon seat"},
+		{name: "search", args: []string{"--search"}, reason: "--search requires verified TUI resume equivalence"},
+		{name: "mailbox writable root", args: []string{"-c", "sandbox_workspace_write.writable_roots=[]", "--sandbox", "workspace-write"}, writableRoots: true, reason: "the Codex daemon's configuration sets sandbox_workspace_write.writable_roots; a daemon seat cannot pin an empty list"},
+		{name: "daemon network mismatch", args: []string{"-c", "sandbox_workspace_write.network_access=false"}, network: true, reason: "the Codex daemon's configuration sets sandbox_workspace_write.network_access=true; a daemon seat cannot pin another value"},
 	}
 	for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
 		t.Setenv(key, "")
 		_ = os.Unsetenv(key)
 	}
 	for _, c := range cases {
-		t.Run(strings.Join(c.args, " "), func(t *testing.T) {
+		t.Run(c.name, func(t *testing.T) {
 			project, err := filepath.EvalSymlinks(t.TempDir())
 			if err != nil {
 				t.Fatal(err)
 			}
-			t.Setenv("CODEX_HOME", nativeDaemon(t, project))
+			t.Setenv("CODEX_HOME", nativeDaemon(t, project, nativeDaemonOptions{networkAccess: c.network, writableRoots: c.writableRoots}))
 			plan, err := New(nativeProvider(t, "0.167.0")).PlanFresh(launch.PlanRequest{Handle: "codex", LaunchNonce: "adadadad-adad-4dad-8dad-adadadadadad",
 				ProjectRoot: project, SessionRoot: project, Cwd: project, AMQExecutable: "/usr/bin/true", ResumePolicy: launch.ResumeEnabled, CommittedArgs: c.args})
 			if err != nil || plan.PreSpawnAcquire || plan.TerminalOnlyReason != c.reason {
@@ -584,7 +644,7 @@ func TestDaemonBoundCodexConversationResumesOnTheDaemon(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	settings := []string{"--model", "gpt-native-test", "--no-alt-screen"}
+	settings := []string{"--model", "gpt-native-test", "--sandbox", "workspace-write", "--no-alt-screen"}
 	resumed, err := New(executable).PlanResume(launch.ResumeRequest{PlanRequest: launch.PlanRequest{Handle: "codex", LaunchNonce: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
 		ProjectRoot: project, SessionRoot: root.Base(), Cwd: project, AMQExecutable: amq, ResumePolicy: launch.ResumeEnabled, CommittedArgs: settings},
 		Conversation: conversation.Identity, Capture: capture})
@@ -592,9 +652,25 @@ func TestDaemonBoundCodexConversationResumesOnTheDaemon(t *testing.T) {
 		t.Fatalf("daemon-bound conversation resumed embedded: %#v, %v", resumed, err)
 	}
 	prepared, argv := executeNative(t, root, resumed, false)
-	expected := append(append(daemonTemplate(t, executable, os.Getenv("CODEX_HOME"), project), settings...), thread)
+	expected := append(append(daemonTemplate(t, executable, os.Getenv("CODEX_HOME"), project), "--model", "gpt-native-test", "--no-alt-screen"), thread)
 	if prepared.ConversationID != thread || !slices.Equal(argv, expected) {
 		t.Fatalf("resume argv = %q (thread %s), want %q", argv, prepared.ConversationID, expected)
+	}
+	resumes := testDaemonCalls(t, os.Getenv("CODEX_HOME"), "thread/resume")
+	if len(resumes) != 1 || resumes[0]["sandbox"] != "workspace-write" || resumes[0]["threadId"] != thread {
+		t.Fatalf("pinned resume calls = %+v; want %s with its sandbox", resumes, thread)
+	}
+	seenResume, foundUnsubAfterResume := false, false
+	for _, call := range recordedDaemonCalls[t][os.Getenv("CODEX_HOME")] {
+		if call.method == "thread/resume" {
+			seenResume = true
+		}
+		if call.method == "thread/unsubscribe" && seenResume {
+			foundUnsubAfterResume = true
+		}
+	}
+	if !foundUnsubAfterResume {
+		t.Fatalf("the pinned thread was not left unsubscribed: resumes=%+v all calls=%+v", resumes, recordedDaemonCalls[t])
 	}
 	if after, err := launch.LoadConversation(root, "codex"); err != nil || after.LaunchNonce != conversation.LaunchNonce || !slices.Equal(after.EvidenceRefs, conversation.EvidenceRefs) {
 		t.Fatalf("resume rewrote the daemon binding: %#v, %v", after, err)
