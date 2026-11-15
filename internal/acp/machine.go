@@ -1269,9 +1269,10 @@ func (s *Server) restore(b binding.Binding, now time.Time) bool {
 // unarchived reports whether the relay-signed state shows the channel of
 // the retired record r not archived, so a restore may make it active. A
 // channel it shows archived is unarchived only when AMQ Remote archived it
-// (Archived or ArchiveSent); one the owner archived stays archived. The
-// unarchive is never taken as proof: the next pass observes again. Every
-// other outcome is written to r and retried after channelStepGap.
+// (Archived or ArchiveSent); one the owner archived stays archived. An
+// accepted unarchive is never taken as proof: the state is read again at
+// once, and only a read that shows the channel not archived reports true.
+// Every other outcome is written to r and retried after channelStepGap.
 func (s *Server) unarchived(r *channelRecord, now time.Time) bool {
 	if r.LastError != "" && !due(r.LastTry, channelStepGap, now) {
 		return false
