@@ -19,6 +19,8 @@ func runThread(args []string) error {
 			return runThreadOpen(args[1:])
 		case "list":
 			return runThreadList(args[1:])
+		case "settle":
+			return runThreadSettle(args[1:])
 		}
 	}
 	fs := flag.NewFlagSet("thread", flag.ContinueOnError)
