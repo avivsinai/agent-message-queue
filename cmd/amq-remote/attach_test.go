@@ -26,6 +26,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
+	"github.com/avivsinai/agent-message-queue/internal/remote/pi"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
@@ -1315,7 +1316,7 @@ func TestNativeAttachRecordsTheHarness(t *testing.T) {
 	savedFind, savedCwd, savedHolder := findSelf, processCwd, processHolder
 	t.Cleanup(func() { findSelf, processCwd, processHolder = savedFind, savedCwd, savedHolder })
 	findSelf = func(string, string) (registry.Candidate, error) {
-		return registry.Candidate{Kind: "pi", Target: "pi:s1", NativeSession: "pi:s1", PID: 7}, nil
+		return registry.Candidate{Kind: "pi", Target: "pi:s1", NativeSession: "pi:s1", PID: 7, Config: pi.Config("s1", "")}, nil
 	}
 	processCwd = func(int) (string, error) { return "/work/pi-proj", nil }
 	processHolder = func(pid int) (launch.HolderIdentity, error) {
@@ -1366,7 +1367,7 @@ func TestNativeAttachWithoutARootUsesTheMachineRoot(t *testing.T) {
 	savedFind, savedCwd, savedHolder := findSelf, processCwd, processHolder
 	t.Cleanup(func() { findSelf, processCwd, processHolder = savedFind, savedCwd, savedHolder })
 	findSelf = func(string, string) (registry.Candidate, error) {
-		return registry.Candidate{Kind: "pi", Target: "pi:s1", NativeSession: "pi:s1", PID: 7}, nil
+		return registry.Candidate{Kind: "pi", Target: "pi:s1", NativeSession: "pi:s1", PID: 7, Config: pi.Config("s1", "")}, nil
 	}
 	processCwd = func(int) (string, error) { return "/work/pi-proj", nil }
 	processHolder = func(pid int) (launch.HolderIdentity, error) {
@@ -1405,7 +1406,7 @@ func TestNativeAttachRefusesASymlinkedMachineRoot(t *testing.T) {
 	savedFind := findSelf
 	t.Cleanup(func() { findSelf = savedFind })
 	findSelf = func(string, string) (registry.Candidate, error) {
-		return registry.Candidate{Kind: "pi", Target: "pi:s1", NativeSession: "pi:s1", PID: 7}, nil
+		return registry.Candidate{Kind: "pi", Target: "pi:s1", NativeSession: "pi:s1", PID: 7, Config: pi.Config("s1", "")}, nil
 	}
 	_, err := attach([]string{"--self", "--native", "--json"}, io.Discard, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "is not a plain directory") {

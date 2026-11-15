@@ -326,7 +326,7 @@ func (ls *linkSet) bindings(run *linkRun, pin linkio.Pin) []linkio.Binding {
 			Binding: sh.Binding, TargetID: b.Target, Epoch: s.Epoch, NativeSessionID: b.NativeSession,
 			Labels: linkio.Labels{
 				Device: pin.DeviceName, Session: nonEmpty(b.Display, nonEmpty(s.DisplayName, b.Target)),
-				Harness: s.Harness, Project: s.Project,
+				Harness: s.Harness, Project: nonEmpty(s.Project, b.Cwd),
 			},
 			Harness: s.Harness, DisplayName: nonEmpty(b.Display, s.DisplayName), Attachment: s.Attachment,
 			Consent: sh.Consent, Tools: sh.Tools, Capabilities: caps,
@@ -348,12 +348,15 @@ func writeLinkStatus(stateDir, name string, st linkio.Status) {
 	}
 }
 
-// link dispatches `amq-remote link add|remove|status`.
+// link dispatches the link subcommands; --help prints their usage.
 func link(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe) (any, int, error) {
 	if len(args) == 0 {
 		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "link needs a subcommand: add, keys, local-key, confirm, remove, status, tools or call")
 	}
 	switch args[0] {
+	case "--help", "-h":
+		_, _ = io.WriteString(stdout, "Usage: amq-remote link <subcommand> [options]\n"+linkUsage)
+		return nil, 0, nil
 	case "add":
 		return linkAdd(args[1:], stdin, stdout, probe)
 	case "confirm":

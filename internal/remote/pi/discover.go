@@ -2,7 +2,6 @@ package pi
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -79,7 +78,7 @@ func (d discoverer) Discover(_ context.Context, req registry.DiscoverRequest) ([
 		if validSessionID(live.sessionID) {
 			native = live.sessionID
 		}
-		cfg, _ := json.Marshal(config{Handle: h})
+		cfg := Config(h, "")
 		out = append(out, registry.Candidate{Kind: "pi", Target: "pi:" + h, Display: h, Config: cfg, NativeSession: native, PID: live.pid})
 	}
 	if incomplete {

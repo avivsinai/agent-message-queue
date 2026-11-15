@@ -100,6 +100,8 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		if stateDir, err = c.stateDir(); err != nil {
 			return protocol.ExitUsage, err
 		}
+	} else if c.root != "" && !filepath.IsAbs(c.root) {
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--root must be absolute")
 	}
 	cand, err := findSelf(c.root, stateDir)
 	if err != nil {
@@ -123,7 +125,7 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	if *linkName == "" {
 		// A link share binds this session through the link's root; a plain
 		// native attach must not add a second binding through another root.
-		if b, err := boundElsewhere(c.root, cand.Target, want); err != nil {
+		if b, err := boundElsewhere(c.root, sessionRoot, cand.Target, want); err != nil {
 			return protocol.ExitActionRequired, err
 		} else if b != nil {
 			return protocol.ExitActionRequired, protocol.Refuse(protocol.CodeUnsupported, "this session is attached through %s (binding %s); run amq-remote detach --name %s, then attach --self --native again", b.Root, b.Name, b.Name)
@@ -146,6 +148,13 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		}
 		if *consent == "local" && !linkio.HasLocalKey(stateDir, *linkName) {
 			return protocol.ExitActionRequired, protocol.Refuse(protocol.CodeUnsupported, "consent local needs the link's local passkey: run amq-remote link local-key %s first", *linkName)
+		}
+	}
+	var piSeat binding.Seat
+	if cand.Kind == "pi" {
+		cand, piSeat, err = piThrough(cand, sessionRoot, c.root)
+		if err != nil {
+			return protocol.ExitActionRequired, err
 		}
 	}
 	reg := ipc.RegisterRequest{Kind: cand.Kind, Target: cand.Target, Config: cand.Config}
@@ -177,6 +186,9 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		display = session.DisplayName
 	}
 	nb, explicit, codexes := nativeBinding(c.root, stateDir, cand, native, display, *name, *linkName != "", "")
+	if cand.Kind == "pi" {
+		nb.Seat = piSeat
+	}
 	inspect := inspectOutsideLock(codexes)
 	var reused bool
 	if nb.Name, reused, err = writeBinding(nb, explicit, *linkName != "", inspect); err != nil {
@@ -237,7 +249,7 @@ func nativeBinding(root, stateDir string, cand registry.Candidate, native, displ
 	machine := binding.Machine()
 	nb := binding.Binding{Root: root, Target: cand.Target, NativeSession: native, Display: display, Name: bindName,
 		Harness: h.Kind, Holder: h.holder(), Label: binding.SessionLabel(h.Kind, place, machine), Machine: machine, AppServer: h.AppServer,
-		Transcript: h.Transcript, ConfigDir: sessionConfigDir(h.Kind)}
+		Transcript: h.Transcript, ConfigDir: sessionConfigDir(h.Kind), Cwd: h.Cwd}
 	// The session identity is the harness, root and working directory, so the
 	// same session coming back gets its name and agent back. A link
 	// share keeps its target-derived identity: the share names its binding,
@@ -253,23 +265,39 @@ func nativeBinding(root, stateDir string, cand registry.Candidate, native, displ
 	return nb, explicit, codexes
 }
 
+// piThrough is cand as the endpoint of driverRoot attaches it, with the
+// session's seat. A session in another root than the driver's is named by its
+// place, and its config carries its own root.
+func piThrough(cand registry.Candidate, sessionRoot, driverRoot string) (registry.Candidate, binding.Seat, error) {
+	handle, err := pi.Handle(cand.Config)
+	if err != nil {
+		return cand, binding.Seat{}, err
+	}
+	sessionRoot = filepath.Clean(sessionRoot)
+	seat := binding.Seat{Root: sessionRoot, Handle: handle}
+	if sameRoot(sessionRoot, driverRoot) {
+		return cand, seat, nil
+	}
+	place, session := amqPlace(sessionRoot)
+	cand.Target = "pi:" + mailboxBindingName(handle, sessionRoot)
+	cand.Config = pi.Config(handle, sessionRoot)
+	cand.Display = handle + " · " + place
+	if session != "" {
+		cand.Display += "/" + session
+	}
+	return cand, seat, nil
+}
+
 // linkAttachRoot is the root attach --self --link shares the session through:
-// the root that holds the link, so the target registration, the binding and
-// the share all name the link's own endpoint. It refuses a pi session whose
-// AMQ root is another root, because only the endpoint of a pi session's own
-// root can drive it, and a session already bound natively through another
-// root, because two bindings would route into one session through two
-// endpoints.
+// the root that holds the link. It refuses a session already bound natively
+// through another root, because two bindings would route into one session
+// through two endpoints.
 func linkAttachRoot(c *common, link string, cand registry.Candidate, want string) (string, error) {
-	sessionRoot := c.root
 	root, _, err := c.resolveLink(link)
 	if err != nil {
 		return "", err
 	}
-	if cand.Kind == "pi" && (sessionRoot == "" || !sameRoot(root, sessionRoot)) {
-		return "", protocol.Refuse(protocol.CodeUnsupported, "this pi session is served by the endpoint of its AMQ root %s, and link %s is in %s. Link that root under another name: amq-remote link add OTHER URL --code CODE --root %s", sessionRoot, link, root, sessionRoot)
-	}
-	if b, err := boundElsewhere(root, cand.Target, want); err != nil {
+	if b, err := boundElsewhere(root, c.root, cand.Target, want); err != nil {
 		return "", err
 	} else if b != nil {
 		return "", protocol.Refuse(protocol.CodeUnsupported, "this session is attached through %s (binding %s); run amq-remote detach --self, then attach --self --link %s again", b.Root, b.Name, link)
@@ -282,17 +310,17 @@ func linkAttachRoot(c *common, link string, cand registry.Candidate, want string
 	return root, nil
 }
 
-// boundElsewhere returns a native binding of this session (target and native
-// session) that names a root other than root, or nil. binding.Same treats
-// two roots as two sessions, so without this check one session would keep
-// two routed bindings, one through each root's endpoint.
-func boundElsewhere(root, target, native string) (*binding.Binding, error) {
+// boundElsewhere returns a native binding of the session (sessionRoot,
+// target and native) that another root than root drives, or nil.
+// binding.Same treats two roots as two sessions, so without this check one
+// session would keep two routed bindings, one through each root's endpoint.
+func boundElsewhere(root, sessionRoot, target, native string) (*binding.Binding, error) {
 	all, err := binding.List()
 	if err != nil {
 		return nil, err
 	}
 	for _, b := range all {
-		if !b.Mailbox() && b.Target == target && b.NativeSession == native && !sameRoot(b.Root, root) {
+		if b.Serves(sessionRoot, target, native) && !sameRoot(b.Root, root) {
 			return &b, nil
 		}
 	}
@@ -1245,7 +1273,7 @@ func selfCandidate(root, stateDir string) (registry.Candidate, error) {
 			return registry.Candidate{}, fmt.Errorf("cannot identify the session this runs in: list Claude sessions: %v", d.Err)
 		}
 	}
-	return registry.Candidate{}, errors.New("cannot identify the session this runs in; run it from inside a Claude Code, Codex or pi session")
+	return registry.Candidate{}, errors.New("cannot identify the session this runs in; run it from inside a Claude Code, Codex or pi session (a pi session needs AM_ROOT and AM_ME: start pi with amq coop exec)")
 }
 
 // candidatePID is the process that runs a candidate's session: Claude's
@@ -1272,7 +1300,7 @@ func candidatePID(cand registry.Candidate) int {
 // session in more than one root are refused, naming the roots.
 func selfNativeMatch(root string, rootSet bool, target, native string) (func(binding.Binding) bool, error) {
 	match := func(b binding.Binding) bool {
-		return !b.Mailbox() && b.Target == target && b.NativeSession == native && (!rootSet || sameRoot(b.Root, root))
+		return b.Serves(root, target, native) && (!rootSet || sameRoot(b.Root, root))
 	}
 	all, err := binding.List()
 	if err != nil {

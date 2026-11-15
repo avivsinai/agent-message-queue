@@ -165,7 +165,7 @@ func hookBinding(s claude.Seat) (string, error) {
 			return "", err
 		}
 	}
-	if b, err := boundElsewhere(root, cand.Target, s.Session); err != nil {
+	if b, err := boundElsewhere(root, root, cand.Target, s.Session); err != nil {
 		return "", err
 	} else if b != nil {
 		return "", fmt.Errorf("this session is attached through %s (binding %s)", b.Root, b.Name)

@@ -27,6 +27,25 @@ var version = "dev"
 // endpoint owns. amq cleanup never touches extension data.
 const stateDirName = "extensions/remote"
 
+// linkUsage is the part of the usage that lists the link commands.
+const linkUsage = `  link add NAME URL --code CODE
+                           Link this machine to a server; type the passkey
+                           fingerprint your browser shows
+  attach --self --link N   Share the session this runs in with linked server N
+                           (--consent passkey|local, --tools PROFILE)
+  link keys add NAME --code CODE
+                           Accept one more consent passkey (type its fingerprint)
+  link local-key NAME      Create the local passkey that confirms consent-local tasks
+  link confirm ID          Show a held task's exact text and confirm it (Touch ID)
+  link remove NAME         Retire link NAME's sink and delete its device key
+  link status              Links on this machine, their sockets and owed
+                           revisions, retired sinks
+  link tools               The tools a linked server offers this machine
+  link call TOOL --args J  Call a linked server's tool (--wait for the final state,
+                           --idempotency-key K; resume K after a lost answer)
+  mcp --link NAME          Serve a linked server's tools as a stdio MCP server
+`
+
 const usageText = `Usage: amq-remote <command> [options]
 
 Attach to a running harness session from another client. A request has an
@@ -65,23 +84,7 @@ Commands:
   service install|uninstall|status [--root R]
                            Start amq-remote up for R (default the machine
                            root) at login: launchd on macOS, systemd on Linux
-  link add NAME URL --code CODE
-                           Link this machine to a server; type the passkey
-                           fingerprint your browser shows
-  attach --self --link N   Share the session this runs in with linked server N
-                           (--consent passkey|local, --tools PROFILE)
-  link keys add NAME --code CODE
-                           Accept one more consent passkey (type its fingerprint)
-  link local-key NAME      Create the local passkey that confirms consent-local tasks
-  link confirm ID          Show a held task's exact text and confirm it (Touch ID)
-  link remove NAME         Retire link NAME's sink and delete its device key
-  link status              Links on this machine, their sockets and owed
-                           revisions, retired sinks
-  link tools               The tools a linked server offers this machine
-  link call TOOL --args J  Call a linked server's tool (--wait for the final state,
-                           --idempotency-key K; resume K after a lost answer)
-  mcp --link NAME          Serve a linked server's tools as a stdio MCP server
-  pi bridge-path           Write this version's pi extension to
+` + linkUsage + `  pi bridge-path           Write this version's pi extension to
                            ~/.amq/pi/amq-bridge.ts and print its path
   doctor [--fix]           Check every link to the owner; --fix repairs hooks,
                            the machine agent's import file and the login service

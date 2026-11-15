@@ -37,6 +37,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -63,6 +64,9 @@ type config struct {
 	// too old and does not publish its own. The party that declares the
 	// target sets it for a pi build that ships its own extension.
 	UpgradeHint string `json:"upgrade_hint,omitempty"`
+	// Root is the session's AMQ root when it is another root than the
+	// endpoint's; empty means the endpoint's root.
+	Root string `json:"root,omitempty"`
 }
 
 // run is one bound request tracked by the adapter. The durable record is
@@ -251,20 +255,53 @@ func ACPFactory(_ context.Context, cfg registry.FactoryConfig) (core.Attachment,
 	return build(cfg, acpWire)
 }
 
-func build(cfg registry.FactoryConfig, names wireNames) (core.Attachment, error) {
+// readConfig parses and checks an adapter config: a handle is required, and
+// any root must be absolute and clean.
+func readConfig(raw json.RawMessage, harness string) (config, error) {
 	var c config
-	if len(cfg.Config) > 0 {
-		if err := json.Unmarshal(cfg.Config, &c); err != nil {
-			return nil, fmt.Errorf("parse pi config: %w", err)
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &c); err != nil {
+			return c, fmt.Errorf("parse %s config: %w", harness, err)
 		}
 	}
 	if c.Handle == "" {
-		return nil, fmt.Errorf("%s config: handle is required (the %s session handle)", names.harness, names.harness)
+		return c, fmt.Errorf("%s config: handle is required (the %s session handle)", harness, harness)
 	}
 	if err := fsq.ValidateHandle(c.Handle); err != nil {
-		return nil, fmt.Errorf("%s config: invalid handle: %v", names.harness, err)
+		return c, fmt.Errorf("%s config: invalid handle: %v", harness, err)
 	}
-	dir := bridgeDir{dir: bridgePath(cfg.Root, c.Handle, names), names: names}
+	if c.Root != "" && (!filepath.IsAbs(c.Root) || filepath.Clean(c.Root) != c.Root) {
+		return c, fmt.Errorf("%s config: root must be an absolute clean path", harness)
+	}
+	return c, nil
+}
+
+// Handle is the handle an adapter config names.
+func Handle(raw json.RawMessage) (string, error) {
+	c, err := readConfig(raw, piWire.harness)
+	if err != nil {
+		return "", err
+	}
+	return c.Handle, nil
+}
+
+// Config is the adapter config of the pi session of handle in root; an empty
+// root means the endpoint's own root.
+func Config(handle, root string) json.RawMessage {
+	raw, _ := json.Marshal(config{Handle: handle, Root: root})
+	return raw
+}
+
+func build(cfg registry.FactoryConfig, names wireNames) (core.Attachment, error) {
+	c, err := readConfig(cfg.Config, names.harness)
+	if err != nil {
+		return nil, err
+	}
+	dirRoot := cfg.Root
+	if c.Root != "" {
+		dirRoot = c.Root
+	}
+	dir := bridgeDir{dir: bridgePath(dirRoot, c.Handle, names), names: names}
 	if st, err := os.Stat(dir.dir); err != nil || !st.IsDir() {
 		running := fmt.Sprintf("is the %s extension running for handle %q?", names.dir, c.Handle)
 		if names.harness == acpWire.harness {
