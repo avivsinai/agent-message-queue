@@ -195,3 +195,57 @@ func TestThreadOpenPlaintextAmbiguousBySenderOneLine(t *testing.T) {
 		t.Fatalf("summary line must point at the JSON output:\n%s", sout)
 	}
 }
+
+// A request from another project's agent that has my handle is not mine to
+// settle. Seen in the live run of 0.146.0 on 2026-11-15: the command
+// selected by handle alone and offered to settle requests that an agent
+// named like the caller, in two other projects, had asked.
+func TestThreadSettleLeavesAnotherProjectsRequestsWithMyHandle(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "queue")
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range []string{"alpha", "beta"} {
+		if err := fsq.EnsureAgentDirs(root, h); err != nil {
+			t.Fatal(err)
+		}
+	}
+	id := "2026-11-12T00-00-00.000Z_pid1_other"
+	msg := format.Message{Header: format.Header{
+		Schema: format.CurrentSchema, ID: id, From: "alpha", To: []string{"beta"},
+		ReplyProject: "other-project", Thread: "p2p/other-project:alpha__beta",
+		Subject:  "asked by the other project's alpha",
+		Created:  time.Now().UTC().Add(-72 * time.Hour).Format(time.RFC3339Nano),
+		Priority: format.PriorityNormal, Kind: format.KindTodo,
+	}}
+	raw, err := msg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbox := fsq.AgentInboxNew(root, "beta")
+	if err := os.WriteFile(filepath.Join(inbox, id+".md"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The request is open, and its requester is the other project's alpha.
+	openOut, _ := captureOutput(t, func() error { return runThread([]string{"open", "--json", "--root", root}) })
+	var open threadOpenResult
+	if err := json.Unmarshal([]byte(openOut), &open); err != nil {
+		t.Fatalf("thread open: %v\n%s", err, openOut)
+	}
+	if len(open.Obligations) != 1 || open.Obligations[0].OwedTo.Project != "other-project" {
+		t.Fatalf("fixture: want one open request owed to other-project's alpha, got %s", openOut)
+	}
+
+	stdout, _ := captureOutput(t, func() error {
+		return runThread([]string{"settle", "--root", root, "--me", "alpha", "--older-than", "0"})
+	})
+	if stdout != "Nothing to settle.\n" {
+		t.Fatalf("settle stdout = %q, want %q", stdout, "Nothing to settle.\n")
+	}
+	if sent, _ := filepath.Glob(filepath.Join(fsq.AgentOutboxSent(root, "alpha"), "*.md")); len(sent) != 0 {
+		t.Fatalf("alpha sent %d messages, want none", len(sent))
+	}
+	if got, _ := filepath.Glob(filepath.Join(inbox, "*.md")); len(got) != 1 {
+		t.Fatalf("beta's inbox holds %d messages, want only the request", len(got))
+	}
+}

@@ -97,6 +97,10 @@ func runThreadSettle(args []string) error {
 		return NotFoundError("root not found at %s", root)
 	}
 	scanRoots := []thread.ScanRoot{threadOpenScanRoot(root)}
+	// The caller as a participant of the scanned root. A request is the
+	// caller's only when its requester is this whole value: an agent of
+	// another project or session with the same handle is someone else.
+	mine := thread.Participant{Session: scanRoots[0].Session, Handle: me}
 	now := time.Now().UTC()
 	// Same window as `thread open` uses on this root (336h cutoff).
 	_, red, err := reduceObligations(scanRoots, now.Add(-336*time.Hour), func(path string, _ error) error { return nil })
@@ -116,7 +120,9 @@ func runThreadSettle(args []string) error {
 		if !ob.Open() {
 			return false
 		}
-		if ob.Requester.Handle != me || !threadMatch(ob.Opener.Thread) {
+		// The marker is delivered into this root, so an owner outside it
+		// is not reached and its rows are not selected.
+		if ob.Requester != mine || ob.Owner.Project != mine.Project || ob.Owner.Session != mine.Session || !threadMatch(ob.Opener.Thread) {
 			return false
 		}
 		if len(allowedOwners) > 0 && !allowedOwners[ob.Owner.Handle] {
