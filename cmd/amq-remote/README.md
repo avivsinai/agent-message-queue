@@ -431,11 +431,10 @@ Protocol: [`amq.remote.link/1`](../../docs/remote-link-protocol.md).
    `amq-remote attach --self --link NAME` (`--consent passkey` by default, or
    `local`; `--tools read` by default). The share names the session's
    binding and runs through the endpoint of the link's root. One link in the
-   machine root serves every session on the machine, including pi seats in
-   project roots: the session's own AMQ root (its queue) is recorded in the
-   pi adapter's config, while its binding runs through the link's endpoint.
-   When the server lists the tool profiles it grants in its link info,
-   `--tools` must be one of them.
+   machine root serves every session on the machine: a pi session in another
+   AMQ root is registered with its own root and is named
+   `&lt;handle&gt; · &lt;project&gt;/&lt;session&gt;`. When the server lists
+   the tool profiles it grants in its link info, `--tools` must be one of them.
 4. `serve` (under `up`) keeps the link up and offers each request revision
    until the server acknowledges it. A revision the server holds with another
    digest is a conflict: never sent again, counted in `link status`.

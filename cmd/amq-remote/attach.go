@@ -100,6 +100,8 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		if stateDir, err = c.stateDir(); err != nil {
 			return protocol.ExitUsage, err
 		}
+	} else if c.root != "" && !filepath.IsAbs(c.root) {
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--root must be absolute")
 	}
 	cand, err := findSelf(c.root, stateDir)
 	if err != nil {
@@ -271,6 +273,7 @@ func piThrough(cand registry.Candidate, sessionRoot, driverRoot string) (registr
 	if err != nil {
 		return cand, binding.Seat{}, err
 	}
+	sessionRoot = filepath.Clean(sessionRoot)
 	seat := binding.Seat{Root: sessionRoot, Handle: handle}
 	if sameRoot(sessionRoot, driverRoot) {
 		return cand, seat, nil
@@ -309,9 +312,9 @@ func linkAttachRoot(c *common, link string, cand registry.Candidate, want string
 
 // boundElsewhere returns a native binding of the session (sessionRoot,
 // target and native) that another root than root drives, or nil.
+// binding.Same treats two roots as two sessions, so without this check one
+// session would keep two routed bindings, one through each root's endpoint.
 func boundElsewhere(root, sessionRoot, target, native string) (*binding.Binding, error) {
-	// boundElsewhere returns a native binding of the session (sessionRoot,
-	// target and native) that another root than root drives, or nil.
 	all, err := binding.List()
 	if err != nil {
 		return nil, err

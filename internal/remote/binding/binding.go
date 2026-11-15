@@ -349,8 +349,8 @@ func (b Binding) Valid() error {
 	}
 	switch b.Carrier {
 	case CarrierMailbox:
-		if b.Seat.Handle != "" || b.Seat.Root != "" {
-			return fmt.Errorf("mailbox binding %q carries a Seat, but a mailbox must not", b.Name)
+		if b.Seat != (Seat{}) {
+			return errors.New("mailbox binding must not name a pi seat")
 		}
 		// A mailbox binding never names a native session, so nothing that
 		// keys on one (the Claude Stop receiver) treats it as native.
@@ -359,10 +359,8 @@ func (b Binding) Valid() error {
 		}
 		return fsq.ValidateHandle(b.Handle)
 	case "", CarrierNative:
-		if b.Seat.Handle != "" || b.Seat.Root != "" {
-			if !filepath.IsAbs(b.Seat.Root) || fsq.ValidateHandle(b.Seat.Handle) != nil {
-				return fmt.Errorf("binding %q: Seat must be an absolute root and a valid handle", b.Name)
-			}
+		if b.Seat != (Seat{}) && (!filepath.IsAbs(b.Seat.Root) || fsq.ValidateHandle(b.Seat.Handle) != nil) {
+			return errors.New("a native binding's pi seat needs an absolute root and a valid handle")
 		}
 		if b.Target == "" || b.NativeSession == "" {
 			return errors.New("native binding needs a target and a native session")

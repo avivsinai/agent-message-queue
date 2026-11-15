@@ -64,9 +64,8 @@ type config struct {
 	// too old and does not publish its own. The party that declares the
 	// target sets it for a pi build that ships its own extension.
 	UpgradeHint string `json:"upgrade_hint,omitempty"`
-	// Root is this session's AMQ root. It is set when the live seat is in a
-	// project root (different from the endpoint root that registered this adapter).
-	// Empty means the root that registered the adapter, preserving old entries.
+	// Root is the session's AMQ root when it is another root than the
+	// endpoint's; empty means the endpoint's root.
 	Root string `json:"root,omitempty"`
 }
 
@@ -256,19 +255,32 @@ func ACPFactory(_ context.Context, cfg registry.FactoryConfig) (core.Attachment,
 	return build(cfg, acpWire)
 }
 
-// Handle is the handle an adapter config names.
-func Handle(raw json.RawMessage) (string, error) {
+// readConfig parses and checks an adapter config: a handle is required, and
+// any root must be absolute and clean.
+func readConfig(raw json.RawMessage, harness string) (config, error) {
 	var c config
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &c); err != nil {
-			return "", fmt.Errorf("parse pi config: %w", err)
+			return c, fmt.Errorf("parse %s config: %w", harness, err)
 		}
 	}
 	if c.Handle == "" {
-		return "", fmt.Errorf("pi config: handle is required")
+		return c, fmt.Errorf("%s config: handle is required", harness)
 	}
 	if err := fsq.ValidateHandle(c.Handle); err != nil {
-		return "", fmt.Errorf("pi config: invalid handle: %v", err)
+		return c, fmt.Errorf("%s config: invalid handle: %v", harness, err)
+	}
+	if c.Root != "" && (!filepath.IsAbs(c.Root) || filepath.Clean(c.Root) != c.Root) {
+		return c, fmt.Errorf("%s config: root must be an absolute clean path", harness)
+	}
+	return c, nil
+}
+
+// Handle is the handle an adapter config names.
+func Handle(raw json.RawMessage) (string, error) {
+	c, err := readConfig(raw, piWire.harness)
+	if err != nil {
+		return "", err
 	}
 	return c.Handle, nil
 }
@@ -281,17 +293,13 @@ func Config(handle, root string) json.RawMessage {
 }
 
 func build(cfg registry.FactoryConfig, names wireNames) (core.Attachment, error) {
-	var c config
-	if len(cfg.Config) > 0 {
-		if err := json.Unmarshal(cfg.Config, &c); err != nil {
-			return nil, fmt.Errorf("parse pi config: %w", err)
+	c, err := readConfig(cfg.Config, names.harness)
+	if err != nil {
+		if cfg.Config == nil {
+			// No config at all: keep the old missing-config text.
+			return nil, fmt.Errorf("%s config: handle is required (the %s session handle)", names.harness, names.harness)
 		}
-	}
-	if c.Handle == "" {
-		return nil, fmt.Errorf("%s config: handle is required (the %s session handle)", names.harness, names.harness)
-	}
-	if err := fsq.ValidateHandle(c.Handle); err != nil {
-		return nil, fmt.Errorf("%s config: invalid handle: %v", names.harness, err)
+		return nil, err
 	}
 	dirRoot := cfg.Root
 	if c.Root != "" {

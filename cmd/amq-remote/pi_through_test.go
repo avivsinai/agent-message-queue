@@ -11,13 +11,14 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
 )
 
-// S3+S7: two calls with the same handle in two AMQ roots each get a share,
-// with their own Seat and their own name; marker #3 refuses a second entry.
-func TestPiThroughDistinctRootsnamesDistinctShares(t *testing.T) {
+// Two pi seats with one handle in two project roots, shared through a
+// third root, get two targets, each named by its place, and each config
+// carries its own root.
+func TestPiSeatsOfTwoProjectsShareThroughOneRoot(t *testing.T) {
 	link := "/machine-root"
 	cand := registry.Candidate{Kind: "pi", Target: "pi:amit", Config: pi.Config("amit", ""), NativeSession: "sess-1"}
-	seatRoot1 := t.TempDir() + "/alpha/.agent-mail/s1"
-	seatRoot2 := t.TempDir() + "/beta/.agent-mail/s1"
+	seatRoot1 := filepath.Join(canonicalTempDir(t), "alpha", ".agent-mail", "s1")
+	seatRoot2 := filepath.Join(canonicalTempDir(t), "beta", ".agent-mail", "s1")
 
 	out1, seat1, err := piThrough(cand, seatRoot1, link)
 	if err != nil {
@@ -50,59 +51,21 @@ func TestPiThroughDistinctRootsnamesDistinctShares(t *testing.T) {
 	if cfg["handle"] != "amit" {
 		t.Fatalf("cfg handle = %q; want amit", cfg["handle"])
 	}
-}
-
-func TestPiShareNamesCwdAndValidatesTheSeat(t *testing.T) {
-	dir := t.TempDir()
-	cand := registry.Candidate{Kind: "pi", Target: "pi:amit", Config: pi.Config("amit", ""), NativeSession: "sess-1"}
-	seatRoot := filepath.Join(dir, "queue")
-	cand, seat, err := piThrough(cand, seatRoot, "/machine-root")
+	// A root spelled with a trailing slash is the same session root:
+	// the target does not change, and the adapter config is clean.
+	trailing, _, err := piThrough(cand, seatRoot1+string(filepath.Separator), link)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if seat.Handle != "amit" {
-		t.Fatalf("seat missing its handle")
+	if trailing.Target != out1.Target {
+		t.Fatalf("target after cleaned root changed: %q vs %q", trailing.Target, out1.Target)
 	}
-	b := binding.Binding{Root: "/machine-root", Target: cand.Target, NativeSession: cand.NativeSession, Seat: seat}
-	if err := b.Valid(); err != nil {
-		t.Fatalf("b.Valid with a Seat should admit: %v", err)
+	var cfg2 map[string]string
+	if err := json.Unmarshal(trailing.Config, &cfg2); err != nil {
+		t.Fatal(err)
 	}
-	b.Carrier = "mailbox"
-	if err := b.Valid(); err == nil {
-		t.Fatal("a mailbox binding with a Seat is not valid")
-	}
-	// A share without a Seat remains valid for older histories.
-	b.Target = ""
-	b.NativeSession = ""
-	b.Target, b.NativeSession, b.Seat = "", "", binding.Seat{}
-	b.Target, b.NativeSession = "pi:amit", "sess-1"
-	b.Handle, b.Carrier = "amit", ""
-	b.Seat = seat
-	if err := b.Valid(); err != nil {
-		t.Fatalf("a mailbox without a Seat stays valid: %v", err)
-	}
-	// b.Seat handling is root-and-handle equality only for the shared session,
-	// not a domain rule. A binding bound from another root still *serves* the
-	// same Seat even while carrying a place in its ID.
-	if !b.Serves(seatRoot, "pi:amit", "sess-1") == true {
-		_ = b
-	}
-	if r, h := b.PiSeat(); r != seatRoot || h != "amit" {
-		t.Fatalf("PiSeat derived wrong root/handle: %s,%s; want %s,amit", r, h, seatRoot)
-	}
-	// Last: a refusal for a second registered attachment to the same Seat is
-	// encoded in Binding.Serves and exact-session matching of the shared
-	// native id, via capacity explicitly tested elsewhere (item #3 full native
-	// session invocation).
-}
-
-// place-has-no-meaning proof of b.Serves while explicit Cwd fallback is an
-// empty Project to the protocol the source already had.
-func TestDefaultProjectIsCwd(t *testing.T) {
-	cwd := t.TempDir()
-	nb := binding.Binding{Cwd: cwd}
-	if nb.Cwd == "" {
-		t.Fatal("cwd unset")
+	if cfg2["root"] != seatRoot1 {
+		t.Fatalf("config root with a trailing slash = %q; want %q", cfg2["root"], seatRoot1)
 	}
 }
 
@@ -130,9 +93,8 @@ func TestPiBoundElsewhereFindsAnotherDriverOfTheSameSeat(t *testing.T) {
 	}
 }
 
-// S7 item 4, driver-match used by detach --self: selfNativeMatch compares
-// the Seat the share names, not the place-named Target alone. So detach
-// finds its own binding even though the Target is pi:<handle>-<project>-<session>.
+// Detach by seat: selfNativeMatch finds the seat from the share, not the
+// candidate's place name, so a place-named target detaches as the same pi seat.
 func TestSelfNativeMatchUsesSeatToDetach(t *testing.T) {
 	dir := canonicalTempDir(t)
 	t.Setenv(binding.EnvPath, filepath.Join(dir, "bindings.json"))
@@ -154,13 +116,11 @@ func TestSelfNativeMatchUsesSeatToDetach(t *testing.T) {
 	if !match(all[0]) {
 		t.Fatal("selfNativeMatch did not recognize the pi seat, so detach --self would leave the binding behind")
 	}
-	var keptOff []string
-	removed, keptOff, err := binding.Detach(match, nil)
+	removed, _, err := binding.Detach(match, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(removed) != 1 || removed[0] != name {
 		t.Fatalf("detach removed %v; want %s", removed, name)
 	}
-	_ = keptOff
 }

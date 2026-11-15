@@ -1200,8 +1200,7 @@ func stampLivenessRevisionAt(t *testing.T, dir string, at time.Time, revision in
 	}
 }
 
-// R1+R5: an adapter told that its session lives in another AMQ root writes
-// under that root only, never under the endpoint's own root.
+// Adapter config routes submission to the session root, not the endpoint root.
 func TestAdapterConfigRootRoutesSubmitToSessionRoot(t *testing.T) {
 	srcRoot := t.TempDir()
 	otherRoot := t.TempDir()
@@ -1213,7 +1212,7 @@ func TestAdapterConfigRootRoutesSubmitToSessionRoot(t *testing.T) {
 	}
 	stampLivenessRevisionAt(t, dir, fixedNow, 4)
 
-	config := []byte(`{"handle":"agent1","root":"` + otherRoot + `"}`)
+	config := Config("agent1", otherRoot)
 	att, err := Factory(context.Background(), registry.FactoryConfig{Root: srcRoot, Target: "pi:agent1", Config: config})
 	if err != nil {
 		t.Fatalf("Factory: %v", err)

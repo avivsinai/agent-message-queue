@@ -3,6 +3,7 @@ package mirror
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -68,31 +69,29 @@ func TestPiFoldRendersTerminalAndBuzzRuns(t *testing.T) {
 	}
 }
 
-// S5: a native pi binding carries a Seat, and its activity path comes from
-// the session's own root, not the driver's root. Without the seat it would
-// derive the wrong handle from a place-target's Target.
+// A native pi binding's activity comes from its Seat, not from the driver:
+// a place in its Target never means the bridge lives under that place.
 func TestPiLocateUsesSeatOnAPlaceNamedTarget(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	root := dir + "/queue"
+	root := filepath.Join(dir, "queue")
 	handle := "agent1"
-	bridge := root + "/agents/" + handle + "/extensions/pi-bridge"
-	const wantRevision = 4
+	bridge := filepath.Join(root, "agents", handle, "extensions", "pi-bridge")
 	at := time.Now().UTC().Format(time.RFC3339Nano)
-	record := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"rpc","session_id":"sess-1","bridge_revision":%d,"activity":3}`, "amq:pi-bridge:v1", at, os.Getpid(), wantRevision)
+	record := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"rpc","session_id":"sess-1","bridge_revision":%d,"activity":3}`, "amq:pi-bridge:v1", at, os.Getpid(), 4)
 	if err := os.MkdirAll(bridge, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	path := bridge + "/bridge.liveness"
+	path := filepath.Join(bridge, "bridge.liveness")
 	if err := os.WriteFile(path, []byte(record), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var b binding.Binding
 	b.Root = "/some/other/root"
 	b.Seat = binding.Seat{Root: root, Handle: handle}
-	b.Target = "pi:agent-message-queue-s1-amit"
+	b.Target = "pi:agent1-proj-s1"
 	b.NativeSession = "sess-1"
 	got := piLocate(b, "")
 	if got != pi.ActivityFile(root, handle, "sess-1") {

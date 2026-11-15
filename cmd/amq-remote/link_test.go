@@ -510,3 +510,41 @@ func TestLinkStatusIgnoresStaleStatusOfAnUnlinkedLink(t *testing.T) {
 		t.Fatalf("link status = %+v, %v; want not linked", out, err)
 	}
 }
+
+// A share of a session that reports no project names the binding's working
+// directory.
+func TestLinkShareProjectIsTheBindingsCwd(t *testing.T) {
+	root := canonicalTempDir(t)
+	stateDir := filepath.Join(root, stateDirName)
+	store, err := requests.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	es := core.New(core.Config{Store: store})
+	defer func() { _ = es.Close() }()
+	nb := binding.Binding{Root: root, Target: "t1", NativeSession: "t1", Cwd: "/work/proj", Name: "p1"}
+	if err := binding.WriteNamed(nb); err != nil {
+		t.Fatal(err)
+	}
+	ls := &linkSet{root: root, stateDir: stateDir, ep: es, running: map[string]*linkRun{}, stderr: io.Discard}
+	ls.running["ex"] = &linkRun{link: manifest.Link{Name: "ex", Shares: []manifest.LinkShare{{Binding: "p1"}}}}
+	ls.ep.Register(fake.New("t1", "e_1"))
+	out := ls.bindings(ls.running["ex"], linkio.Pin{DeviceName: "dev"})
+	if len(out) != 1 || out[0].Labels.Project != "/work/proj" {
+		t.Fatalf("labels = %+v; want Project=/work/proj", out)
+	}
+}
+
+func TestLinkHelpPrintsUsage(t *testing.T) {
+	for _, argv := range [][]string{{"--help"}, {"-h"}} {
+		var out strings.Builder
+		res, code, err := link(argv, strings.NewReader(""), &out, nil)
+		if res != nil || code != 0 || err != nil {
+			t.Fatalf("link %v = (%v, %d, %v)", argv, res, code, err)
+		}
+		if !strings.Contains(out.String(), linkUsage) {
+			t.Fatalf("link %v does not print the link usage:\n%s", argv, out.String())
+		}
+	}
+}
