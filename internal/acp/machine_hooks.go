@@ -44,8 +44,8 @@ func (w settingsSeen) unchanged(info os.FileInfo) bool {
 
 // hookReader is one served session that reads a settings file.
 type hookReader struct {
-	channel string
-	native  bool
+	name, channel string
+	native        bool
 }
 
 // watchHooks checks the settings file of each Claude session among the
@@ -67,7 +67,7 @@ func (s *Server) watchHooks(all []binding.Binding) {
 		if _, seen := readers[path]; !seen {
 			order = append(order, path)
 		}
-		readers[path] = append(readers[path], hookReader{channel: r.ChannelID, native: !b.Mailbox()})
+		readers[path] = append(readers[path], hookReader{name: b.Name, channel: r.ChannelID, native: !b.Mailbox()})
 	}
 	if s.machine.settings == nil {
 		s.machine.settings = map[string]settingsSeen{}
@@ -128,13 +128,13 @@ func (s *Server) checkHooks(path string, info os.FileInfo, readers []hookReader)
 		{claude.HookApproval, "approval", approvalLostLine, claude.PermissionHookState, claude.PermissionHookForm, false},
 		{claude.HookStop, "Stop", stopLostLine, claude.StopHookStateAt, claude.StopHookForm, true},
 	} {
-		var channels []string
+		var to []hookReader
 		for _, r := range readers {
 			if !h.nativeOnly || r.native {
-				channels = append(channels, r.channel)
+				to = append(to, r)
 			}
 		}
-		if len(channels) == 0 {
+		if len(to) == 0 {
 			continue
 		}
 		var text string
@@ -153,8 +153,12 @@ func (s *Server) checkHooks(path string, info os.FileInfo, readers []hookReader)
 		if !s.warnOnce(path, h.kind, info) {
 			continue
 		}
-		for _, channel := range channels {
-			_ = s.posts.Send(context.Background(), buzzop.Message{Channel: channel, Content: mirror.Unmention(text)})
+		// One warning per session, hook and version of the file: the key
+		// that names it on the direct transport.
+		version := settingsVersion(info)
+		for _, r := range to {
+			_ = s.posts.Send(context.Background(), buzzop.Message{Key: buzzop.Key("hook/" + r.name + "/" + h.kind + "/" + version),
+				Channel: r.channel, Content: mirror.Unmention(text)})
 		}
 	}
 }

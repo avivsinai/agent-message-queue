@@ -441,8 +441,8 @@ func (s *Server) resendFinal(c *lateClaim) {
 		if err := fsq.SyncDir(filepath.Dir(sending)); err != nil {
 			return err
 		}
-		result, err := s.post(c.channel, text)
-		if buzzcli.NeverSent(err) {
+		result, err := s.post(finalKey(c.eventID), c.channel, text)
+		if buzzcli.NeverSent(err) || notSent(err) {
 			if err := os.Rename(sending, unsent); err != nil {
 				return err
 			}
