@@ -72,6 +72,12 @@ type outgoingMessage struct {
 	displaySession       string
 	sourceSessionDisplay string
 	jsonExtra            map[string]any
+	// outID, when non-nil, receives the message id deliverOutgoing minted.
+	outID *string
+	// silent suppresses every printer from send/reply. The embedding command
+	// owns its stdout. Outbox errors still reach the caller through return.
+	silent bool
+
 	// propagateOutboxReportError returns a failed outbox warning write.
 	propagateOutboxReportError bool
 }
@@ -94,6 +100,9 @@ func deliverOutgoing(m outgoingMessage) error {
 	id, err := format.NewMessageID(now)
 	if err != nil {
 		return err
+	}
+	if m.outID != nil {
+		*m.outID = id
 	}
 	msg := format.Message{
 		Header: format.Header{
@@ -184,6 +193,11 @@ func deliverOutgoing(m outgoingMessage) error {
 	outboxErr := error(nil)
 	if _, err := m.sourceFS.WriteFileAtomic(outboxDir, filename, data, 0o600); err != nil {
 		outboxErr = err
+	}
+	if m.silent {
+		// The embedding command owns its stdout/stderr. Surface outbox errors
+		// (only write failures, never success toasts) through the caller.
+		return outboxErr
 	}
 
 	var followUp *followUpResult

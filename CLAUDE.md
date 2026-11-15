@@ -258,7 +258,7 @@ exact flags. This table defines the owning workflow for each surface.
 | Onboarding | `setup`, `launch` | Configure once, then reconcile and print or run the declared launch plan. The [README Getting started](README.md#getting-started) is canonical. |
 | Sessions | `session create`, `session list`, `session resume` | Create explicitly, inspect available sessions, or resume stored conversations. |
 | Shell context | `env`, `who`, `shell-setup`, `completion` | Set or inspect a complete context and configure shell integration. |
-| Messaging | `send`, `reply`, `list`, `read`, `drain`, `thread`, `thread open`, `thread list`, `trace` | Deliver, ingest, inspect, and follow conversations. `thread open` lists unanswered review requests, questions, and todos without reading bodies or moving messages. Prefer `drain --include-body` for handoffs. |
+| Messaging | `send`, `reply`, `list`, `read`, `drain`, `thread`, `thread open`, `thread list`, `thread settle`, `trace` | Deliver, ingest, inspect, and follow conversations. `thread open` lists unanswered review requests, questions, and todos without reading bodies or moving messages. `thread settle` closes a requester's older requests to one owner per thread with one decision marker. Prefer `drain --include-body` for handoffs. |
 | Delivery proof | `receipts list`, `receipts wait` | Inspect consumer-local `drained` and `dlq` outcomes. |
 | Live waits | `watch`, `monitor` | Wait for arrivals; `monitor` also drains and emits receipts. |
 | Routing | `route explain`, `route peers`, `peer pair`, `presence set`, `presence list` | Explain a route, list the project's peers, pair with a peer, and publish or inspect advisory presence. |
@@ -291,6 +291,10 @@ whitespace-only input is a usage error unless `--allow-empty` is explicit.
 
 A todo is finished with `amq reply --kind status --labels done`; the requester
 cancels a request with `--kind decision --labels withdrawn`.
+A requester settles its requests to one owner in one thread up to and
+including one of them, with one `--kind decision --labels settled-through`
+reply to that request; `amq thread settle --older-than <dur>` sends one per
+thread and owner.
 
 When work starts, reply with `kind=status` and an ETA. Review responses remain
 `normal` by default. Use `--priority urgent` on `send` or `reply` for a

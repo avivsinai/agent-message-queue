@@ -112,6 +112,10 @@ completion uses `--kind status --labels done`; cancellation uses
 honestly: withdrawing a request does not mean its feature shipped.
 The last `--refs` entry is the direct reply target; a list of refs is lineage,
 not a batch-close operation. Close independent requests separately.
+The one exception is the requester's own requests to one owner in one thread:
+send one reply of `--kind decision --labels settled-through` against the latest
+of them and the pair's older open requests follow. `amq thread settle
+--older-than <dur>` composes exactly one such decision per (thread, owner).
 
 `amq send --follow-up 30m` delivers one notice to the sender's own inbox if the
 recipient has not replied to that message when the time passes; a live wake,

@@ -461,6 +461,24 @@ func TestThreadOpenListsOpenObligations(t *testing.T) {
 				}
 			},
 		},
+		{
+			// Bead dtyx.3 (observed mail shape on the live queue 2026-11-14):
+			// an unlabelled status reply does not close a todo, a no-refs reply
+			// continues nothing. A settled-through decision must close both
+			// older requests of the same pair in that thread.
+			name: "a requester's settled-through closes the anchor and its older requests to the same owner in the thread",
+			messages: []threadOpenMessage{
+				{name: "t1", from: "alpha@s1", to: "beta@s1", thread: "p2p/alpha__beta", kind: format.KindTodo},
+				{name: "t2", from: "alpha@s1", to: "beta@s1", thread: "p2p/alpha__beta", kind: format.KindTodo},
+				{name: "t3", from: "alpha@s1", to: "gamma@s1", thread: "p2p/alpha__beta", kind: format.KindTodo},
+				{name: "t4", from: "alpha@s1", to: "beta@s1", thread: "p2p/alpha__beta", kind: format.KindTodo},
+				{name: "st1", from: "beta@s1", to: "alpha@s1", thread: "p2p/alpha__beta", kind: format.KindStatus, refs: []string{"t1"}},
+				{name: "r2", from: "beta@s1", to: "alpha@s1", thread: "p2p/alpha__beta", kind: format.KindTodo, refs: []string{"t2"}},
+				{name: "st2", from: "beta@s1", to: "alpha@s1", thread: "p2p/alpha__beta", kind: format.KindStatus},
+				{name: "settler", from: "alpha@s1", to: "beta@s1", thread: "p2p/alpha__beta", kind: format.KindDecision, labels: []string{"settled-through"}, refs: []string{"t1", "t2"}},
+			},
+			want: []string{"s1/t4/beta pending agent", "s1/t3/gamma pending agent"},
+		},
 	}
 
 	for _, tc := range cases {
