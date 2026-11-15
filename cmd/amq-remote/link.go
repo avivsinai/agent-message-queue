@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/acp"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	karegistry "github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
@@ -50,6 +51,7 @@ type linkSet struct {
 	mf       manifestBytes
 	mfErr    string // the manifest read error last reported
 	statuses map[string]linkio.Status
+	restored time.Time   // when restore last ran
 	pages    *pageServer // the endpoint's own local pages
 }
 
@@ -104,6 +106,7 @@ func (ls *linkSet) start(ctx context.Context, ep *core.Endpoint, mf manifest.Fil
 // edit made during startup is not missed; a manifest that does not load
 // keeps every running link and is reported once.
 func (ls *linkSet) tick() {
+	ls.restore(time.Now())
 	changed, _, err := ls.mf.changed(ls.manifestFile)
 	if err != nil {
 		if err.Error() != ls.mfErr {
@@ -334,6 +337,72 @@ func (ls *linkSet) bindings(run *linkRun, pin linkio.Pin) []linkio.Binding {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Binding < out[j].Binding })
 	return out
+}
+
+// linkRestoreEvery is how often the endpoint checks whether a share's
+// session changed or came back.
+const linkRestoreEvery = 30 * time.Second
+
+// restore brings a share's binding back under one of two proofs: the live
+// holder process now reports another native session, or the native proof of
+// a restarted process that runs the recorded session again. Unknown liveness
+// is never a proof, and an owner's detach remains off.
+func (ls *linkSet) restore(now time.Time) {
+	ls.mu.Lock()
+	if now.Sub(ls.restored) < linkRestoreEvery {
+		ls.mu.Unlock()
+		return
+	}
+	ls.restored = now
+	ep := ls.ep
+	var links []manifest.Link
+	for _, r := range ls.running {
+		links = append(links, r.link)
+	}
+	ls.mu.Unlock()
+	if ep == nil {
+		return
+	}
+	tombs, err := binding.Tombstones()
+	if err != nil {
+		return
+	}
+	for _, l := range links {
+		for _, sh := range l.Shares {
+			b, err := binding.ReadNamed(sh.Binding)
+			if errors.Is(err, binding.ErrNone) {
+				for _, t := range tombs {
+					if t.Name != sh.Binding || t.Removed != binding.RemovedEnded || t.Mailbox() || filepath.Clean(t.Root) != filepath.Clean(ls.root) {
+						continue
+					}
+					nb, ok := acp.LiveAgain(t, now)
+					if _, off := binding.DetachedFor(nb, tombs); ok && !off {
+						_, _ = binding.ReviveEnded(t, nb)
+					}
+					break
+				}
+				continue
+			}
+			if err != nil || b.Mailbox() || filepath.Clean(b.Root) != filepath.Clean(ls.root) {
+				continue
+			}
+			cur := ep.NativeSessionID(b.Target)
+			state, _ := b.Liveness()
+			switch {
+			case cur != "" && cur != b.NativeSession && state == binding.Live:
+				nb := b
+				nb.NativeSession, nb.BoundAt = cur, ""
+				if _, off := binding.DetachedFor(nb, tombs); !off {
+					_, _, _ = binding.Replace(b, nb)
+				}
+			case cur == b.NativeSession && state == binding.Ended:
+				nb, ok := acp.LiveAgain(b, now)
+				if ok {
+					_, _, _ = binding.Replace(b, nb)
+				}
+			}
+		}
+	}
 }
 
 // writeLinkStatus records a link's status for `link status`, atomically so a
@@ -1047,6 +1116,54 @@ type linkStatusRow struct {
 	ShareStates map[string]string `json:"share_states,omitempty"`
 }
 
+// dropShares removes from l the shares of the bindings in names and
+// reports whether it removed one.
+func dropShares(l *manifest.Link, names map[string]bool) bool {
+	kept := make([]manifest.LinkShare, 0, len(l.Shares))
+	removed := false
+	for _, sh := range l.Shares {
+		if names[sh.Binding] {
+			removed = true
+		} else {
+			kept = append(kept, sh)
+		}
+	}
+	l.Shares = kept
+	return removed
+}
+
+// removeDetachedLinkShares removes entries for names that were just
+// detached or confirmed ended. Each manifest is written only when it holds
+// one, so a root with no such share keeps its file untouched.
+func removeDetachedLinkShares(roots, names []string) error {
+	gone := make(map[string]bool, len(names))
+	for _, name := range names {
+		gone[name] = true
+	}
+	for _, root := range roots {
+		path := manifest.DefaultPath(filepath.Join(root, stateDirName))
+		mf, err := manifest.Load(path)
+		if err != nil {
+			return err
+		}
+		changed := false
+		for i := range mf.Links {
+			changed = dropShares(&mf.Links[i], gone) || changed
+		}
+		if !changed {
+			continue
+		}
+		if err := editManifest(filepath.Join(root, stateDirName), func(mf *manifest.File) {
+			for i := range mf.Links {
+				dropShares(&mf.Links[i], gone)
+			}
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // linkShareState says whether the server sees a shared binding now. A share is
 // sent only while its binding names this root and its pinned native session
 // is the one attached; otherwise it silently drops off the link, so the
@@ -1055,6 +1172,12 @@ func linkShareState(root string, p *nativeProbe, name string) string {
 	b, err := binding.ReadNamed(name)
 	switch {
 	case errors.Is(err, binding.ErrNone):
+		tombs, _ := binding.Tombstones()
+		for _, t := range tombs {
+			if t.Name == name && t.Removed == binding.RemovedEnded {
+				return "ended: it comes back when the session resumes; in a new session run amq-remote attach --self --link"
+			}
+		}
 		return "no such binding: run amq-remote attach --self --link in the session to share"
 	case err != nil:
 		return "the binding cannot be read: " + err.Error()

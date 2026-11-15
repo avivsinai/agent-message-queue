@@ -456,13 +456,15 @@ Protocol: [`amq.remote.link/1`](../../docs/remote-link-protocol.md).
 7. `amq-remote link status` shows each link's socket, generation, owed
    revisions, conflicts and retired sinks, and for each share whether the
    server sees it now: `shared`, or why not (`session changed`, `not attached
-   now`, `no such binding`) with the step that fixes it. A share is announced
-   only while its session is the one attached; after a session change (a pi
-   `/new`, a reload), run `attach --self --link NAME` again in the new
-   session, which keeps the share's binding name. `amq-remote link remove NAME`
+   now`, `no such binding`, or `ended`) with the step that fixes it. A share
+   is announced only while its session is the one attached. The endpoint
+   follows a session change in a live process and a proved pi resume. A
+   native Claude session resumed in a new process needs
+   `attach --self --link NAME` again, which keeps the share's binding name. `amq-remote link remove NAME`
    retires the link's sink and deletes its device key; the records it created
    settle without network. The server keeps the machine until you unlink it
-   on the server's connections page.
+   on the server's connections page. `detach` removes the share's entry, and
+   a detached session never comes back by itself.
 
 ### Restart after a reboot
 

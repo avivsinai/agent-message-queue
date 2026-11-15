@@ -1461,3 +1461,37 @@ func TestAttachReportsADaemonThreadLiveAndItsReviewer(t *testing.T) {
 		t.Fatalf("approval_reviewer = %v", got)
 	}
 }
+
+// Detach removes the session's share from its link manifest. The link no
+// longer carries a stale binding name that could later be restored.
+func TestDetachRemovesShareFromManifest(t *testing.T) {
+	root := canonicalTempDir(t)
+	t.Setenv(binding.EnvPath, filepath.Join(root, "binding.json"))
+	stateDir := filepath.Join(root, stateDirName)
+	mf := manifest.File{SchemaVersion: manifest.RelaySchemaVersion, Layer: manifest.Layer,
+		Links: []manifest.Link{{Name: "ada", URL: "wss://link.example.test/link"}}}
+	if err := manifest.Write(manifest.DefaultPath(stateDir), mf); err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range []binding.Binding{
+		{Root: root, Target: "claude:7", NativeSession: "session-7", Name: "claude-7"},
+		{Root: root, Target: "claude:8", NativeSession: "session-8", Name: "claude-8"},
+	} {
+		if err := binding.WriteNamed(b); err != nil {
+			t.Fatal(err)
+		}
+		if err := shareWithLink(stateDir, "ada", manifest.LinkShare{Binding: b.Name, Consent: "passkey", Tools: "read"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	saved := selfIdentity
+	t.Cleanup(func() { selfIdentity = saved })
+	selfIdentity = func(string, string) (string, string, error) { return "claude:7", "session-7", nil }
+	if code, err := detach([]string{"--self", "--root", root}, io.Discard, io.Discard); code != 0 || err != nil {
+		t.Fatalf("detach = %d, %v", code, err)
+	}
+	mf, err := manifest.Load(manifest.DefaultPath(stateDir))
+	if err != nil || len(mf.Links) != 1 || len(mf.Links[0].Shares) != 1 || mf.Links[0].Shares[0].Binding != "claude-8" {
+		t.Fatalf("shares after detach = %+v, %v; want only claude-8", mf.Links, err)
+	}
+}
