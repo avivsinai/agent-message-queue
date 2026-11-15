@@ -299,9 +299,6 @@ func build(cfg registry.FactoryConfig, names wireNames) (core.Attachment, error)
 	}
 	dirRoot := cfg.Root
 	if c.Root != "" {
-		if !filepath.IsAbs(c.Root) || filepath.Clean(c.Root) != c.Root {
-			return nil, fmt.Errorf("pi config: root must be an absolute clean path")
-		}
 		dirRoot = c.Root
 	}
 	dir := bridgeDir{dir: bridgePath(dirRoot, c.Handle, names), names: names}
