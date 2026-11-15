@@ -1187,6 +1187,9 @@ func ResolveExecutionArgv(ticket ExecutionTicket, env []string) ([]string, error
 			return nil, fmt.Errorf("unsupported dynamic argv kind %q", dynamic.Kind)
 		}
 	}
+	if ticket.Provider == CodexProvider && ticket.PreSpawnAcquire {
+		argv = CodexDaemonTerminalArgv(ticket, argv)
+	}
 	return argv, nil
 }
 

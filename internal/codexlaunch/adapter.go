@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -49,7 +50,7 @@ func (a *adapter) PlanFresh(request launch.PlanRequest) (launch.AgentPlan, error
 	}
 	reviewer := ""
 	if reason == "" {
-		reason, reviewer, _ = admission(a.executable, endpoint, request.Cwd)
+		reason, reviewer, _ = admission(a.executable, endpoint, request.Cwd, launch.CodexDaemonRequestPins(request))
 	}
 	if reason == "" {
 		plan, err := a.PlanFreshDaemon(request, endpoint.remote)
@@ -102,7 +103,7 @@ func daemonResumeEndpoint(executable string, request launch.ResumeRequest) (remo
 	}
 	version := ""
 	if reason == "" {
-		reason, reviewer, version = admission(executable, endpoint, request.Cwd)
+		reason, reviewer, version = admission(executable, endpoint, request.Cwd, launch.CodexDaemonRequestPins(request.PlanRequest))
 	}
 	if reason == "" {
 		reason = threadReason(endpoint.socket, request.Conversation.ID, request.Cwd, version)
@@ -256,13 +257,15 @@ func verifiedDaemonLink(socket string) bool {
 
 // admission checks the startup facts a seat meets on the daemon at the
 // endpoint: provider version, sign-in, directory trust, daemon version, hook
-// review, terminal instructions, and managed update requirements. The seat's
+// review, terminal instructions, managed update requirements, and the
+// daemon configuration facts that the seat's pins need. The seat's
 // own -c turns the update check off, so no user setting is needed. reviewer
 // is the automatic approvals reviewer of the daemon's configuration for cwd,
-// which answers approvals before any client sees them; "" for the user.
+// which answers approvals before any client sees them; a seat's pinned
+// reviewer takes its place; "" for the user.
 // version is the release the running daemon reported; ReadThread and
 // StartThread check the daemon against it.
-func admission(executable string, endpoint endpoint, cwd string) (reason, reviewer, version string) {
+func admission(executable string, endpoint endpoint, cwd string, pins launch.CodexDaemonPins) (reason, reviewer, version string) {
 	home, sock := endpoint.home, endpoint.socket
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -302,6 +305,10 @@ func admission(executable string, endpoint endpoint, cwd string) (reason, review
 	}
 	var config struct {
 		Config struct {
+			SandboxWorkspaceWrite struct {
+				NetworkAccess bool     `json:"network_access"`
+				WritableRoots []string `json:"writable_roots"`
+			} `json:"sandbox_workspace_write"`
 			Features          map[string]bool `json:"features"`
 			ApprovalsReviewer string          `json:"approvals_reviewer"`
 		} `json:"config"`
@@ -312,10 +319,27 @@ func admission(executable string, endpoint endpoint, cwd string) (reason, review
 	if !RequirementsAllowNoUpdateCheck(state.Requirements) {
 		return "a managed Codex requirement turns the startup update check on", "", ""
 	}
-	if reviewer = config.Config.ApprovalsReviewer; reviewer == "user" {
+	write := config.Config.SandboxWorkspaceWrite
+	if pins.NetworkAccess != "" && pins.NetworkAccess != strconv.FormatBool(write.NetworkAccess) {
+		return "the Codex daemon's configuration sets sandbox_workspace_write.network_access=" + strconv.FormatBool(write.NetworkAccess) + "; a daemon seat cannot pin another value", "", ""
+	}
+	if pins.NoWritableRoots && len(write.WritableRoots) > 0 {
+		return "the Codex daemon's configuration sets sandbox_workspace_write.writable_roots; a daemon seat cannot pin an empty list", "", ""
+	}
+	reviewer = config.Config.ApprovalsReviewer
+	if pins.ApprovalsReviewer != "" {
+		reviewer = pins.ApprovalsReviewer
+	}
+	if reviewer == "user" {
 		reviewer = ""
 	}
 	return "", reviewer, version
+}
+
+// threadSettings are the pins the thread itself carries.
+func threadSettings(pins launch.CodexDaemonPins) codex.ThreadSettings {
+	return codex.ThreadSettings{Sandbox: pins.Sandbox, ApprovalPolicy: pins.ApprovalPolicy,
+		ApprovalsReviewer: pins.ApprovalsReviewer, ReasoningEffort: pins.ReasoningEffort}
 }
 
 // Acquire creates a native thread only after launch has persisted its attempt
@@ -333,7 +357,7 @@ func Acquire(root *fsq.DeliveryRoot, ticket launch.ExecutionTicket) (launch.Capt
 		reason = plannedEndpointReason(ticket, endpoint)
 	}
 	if reason == "" {
-		reason, _, version = admission(ticket.ProviderExecutable, endpoint, ticket.Cwd)
+		reason, _, version = admission(ticket.ProviderExecutable, endpoint, ticket.Cwd, launch.CodexDaemonSeatPins(ticket))
 	}
 	if reason != "" {
 		return launch.CaptureEvidence{}, fmt.Errorf("%w: Buzz approvals: terminal only: %s; replan this launch", launch.ErrIdentityNotRequested, reason)
@@ -347,6 +371,7 @@ func Acquire(root *fsq.DeliveryRoot, ticket launch.ExecutionTicket) (launch.Capt
 	if err != nil {
 		return launch.CaptureEvidence{}, errors.Join(launch.ErrIdentityNotRequested, err)
 	}
+	pins := launch.CodexDaemonSeatPins(ticket)
 	thread := ticket.ConversationID
 	if launch.CodexDaemonResume(ticket) {
 		capture, err := resumedCapture(root, ticket)
@@ -360,10 +385,18 @@ func Acquire(root *fsq.DeliveryRoot, ticket launch.ExecutionTicket) (launch.Capt
 		if err := provenanceRefusal(reason); err != nil {
 			return launch.CaptureEvidence{}, fmt.Errorf("%w: %w", launch.ErrIdentityNotRequested, err)
 		}
+		if settings := threadSettings(pins); settings != (codex.ThreadSettings{}) {
+			pctx, pcancel := context.WithTimeout(context.Background(), codex.ThreadStartTimeout)
+			err := codex.PinThread(pctx, sock, thread, version, settings)
+			pcancel()
+			if err != nil {
+				return launch.CaptureEvidence{}, errors.Join(launch.ErrIdentityNotRequested, err)
+			}
+		}
 	} else {
 		ctx, cancel := context.WithTimeout(context.Background(), codex.ThreadStartTimeout)
 		defer cancel()
-		thread, err = codex.StartThread(ctx, sock, ticket.Cwd, "", version)
+		thread, err = codex.StartThread(ctx, sock, ticket.Cwd, "", version, threadSettings(pins))
 		if err != nil {
 			if errors.Is(err, codex.ErrThreadNotStarted) {
 				return launch.CaptureEvidence{}, errors.Join(launch.ErrIdentityNotRequested, err)
@@ -431,7 +464,7 @@ func RecordIdentity(root *fsq.DeliveryRoot, ticket launch.ExecutionTicket, env [
 	if err := launch.ValidateCodexDaemonEndpoint(root, ticket, sock, holder); err != nil {
 		return err
 	}
-	reason, _, version := admission(ticket.ProviderExecutable, endpoint, ticket.Cwd)
+	reason, _, version := admission(ticket.ProviderExecutable, endpoint, ticket.Cwd, launch.CodexDaemonSeatPins(ticket))
 	if reason != "" {
 		return fmt.Errorf("%s; resolve it and retry the original emitted command", reason)
 	}

@@ -26,13 +26,82 @@ func ControlSocket(codexHome string) (string, error) {
 	return sock, checkControlSocket(sock)
 }
 
+// ThreadSettings are the settings a client gives a thread when it starts
+// or resumes it. An empty field is left to the daemon.
+type ThreadSettings struct {
+	Sandbox           string // read-only or workspace-write
+	ApprovalPolicy    string
+	ApprovalsReviewer string
+	ReasoningEffort   string
+}
+
+// params adds the settings to a thread/start or thread/resume request.
+func (s ThreadSettings) params(p map[string]any) {
+	if s.Sandbox != "" {
+		p["sandbox"] = s.Sandbox
+	}
+	if s.ApprovalPolicy != "" {
+		p["approvalPolicy"] = s.ApprovalPolicy
+	}
+	if s.ApprovalsReviewer != "" {
+		p["approvalsReviewer"] = s.ApprovalsReviewer
+	}
+	if s.ReasoningEffort != "" {
+		p["config"] = map[string]any{"model_reasoning_effort": s.ReasoningEffort}
+	}
+}
+
+// threadAnswer is the part of a thread/start or thread/resume answer that
+// states the thread's effective settings.
+type threadAnswer struct {
+	Thread struct {
+		ID string `json:"id"`
+	} `json:"thread"`
+	Sandbox struct {
+		Type string `json:"type"`
+	} `json:"sandbox"`
+	ApprovalPolicy    json.RawMessage `json:"approvalPolicy"`
+	ApprovalsReviewer string          `json:"approvalsReviewer"`
+	ReasoningEffort   string          `json:"reasoningEffort"`
+}
+
+// sandboxTypes maps a sandbox setting to the type the daemon answers.
+var sandboxTypes = map[string]string{"read-only": "readOnly", "workspace-write": "workspaceWrite"}
+
+// held reports the first setting of s that a does not hold: its key, the
+// wanted value and the daemon's value. ok is true when a holds them all.
+func (s ThreadSettings) held(a threadAnswer) (key, want, got string, ok bool) {
+	policy := ""
+	_ = json.Unmarshal(a.ApprovalPolicy, &policy) // an object policy is not a named one
+	switch {
+	case s.Sandbox != "" && a.Sandbox.Type != sandboxTypes[s.Sandbox]:
+		return "sandbox", s.Sandbox, a.Sandbox.Type, false
+	case s.ApprovalPolicy != "" && policy != s.ApprovalPolicy:
+		return "approval policy", s.ApprovalPolicy, nonEmptyText(policy, string(a.ApprovalPolicy)), false
+	case s.ApprovalsReviewer != "" && a.ApprovalsReviewer != s.ApprovalsReviewer:
+		return "approvals reviewer", s.ApprovalsReviewer, a.ApprovalsReviewer, false
+	case s.ReasoningEffort != "" && a.ReasoningEffort != s.ReasoningEffort:
+		return "reasoning effort", s.ReasoningEffort, a.ReasoningEffort, false
+	}
+	return "", "", "", true
+}
+
+func nonEmptyText(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}
+
 // StartThread creates a native thread in cwd and persists it without a turn.
 // A nonempty name sets its display name; a nonempty expectedVersion requires
 // that exact app-server version before creating anything. The caller owns
-// binding the returned identity to the TUI it starts.
+// binding the returned identity to the TUI it starts. Settings are sent with
+// the request, and the thread is refused when the daemon's answer does not
+// hold them.
 //
 // The persistence write adds one developer message to model-visible history.
-func StartThread(ctx context.Context, sock, cwd, name, expectedVersion string) (string, error) {
+func StartThread(ctx context.Context, sock, cwd, name, expectedVersion string, settings ThreadSettings) (string, error) {
 	client, err := Dial(sock, Handlers{})
 	if err != nil {
 		return "", errors.Join(ErrThreadNotStarted, err)
@@ -45,12 +114,9 @@ func StartThread(ctx context.Context, sock, cwd, name, expectedVersion string) (
 	if expectedVersion != "" && version != expectedVersion {
 		return "", fmt.Errorf("%w: codex daemon version %q does not match %q", ErrThreadNotStarted, version, expectedVersion)
 	}
-	var started struct {
-		Thread struct {
-			ID string `json:"id"`
-		} `json:"thread"`
-	}
+	var started threadAnswer
 	startParams := map[string]any{"cwd": cwd, "historyMode": "paginated", "threadSource": "user"}
+	settings.params(startParams)
 	if err := client.Call(ctx, "thread/start", startParams, &started); err != nil {
 		return "", fmt.Errorf("start thread: %w", err)
 	}
@@ -68,6 +134,9 @@ func StartThread(ctx context.Context, sock, cwd, name, expectedVersion string) (
 			_ = client.Call(actx, "thread/archive", map[string]any{"threadId": id}, nil)
 		}
 	}()
+	if key, want, got, ok := settings.held(started); !ok {
+		return "", fmt.Errorf("codex daemon thread %s does not hold the seat's pins (%s: want %s, daemon has %s)", id, key, want, got)
+	}
 	if name != "" {
 		if err := client.Call(ctx, "thread/name/set", map[string]any{"threadId": id, "name": name}, nil); err != nil {
 			return "", fmt.Errorf("name thread %s: %w", id, err)
@@ -94,6 +163,38 @@ func StartThread(ctx context.Context, sock, cwd, name, expectedVersion string) (
 	}
 	ok = true
 	return id, nil
+}
+
+// PinThread sets settings on an existing thread that no client holds, with
+// the resume the daemon applies durably, and leaves the thread with no
+// subscriber. It refuses when the daemon's answer does not hold them, which
+// is the case while another client is subscribed to the thread.
+func PinThread(ctx context.Context, sock, thread, expectedVersion string, settings ThreadSettings) error {
+	client, err := Dial(sock, Handlers{})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = client.Close() }()
+	version, err := initializeAMQ(ctx, client)
+	if err != nil {
+		return err
+	}
+	if version != expectedVersion {
+		return fmt.Errorf("codex daemon version %q does not match %q", version, expectedVersion)
+	}
+	params := map[string]any{"threadId": thread, "excludeTurns": true}
+	settings.params(params)
+	var resumed threadAnswer
+	if err := client.Call(ctx, "thread/resume", params, &resumed); err != nil {
+		return fmt.Errorf("thread/resume %s: %w", thread, err)
+	}
+	if err := client.Call(ctx, "thread/unsubscribe", map[string]any{"threadId": thread}, nil); err != nil {
+		return fmt.Errorf("unsubscribe thread %s: %w", thread, err)
+	}
+	if key, want, got, ok := settings.held(resumed); !ok {
+		return fmt.Errorf("codex daemon thread %s does not hold the seat's pins (%s: want %s, daemon has %s)", thread, key, want, got)
+	}
+	return nil
 }
 
 // initializeAMQ opens an app-server session as AMQ, with the experimental

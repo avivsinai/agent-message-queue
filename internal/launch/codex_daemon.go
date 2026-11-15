@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"strings"
 	"time"
 
@@ -176,6 +175,96 @@ func CodexDaemonSocket(ticket ExecutionTicket) string {
 	return socket
 }
 
+// CodexDaemonPins are a daemon seat's settings that its terminal's argv
+// cannot carry. Sandbox, ApprovalPolicy, ApprovalsReviewer and
+// ReasoningEffort are set on the thread by the client that starts or resumes
+// it. NetworkAccess and NoWritableRoots are decided by the daemon's own
+// configuration, which must already agree. An empty field is not pinned.
+type CodexDaemonPins struct {
+	Sandbox           string // read-only or workspace-write
+	ApprovalPolicy    string // on-request
+	ApprovalsReviewer string // user, auto_review or guardian_subagent
+	ReasoningEffort   string // minimal, low, medium, high or xhigh
+	NetworkAccess     string // true or false
+	NoWritableRoots   bool
+}
+
+// splitCodexDaemonArgs splits a daemon seat's settings, already valid for
+// the Codex grammar, into the arguments its terminal takes and its pins.
+// reason is why a setting keeps the seat embedded, "" when none does.
+func splitCodexDaemonArgs(args []string) (terminal []string, pins CodexDaemonPins, reason string) {
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--no-alt-screen":
+			terminal = append(terminal, args[i])
+		case "--model":
+			terminal = append(terminal, args[i], args[i+1])
+			i++
+		case "--sandbox":
+			pins.Sandbox = args[i+1]
+			i++
+		case "--ask-for-approval":
+			pins.ApprovalPolicy = args[i+1]
+			i++
+		case "-c":
+			key, value, _ := strings.Cut(args[i+1], "=")
+			i++
+			switch key {
+			case "model_reasoning_effort":
+				pins.ReasoningEffort = stripOneSurroundingQuotePair(value)
+			case "approvals_reviewer":
+				pins.ApprovalsReviewer = stripOneSurroundingQuotePair(value)
+			case "sandbox_workspace_write.network_access":
+				pins.NetworkAccess = value
+			case "sandbox_workspace_write.writable_roots":
+				if value != "[]" {
+					return nil, CodexDaemonPins{}, "the mailbox writable root needs an embedded app-server"
+				}
+				pins.NoWritableRoots = true
+			case "check_for_update_on_startup":
+				// The daemon template already sets it.
+			default:
+				return nil, CodexDaemonPins{}, "launch option requires verified TUI resume equivalence"
+			}
+		case "--search":
+			return nil, CodexDaemonPins{}, "--search requires verified TUI resume equivalence"
+		default:
+			return nil, CodexDaemonPins{}, "launch option requires verified TUI resume equivalence"
+		}
+	}
+	return terminal, pins, ""
+}
+
+// CodexDaemonSeatPins are the pins of a daemon ticket.
+func CodexDaemonSeatPins(ticket ExecutionTicket) CodexDaemonPins {
+	_, pins, _ := splitCodexDaemonArgs(codexDaemonSettings(ticket))
+	return pins
+}
+
+// CodexDaemonRequestPins are the pins of a plan request's settings.
+func CodexDaemonRequestPins(request PlanRequest) CodexDaemonPins {
+	_, pins, _ := splitCodexDaemonArgs(request.CommittedArgs)
+	return pins
+}
+
+// codexDaemonSettings are the settings a daemon ticket's argv declares:
+// the arguments between its template and its conversation slot. nil for an
+// argv that is not a daemon template.
+func codexDaemonSettings(ticket ExecutionTicket) []string {
+	start := codexDaemonLegacyTemplateStart
+	if CodexDaemonSocket(ticket) != "" {
+		start = codexDaemonTemplateStart
+	}
+	if len(ticket.DynamicArgv) != 1 {
+		return nil
+	}
+	index := ticket.DynamicArgv[0].Index
+	if index < start || index > len(ticket.TargetArgv) {
+		return nil
+	}
+	return ticket.TargetArgv[start:index]
+}
+
 func validateCodexDaemonTargetArgv(ticket ExecutionTicket) error {
 	argv := ticket.TargetArgv
 	start := codexDaemonLegacyTemplateStart
@@ -207,59 +296,56 @@ func validateCodexDaemonTargetArgv(ticket ExecutionTicket) error {
 	return nil
 }
 
-// CodexDaemonOptionsReason admits a request on the daemon only when the Codex
-// TUI accepts its options on a resume there: --model and --no-alt-screen. The
-// TUI refuses sandbox and approval options on such a resume and exits, and a
-// caller's configuration or search override is not shown to take effect, so
-// those requests keep the embedded path.
+// CodexDaemonOptionsReason admits a request on the daemon when each of its
+// settings is a terminal setting (--model, --no-alt-screen) or a pin that
+// the thread or the daemon's configuration carries. A wrapper, an
+// environment overlay, a bypass option, --search and the mailbox writable
+// root keep the embedded path.
 func CodexDaemonOptionsReason(request PlanRequest) string {
 	if request.Wrapper != nil || len(request.EnvOverlay) != 0 || len(request.BypassArgs) != 0 {
 		return "wrapper, environment, or bypass options require verified TUI resume equivalence"
 	}
-	if reason := codexDaemonArgumentsReason(request.CommittedArgs); reason != "" {
-		return reason
-	}
-	if slices.Contains(request.CommittedArgs, "--sandbox") || slices.Contains(request.CommittedArgs, "--ask-for-approval") {
-		return "Codex refuses sandbox and approval options on a daemon seat"
-	}
-	return ""
+	return codexDaemonArgumentsReason(request.CommittedArgs)
 }
 
-// codexDaemonArgumentsReason is the argument grammar of a daemon ticket. It
-// reads --sandbox and --ask-for-approval because tickets of earlier releases
-// carry them; planning refuses them.
+// codexDaemonArgumentsReason reports why a daemon seat's settings keep it
+// embedded: a setting that is neither a terminal setting nor a pin.
 func codexDaemonArgumentsReason(args []string) string {
 	if err := validateCommittedArgs(args, codexArgRules()); err != nil {
 		return "launch arguments do not match the verified Codex resume grammar"
 	}
+	rules := codexArgRules()
 	seen := make(map[string]bool)
 	for i := 0; i < len(args); i++ {
 		flag := args[i]
+		if rules[flag].value {
+			i++
+		}
+		if flag == "-c" {
+			continue
+		}
 		if seen[flag] {
 			return "duplicate launch options require verified TUI resume equivalence"
 		}
 		seen[flag] = true
-		switch flag {
-		case "--no-alt-screen":
-		case "--model":
-			i++
-		case "--sandbox":
-			i++
-			if !oneOf("read-only", "workspace-write")(args[i]) {
-				return "sandbox option requires verified TUI resume equivalence"
-			}
-		case "--ask-for-approval":
-			i++
-			if args[i] != "on-request" {
-				return "approval option requires verified TUI resume equivalence"
-			}
-		case "-c", "--search":
-			return "command-line configuration or search overrides require verified TUI resume equivalence"
-		default:
-			return "launch option requires verified TUI resume equivalence"
-		}
 	}
-	return ""
+	_, _, reason := splitCodexDaemonArgs(args)
+	return reason
+}
+
+// CodexDaemonTerminalArgv is argv, resolved from a daemon ticket, without
+// the ticket's pins: the Codex terminal refuses them on a daemon resume, and
+// the thread already carries them.
+func CodexDaemonTerminalArgv(ticket ExecutionTicket, argv []string) []string {
+	settings := codexDaemonSettings(ticket)
+	if settings == nil {
+		return argv
+	}
+	terminal, _, _ := splitCodexDaemonArgs(settings)
+	start := ticket.DynamicArgv[0].Index - len(settings)
+	out := append([]string{}, argv[:start]...)
+	out = append(out, terminal...)
+	return append(out, argv[ticket.DynamicArgv[0].Index:]...)
 }
 
 // CodexDaemonReleaseReadable reports whether version is a strict release at
