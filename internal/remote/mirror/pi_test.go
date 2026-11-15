@@ -73,9 +73,6 @@ func TestPiFoldRendersTerminalAndBuzzRuns(t *testing.T) {
 // a place in its Target never means the bridge lives under that place.
 func TestPiLocateUsesSeatOnAPlaceNamedTarget(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
 	root := filepath.Join(dir, "queue")
 	handle := "agent1"
 	bridge := filepath.Join(root, "agents", handle, "extensions", "pi-bridge")

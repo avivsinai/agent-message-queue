@@ -38,7 +38,7 @@ const linkUsage = `  link add NAME URL --code CODE
   link local-key NAME      Create the local passkey that confirms consent-local tasks
   link confirm ID          Show a held task's exact text and confirm it (Touch ID)
   link remove NAME         Retire link NAME's sink and delete its device key
-  link status              Links on this machine, their sockets and their owed
+  link status              Links on this machine, their sockets and owed
                            revisions, retired sinks
   link tools               The tools a linked server offers this machine
   link call TOOL --args J  Call a linked server's tool (--wait for the final state,

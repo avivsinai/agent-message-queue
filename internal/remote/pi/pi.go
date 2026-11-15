@@ -265,7 +265,7 @@ func readConfig(raw json.RawMessage, harness string) (config, error) {
 		}
 	}
 	if c.Handle == "" {
-		return c, fmt.Errorf("%s config: handle is required", harness)
+		return c, fmt.Errorf("%s config: handle is required (the %s session handle)", harness, harness)
 	}
 	if err := fsq.ValidateHandle(c.Handle); err != nil {
 		return c, fmt.Errorf("%s config: invalid handle: %v", harness, err)
@@ -295,10 +295,6 @@ func Config(handle, root string) json.RawMessage {
 func build(cfg registry.FactoryConfig, names wireNames) (core.Attachment, error) {
 	c, err := readConfig(cfg.Config, names.harness)
 	if err != nil {
-		if cfg.Config == nil {
-			// No config at all: keep the old missing-config text.
-			return nil, fmt.Errorf("%s config: handle is required (the %s session handle)", names.harness, names.harness)
-		}
 		return nil, err
 	}
 	dirRoot := cfg.Root

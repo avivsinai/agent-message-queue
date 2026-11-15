@@ -69,9 +69,8 @@ func TestPiSeatsOfTwoProjectsShareThroughOneRoot(t *testing.T) {
 	}
 }
 
-// R4: the same pi seat must never get a second native driver in another
-// root, whatever target spelling the share used. boundElsewhere sees the
-// Seat, not only the discovered pi:<handle> string.
+// A pi seat that a link's root drives is found from the seat's own root,
+// so a plain native attach there is refused.
 func TestPiBoundElsewhereFindsAnotherDriverOfTheSameSeat(t *testing.T) {
 	dir := canonicalTempDir(t)
 	t.Setenv(binding.EnvPath, filepath.Join(dir, "bindings.json"))
