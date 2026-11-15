@@ -396,6 +396,34 @@ func TestPermissionHookEndsWhenItsDialogIsAnsweredInTheTerminal(t *testing.T) {
 	}
 }
 
+// Live check on Claude Code 2.1.325, bead agent-message-queue-vosl: the
+// asking assistant message reached the transcript about 0.1 s after the
+// hook started, and the watch read it as the chain moving on, so every
+// dialog closed as answered in the terminal before Buzz showed it.
+func TestToolWatchDoesNotTakeTheLateAskingMessageForAnAnswer(t *testing.T) {
+	transcript := filepath.Join(t.TempDir(), "s-1.jsonl")
+	earlier := `{"type":"assistant","message":{"id":"msg_0","content":[{"type":"text","text":"earlier turn"}]}}` + "\n"
+	asking := `{"type":"assistant","message":{"id":"msg_1","content":[{"type":"thinking","thinking":"..."}]}}` + "\n" +
+		`{"type":"assistant","message":{"id":"msg_1","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"make"}}]}}` + "\n"
+	result := `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}}` + "\n"
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(transcript, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(earlier)
+	w := newToolWatch(func() (string, error) { return transcript, nil }, false, "Bash", json.RawMessage(`{"command":"make"}`))
+	write(earlier + asking)
+	if w.answered() {
+		t.Fatal("the asking message itself was read as the terminal's answer")
+	}
+	write(earlier + asking + result)
+	if !w.answered() {
+		t.Fatal("the call's result was not read as the terminal's answer")
+	}
+}
+
 // subagentHook opens a dialog for subagent a1 whose meta.json holds meta
 // ("": no meta file), with the hook's clock at now, and returns the meta
 // path, the dialogs directory and the hook's wait.
