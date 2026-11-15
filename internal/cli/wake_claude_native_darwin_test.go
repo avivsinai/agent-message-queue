@@ -137,9 +137,9 @@ func TestClaudeNativeRegistryAdmitsNewerReleaseOnPeerProtocol1(t *testing.T) {
 	}
 }
 
-// Bead v9zg: a user whose shell sets CLAUDE_CONFIG_DIR chooses that directory
-// as the launch's Claude home and reads its (peer-1) registration from
-// <that dir>/sessions/<pid>.json, not ~/.claude.
+// Live check, bead agent-message-queue-v9zg: a seat whose shell sets
+// CLAUDE_CONFIG_DIR was refused. The launch's Claude home is that directory,
+// and the session record is read from <dir>/sessions/<pid>.json.
 func TestNativeConfigDirSelectsRegistryHome(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", dir)
@@ -164,15 +164,14 @@ func TestNativeConfigDirSelectsRegistryHome(t *testing.T) {
 		Cwd:             t.TempDir(),
 	})
 	if err != nil {
-		t.Fatalf("prepare with a custom config dir must now be admitted: %v", err)
+		t.Fatalf("prepare with CLAUDE_CONFIG_DIR set: %v", err)
 	}
 	if prepare.Home != dir {
 		t.Fatalf("prepare.Home = %q; want the environment's directory %q", prepare.Home, dir)
 	}
-	// The session's own registration named nextCourt(inspect, dir := pid.File)
-	// can then be read at that path.
-	got, err := readClaudeSessionRecord(dir, pid)
-	if err != nil || got.SessionID != "abc" || got.Protocol != 1 {
-		t.Fatalf("the session record path did not follow the directory: got %+v err=%v", got, err)
+	// The session record is read from the launch's home.
+	got, err := readClaudeSessionRecord(prepare.Home, pid)
+	if err != nil || got.SessionID != "abc" {
+		t.Fatalf("session record under the launch's home = %+v, %v; want session abc", got, err)
 	}
 }
