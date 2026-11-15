@@ -15,8 +15,10 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
 
 	"github.com/avivsinai/agent-message-queue/internal/agentidentity"
+	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
@@ -25,6 +27,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
+	"github.com/avivsinai/agent-message-queue/internal/remote/machinecred"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
@@ -1458,5 +1461,76 @@ func TestAttachReportsADaemonThreadLiveAndItsReviewer(t *testing.T) {
 	}
 	if got := connectedJSON(map[string]any{}, v)["approval_reviewer"]; got != "auto_review" {
 		t.Fatalf("approval_reviewer = %v", got)
+	}
+}
+
+// An enrolled machine agent runs inside amq-remote serve, not Buzz Desktop:
+// while its serve refuses it, attach says so with the serve's own line and
+// never sends the owner to Buzz Desktop.
+func TestAttachSaysTheStandaloneMachineAgentIsNotRunning(t *testing.T) {
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", dir)
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	root := filepath.Join(dir, "p", ".agent-mail", "session3")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	home, err := amqhome.EnsureDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := machinecred.Mint(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tag, err := bodykey.SignAuthTag([32]byte{31: 7}, agent, bodykey.MachineConditions(time.Now().Add(time.Hour).Unix()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grant, err := machinecred.EncodeGrant(agent, "wss://relay.example", *tag); err != nil {
+		t.Fatal(err)
+	} else if _, err := machinecred.Enroll(home, grant); err != nil {
+		t.Fatal(err)
+	}
+	line := agent[:8] + ": the owner's grant ended 2026-11-01T00:00:00Z; run amq-remote machine request and have the owner sign again."
+	status, _ := json.Marshal(machineStatus{State: "refused", Code: codeAuthorityExpired, Line: line, PID: os.Getpid(), Updated: time.Now().UTC().Format(time.RFC3339)})
+	if err := os.WriteFile(filepath.Join(home, "remote", "machine", agent, machineStatusFile), status, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pinMailboxSession(t, root)
+
+	var out bytes.Buffer
+	if code, err := attach([]string{"--self", "--json"}, &out, io.Discard); code != 0 || err != nil {
+		t.Fatalf("attach: code=%d err=%v", code, err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["machine_host"] != hostStandalone || got["machine_refusal"] != codeAuthorityExpired {
+		t.Fatalf("attach JSON = %v; want machine_host standalone and machine_refusal %s", got, codeAuthorityExpired)
+	}
+
+	out.Reset()
+	if code, err := attach([]string{"--self"}, &out, io.Discard); code != 0 || err != nil {
+		t.Fatalf("attach: code=%d err=%v", code, err)
+	}
+	if text := out.String(); !strings.Contains(text, "The machine agent runs inside amq-remote serve and is not running: "+line) ||
+		strings.Contains(text, "Buzz Desktop") || strings.Contains(text, "amq-acp setup --machine") {
+		t.Fatalf("attach printed %q; want the serve's refusal and no Buzz Desktop step", text)
+	}
+
+	// Found in pre-merge review: the refusal of a serve that no longer runs
+	// was shown as current. A status file whose pid does not run is ignored.
+	status, _ = json.Marshal(machineStatus{State: "refused", Code: codeAuthorityExpired, Line: line, PID: 1 << 30, Updated: time.Now().UTC().Format(time.RFC3339)})
+	if err := os.WriteFile(filepath.Join(home, "remote", "machine", agent, machineStatusFile), status, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if code, err := attach([]string{"--self"}, &out, io.Discard); code != 0 || err != nil {
+		t.Fatalf("attach: code=%d err=%v", code, err)
+	}
+	if text := out.String(); !strings.Contains(text, "is not running: run amq-remote up.") || strings.Contains(text, line) {
+		t.Fatalf("attach printed %q; want run amq-remote up for the status of a serve that no longer runs", text)
 	}
 }

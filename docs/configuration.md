@@ -8,7 +8,7 @@ lives in the narrowest scope that owns it.
 | Agent | `<root>/agents/<me>/` | `.wake.settings` |
 | Root | `<root>/meta/` | `config.json` |
 | Project | the project directory | `.amqrc`, `.amq/launch.json` |
-| User and host | `~/.amq/` | `wake.settings`, `remote/binding.json`, `codex-threads/`, `claude-sessions/`, `state/` |
+| User and host | `~/.amq/` | `wake.settings`, `remote/binding.json`, `remote/machine/`, `codex-threads/`, `claude-sessions/`, `state/` |
 
 The user scope belongs to one user on one machine. It never travels with a
 root: a root on shared storage meets each host's own user scope.
@@ -36,8 +36,10 @@ settings files, the co-op wait hook reads the same two files each time it
 weighs unread mail (it has no log, so it reports no refused edit),
 `amq-keepalive supervise` reloads its settings file,
 `amq-remote serve` reloads its relay shares and its links when the manifest
-bytes change (a deleted manifest means no links and no shares), and `amq-acp`
-reads `~/.amq/acp.settings` at the start of each turn.
+bytes change (a deleted manifest means no links and no shares) and follows
+the enrolled machine agent credential (see
+[Machine agent credential](#machine-agent-credential)), and `amq-acp` reads
+`~/.amq/acp.settings` at the start of each turn.
 
 - A change applies without a restart.
 - A refused edit (bad syntax, unknown key, failed validation, failed trust
@@ -77,6 +79,37 @@ read and write:
 - A file or directory that fails a check is refused, not repaired.
 - A missing `~/.amq/wake.settings` always means no machine layer, even when
   `~/.amq` fails the checks.
+
+## Machine agent credential
+
+The AMQ Remote machine agent that runs inside `amq-remote serve` (see
+[Machine agent without Buzz Desktop](../cmd/amq-remote/README.md#machine-agent-without-buzz-desktop))
+keeps its credential in the user scope, in
+`~/.amq/remote/machine/<agent pubkey>/` (mode 0700):
+
+- `body.key` (0600): the agent key, which `amq-remote machine request` makes.
+- `grant.json` (0600): the owner's signed grant and the relay URL the owner
+  named, which `amq-remote machine enroll --grant FILE` stores.
+- `status.json`: what `serve` does with the agent, a snapshot that `serve`
+  writes and other commands read; it is not configuration.
+
+`serve` follows the enrolled credential while it runs:
+
+- One key with a valid grant starts the agent. More than one key refuses a
+  start (`identity_ambiguous`).
+- The running key's directory removed stops the agent; a single new key in
+  its place starts the new agent.
+- A renewed grant for the running key, relay and owner applies with no
+  restart.
+- A second key keeps the agent running as it started. A grant that names
+  another relay or owner for the running key keeps its current connection,
+  and no new connection is made with that grant. In both cases `serve` says
+  so once, and a restart of `serve` adopts the change.
+- An ended grant or a relay that refuses the key is a refusal in
+  `status.json`, and nothing reaches the relay until a new grant is enrolled
+  or the relay accepts the key; neither needs a restart.
+- A relay that now publishes a different self key stops the agent until
+  `serve` restarts.
 
 ## Launch trust state
 
