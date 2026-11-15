@@ -81,6 +81,13 @@ type Binding struct {
 	// AppServer is the Codex app-server thread that runs the session, which
 	// has no session process to hold; zero for other harnesses.
 	AppServer AppServerThread `json:"app_server,omitzero"`
+	// Seat is the AMQ root and handle of the pi session a native binding
+	// serves; zero for other harnesses and in a binding written before it
+	// was recorded.
+	Seat Seat `json:"seat,omitzero"`
+	// Cwd is the session's working directory when the binding was written;
+	// empty when it was not known.
+	Cwd string `json:"cwd,omitempty"`
 	// Transcript is the Claude session's transcript as the session itself
 	// named it, or the Codex thread's rollout file, when the binding was
 	// written; empty when it was not known. The session mirror reads it when
@@ -99,6 +106,37 @@ type Binding struct {
 	// (RemovedEnded, RemovedDetached or RemovedMoved). Empty in a tombstone
 	// written before it was recorded.
 	Removed string `json:"removed,omitempty"`
+}
+
+// Seat is a pi session's AMQ root and handle.
+type Seat struct {
+	Root   string `json:"root"`
+	Handle string `json:"handle"`
+}
+
+// PiSeat is the AMQ root and handle of the pi session b serves: a mailbox
+// binding's root and handle, a native binding's Seat, else its root and the
+// handle in its target.
+func (b Binding) PiSeat() (root, handle string) {
+	if b.Mailbox() {
+		return b.Root, b.Handle
+	}
+	if b.Seat.Handle != "" {
+		return b.Seat.Root, b.Seat.Handle
+	}
+	return b.Root, strings.TrimPrefix(b.Target, "pi:")
+}
+
+// Serves reports whether b is a native binding of the session that the
+// endpoint of root names target, attached as native.
+func (b Binding) Serves(root, target, native string) bool {
+	if b.Mailbox() || b.NativeSession != native {
+		return false
+	}
+	if b.Seat.Handle != "" {
+		return canonicalRoot(b.Seat.Root) == canonicalRoot(root) && "pi:"+b.Seat.Handle == target
+	}
+	return b.Target == target
 }
 
 // Why a binding was removed, recorded in its tombstone.
@@ -311,6 +349,9 @@ func (b Binding) Valid() error {
 	}
 	switch b.Carrier {
 	case CarrierMailbox:
+		if b.Seat != (Seat{}) {
+			return errors.New("mailbox binding must not name a pi seat")
+		}
 		// A mailbox binding never names a native session, so nothing that
 		// keys on one (the Claude Stop receiver) treats it as native.
 		if b.Target != "" || b.NativeSession != "" {
@@ -318,6 +359,9 @@ func (b Binding) Valid() error {
 		}
 		return fsq.ValidateHandle(b.Handle)
 	case "", CarrierNative:
+		if b.Seat != (Seat{}) && (!filepath.IsAbs(b.Seat.Root) || fsq.ValidateHandle(b.Seat.Handle) != nil) {
+			return errors.New("a native binding's pi seat needs an absolute root and a valid handle")
+		}
 		if b.Target == "" || b.NativeSession == "" {
 			return errors.New("native binding needs a target and a native session")
 		}

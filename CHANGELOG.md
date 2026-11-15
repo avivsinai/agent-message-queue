@@ -8,6 +8,37 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.147.0](https://github.com/avivsinai/agent-message-queue/compare/v0.146.1...v0.147.0) (2026-11-15)
+
+
+### Features
+
+* **remote:** one link shares the sessions of every project ([#1511](https://github.com/avivsinai/agent-message-queue/issues/1511)) ([d01e628](https://github.com/avivsinai/agent-message-queue/commit/d01e62863cdc5a672eff2f37bc7a834e98103109))
+
+
+### Bug Fixes
+
+* **launch:** a Codex seat with sandbox or approval options starts while a daemon runs ([#1512](https://github.com/avivsinai/agent-message-queue/issues/1512)) ([09f439a](https://github.com/avivsinai/agent-message-queue/commit/09f439a36baa4170239f8109eb1839aea9965b28))
+
+## [0.146.1](https://github.com/avivsinai/agent-message-queue/compare/v0.146.0...v0.146.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* **thread:** settle selects only the caller's own requests ([#1509](https://github.com/avivsinai/agent-message-queue/issues/1509)) ([cffe10a](https://github.com/avivsinai/agent-message-queue/commit/cffe10a09995dffb8cd48a74f3e493ff2f5822f3))
+
+## [0.146.0](https://github.com/avivsinai/agent-message-queue/compare/v0.145.2...v0.146.0) (2026-11-15)
+
+
+### Features
+
+* **thread:** a requester settles its old requests in one step ([#1507](https://github.com/avivsinai/agent-message-queue/issues/1507)) ([dcfbd87](https://github.com/avivsinai/agent-message-queue/commit/dcfbd87a8328796bce28e2798b5bd6a9d4b03874))
+
+
+### Bug Fixes
+
+* **fsq:** a refused claim names the step and the path ([#1505](https://github.com/avivsinai/agent-message-queue/issues/1505)) ([822c8b9](https://github.com/avivsinai/agent-message-queue/commit/822c8b9f563cf703dc2eb5266ca3c20705571de0))
+
 ## [0.145.2](https://github.com/avivsinai/agent-message-queue/compare/v0.145.1...v0.145.2) (2026-11-15)
 
 

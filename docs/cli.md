@@ -1229,7 +1229,7 @@ Usage:
   amq thread open [--all-sessions] [--include-base] [--owed-by <handles>] [--owed-to <handles>] [--kind <kinds>] [--max-age <dur>] [--follow] [options]
 
 List open review requests, questions, and todos per thread.
-An obligation closes when its owner replies with the expected kind or a closing label.
+An obligation closes when its owner replies with the expected kind, with a closing label, or when its requester settles it.
 Read-only: it never moves a message, writes a receipt, or reads a body.
 
 --follow adds, for each listed request and each request sent to a root outside

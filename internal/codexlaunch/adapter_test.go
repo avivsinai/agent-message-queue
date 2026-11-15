@@ -77,7 +77,7 @@ func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
 			var settings []string
 			var initial *launch.InitialInputRequest
 			if scenario == "publish" {
-				settings = []string{"--model", "gpt-native-test", "--sandbox", "workspace-write", "--ask-for-approval", "on-request", "--no-alt-screen"}
+				settings = []string{"--model", "gpt-native-test", "--no-alt-screen"}
 				text := "Keep the requested settings."
 				sum := sha256.Sum256([]byte(text))
 				initial = &launch.InitialInputRequest{Kind: launch.InitialInputArgument, Value: text, SHA256: "sha256:" + hex.EncodeToString(sum[:])}
@@ -529,26 +529,36 @@ func TestPublicPrepareRetainsEmbeddedWrappedCodexPlan(t *testing.T) {
 	}
 }
 
-// Codex selects an embedded app-server for these command-line
-// overrides. Preserve the caller's settings rather than acquire a native thread.
-func TestConfigurationAndSearchSettingsRetainEmbeddedExecution(t *testing.T) {
+// A configuration or search pin stays embedded, and sandbox/approval
+// settings the Codex TUI refuses on a daemon resume do too.
+func TestSettingsTheDaemonTUIRefusesKeepEmbeddedExecution(t *testing.T) {
+	cases := []struct {
+		args   []string
+		reason string
+	}{
+		{args: []string{"-c", `approvals_reviewer="user"`}, reason: "command-line configuration or search overrides require verified TUI resume equivalence"},
+		{args: []string{"--search"}, reason: "command-line configuration or search overrides require verified TUI resume equivalence"},
+		// Codex 0.167.0 exits a resume with sandbox or approval options
+		// (bead agent-message-queue-2e2z, observed live on 2026-11-15).
+		{args: []string{"--sandbox", "workspace-write", "--ask-for-approval", "on-request"}, reason: "Codex refuses sandbox and approval options on a daemon seat"},
+	}
 	for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
 		t.Setenv(key, "")
 		_ = os.Unsetenv(key)
 	}
-	for _, args := range [][]string{{"-c", `approvals_reviewer="user"`}, {"--search"}} {
-		t.Run(strings.Join(args, " "), func(t *testing.T) {
+	for _, c := range cases {
+		t.Run(strings.Join(c.args, " "), func(t *testing.T) {
 			project, err := filepath.EvalSymlinks(t.TempDir())
 			if err != nil {
 				t.Fatal(err)
 			}
 			t.Setenv("CODEX_HOME", nativeDaemon(t, project))
 			plan, err := New(nativeProvider(t, "0.167.0")).PlanFresh(launch.PlanRequest{Handle: "codex", LaunchNonce: "adadadad-adad-4dad-8dad-adadadadadad",
-				ProjectRoot: project, SessionRoot: project, Cwd: project, AMQExecutable: "/usr/bin/true", ResumePolicy: launch.ResumeEnabled, CommittedArgs: args})
-			if err != nil || plan.PreSpawnAcquire || plan.TerminalOnlyReason != "command-line configuration or search overrides require verified TUI resume equivalence" {
+				ProjectRoot: project, SessionRoot: project, Cwd: project, AMQExecutable: "/usr/bin/true", ResumePolicy: launch.ResumeEnabled, CommittedArgs: c.args})
+			if err != nil || plan.PreSpawnAcquire || plan.TerminalOnlyReason != c.reason {
 				t.Fatalf("unverified native settings=%#v, %v", plan, err)
 			}
-			if !slices.Equal(plan.Argv[1:1+len(args)], args) {
+			if !slices.Equal(plan.Argv[1:1+len(c.args)], c.args) {
 				t.Fatalf("embedded settings changed: %q", plan.Argv)
 			}
 		})
@@ -574,7 +584,7 @@ func TestDaemonBoundCodexConversationResumesOnTheDaemon(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	settings := []string{"--model", "gpt-native-test", "--sandbox", "workspace-write", "--ask-for-approval", "on-request", "--no-alt-screen"}
+	settings := []string{"--model", "gpt-native-test", "--no-alt-screen"}
 	resumed, err := New(executable).PlanResume(launch.ResumeRequest{PlanRequest: launch.PlanRequest{Handle: "codex", LaunchNonce: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
 		ProjectRoot: project, SessionRoot: root.Base(), Cwd: project, AMQExecutable: amq, ResumePolicy: launch.ResumeEnabled, CommittedArgs: settings},
 		Conversation: conversation.Identity, Capture: capture})

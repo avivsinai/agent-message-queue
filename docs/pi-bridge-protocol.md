@@ -20,6 +20,8 @@ The extension takes its identity from the AMQ participation contract: `AM_ROOT`
 extension stays inactive. A host application that embeds the extension may
 supply the root and handle itself (see [Embedding](#embedding)). The adapter
 takes the handle from its manifest entry and never from its own environment.
+A manifest entry with `root` names the session's AMQ root when that is
+another root than the endpoint's.
 
 ```text
 <AM_ROOT>/agents/<handle>/extensions/pi-bridge/

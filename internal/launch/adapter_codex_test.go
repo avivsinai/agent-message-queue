@@ -72,3 +72,12 @@ func TestValidateCodexConfigOverridesApprovalsReviewerSet(t *testing.T) {
 		t.Fatalf("validateCodexConfigOverrides(%q) = %v, want nil", bareSet, err)
 	}
 }
+
+// Reader compatibility: the daemon ticket grammar still accepts the two
+// settings whose launch a daemon resumes refuses, so an old ticket round-trips
+// for inspection and cleanup.
+func TestCodexDaemonTicketGrammarReadsSandboxAndApproval(t *testing.T) {
+	if got := codexDaemonArgumentsReason([]string{"--sandbox", "workspace-write", "--ask-for-approval", "on-request"}); got != "" {
+		t.Fatalf("older daemon settings must still parse for inspection, got refusal %q", got)
+	}
+}

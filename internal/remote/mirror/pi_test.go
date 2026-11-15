@@ -2,7 +2,13 @@ package mirror
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/pi"
 )
 
 // A pi run is one turn from its run_start to its settled record: a prompt
@@ -60,5 +66,32 @@ func TestPiFoldRendersTerminalAndBuzzRuns(t *testing.T) {
 	}
 	if st.Open != nil {
 		t.Errorf("a turn is still open after the last settle: %+v", st.Open)
+	}
+}
+
+// A native pi binding's activity comes from its Seat, not from the driver:
+// a place in its Target never means the bridge lives under that place.
+func TestPiLocateUsesSeatOnAPlaceNamedTarget(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "queue")
+	handle := "agent1"
+	bridge := filepath.Join(root, "agents", handle, "extensions", "pi-bridge")
+	at := time.Now().UTC().Format(time.RFC3339Nano)
+	record := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"rpc","session_id":"sess-1","bridge_revision":%d,"activity":3}`, "amq:pi-bridge:v1", at, os.Getpid(), 4)
+	if err := os.MkdirAll(bridge, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(bridge, "bridge.liveness")
+	if err := os.WriteFile(path, []byte(record), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var b binding.Binding
+	b.Root = "/some/other/root"
+	b.Seat = binding.Seat{Root: root, Handle: handle}
+	b.Target = "pi:agent1-proj-s1"
+	b.NativeSession = "sess-1"
+	got := piLocate(b, "")
+	if got != pi.ActivityFile(root, handle, "sess-1") {
+		t.Fatalf("piLocate used the driver's root: %q; want %q", got, pi.ActivityFile(root, handle, "sess-1"))
 	}
 }

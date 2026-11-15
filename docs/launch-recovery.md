@@ -189,17 +189,13 @@ Prepare; Apply does not execute a different plan under the earlier authorization
 
 ## Native resume settings
 
-The Codex 0.167.0 TUI forwards `--model <value>`,
-`--sandbox read-only|workspace-write`, and `--ask-for-approval on-request` on
-resume, and retains `--no-alt-screen` for terminal presentation. Native
-admission fixes these sandbox and approval values independently of the embedded
-argument grammar. Settings keep
+On a daemon resume the Codex TUI accepts `--model <value>` and `--no-alt-screen`. Settings keep
 their order in the execution ticket, followed by its acquired thread ID and any
 initial prompt.
 
-A caller's command-line configuration overrides, such as
+The Codex TUI refuses `--sandbox` and `--ask-for-approval` on a daemon resume, so a launch with them keeps the embedded path. A caller's command-line configuration overrides, such as
 `-c approvals_reviewer=...` or `-c model_reasoning_effort=...`, and `--search`
-keep the embedded path, because their effect on a daemon TUI is not verified.
+keep the embedded path too, because their effect on a daemon TUI is not verified.
 Those launches retain the original arguments and explain the terminal-only
 approval capability. Wrappers, environment overlays, bypass
 options, and unverified or duplicate options also retain the embedded path.

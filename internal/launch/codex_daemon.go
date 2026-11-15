@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -206,16 +207,27 @@ func validateCodexDaemonTargetArgv(ticket ExecutionTicket) error {
 	return nil
 }
 
-// CodexDaemonOptionsReason admits only invocation settings that Codex 0.167
-// forwards to a local-daemon TUI resume. A caller's configuration or search
-// override is not shown to take effect there, so it keeps the embedded path.
+// CodexDaemonOptionsReason admits a request on the daemon only when the Codex
+// TUI accepts its options on a resume there: --model and --no-alt-screen. The
+// TUI refuses sandbox and approval options on such a resume and exits, and a
+// caller's configuration or search override is not shown to take effect, so
+// those requests keep the embedded path.
 func CodexDaemonOptionsReason(request PlanRequest) string {
 	if request.Wrapper != nil || len(request.EnvOverlay) != 0 || len(request.BypassArgs) != 0 {
 		return "wrapper, environment, or bypass options require verified TUI resume equivalence"
 	}
-	return codexDaemonArgumentsReason(request.CommittedArgs)
+	if reason := codexDaemonArgumentsReason(request.CommittedArgs); reason != "" {
+		return reason
+	}
+	if slices.Contains(request.CommittedArgs, "--sandbox") || slices.Contains(request.CommittedArgs, "--ask-for-approval") {
+		return "Codex refuses sandbox and approval options on a daemon seat"
+	}
+	return ""
 }
 
+// codexDaemonArgumentsReason is the argument grammar of a daemon ticket. It
+// reads --sandbox and --ask-for-approval because tickets of earlier releases
+// carry them; planning refuses them.
 func codexDaemonArgumentsReason(args []string) string {
 	if err := validateCommittedArgs(args, codexArgRules()); err != nil {
 		return "launch arguments do not match the verified Codex resume grammar"

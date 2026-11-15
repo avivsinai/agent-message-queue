@@ -155,7 +155,7 @@ func runThreadOpen(args []string) error {
 
 	usage := usageWithFlags(fs, "amq thread open [--all-sessions] [--include-base] [--owed-by <handles>] [--owed-to <handles>] [--kind <kinds>] [--max-age <dur>] [--follow] [options]",
 		"List open review requests, questions, and todos per thread.",
-		"An obligation closes when its owner replies with the expected kind or a closing label.",
+		"An obligation closes when its owner replies with the expected kind, with a closing label, or when its requester settles it.",
 		"Read-only: it never moves a message, writes a receipt, or reads a body.",
 		"",
 		"--follow adds, for each listed request and each request sent to a root outside",
@@ -576,8 +576,18 @@ func writeThreadOpenText(result threadOpenResult) error {
 			return err
 		}
 	}
+	// Ambiguous replies are one line per (sender, reason) with a count;
+	// the JSON expansion carries each reply. See brief thread-settle ruling 1.
+	batchAmbiguous := map[string]int{}
+	var ambOrder []string
 	for _, amb := range cov.Ambiguous {
-		if err := writeStdout("ambiguous: %s from %s (%s)\n", amb.ID, amb.From, amb.Reason); err != nil {
+		if _, seen := batchAmbiguous[amb.From]; !seen {
+			ambOrder = append(ambOrder, amb.From)
+		}
+		batchAmbiguous[amb.From]++
+	}
+	for _, sender := range ambOrder {
+		if err := writeStdout("ambiguous: %d messages from %s without refs (see --json)\n", batchAmbiguous[sender], sender); err != nil {
 			return err
 		}
 	}

@@ -29,11 +29,18 @@ const (
 // parent's lineage is not settled at its created time.
 const UnsettledParent = "parent lineage not settled at created time"
 
+// SettledThrough is the requester-closing label that closes its own anchor
+// request and every older open request of the same requester/owner pair in
+// the same thread. `amq thread settle` produces one such decision per
+// (thread, owner). The label also closes the anchor itself through the
+// requester-closer table.
+const SettledThrough = "settled-through"
+
 // OpenerKinds are the kinds that open an obligation for each recipient.
 var OpenerKinds = []string{format.KindReviewRequest, format.KindQuestion, format.KindTodo}
 
 // closingLabels make a message terminal: it never opens an obligation.
-var closingLabels = []string{"done", "merged", "closed", "wontfix", "withdrawn"}
+var closingLabels = []string{SettledThrough, "done", "merged", "closed", "wontfix", "withdrawn"}
 
 // Participant is one party to an obligation. Project is empty for the
 // project under scan; Session is empty for a base root. Handles alone never
@@ -142,6 +149,10 @@ type record struct {
 // nonzero cutoff is Expired. A direct target that is missing and for which
 // settled reports true is a settled root outside entries: the message's
 // lineage reaches it and holds no obligation; settled may be nil.
+//
+// A message with refs ending at a settled-through requester marker closes the
+// anchor obligation of that requester/owner pair and every open obligation of
+// the same pair in the same thread created at or before it.
 //
 // Every header is classified from headers alone before the pass: its direct
 // parent and whether its lineage reaches a root. Openers open at their own
@@ -300,6 +311,13 @@ func (red *Reduction) actOnParent(rec *record) {
 		}
 		act(ob, owner, msg)
 		acted = append(acted, ob)
+		// A settled-through from this obligation's requester to its owner
+		// closes the anchor and every open obligation of the same pair in the
+		// same thread whose opener sorts at or before the anchor's opener.
+		// Other obligants of the thread are untouched.
+		if requester && slices.Contains(msg.Labels, SettledThrough) {
+			red.settleThrough(ob, msg)
+		}
 	}
 	if !rec.ready {
 		red.settle(rec, acted)
@@ -315,6 +333,39 @@ func (red *Reduction) settle(rec *record, lineage []*Obligation) {
 	for _, waiter := range waiters {
 		red.actOnParent(waiter)
 	}
+}
+
+// settleThrough closes every open obligation of anchor's requester/owner
+// pair in anchor's thread whose opener sorts at or before anchor's opener.
+// Owned by `actOnParent` after the anchor's own `act` has already marked
+// the anchor. Each touched obligation keeps its most recent activity by the
+// same rule `act` uses.
+func (red *Reduction) settleThrough(anchor *Obligation, msg *Entry) {
+	for _, ob := range red.byThread[anchor.Opener.Thread] {
+		if ob == anchor {
+			continue
+		}
+		if ob.Requester != anchor.Requester || ob.Owner != anchor.Owner {
+			continue
+		}
+		if ob.Closed {
+			continue
+		}
+		if lessEntries(anchor.Opener, ob.Opener) {
+			continue // ob created after the anchor, untouched
+		}
+		touch(ob, msg)
+		ob.Closed = true
+		ob.ClosedBy = msg
+	}
+}
+
+// lessEntries is Reduction's order comparator (created_at, id).
+func lessEntries(a, b *Entry) bool {
+	if !a.RawTime.Equal(b.RawTime) {
+		return a.RawTime.Before(b.RawTime)
+	}
+	return a.ID < b.ID
 }
 
 // lookup reads the header of a direct target the entries do not hold, by
@@ -585,9 +636,9 @@ func closesObligation(openerKind string, fromOwner bool, msg *Entry) bool {
 	}
 	if !fromOwner {
 		if openerKind == format.KindReviewRequest {
-			return hasLabel("withdrawn", "done", "merged", "closed")
+			return hasLabel(SettledThrough, "withdrawn", "done", "merged", "closed")
 		}
-		return hasLabel("withdrawn", "done", "closed")
+		return hasLabel(SettledThrough, "withdrawn", "done", "closed")
 	}
 	switch openerKind {
 	case format.KindReviewRequest:
