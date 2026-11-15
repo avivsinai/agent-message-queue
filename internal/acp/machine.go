@@ -1446,6 +1446,12 @@ func (s *Server) machineBinding(sessionID string) (binding.Binding, error) {
 	if !ok {
 		return binding.Binding{}, &unpinnedError{machine: true}
 	}
+	return routeBinding(r)
+}
+
+// routeBinding is the binding of the session the active record r was made
+// for; errChannelNotConnected when that session is no longer bound.
+func routeBinding(r channelRecord) (binding.Binding, error) {
 	b, err := binding.ReadNamed(r.Name)
 	switch {
 	case errors.Is(err, binding.ErrNone):

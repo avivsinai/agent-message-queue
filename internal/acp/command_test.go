@@ -31,7 +31,7 @@ func TestOwnerSlashCommandIsQueuedForTheWake(t *testing.T) {
 	t.Cleanup(func() { commandPoll = saved })
 	commandPoll = 10 * time.Millisecond
 
-	cmd, ok := s.ownerCommandFor(dmChannel, evt.ID.Hex(), buzzPrompt(dmChannel, s.id.Owner, "/compact"))
+	cmd, ok := s.ownerCommandOf(s.acpOwner(dmChannel, evt.ID.Hex(), buzzPrompt(dmChannel, s.id.Owner, "/compact")))
 	if !ok || cmd.refusal != "" {
 		t.Fatalf("ownerCommandFor = %+v, %v; want a queued command", cmd, ok)
 	}
@@ -70,7 +70,7 @@ func TestOldChannelCannotQueueCommandForReplacementSeat(t *testing.T) {
 	evt := signedBy(t, owner, "/compact", dmChannel)
 	lr.Inject(evt)
 
-	cmd, ok := s.ownerCommandFor(dmChannel, evt.ID.Hex(), buzzPrompt(dmChannel, s.id.Owner, "/compact"))
+	cmd, ok := s.ownerCommandOf(s.acpOwner(dmChannel, evt.ID.Hex(), buzzPrompt(dmChannel, s.id.Owner, "/compact")))
 	if queued := queuedCommands(t, fsq.AgentBase(replacement.Root, replacement.Handle)); len(queued) != 0 {
 		t.Fatalf("the old channel queued for the replacement seat: ok=%v refusal=%q queue=%+v", ok, cmd.refusal, queued)
 	}

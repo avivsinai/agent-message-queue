@@ -145,6 +145,10 @@ func (s *Server) startLateReplySweep() (stop func()) {
 	} else {
 		close(mirrorDone)
 	}
+	// A standalone server's owner turns run until the same quit.
+	if s.direct != nil {
+		s.owners.start(quit)
+	}
 	go func() {
 		defer close(done)
 		tick := time.NewTicker(lateReplyInterval)
@@ -170,6 +174,7 @@ func (s *Server) startLateReplySweep() (stop func()) {
 		<-machineDone
 		<-dialogDone
 		<-mirrorDone
+		s.owners.stop()
 		s.resign()
 		if s.dialogs.release != nil {
 			s.dialogs.release()
