@@ -337,6 +337,9 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) (p pace) {
 		s.writeAgentMarker(dir, m, now)
 		s.machine.marked = now.UTC().Format(time.RFC3339)
 	}
+	if s.direct == nil && s.standaloneRuns(now) {
+		return pace{next: now.Add(machineScanInterval)}
+	}
 	if s.id.RelayKey == "" || s.id.Owner == "" {
 		return pace{}
 	}
@@ -381,6 +384,24 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) (p pace) {
 		}
 	}
 	return p
+}
+
+// standaloneRuns reports whether a machine agent of another key runs on the
+// direct transport here: its marker says host standalone, reads running,
+// and is younger than agentMarkerFresh. One machine agent serves a machine,
+// so a machine agent on the buzz CLI provisions nothing while one does. The
+// age bound matters because the standalone worker is its serve process,
+// which outlives a stopped agent and keeps its last marker running.
+func (s *Server) standaloneRuns(now time.Time) bool {
+	for _, m := range s.agentMarkers(machineName) {
+		if m.PubKey == s.id.Agent || m.Host != "standalone" || m.state(now) != AgentRunning {
+			continue
+		}
+		if at, err := time.Parse(time.RFC3339, m.Updated); err == nil && now.Sub(at) <= agentMarkerFresh {
+			return true
+		}
+	}
+	return false
 }
 
 // uncertainGap separates the lookups of an uncertain create: on the direct

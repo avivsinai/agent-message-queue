@@ -220,6 +220,9 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	if relayCfg != nil {
 		say(stdout, "relay %s: %d shared session(s)", relayCfg.URL, len(relayCfg.Shares))
 	}
+	// The enrolled machine agent, when this serve takes its lock.
+	machines := newMachineSet(ctx, stderr)
+	machines.tick(time.Now())
 	ep.SetConsent(links.consentLive)
 	links.start(ctx, ep, mfSnap)
 	go func() {
@@ -249,6 +252,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 				}
 				links.tick()
 				relays.tick()
+				machines.tick(time.Now())
 				// Replay durable sender envelopes (CLI submits persisted while the
 				// companion was down).
 				if _, derr := drainer.Drain(ctx); derr != nil {
@@ -268,6 +272,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	// Cancel before joining: Serve can also return on an accept error with
 	// ctx still live, and the relays would never end.
 	stop()
+	machines.close()
 	relays.wait()
 	if cerr := ep.Close(); cerr != nil && err == nil {
 		err = cerr
