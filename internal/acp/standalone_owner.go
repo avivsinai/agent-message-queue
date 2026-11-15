@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -249,6 +250,7 @@ func (s *Server) runOwnerTurn(ch string, evt nostr.Event, quit <-chan struct{}) 
 	turn.route, turn.channel, turn.mailboxEvent, turn.event = ch, ch, id, &evt
 	s.mu.Unlock()
 	defer s.finishTurn(session, turn)
+	defer s.showWorking(ch)()
 	t := s.loadTurnTiming()
 	turn.timing = &t
 	s.mu.Lock()
@@ -272,4 +274,67 @@ func (s *Server) runOwnerTurn(ch string, evt nostr.Event, quit <-chan struct{}) 
 	close(ended)
 	<-watched
 	return cut
+}
+
+// A turn's channel gets a typing pulse every workingEvery, which a Buzz
+// client shows for 8 s; workingLongest bounds a turn that never ends.
+const (
+	workingEvery   = 3 * time.Second
+	workingLongest = 30 * time.Minute
+)
+
+// working is one route's working indication.
+type working struct {
+	done, ended chan struct{}
+	once        sync.Once
+}
+
+// stop ends the indication and returns once no further pulse is sent.
+func (w *working) stop() {
+	w.once.Do(func() { close(w.done) })
+	<-w.ended
+}
+
+// showWorking shows the agent as working in route ch until stop is called,
+// the route's final text is about to be posted (stopWorking), or
+// workingLongest passes. A pulse that fails is not sent again: the
+// indication is advisory, and the first failure of the process is said
+// once.
+func (s *Server) showWorking(ch string) (stop func()) {
+	w := &working{done: make(chan struct{}), ended: make(chan struct{})}
+	s.working.Store(ch, w)
+	go func() {
+		defer close(w.ended)
+		defer s.working.CompareAndDelete(ch, w)
+		tick := time.NewTicker(workingEvery)
+		defer tick.Stop()
+		longest := time.NewTimer(workingLongest)
+		defer longest.Stop()
+		for {
+			ctx, cancel := context.WithTimeout(context.Background(), workingEvery)
+			err := s.direct.Working(ctx, ch)
+			cancel()
+			if err != nil {
+				s.workingFailed.Do(func() {
+					fmt.Fprintf(os.Stderr, "amq-acp: the working indication is not shown in %s: %v\n", ch, err)
+				})
+			}
+			select {
+			case <-w.done:
+				return
+			case <-longest.C:
+				return
+			case <-tick.C:
+			}
+		}
+	}()
+	return w.stop
+}
+
+// stopWorking ends the working indication of route ch, if one runs, so
+// that no pulse follows the route's final text.
+func (s *Server) stopWorking(ch string) {
+	if w, ok := s.working.Load(ch); ok {
+		w.(*working).stop()
+	}
 }

@@ -141,6 +141,23 @@ func (p *Port) Edit(ctx context.Context, key buzzop.Key, channel, eventID, conte
 	})
 }
 
+// Working publishes one typing pulse in channel. The pulse is ephemeral:
+// it has no outbox record and is never sent again.
+func (p *Port) Working(ctx context.Context, channel string) error {
+	evt, err := buzzwire.Typing(channel, p.now())
+	if err != nil {
+		return err
+	}
+	if err := relay.Sign(&evt, p.secret); err != nil {
+		return err
+	}
+	conn := p.live()
+	if conn == nil {
+		return errors.New(buzzop.ReasonNoConnection)
+	}
+	return conn.Publish(ctx, evt)
+}
+
 // Replay sends the stored event of key again, with the same event id. A
 // key with no record is NotSent.
 func (p *Port) Replay(ctx context.Context, key buzzop.Key) buzzop.Result {

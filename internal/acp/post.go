@@ -250,6 +250,7 @@ const (
 // the direct transport did not send, is unsent, and the late-reply sweep
 // may make it again (resendFinal) under the same key.
 func (s *Server) publishFinal(eventID, channel, text string) string {
+	s.stopWorking(channel)
 	result, err := s.post(finalKey(eventID), channel, text)
 	if eventID == "" || channel == "" || strings.TrimSpace(text) == "" {
 		return result

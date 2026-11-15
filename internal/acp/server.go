@@ -226,6 +226,10 @@ type Server struct {
 	// observation of relay-signed state, a keyed post) runs only when it is
 	// set.
 	direct Transport
+	// working holds each route's working indication (*working);
+	// workingFailed says the first failed pulse once.
+	working       sync.Map
+	workingFailed sync.Once
 	// online reports whether the direct transport has a relay connection;
 	// nil means it is not known, and the machine tick runs.
 	online func() bool

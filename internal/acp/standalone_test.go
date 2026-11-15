@@ -175,6 +175,19 @@ func TestStandaloneOwnerMessageReachesTheSessionAndItsReplyIsPosted(t *testing.T
 	if prompt.Header.From != mailboxSender || !strings.HasPrefix(prompt.Body, in.Event.Content+"\n") || !strings.Contains(string(signed), in.Event.ID.Hex()) {
 		t.Fatalf("prompt from %s, context %s, body %q; want the owner's text and signed event from %s", prompt.Header.From, signed, prompt.Body, mailboxSender)
 	}
+	// While the session works on the answer, the channel shows the agent
+	// as working: a typing pulse with the channel's h tag alone.
+	pulsed := func() bool {
+		return slices.ContainsFunc(f.relay.Events(), func(evt nostr.Event) bool {
+			return evt.Kind == 20002 && evt.PubKey.Hex() == f.s.id.Agent && evt.Content == "" &&
+				len(evt.Tags) == 1 && evt.Tags[0][0] == "h" && evt.Tags[0][1] == machineChanA
+		})
+	}
+	for deadline := time.Now().Add(5 * time.Second); !pulsed() && time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+	}
+	if !pulsed() {
+		t.Fatal("no typing pulse in the channel while the turn ran")
+	}
 	replyAs(t, b.Root, prompt.Header.Thread, ids[0], format.KindAnswer, "green on main")
 	waitClosed(t, done)
 	if n := f.posts(machineChanA, "green on main"); n != 1 {

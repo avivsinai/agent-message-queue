@@ -988,6 +988,13 @@ func (h *portHolder) Lookup(ctx context.Context, eventID string) (bool, error) {
 	return false, errNoPort
 }
 
+func (h *portHolder) Working(ctx context.Context, channel string) error {
+	if p := h.p.Load(); p != nil {
+		return p.Working(ctx, channel)
+	}
+	return errNoPort
+}
+
 // machineMarker is what serve reads of one machine agent marker
 // (agents/_machine/<pubkey>.json).
 type machineMarker struct {

@@ -433,7 +433,9 @@ this machine and connects to the relay itself, so the owner needs only the
 Buzz phone app. For each session that attaches, it does what the Buzz Desktop
 machine agent does: it makes a private channel, adds the owner as an admin
 and mentions them, and posts the session's approval dialogs and its mirror
-there. An owner's message in the channel reaches the session.
+there. An owner's message in the channel reaches the session, and until the
+session's answer is posted the channel shows the agent as working (a Buzz
+typing pulse every 3 seconds, for at most 30 minutes).
 
 Set it up once per machine:
 

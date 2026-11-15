@@ -30,6 +30,7 @@ type Transport interface {
 	ChannelFacts(ctx context.Context, channel string) (buzzop.ChannelFacts, error)
 	Replay(ctx context.Context, key buzzop.Key) buzzop.Result
 	Lookup(ctx context.Context, eventID string) (bool, error)
+	Working(ctx context.Context, channel string) error
 }
 
 // Standalone is what a standalone machine agent runs with.
