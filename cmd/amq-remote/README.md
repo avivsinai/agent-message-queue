@@ -1041,7 +1041,10 @@ options as the harness shows them, so the owner reads what the terminal
 shows. ✅ takes the first option, ❌ the deny option, a reply `1`, `2`, ...
 takes that option, `yes` and `no` work as ✅ and ❌, and a dialog that asks for
 text takes any reply. The first answer wins, in Buzz or in the terminal, and
-the message is edited with the outcome.
+the message is edited with the outcome. A Claude Code question with one
+single-select question shows its choices; a reply with the number, or with
+other text, is the answer. A question with more than one part, a multi-select
+question and a plan approval show their text and are answered in the terminal.
 
 Once the Claude hook is installed, every Claude Code session on the machine
 (terminal, desktop app Code tab, IDE) mirrors its dialogs to Buzz, with or

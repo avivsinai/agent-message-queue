@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -618,5 +619,107 @@ func TestPermissionHookClosesTheDialogOfAUniqueCallOnItsResult(t *testing.T) {
 	}
 	if r, ok, _ := dialog.ReadResolved(dir, req.ID); !ok || r.By != dialog.ByTerminal {
 		t.Fatalf("resolved = %+v, %v; want answered in the terminal", r, ok)
+	}
+}
+
+// A single-select Claude question offers its choices and free text. The
+// allow decision carries the chosen label as the tool's answer and keeps
+// every other part of the original input.
+func TestPermissionHookAnswersAQuestionWithTheChosenLabel(t *testing.T) {
+	dir := boundHookEnv(t)
+	for _, tc := range []struct {
+		name   string
+		answer dialog.Answer
+		want   string
+	}{
+		{"chosen label", dialog.Answer{Option: 2}, "SQLite"},
+		{"own text", dialog.Answer{Text: "DuckDB"}, "DuckDB"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := map[string]any{"questions": []any{map[string]any{
+				"question": "Which database?", "multiSelect": false,
+				"options": []any{map[string]any{"label": "Postgres", "description": "relational"}, map[string]any{"label": "SQLite"}},
+			}}}
+			stdin, _ := json.Marshal(map[string]any{
+				"session_id": "s-1", "hook_event_name": "PermissionRequest",
+				"tool_name": "AskUserQuestion", "tool_input": input,
+			})
+			wait := runHook(t, string(stdin))
+			req := openRequest(t, dir)
+			if req.Tool != "" || !req.FreeText || len(req.Options) != 2 || req.Options[0].Label != "Postgres" || req.Options[1].Label != "SQLite" {
+				t.Fatalf("question request = %+v", req)
+			}
+			if !strings.Contains(req.Text, "Which database?") || !strings.Contains(req.Text, "- Postgres: relational") {
+				t.Fatalf("question text = %q", req.Text)
+			}
+			answer := tc.answer
+			answer.ID, answer.By = req.ID, dialog.ByBuzz
+			if _, err := dialog.WriteAnswer(dir, answer); err != nil {
+				t.Fatal(err)
+			}
+			d := decisionOf(t, wait())
+			updated, _ := d["updatedInput"].(map[string]any)
+			answers, _ := updated["answers"].(map[string]any)
+			if d["behavior"] != "allow" || answers["Which database?"] != tc.want {
+				t.Fatalf("decision = %v; want the answer %q", d, tc.want)
+			}
+			if got := updated["questions"]; !reflect.DeepEqual(got, input["questions"]) {
+				t.Fatalf("questions in updated input = %v; want original %v", got, input["questions"])
+			}
+			if r, ok, _ := dialog.ReadResolved(dir, req.ID); !ok || r.Outcome != dialog.OutcomeAnswered || r.Label != tc.want || r.By != dialog.ByBuzz {
+				t.Fatalf("resolved = %+v, %v", r, ok)
+			}
+		})
+	}
+}
+
+// A multi-part question or a plan cannot be answered with a single choice.
+// Buzz offers no numeric choice, so the owner responds in the terminal.
+func TestPermissionHookSendsAnUnanswerableQuestionToTheTerminal(t *testing.T) {
+	dir := boundHookEnv(t)
+	for _, tc := range []struct {
+		name, tool string
+		input      map[string]any
+	}{
+		{"two questions", "AskUserQuestion", map[string]any{"questions": []any{
+			map[string]any{"question": "Which database?", "options": []any{map[string]any{"label": "Postgres"}, map[string]any{"label": "SQLite"}}},
+			map[string]any{"question": "Which region?", "options": []any{map[string]any{"label": "US"}, map[string]any{"label": "EU"}}},
+		}}},
+		{"plan", "ExitPlanMode", map[string]any{"plan": "step 1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdin, _ := json.Marshal(map[string]any{
+				"session_id": "s-1", "hook_event_name": "PermissionRequest", "tool_name": tc.tool, "tool_input": tc.input,
+			})
+			wait := runHook(t, string(stdin))
+			req := openRequest(t, dir)
+			if len(req.Options) != 0 || req.FreeText || req.Tool != "" {
+				t.Fatalf("unanswerable request = %+v", req)
+			}
+			if tc.tool == "ExitPlanMode" && !strings.Contains(req.Text, "step 1") {
+				t.Fatalf("plan text = %q", req.Text)
+			}
+			if _, err := dialog.WriteAnswer(dir, dialog.Answer{ID: req.ID, Option: 1, By: dialog.ByBuzz}); err != nil {
+				t.Fatal(err)
+			}
+			for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+				won, err := dialog.WriteAnswer(dir, dialog.Answer{ID: req.ID, Option: 1, By: dialog.ByBuzz})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if won {
+					break // the hook rejected the first answer, as no option fits it
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("the response with no matching option was not rejected")
+				}
+			}
+			if _, err := dialog.Resolve(dir, dialog.Resolved{ID: req.ID, Outcome: dialog.OutcomeTerminal, By: dialog.ByTerminal}); err != nil {
+				t.Fatal(err)
+			}
+			if out := wait(); out != "" {
+				t.Fatalf("a terminal-only question printed %q", out)
+			}
+		})
 	}
 }

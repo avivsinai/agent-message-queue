@@ -83,6 +83,10 @@ const (
 	valueAllow        = "allow"
 	valueAllowSession = "allow_session"
 	valueDeny         = "deny"
+	valueAnswer       = "answer"
+
+	toolAskUserQuestion = "AskUserQuestion"
+	toolExitPlanMode    = "ExitPlanMode"
 )
 
 // Seat is the session a dialog comes from, as the hook found it.
@@ -218,10 +222,19 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 		return 0
 	}
 	options, sessionRules := dialogOptions(in)
+	asked, isQuestion := question{}, false
+	if in.ToolName == toolAskUserQuestion {
+		asked, isQuestion = singleQuestion(in.ToolInput)
+	}
+	tool := in.ToolName
+	if in.ToolName == toolAskUserQuestion || in.ToolName == toolExitPlanMode {
+		tool = ""
+	}
 	opened := h.now()
 	req := dialog.Request{
-		ID: dialog.NewID(), Harness: harnessClaude, Session: in.SessionID, Tool: in.ToolName,
-		Text: dialogText(in.ToolName, in.ToolInput), Options: options,
+		ID: dialog.NewID(), Harness: harnessClaude, Session: in.SessionID, Tool: tool,
+		FreeText: isQuestion,
+		Text:     dialogText(in.ToolName, in.ToolInput), Options: options,
 		OpenedAt: opened.UTC(), PID: os.Getpid(),
 	}
 	// Claude signals no terminal approve: the transcript that records the
@@ -258,18 +271,33 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 		}
 		if phase == dialog.PhaseAnswered {
 			opt, ok := chosen(options, a.Option)
-			if !ok {
+			switch {
+			case isQuestion && (ok || strings.TrimSpace(a.Text) != ""):
+				answer := strings.TrimSpace(a.Text)
+				if ok {
+					answer = opt.Label
+				}
+				updated, err := answeredInput(in.ToolInput, asked, answer)
+				if err != nil {
+					_ = dialog.RejectAnswer(dir, req.ID)
+					break
+				}
+				if resolve(dialog.OutcomeAnswered, answer, dialog.ByBuzz) {
+					_ = writeDecision(stdout, valueAllow, nil, updated)
+				}
+				return 0
+			case !ok:
 				// The answer fits no option: reject it, so the owner can
 				// answer again, and keep waiting.
 				_ = dialog.RejectAnswer(dir, req.ID)
-			} else {
+			default:
 				outcome := dialog.OutcomeAllowed
 				if opt.Deny {
 					outcome = dialog.OutcomeDenied
 				}
 				// The first resolution decides: print only after winning it.
 				if resolve(outcome, opt.Label, dialog.ByBuzz) {
-					_ = writeDecision(stdout, opt.Value, sessionRules)
+					_ = writeDecision(stdout, opt.Value, sessionRules, nil)
 				}
 				return 0
 			}
@@ -413,12 +441,88 @@ func claudeExecutable(path string) bool {
 	return filepath.Base(path) == harnessClaude || filepath.Base(dir) == "versions" && filepath.Base(filepath.Dir(dir)) == harnessClaude
 }
 
+// question is the one single-select question of an AskUserQuestion call:
+// the shape Buzz can answer with one choice or the owner's own text.
+type question struct {
+	Text    string
+	Options []questionOption
+}
+
+type questionOption struct {
+	Label       string `json:"label"`
+	Description string `json:"description"`
+}
+
+// askedQuestions are the questions of an AskUserQuestion input.
+type askedQuestions struct {
+	Questions []struct {
+		Question    string           `json:"question"`
+		MultiSelect bool             `json:"multiSelect"`
+		Options     []questionOption `json:"options"`
+	} `json:"questions"`
+}
+
+// singleQuestion returns the question of input when it is exactly one
+// single-select question with a text and at least two options whose labels
+// are not empty and differ.
+func singleQuestion(input json.RawMessage) (question, bool) {
+	var in askedQuestions
+	if json.Unmarshal(input, &in) != nil || len(in.Questions) != 1 {
+		return question{}, false
+	}
+	q := in.Questions[0]
+	if q.MultiSelect || strings.TrimSpace(q.Question) == "" || len(q.Options) < 2 {
+		return question{}, false
+	}
+	seen := map[string]bool{}
+	for _, o := range q.Options {
+		if strings.TrimSpace(o.Label) == "" || seen[o.Label] {
+			return question{}, false
+		}
+		seen[o.Label] = true
+	}
+	return question{Text: q.Question, Options: q.Options}, true
+}
+
+// answeredInput is input with the answer to q: the form Claude Code takes
+// as the tool's updated input.
+func answeredInput(input json.RawMessage, q question, answer string) (json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(input, &fields); err != nil {
+		return nil, err
+	}
+	answers, err := json.Marshal(map[string]string{q.Text: answer})
+	if err != nil {
+		return nil, err
+	}
+	fields["answers"] = answers
+	return json.Marshal(fields)
+}
+
 // dialogOptions are the choices Buzz offers, numbered as shown, and the
 // permission updates "Allow this session" applies. Claude offers it when
 // the dialog suggests updates (each echoed with destination session), and
 // for an edit tool without suggestions (accept edits for the session). Its
-// label says the scope in short (sessionScope).
+// label says the scope in short (sessionScope). A single-select question
+// offers its own choices; any other question and a plan offer none, so Buzz
+// sends the owner to the terminal.
 func dialogOptions(in permissionInput) ([]dialog.Option, []json.RawMessage) {
+	// A question or a plan needs its answer in the decision, which an
+	// allow or a deny cannot carry.
+	switch in.ToolName {
+	case toolAskUserQuestion:
+		q, ok := singleQuestion(in.ToolInput)
+		if !ok {
+			return nil, nil
+		}
+		opts := make([]dialog.Option, len(q.Options))
+		for i, o := range q.Options {
+			opts[i] = dialog.Option{N: i + 1, Label: o.Label, Value: valueAnswer}
+		}
+		return opts, nil
+	case toolExitPlanMode:
+		return nil, nil
+	}
 	opts := []dialog.Option{{N: 1, Label: "Allow once", Value: valueAllow}}
 	var rules []json.RawMessage
 	for _, s := range in.Suggestions {
@@ -573,6 +677,7 @@ func dialogText(tool string, input json.RawMessage) string {
 		NewSource    string `json:"new_source"`
 		URL          string `json:"url"`
 		Prompt       string `json:"prompt"`
+		Plan         string `json:"plan"`
 		Edits        []struct {
 			OldString  string `json:"old_string"`
 			NewString  string `json:"new_string"`
@@ -611,6 +716,25 @@ func dialogText(tool string, input json.RawMessage) string {
 		if in.Prompt != "" {
 			b.WriteString("\n" + in.Prompt)
 		}
+	case tool == toolAskUserQuestion:
+		var in askedQuestions
+		_ = json.Unmarshal(input, &in)
+		for i, q := range in.Questions {
+			if i > 0 {
+				b.WriteString("\n\n")
+			}
+			b.WriteString(q.Question + "\n")
+			for _, o := range q.Options {
+				if o.Description != "" {
+					b.WriteString("- " + o.Label + ": " + o.Description + "\n")
+				}
+			}
+			if q.MultiSelect {
+				b.WriteString("(more than one choice)\n")
+			}
+		}
+	case tool == toolExitPlanMode && in.Plan != "":
+		b.WriteString(in.Plan)
 	default:
 		if rest, ok := strings.CutPrefix(tool, "mcp__"); ok {
 			if server, name, ok := strings.Cut(rest, "__"); ok {
@@ -653,12 +777,14 @@ func truncateRunes(s string, n int) string {
 	return string([]rune(s)[:n]) + "\n… full text in the terminal"
 }
 
-// writeDecision prints the hook's decision: allow (with the session updates for valueAllowSession),
-// or deny with a message and no interrupt, so the turn continues.
-func writeDecision(stdout io.Writer, value string, sessionRules []json.RawMessage) error {
+// writeDecision prints the hook's decision: allow (with the session updates for valueAllowSession,
+// or with the tool's updated input for an answered question), or deny with
+// a message and no interrupt, so the turn continues.
+func writeDecision(stdout io.Writer, value string, sessionRules []json.RawMessage, updatedInput json.RawMessage) error {
 	type decision struct {
 		Behavior           string            `json:"behavior"`
 		Message            string            `json:"message,omitempty"`
+		UpdatedInput       json.RawMessage   `json:"updatedInput,omitempty"`
 		UpdatedPermissions []json.RawMessage `json:"updatedPermissions,omitempty"`
 	}
 	var out struct {
@@ -670,7 +796,7 @@ func writeDecision(stdout io.Writer, value string, sessionRules []json.RawMessag
 	out.HookSpecificOutput.HookEventName = permissionHookType
 	switch value {
 	case valueAllow:
-		out.HookSpecificOutput.Decision = decision{Behavior: "allow"}
+		out.HookSpecificOutput.Decision = decision{Behavior: "allow", UpdatedInput: updatedInput}
 	case valueAllowSession:
 		out.HookSpecificOutput.Decision = decision{Behavior: "allow", UpdatedPermissions: sessionRules}
 	default:
