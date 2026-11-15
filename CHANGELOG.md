@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.145.2](https://github.com/avivsinai/agent-message-queue/compare/v0.145.1...v0.145.2) (2026-11-15)
+
+
+### Bug Fixes
+
+* **launch:** a managed Codex seat binds a daemon whose release differs from the CLI ([#1503](https://github.com/avivsinai/agent-message-queue/issues/1503)) ([9b1264b](https://github.com/avivsinai/agent-message-queue/commit/9b1264b9698405c44e474231363220b80647a616))
+
 ## [0.145.1](https://github.com/avivsinai/agent-message-queue/compare/v0.145.0...v0.145.1) (2026-11-15)
 
 
