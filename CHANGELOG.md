@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.147.1](https://github.com/avivsinai/agent-message-queue/compare/v0.147.0...v0.147.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* **relay:** a subscription asked again after a close stays open ([f67d4d4](https://github.com/avivsinai/agent-message-queue/commit/f67d4d4d47b18f86f44aaa36047a60964cc2150d))
+* **remote:** a Claude dialog stays open in Buzz until it is answered ([f67d4d4](https://github.com/avivsinai/agent-message-queue/commit/f67d4d4d47b18f86f44aaa36047a60964cc2150d))
+
 ## [0.147.0](https://github.com/avivsinai/agent-message-queue/compare/v0.146.1...v0.147.0) (2026-11-15)
 
 
