@@ -17,6 +17,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
 	"github.com/avivsinai/agent-message-queue/internal/remote/mirror"
 )
 
@@ -32,7 +33,7 @@ func TestMirrorTickPostsEachTurnOnce(t *testing.T) {
 	}
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha", Harness: "claude", Transcript: transcript}
 	var posts []string
-	sendErr := error(&notSentError{errors.New("no buzz CLI")})
+	sendErr := error(&buzzcli.NotSentError{Err: errors.New("no buzz CLI")})
 	savedPost := postAnswer
 	t.Cleanup(func() { postAnswer = savedPost })
 	postAnswer = func(ch, content string, _ time.Duration) (string, error) {
@@ -480,7 +481,7 @@ func TestMirrorRunningPostEndsAfterABacklog(t *testing.T) {
 	f.add(f.userLine("o1", "p1", 0, "ship", nil), f.assistantLine("m1", 1, "tool_use", toolBlock("Bash")))
 	f.tick(1)
 	edit := editMessage
-	editMessage = func(string, string, time.Duration) error { return &notSentError{errors.New("relay down")} }
+	editMessage = func(string, string, time.Duration) error { return &buzzcli.NotSentError{Err: errors.New("relay down")} }
 	f.add(f.assistantLine("m2", 35, "tool_use", toolBlock("Read")))
 	f.tick(35) // the progress edit is not sent: the binding backs off
 	editMessage = edit

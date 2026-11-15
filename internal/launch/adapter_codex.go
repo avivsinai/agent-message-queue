@@ -88,17 +88,21 @@ func (adapter *CodexAdapter) ValidateCommittedConfig(request CommittedConfigRequ
 	return validateCommittedConfig(request, codexEnvRules(), codexArgRules())
 }
 
-func (adapter *CodexAdapter) Capabilities(ctx context.Context) AdapterCapabilities {
+// probe returns the Codex CLI's standard capability report, plus the
+// `codex resume --help` text its daemon-attach grammar check reads once;
+// the help is reused so no subprocess is called twice. Capabilities ignores
+// the help text; DaemonSeatReason reads it.
+func (adapter *CodexAdapter) probeCapabilities(ctx context.Context) (AdapterCapabilities, []byte) {
 	result := AdapterCapabilities{Provider: CodexProvider, Mode: adapter.Mode()}
 	executable, err := adapter.probe.LookPath(adapter.executable)
 	if err != nil {
 		result.Reason = "executable_not_found"
-		return result
+		return result, nil
 	}
 	version, err := adapter.probe.Output(ctx, executable, "--version")
 	if err != nil {
 		result.Reason = "version_probe_failed"
-		return result
+		return result, nil
 	}
 	help, helpErr := adapter.probe.Output(ctx, executable, "--help")
 	resumeHelp, resumeErr := adapter.probe.Output(ctx, executable, "resume", "--help")
@@ -106,7 +110,7 @@ func (adapter *CodexAdapter) Capabilities(ctx context.Context) AdapterCapabiliti
 		!strings.Contains(string(help), "resume") ||
 		!strings.Contains(string(resumeHelp), "[SESSION_ID]") {
 		result.Reason = "identity_contract_unsupported"
-		return result
+		return result, nil
 	}
 	result.Available = true
 	result.Executable = executable
@@ -114,15 +118,20 @@ func (adapter *CodexAdapter) Capabilities(ctx context.Context) AdapterCapabiliti
 	if result.ProviderVersion == "" {
 		result.Available = false
 		result.Reason = "version_probe_failed"
-		return result
+		return result, nil
 	}
 	result.Fresh = true
 	result.Resume = true
 	if !codexCaptureVersionSupported(result.ProviderVersion) {
 		result.Reason = "capture_version_unsupported"
-		return result
+		return result, resumeHelp
 	}
 	result.Capture = true
+	return result, resumeHelp
+}
+
+func (adapter *CodexAdapter) Capabilities(ctx context.Context) AdapterCapabilities {
+	result, _ := adapter.probeCapabilities(ctx)
 	return result
 }
 
@@ -260,12 +269,20 @@ var codexApprovalsReviewerValues = []string{"user", "auto_review", "guardian_sub
 
 // Codex applies -c overrides above config.toml, so these pins keep a project
 // or user config from widening a --sandbox workspace-write seat. Writable
-// roots admit only the empty array: a path list would widen the sandbox
-// through argv. Both network values are admitted; the digest binds either.
+// roots admit the empty array and one fixed token array with the marker
+// __AMQ_MAILBOXES__. The marker is filled with <session root>/agents at exec
+// time. A path list would widen the sandbox through argv; only the empty
+// array and the token are admitted. Both network values are admitted.
 var (
-	codexWritableRootsValues = []string{"[]"}
+	codexWritableRootsValues = []string{"[]", codexMailboxesToken}
 	codexNetworkAccessValues = []string{"true", "false"}
 )
+
+// codexMailboxesToken is the admitted writable_roots array literal.
+const codexMailboxesToken = `["__AMQ_MAILBOXES__"]`
+
+// codexMailboxesArgPrefix is the -c key of the writable_roots setting.
+const codexMailboxesArgPrefix = "sandbox_workspace_write.writable_roots="
 
 // codexConfigOverrideRule is the fixed value set of one admitted -c key.
 // Codex parses each value as TOML. A quoted value is a TOML string, so only a

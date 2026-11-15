@@ -1,14 +1,10 @@
 package acp
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -16,6 +12,8 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/relay"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 )
 
 // A Buzz agent's chat reply exists only if the agent publishes it: buzz-acp
@@ -29,11 +27,9 @@ import (
 // environment; they leave this process only as the buzz child's env.
 var buzzIdentityKeys = []string{"BUZZ_PRIVATE_KEY", "BUZZ_AUTH_TAG", "BUZZ_RELAY_URL"}
 
-// buzzIdentity holds "KEY=value" entries for buzzIdentityKeys.
-var buzzIdentity []string
-
-// envBuzzCLI overrides the buzz binary used to post.
-const envBuzzCLI = "AMQ_ACP_BUZZ_CLI"
+// buzzPort runs the buzz CLI with "KEY=value" entries for buzzIdentityKeys.
+// It is set once at worker start, before any server runs.
+var buzzPort *buzzcli.Port
 
 // defaultPostTimeout bounds one post, including the wait for the CLI's
 // output pipes to close (Config.PostTimeout).
@@ -42,17 +38,6 @@ const defaultPostTimeout = 30 * time.Second
 // postAnswer publishes content into channel and returns the posted event
 // id. A variable so tests can record posts without a relay.
 var postAnswer = postWithBuzzCLI
-
-// errNoBuzzIdentity means this process runs outside a Buzz managed agent, so
-// there is nothing to post as; the ACP text is the only channel.
-var errNoBuzzIdentity = errors.New("no Buzz agent identity")
-
-// notSentError marks a post that failed before the buzz CLI started, so
-// nothing can have reached the relay and the post may be made again.
-type notSentError struct{ err error }
-
-func (e *notSentError) Error() string { return e.err.Error() }
-func (e *notSentError) Unwrap() error { return e.err }
 
 // channelRe finds the channel UUID in the Channel line of the prompt's
 // <context> block, the reply destination buzz-acp supplies.
@@ -169,29 +154,31 @@ func hostChannel(line string) string {
 	return ""
 }
 
-// buzzSelf is the managed agent's own public key (64 lowercase hex), or ""
-// when the secret is absent or unreadable. The agent archives and unarchives
-// itself under it (lifecycle.go).
-var buzzSelf string
-
-// captureBuzzIdentity records the credentials the buzz CLI needs, the agent's
-// own public key, and the agent's owner (dialog.go).
-func captureBuzzIdentity() {
-	buzzIdentity = nil
+// captureBuzzIdentity records the credentials the buzz CLI needs and the
+// relay credential, and returns the agent's public identity: its own public
+// key, under which it archives and unarchives itself (lifecycle.go), its
+// owner (dialog.go), its relay and its display name.
+func captureBuzzIdentity() buzzop.Identity {
+	var env []string
 	for _, key := range buzzIdentityKeys {
 		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-			buzzIdentity = append(buzzIdentity, key+"="+v)
+			env = append(env, key+"="+v)
 		}
 	}
-	buzzSelf = ""
+	buzzPort = buzzcli.New(env)
+	var id buzzop.Identity
 	if secret := strings.TrimSpace(os.Getenv("BUZZ_PRIVATE_KEY")); secret != "" {
 		if pub, err := agentPubKey(secret); err == nil {
-			buzzSelf = pub
+			id.Agent = pub
 		}
 	}
-	buzzOwner = agentOwner(os.Getenv("BUZZ_AUTH_TAG"), os.Getenv("BUZZ_PRIVATE_KEY"), os.Getenv("BUZZ_ACP_AGENT_OWNER"))
-	buzzRelayURL, buzzRelayKey = strings.TrimSpace(os.Getenv("BUZZ_RELAY_URL")), relayKey(os.Getenv("BUZZ_RELAY_URL"))
-	buzzRelay = agentRelay(buzzRelayURL, os.Getenv("BUZZ_PRIVATE_KEY"), os.Getenv("BUZZ_AUTH_TAG"))
+	id.Owner = agentOwner(os.Getenv("BUZZ_AUTH_TAG"), os.Getenv("BUZZ_PRIVATE_KEY"), os.Getenv("BUZZ_ACP_AGENT_OWNER"))
+	id.RelayURL, id.RelayKey = buzzop.NormalizeRelay(os.Getenv("BUZZ_RELAY_URL")), buzzop.RelayKey(os.Getenv("BUZZ_RELAY_URL"))
+	id.DisplayName = strings.TrimSpace(os.Getenv(envBuzzDisplayName))
+	// The relay credential connects to the URL as given, not the normalized
+	// one.
+	buzzRelay = agentRelay(strings.TrimSpace(os.Getenv("BUZZ_RELAY_URL")), os.Getenv("BUZZ_PRIVATE_KEY"), os.Getenv("BUZZ_AUTH_TAG"))
+	return id
 }
 
 // buzzRelay is the managed agent's own relay identity: the relay URL, the
@@ -216,14 +203,11 @@ func agentRelay(url, secret, authTag string) relay.Config {
 // postWithBuzzCLI runs `buzz messages send --channel <channel> --content -`
 // with only the agent identity and a minimal environment, and returns the
 // event_id the CLI prints. A refused messages-send (accepted:false on HTTP
-// 200) still prints event_id, so this function asks acceptedFor about the
-// args and returns the resulting *notAcceptedError to the caller.
+// 200) still prints event_id, so a write that is not accepted returns
+// buzzcli.WriteError's *buzzcli.NotAcceptedError to the caller.
 func postWithBuzzCLI(channel, content string, budget time.Duration) (string, error) {
-	out, err := runBuzzCLI(budget, strings.NewReader(content), "messages", "send", "--channel", channel, "--content", "-")
-	if err != nil {
-		return "", err
-	}
-	if err := acceptedFor([]string{"messages", "send"}, out, nil); err != nil {
+	out, err := buzzPort.Run(budget, strings.NewReader(content), "messages", "send", "--channel", channel, "--content", "-")
+	if err := buzzcli.WriteError(buzzcli.ShapeAccepted, out, err); err != nil {
 		return "", err
 	}
 	var sent struct {
@@ -233,175 +217,6 @@ func postWithBuzzCLI(channel, content string, budget time.Duration) (string, err
 		return "", fmt.Errorf("buzz messages send: no event_id in its output")
 	}
 	return sent.EventID, nil
-}
-
-// runBuzzCLI runs the buzz CLI with only the agent identity and a minimal
-// environment and returns its stdout.
-func runBuzzCLI(budget time.Duration, stdin io.Reader, args ...string) ([]byte, error) {
-	return runBuzzCLIContext(context.Background(), budget, stdin, args...)
-}
-
-// runBuzzCLIContext is runBuzzCLI that also stops when parent ends. A run
-// that never started is a notSentError: it cannot have reached the relay.
-func runBuzzCLIContext(parent context.Context, budget time.Duration, stdin io.Reader, args ...string) ([]byte, error) {
-	return runBuzzCLIBounded(parent, budget, stdin, 0, args...)
-}
-
-// errBuzzOutputLimit is a buzz CLI run stopped because its stdout passed the
-// caller's limit.
-var errBuzzOutputLimit = errors.New("buzz CLI output is over the limit")
-
-// boundedBuffer holds at most limit bytes. The write that would pass limit
-// fails and calls stop, which kills the CLI, so the output never grows past
-// limit however much the CLI writes. It is not an io.ReaderFrom, so every
-// copy goes through Write.
-type boundedBuffer struct {
-	buf   bytes.Buffer
-	limit int
-	over  bool
-	stop  func()
-}
-
-func (b *boundedBuffer) Write(p []byte) (int, error) {
-	if b.buf.Len()+len(p) > b.limit {
-		b.over = true
-		b.stop()
-		return 0, errBuzzOutputLimit
-	}
-	return b.buf.Write(p)
-}
-
-// runBuzzCLIBounded is runBuzzCLIContext whose stdout is limited to
-// stdoutMax bytes when stdoutMax > 0: a run that writes more is killed and
-// fails with errBuzzOutputLimit.
-func runBuzzCLIBounded(parent context.Context, budget time.Duration, stdin io.Reader, stdoutMax int, args ...string) ([]byte, error) {
-	if len(buzzIdentity) == 0 {
-		return nil, errNoBuzzIdentity
-	}
-	bin, err := buzzCLI()
-	if err != nil {
-		var notSent *notSentError
-		if !errors.As(err, &notSent) {
-			err = &notSentError{err}
-		}
-		return nil, err
-	}
-	// The budget covers the run and the pipe drain: a CLI whose child keeps
-	// stderr open must not hold a status post (and its event post lock)
-	// past the budget. A CLI that keeps sending after its budget is outside
-	// the status/final ordering (README).
-	waitDelay := budget / 10
-	ctx, cancel := context.WithTimeout(parent, budget-waitDelay)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, bin, args...)
-	cmd.WaitDelay = waitDelay
-	cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}, buzzIdentity...)
-	cmd.Stdin = stdin
-	var stderr bytes.Buffer
-	stdout := &boundedBuffer{limit: stdoutMax, stop: cancel}
-	if stdoutMax > 0 {
-		cmd.Stdout = stdout
-	} else {
-		cmd.Stdout = &stdout.buf
-	}
-	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
-		return nil, &notSentError{fmt.Errorf("buzz %s: %w", strings.Join(args[:2], " "), err)}
-	}
-	if err := cmd.Wait(); err != nil {
-		if stdout.over {
-			return nil, fmt.Errorf("buzz %s: %w", strings.Join(args[:2], " "), errBuzzOutputLimit)
-		}
-		msg := strings.TrimSpace(stderr.String())
-		if len(msg) > 300 {
-			msg = msg[:300]
-		}
-		code := -1
-		var exit *exec.ExitError
-		if errors.As(err, &exit) && ctx.Err() == nil {
-			code = exit.ExitCode()
-		}
-		return nil, &buzzExitError{code: code, err: fmt.Errorf("buzz %s: %v: %s", strings.Join(args[:2], " "), err, msg)}
-	}
-	return stdout.buf.Bytes(), nil
-}
-
-// buzzExitError is a buzz CLI run that started and failed. code is the
-// CLI's exit status: 1 bad input, 2 relay or network, 3 auth, 4 other, 5
-// write conflict; -1 when the run was cut off (a timeout or a signal).
-type buzzExitError struct {
-	code int
-	err  error
-}
-
-func (e *buzzExitError) Error() string { return e.err.Error() }
-func (e *buzzExitError) Unwrap() error { return e.err }
-
-// buzzCLI finds the buzz binary that receives the managed agent's key:
-// AMQ_ACP_BUZZ_CLI, else the CLI inside Buzz.app under /Applications or the
-// user's Applications.
-// There is no PATH fallback: an unrelated buzz on PATH must never receive
-// BUZZ_PRIVATE_KEY.
-func buzzCLI() (string, error) {
-	if p := strings.TrimSpace(os.Getenv(envBuzzCLI)); p != "" {
-		return p, nil
-	}
-	home, _ := os.UserHomeDir()
-	return buzzCLIFrom("/Applications", home)
-}
-
-// buzzCLIFrom selects the first usable Buzz.app CLI: systemApps first, then
-// home/Applications. A home that is not absolute yields no candidate.
-func buzzCLIFrom(systemApps, home string) (string, error) {
-	dirs := []string{systemApps}
-	if filepath.IsAbs(home) {
-		dirs = append(dirs, filepath.Join(home, "Applications"))
-	}
-	for _, d := range dirs {
-		if p := bundledBuzz(filepath.Join(d, "Buzz.app")); p != "" {
-			return p, nil
-		}
-	}
-	return "", &notSentError{errors.New("buzz CLI not found in Buzz.app; set " + envBuzzCLI + " to the buzz executable")}
-}
-
-// bundledBuzz returns the CLI inside one Buzz.app, or "" unless the whole path
-// from the filesystem root down contains no symlink (so an ancestor such as a
-// symlinked home or Applications cannot redirect the key to another tree), the
-// CLI is a regular file, and this process can execute it. The installation and
-// its parent directories are trusted against concurrent replacement: pathname
-// validation is not atomic with exec.
-//
-// The CLI file is named exactly "buzz" (byte for byte). A file whose name
-// differs only in case (for example the Buzz Desktop GUI binary "Buzz") is
-// another program and never gets the key, so the entry is looked up in the
-// directory listing, not by a case-insensitive path resolution.
-func bundledBuzz(app string) string {
-	macos := filepath.Join(app, "Contents", "MacOS")
-	entries, err := os.ReadDir(macos)
-	if err != nil {
-		return ""
-	}
-	found := false
-	for _, e := range entries {
-		if e.Name() == "buzz" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		return ""
-	}
-	path := filepath.Join(macos, "buzz")
-	real, err := filepath.EvalSymlinks(path)
-	if err != nil || real != filepath.Clean(path) {
-		return ""
-	}
-	fi, err := os.Lstat(path)
-	if err != nil || !fi.Mode().IsRegular() || !canExecute(path) {
-		return ""
-	}
-	return path
 }
 
 // publish posts text for the owner when the prompt came from Buzz. It
@@ -442,13 +257,12 @@ func (s *Server) publishFinal(eventID, channel, text string) string {
 
 // recordFinal records what a final post proves and returns its result.
 func (s *Server) recordFinal(eventID, result string, err error) string {
-	if errors.Is(err, errNoBuzzIdentity) {
+	if errors.Is(err, buzzcli.ErrNoIdentity) {
 		return result
 	}
 	state := finalPostAccepted
-	var notSent *notSentError
 	switch {
-	case errors.As(err, &notSent):
+	case buzzcli.NeverSent(err):
 		state = finalPostUnsent
 	case err != nil:
 		state = finalPostUncertain
@@ -468,7 +282,7 @@ func (s *Server) post(channel, text string) (string, error) {
 	switch {
 	case err == nil:
 		return "posted", nil
-	case errors.Is(err, errNoBuzzIdentity):
+	case errors.Is(err, buzzcli.ErrNoIdentity):
 		return "", err
 	default:
 		return "error: " + err.Error(), err

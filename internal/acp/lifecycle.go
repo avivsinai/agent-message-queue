@@ -16,6 +16,8 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 )
 
 // One Buzz agent serves one session. Its pin names that session's binding:
@@ -47,12 +49,11 @@ var machineLineRe = regexp.MustCompile(`(?m)^[ \t]*AMQ Remote machine[ \t]*\r?$`
 
 // buzzAgent is the managed agent's record as Desktop passed it, captured
 // before PrepareWorkerEnv strips BUZZ_*.
-var buzzAgent struct{ systemPrompt, model, displayName string }
+var buzzAgent struct{ systemPrompt, model string }
 
 func captureBuzzAgent() {
 	buzzAgent.systemPrompt = os.Getenv(envBuzzSystemPrompt)
 	buzzAgent.model = strings.TrimSpace(os.Getenv(envBuzzModel))
-	buzzAgent.displayName = strings.TrimSpace(os.Getenv(envBuzzDisplayName))
 }
 
 // sessionPin resolves the binding an agent serves, or its helper or machine
@@ -333,14 +334,14 @@ func (s *Server) agentMarkers(pin string) []agentMarker {
 // buzzCall runs one buzz CLI command as the agent and returns its output. A
 // variable so tests can record calls without a relay.
 var buzzCall = func(budget time.Duration, args ...string) ([]byte, error) {
-	return runBuzzCLI(budget, nil, args...)
+	return buzzPort.Run(budget, nil, args...)
 }
 
 // machineCall is buzzCall for the machine agent's lifecycle: it stops when
 // the worker's context ends. A variable so tests can record calls without a
 // relay.
 var machineCall = func(ctx context.Context, budget time.Duration, args ...string) ([]byte, error) {
-	return runBuzzCLIContext(ctx, budget, nil, args...)
+	return buzzPort.RunContext(ctx, budget, nil, args...)
 }
 
 // buzzRun is buzzCall for one CLI write whose outcome matters. stdout shape
@@ -364,7 +365,7 @@ func buzzRun(budget time.Duration, args ...string) error {
 // Buzz may run N identical workers of one agent; only the worker that leads
 // its identity runs the tick, so each change runs once, not N times.
 func (s *Server) lifecycleTick(now time.Time) {
-	if buzzSelf == "" || (!s.cfg.Helper && (s.cfg.Pin == "" || s.cfg.PinErr != nil)) {
+	if s.id.Agent == "" || (!s.cfg.Helper && (s.cfg.Pin == "" || s.cfg.PinErr != nil)) {
 		return
 	}
 	if s.cfg.Helper {
@@ -377,12 +378,12 @@ func (s *Server) lifecycleTick(now time.Time) {
 		return
 	}
 	dir := s.agentMarkerDir(s.cfg.Pin)
-	m, _ := readAgentMarker(filepath.Join(dir, buzzSelf+".json"))
-	m.Name, m.DisplayName = s.cfg.Pin, buzzAgent.displayName
+	m, _ := readAgentMarker(filepath.Join(dir, s.id.Agent+".json"))
+	m.Name, m.DisplayName = s.cfg.Pin, s.id.DisplayName
 	// The marker names this worker before any relay call, so a slow or
 	// failing relay never leaves the previous worker's identity in it.
 	s.writeAgentMarker(dir, m, now)
-	if raw, err := readSmallRegular(filepath.Join(dir, buzzSelf+".dm")); err == nil && strings.TrimSpace(string(raw)) != "" {
+	if raw, err := readSmallRegular(filepath.Join(dir, s.id.Agent+".dm")); err == nil && strings.TrimSpace(string(raw)) != "" {
 		m.Channel = strings.TrimSpace(string(raw))
 	} else {
 		s.mu.Lock()
@@ -394,12 +395,12 @@ func (s *Server) lifecycleTick(now time.Time) {
 	b, err := binding.ReadNamed(s.cfg.Pin)
 	switch {
 	case errors.Is(err, binding.ErrNone):
-		if !m.Archived && buzzRun(s.cfg.PostTimeout, "agents", "archive", buzzSelf, "--reason", "retired") == nil {
+		if !m.Archived && buzzRun(s.cfg.PostTimeout, "agents", "archive", s.id.Agent, "--reason", "retired") == nil {
 			m.Archived = true
 			_ = buzzRun(s.cfg.PostTimeout, "users", "set-status", "--text", "session ended")
 		}
 	case err == nil:
-		if m.Archived && buzzRun(s.cfg.PostTimeout, "agents", "unarchive", buzzSelf, "--reason", "returned") == nil {
+		if m.Archived && buzzRun(s.cfg.PostTimeout, "agents", "unarchive", s.id.Agent, "--reason", "returned") == nil {
 			m.Archived = false
 			_ = buzzRun(s.cfg.PostTimeout, "users", "set-status", "--clear")
 			if m.Channel != "" {
@@ -424,7 +425,7 @@ func (s *Server) lead(pin string) bool {
 	if os.MkdirAll(dir, 0o700) != nil {
 		return false
 	}
-	release, ok, err := lock.TryExclusive(filepath.Join(dir, buzzSelf+".lock"))
+	release, ok, err := lock.TryExclusive(filepath.Join(dir, s.id.Agent+".lock"))
 	if err != nil || !ok {
 		return false
 	}
@@ -444,10 +445,10 @@ func (s *Server) resign() {
 // workers, so the worker that leads its lifecycle posts "Connected again"
 // there. Every DM prompt writes it: the last writer is the latest DM.
 func (s *Server) recordDM(channel string) {
-	if !s.cfg.RemoteBinding || s.cfg.Helper || s.cfg.Pin == "" || s.cfg.PinErr != nil || buzzSelf == "" {
+	if !s.cfg.RemoteBinding || s.cfg.Helper || s.cfg.Pin == "" || s.cfg.PinErr != nil || s.id.Agent == "" {
 		return
 	}
-	_ = s.writeState(filepath.Join(s.agentMarkerDir(s.cfg.Pin), buzzSelf+".dm"), []byte(channel+"\n"))
+	_ = s.writeState(filepath.Join(s.agentMarkerDir(s.cfg.Pin), s.id.Agent+".dm"), []byte(channel+"\n"))
 }
 
 // writeAgentMarker stamps m as this process's and writes it under dir. Only
@@ -455,7 +456,7 @@ func (s *Server) recordDM(channel string) {
 // the marker of a worker that started after it. A marker that already says
 // the same, younger than agentMarkerRefresh, is left as it is.
 func (s *Server) writeAgentMarker(dir string, m agentMarker, now time.Time) {
-	path := filepath.Join(dir, buzzSelf+".json")
+	path := filepath.Join(dir, s.id.Agent+".json")
 	old, ok := readAgentMarker(path)
 	if ok && newerWorker(old.Worker, workerIdentity.self) {
 		// Holding the lead is the authority to write: a newer worker that
@@ -464,7 +465,7 @@ func (s *Server) writeAgentMarker(dir string, m agentMarker, now time.Time) {
 			return
 		}
 	}
-	m.PubKey, m.PID = buzzSelf, os.Getpid()
+	m.PubKey, m.PID = s.id.Agent, os.Getpid()
 	m.Worker, m.Parent = workerIdentity.self, workerIdentity.parent
 	m.Updated = now.UTC().Format(time.RFC3339)
 	raw, err := json.MarshalIndent(m, "", "  ")
@@ -512,14 +513,14 @@ type helperRequest struct {
 }
 
 func (s *Server) helperTick(now time.Time) {
-	if buzzSelf == "" {
+	if s.id.Agent == "" {
 		return
 	}
 	dir := s.agentMarkerDir(helperName)
-	m, _ := readAgentMarker(filepath.Join(dir, buzzSelf+".json"))
-	m.Name, m.DisplayName = helperName, buzzAgent.displayName
+	m, _ := readAgentMarker(filepath.Join(dir, s.id.Agent+".json"))
+	m.Name, m.DisplayName = helperName, s.id.DisplayName
 	defer func() { s.writeAgentMarker(dir, m, now) }()
-	if buzzOwner == "" || !s.helperChannel(&m, now) {
+	if s.id.Owner == "" || !s.helperChannel(&m, now) {
 		return
 	}
 	// Desktop shows one draft at a time and drops a draft that arrives
@@ -615,21 +616,17 @@ func (s *Server) helperChannel(m *agentMarker, now time.Time) bool {
 	if m.Channel == "" {
 		out, err := buzzCall(s.cfg.PostTimeout, "channels", "create", "--name", name, "--type", "stream", "--visibility", "private")
 		var created struct {
-			Accepted  bool   `json:"accepted"`
 			ChannelID string `json:"channel_id"`
 		}
-		if err != nil || json.Unmarshal(out, &created) != nil || !created.Accepted || created.ChannelID == "" {
+		if buzzcli.Classify(buzzcli.ShapeAccepted, out, err).Outcome != buzzop.Accepted || json.Unmarshal(out, &created) != nil || created.ChannelID == "" {
 			return false
 		}
 		m.Channel = created.ChannelID
 	}
 	// Adding the owner again with a new role changes the role, so a channel
 	// set up before the owner was made an admin is upgraded here.
-	out, err := buzzCall(s.cfg.PostTimeout, "channels", "add-member", "--channel", m.Channel, "--pubkey", buzzOwner, "--role", "admin")
-	var added struct {
-		Accepted bool `json:"accepted"`
-	}
-	if err != nil || json.Unmarshal(out, &added) != nil || !added.Accepted {
+	out, err := buzzCall(s.cfg.PostTimeout, "channels", "add-member", "--channel", m.Channel, "--pubkey", s.id.Owner, "--role", "admin")
+	if buzzcli.Classify(buzzcli.ShapeAccepted, out, err).Outcome != buzzop.Accepted {
 		failure := string(out)
 		if err != nil {
 			failure = err.Error()
@@ -653,12 +650,12 @@ func (s *Server) ownsChannel(channel string) bool {
 // channelOwner reports whether the helper owns channel; ok is false when
 // the members could not be read, which proves nothing.
 func (s *Server) channelOwner(channel string) (owner, ok bool) {
-	return ownerOf(buzzCall(s.cfg.PostTimeout, "channels", "members", "--channel", channel))
+	return s.ownerOf(buzzCall(s.cfg.PostTimeout, "channels", "members", "--channel", channel))
 }
 
 // ownerOf reads a channels members result: whether this agent is the
 // channel's owner, and whether the members could be read at all.
-func ownerOf(out []byte, err error) (owner, ok bool) {
+func (s *Server) ownerOf(out []byte, err error) (owner, ok bool) {
 	var members []struct {
 		PubKey string `json:"pubkey"`
 		Role   string `json:"role"`
@@ -667,7 +664,7 @@ func ownerOf(out []byte, err error) (owner, ok bool) {
 		return false, false
 	}
 	for _, mb := range members {
-		if mb.PubKey == buzzSelf && mb.Role == "owner" {
+		if mb.PubKey == s.id.Agent && mb.Role == "owner" {
 			return true, true
 		}
 	}

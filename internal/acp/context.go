@@ -12,6 +12,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/sessionguard"
 )
 
@@ -89,6 +90,9 @@ type Config struct {
 	HeartbeatInterval time.Duration
 	// PostTimeout bounds one Buzz post (default 30 s).
 	PostTimeout time.Duration
+	// Identity is the managed agent's Buzz identity (PrepareWorkerEnv);
+	// zero outside Buzz. NewServer fixes it for the server's life.
+	Identity buzzop.Identity
 }
 
 // LoadConfig resolves the routing context from the environment. An absent root,

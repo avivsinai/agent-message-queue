@@ -22,7 +22,9 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzevent"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 )
 
@@ -65,11 +67,6 @@ func reactionPollGap(age time.Duration) time.Duration {
 	}
 	return min(gap, reactionPollMax)
 }
-
-// buzzOwner is the managed agent's owner pubkey (64 lowercase hex), or ""
-// when it cannot be established. Only its reactions and messages answer a
-// dialog.
-var buzzOwner string
 
 // agentOwner is the owner that Buzz Desktop gave this agent: the NIP-OA
 // BUZZ_AUTH_TAG ["auth", owner, conditions, sig], verified against the
@@ -135,7 +132,7 @@ var readReactions = reactionsWithBuzzCLI
 // reactionsWithBuzzCLI runs `buzz reactions get --event <id>`, which prints
 // {"reactions":[{"emoji","count","pubkeys"}]}.
 func reactionsWithBuzzCLI(eventID string, budget time.Duration) ([]reaction, error) {
-	out, err := runBuzzCLI(budget, nil, "reactions", "get", "--event", eventID)
+	out, err := buzzPort.Run(budget, nil, "reactions", "get", "--event", eventID)
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +146,7 @@ func reactionsWithBuzzCLI(eventID string, budget time.Duration) ([]reaction, err
 }
 
 // reacted reports whether owner reacted with emoji.
-func reacted(rs []reaction, owner, emoji string) bool {
+func reacted(rs []buzzop.Reaction, owner, emoji string) bool {
 	for _, r := range rs {
 		if strings.TrimSpace(r.Emoji) == emoji && slices.Contains(r.PubKeys, owner) {
 			return true
@@ -163,10 +160,11 @@ func reacted(rs []reaction, owner, emoji string) bool {
 var editMessage = editWithBuzzCLI
 
 // editWithBuzzCLI runs `buzz messages edit --event <id> --content <text>`.
-// A refused edit (accepted:false on exit 0) returns a *notAcceptedError.
+// A refused edit (accepted:false on exit 0) returns a
+// *buzzcli.NotAcceptedError.
 func editWithBuzzCLI(eventID, content string, budget time.Duration) error {
-	out, err := runBuzzCLI(budget, nil, "messages", "edit", "--event", eventID, "--content", content)
-	return acceptedFor([]string{"messages", "edit"}, out, err)
+	out, err := buzzPort.Run(budget, nil, "messages", "edit", "--event", eventID, "--content", content)
+	return buzzcli.WriteError(buzzcli.ShapeAccepted, out, err)
 }
 
 // dialogPost is the record of one posted dialog.
@@ -376,8 +374,8 @@ func (s *Server) dialogStopped() bool {
 
 // routable reports whether r is an active channel record of this machine
 // agent on its relay.
-func routable(r channelRecord) bool {
-	return r.State == channelActive && r.ChannelID != "" && r.Machine == buzzSelf && r.Relay == normalizeRelay(buzzRelayURL)
+func routable(r channelRecord, id buzzop.Identity) bool {
+	return r.State == channelActive && r.ChannelID != "" && r.Machine == id.Agent && r.Relay == id.RelayURL
 }
 
 // serves reports whether the routable record r is the channel of b's live
@@ -410,7 +408,7 @@ func (s *Server) machineTargets() []dialogTarget {
 	}
 	var out []dialogTarget
 	for _, r := range snap.activeRecords() {
-		if !routable(r) {
+		if !routable(r, s.id) {
 			continue
 		}
 		if b, ok := snap.binding(r.Name); ok && s.serves(r, b) {
@@ -424,11 +422,11 @@ func (s *Server) machineTargets() []dialogTarget {
 // dialogTargets are the bindings this worker posts dialogs for: a machine
 // agent's live channels, or a pinned agent's live binding and its latest DM.
 func (s *Server) dialogTargets() []dialogTarget {
-	if buzzSelf == "" {
+	if s.id.Agent == "" {
 		return nil
 	}
 	if s.cfg.Machine {
-		if buzzRelayKey == "" || buzzOwner == "" {
+		if s.id.RelayKey == "" || s.id.Owner == "" {
 			return nil
 		}
 		return s.machineTargets()
@@ -441,7 +439,7 @@ func (s *Server) dialogTargets() []dialogTarget {
 		return nil
 	}
 	channel := ""
-	if raw, err := readSmallRegular(filepath.Join(s.agentMarkerDir(s.cfg.Pin), buzzSelf+".dm")); err == nil {
+	if raw, err := readSmallRegular(filepath.Join(s.agentMarkerDir(s.cfg.Pin), s.id.Agent+".dm")); err == nil {
 		channel = strings.TrimSpace(string(raw))
 	}
 	if channel == "" {
@@ -630,11 +628,11 @@ func (s *Server) dialogStep(t dialogTarget, dir string, req dialog.Request, now 
 		return
 	}
 	s.dialogs.polled[req.ID] = now
-	rs, err := readReactions(p.Event, s.cfg.PostTimeout)
+	rs, err := s.posts.Reactions(context.Background(), p.Event)
 	if err != nil {
 		return
 	}
-	if n := reactionOption(req, rs); n != 0 {
+	if n := reactionOption(req, rs, s.id.Owner); n != 0 {
 		_, _ = dialog.WriteAnswer(dir, dialog.Answer{ID: req.ID, Option: n, By: dialog.ByBuzz, At: now.UTC()})
 	}
 }
@@ -642,15 +640,15 @@ func (s *Server) dialogStep(t dialogTarget, dir string, req dialog.Request, now 
 // reactionOption is the option the owner's reaction picks: ❌ the deny
 // option, which beats ✅, option 1. A reaction never answers a dialog
 // without that option; 0 means no answer.
-func reactionOption(req dialog.Request, rs []reaction) int {
-	if reacted(rs, buzzOwner, "❌") {
+func reactionOption(req dialog.Request, rs []buzzop.Reaction, owner string) int {
+	if reacted(rs, owner, "❌") {
 		for _, o := range req.Options {
 			if o.Deny {
 				return o.N
 			}
 		}
 	}
-	if reacted(rs, buzzOwner, "✅") {
+	if reacted(rs, owner, "✅") {
 		for _, o := range req.Options {
 			if o.N == 1 {
 				return 1
@@ -677,16 +675,16 @@ func (s *Server) postDialog(path string, t dialogTarget, req dialog.Request) {
 	if won, err := createExclusive(path, raw); err != nil || !won {
 		return
 	}
-	id, err := postAnswer(t.channel, p.Text, s.cfg.PostTimeout)
-	var notSent *notSentError
-	if errors.As(err, &notSent) || errors.Is(err, errNoBuzzIdentity) {
+	r := s.posts.Send(context.Background(), buzzop.Message{Key: buzzop.Key("dialog/" + t.name + "/" + req.ID),
+		Channel: t.channel, Content: p.Text})
+	if r.Outcome == buzzop.NotSent {
 		_ = os.Remove(path)
 		return
 	}
-	if err != nil || id == "" {
+	if r.Outcome != buzzop.Accepted || r.EventID == "" {
 		return
 	}
-	p.Event = id
+	p.Event = r.EventID
 	_ = s.writeDialogPost(path, p)
 }
 
@@ -719,7 +717,8 @@ func (s *Server) dialogClose(name, dir string, open map[string]bool, now time.Ti
 		if bo, ok := s.dialogs.edits[id]; ok && now.Before(bo.until) {
 			continue
 		}
-		if p.Event != "" && editMessage(p.Event, p.Text+"\n\n"+outcomeLine(res), s.cfg.PostTimeout) != nil {
+		if p.Event != "" && s.posts.Edit(context.Background(), buzzop.Key("dialog/"+name+"/"+id+"/closed"),
+			p.Channel, p.Event, p.Text+"\n\n"+outcomeLine(res)).Outcome != buzzop.Accepted {
 			s.dialogEditBackOff(id, now)
 			continue
 		}
@@ -870,14 +869,14 @@ func (s *Server) dialogLead() bool {
 	if s.dialogs.release != nil || !lock.AdvisoryLockAvailable() {
 		return true
 	}
-	if buzzSelf == "" {
+	if s.id.Agent == "" {
 		return false
 	}
 	dir := s.agentMarkerDir(s.dialogPin())
 	if os.MkdirAll(dir, 0o700) != nil {
 		return false
 	}
-	release, ok, err := lock.TryExclusive(filepath.Join(dir, buzzSelf+".dialog.lock"))
+	release, ok, err := lock.TryExclusive(filepath.Join(dir, s.id.Agent+".dialog.lock"))
 	if err != nil || !ok {
 		return false
 	}
@@ -894,7 +893,7 @@ func (s *Server) dialogLead() bool {
 // open in channel. With no verified event the dialogs stay pending and the
 // channel is told why, once per open set.
 func (s *Server) dialogReply(channel, eventID, prompt string) (string, dialog.Answer, bool) {
-	if channel == "" || buzzOwner == "" {
+	if channel == "" || s.id.Owner == "" {
 		return "", dialog.Answer{}, false
 	}
 	name := s.cfg.Pin
@@ -931,7 +930,7 @@ func (s *Server) dialogReply(channel, eventID, prompt string) (string, dialog.An
 	}) {
 		return "", dialog.Answer{}, false
 	}
-	evt, err := ownerEvent(eventID, prompt, channel)
+	evt, err := ownerEvent(s.id.Owner, eventID, prompt, channel)
 	if err != nil {
 		s.tellUnverified(channel, "dialog:"+strings.Join(openIDs, ","), "Your reply was not taken as an answer", err)
 		return "", dialog.Answer{}, false
@@ -1056,7 +1055,7 @@ var errNoEventID = errors.New("the message names no signed event")
 // its content and tags, never on the prompt text. errNotOwner means it
 // verified but another key signed it; any other error means there is no
 // verified event.
-func ownerEvent(eventID, prompt, channel string) (nostr.Event, error) {
+func ownerEvent(owner, eventID, prompt, channel string) (nostr.Event, error) {
 	id := lookupEventID(eventID, prompt)
 	if id == "" {
 		return nostr.Event{}, errNoEventID
@@ -1065,7 +1064,7 @@ func ownerEvent(eventID, prompt, channel string) (nostr.Event, error) {
 	if err != nil {
 		return nostr.Event{}, err
 	}
-	if buzzOwner == "" || evt.PubKey.Hex() != buzzOwner {
+	if owner == "" || evt.PubKey.Hex() != owner {
 		return nostr.Event{}, errNotOwner
 	}
 	return evt, nil

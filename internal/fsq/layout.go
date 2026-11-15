@@ -63,6 +63,10 @@ const (
 	MailboxDLQNew     MailboxLeaf = "dlq/new"
 	MailboxDLQCur     MailboxLeaf = "dlq/cur"
 	MailboxReceipts   MailboxLeaf = "receipts"
+	// MailboxFollowUps holds a sender's follow-up timers. It is created on
+	// first use and is not part of the required layout: a mailbox without it
+	// is complete.
+	MailboxFollowUps MailboxLeaf = "follow-ups"
 )
 
 var requiredMailboxLeaves = [...]MailboxLeaf{
@@ -209,6 +213,10 @@ func AgentDLQNew(root, agent string) string {
 
 func AgentReceipts(root, agent string) string {
 	return AgentMailboxPath(root, agent, MailboxReceipts)
+}
+
+func AgentFollowUps(root, agent string) string {
+	return AgentMailboxPath(root, agent, MailboxFollowUps)
 }
 
 func EnsureRootDirs(root string) error {

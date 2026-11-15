@@ -479,7 +479,7 @@ func (s *Server) localEvent(b binding.Binding) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	raw, err := json.Marshal(eventClaim{Binding: b, Name: b.Name, Agent: buzzSelf})
+	raw, err := json.Marshal(eventClaim{Binding: b, Name: b.Name, Agent: s.id.Agent})
 	if err != nil {
 		return "", err
 	}

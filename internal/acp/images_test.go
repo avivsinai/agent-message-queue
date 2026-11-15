@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
 )
 
 // imagePrompt is a buzz-acp prompt whose event carries one imeta tag.
@@ -39,9 +41,8 @@ func TestAttachImagesStoresTheImageAndNamesIt(t *testing.T) {
 	sum := sha256.Sum256(buf.Bytes())
 	sha := hex.EncodeToString(sum[:])
 	url := "https://relay.example/" + sha + ".png"
-	saved, savedRelay := mediaGet, buzzRelayURL
-	t.Cleanup(func() { mediaGet, buzzRelayURL = saved, savedRelay })
-	buzzRelayURL = "wss://relay.example"
+	saved := mediaGet
+	t.Cleanup(func() { mediaGet = saved })
 	var calls []string
 	mediaGet = func(_ time.Duration, _ int, url string) ([]byte, error) {
 		calls = append(calls, "media get "+url)
@@ -50,7 +51,7 @@ func TestAttachImagesStoresTheImageAndNamesIt(t *testing.T) {
 	root := canonicalTempDir(t)
 	prompt := imagePrompt(url, sha, buf.Len())
 
-	got := attachImages(root, prompt)
+	got := attachImages(root, "wss://relay.example", prompt)
 	path := filepath.Join(root, "agents", mailboxSender, "remote-files", sha+".png")
 	if want := prompt + "\n\n[image: " + path + "]"; got != want {
 		t.Fatalf("prompt =\n%s\nwant\n%s", got, want)
@@ -78,9 +79,8 @@ func TestAttachImagesDownloadsAMarkdownImageLink(t *testing.T) {
 	sum := sha256.Sum256(buf.Bytes())
 	sha := hex.EncodeToString(sum[:])
 	url := "https://relay.example/media/" + sha + ".png"
-	saved, savedRelay := mediaGet, buzzRelayURL
-	t.Cleanup(func() { mediaGet, buzzRelayURL = saved, savedRelay })
-	buzzRelayURL = "wss://relay.example"
+	saved := mediaGet
+	t.Cleanup(func() { mediaGet = saved })
 	var calls []string
 	mediaGet = func(_ time.Duration, _ int, got string) ([]byte, error) {
 		calls = append(calls, got)
@@ -89,7 +89,7 @@ func TestAttachImagesDownloadsAMarkdownImageLink(t *testing.T) {
 	root := canonicalTempDir(t)
 	prompt := "<buzz-event type=\"@mention\">\nContent: see ![image](" + url + "). Again: **`" + url + "`**\nTags: [[\"h\",\"chan\"]]\n</buzz-event>"
 
-	got := attachImages(root, prompt)
+	got := attachImages(root, "wss://relay.example", prompt)
 	path := filepath.Join(root, "agents", mailboxSender, "remote-files", sha+".png")
 	if want := prompt + "\n\n[image: " + path + "]"; got != want || len(calls) != 1 || calls[0] != url {
 		t.Fatalf("prompt =\n%s\ndownloads = %q; want one download of %s", got, calls, url)
@@ -108,7 +108,7 @@ func TestAttachImagesRefusesAnImageOverTheCap(t *testing.T) {
 	sha := strings.Repeat("b", 64)
 	prompt := imagePrompt("https://relay.example/"+sha+".png", sha, 30<<20)
 
-	got := attachImages(canonicalTempDir(t), prompt)
+	got := attachImages(canonicalTempDir(t), "", prompt)
 	if want := prompt + "\n\n[image not attached: " + sha + ".png: 31457280 bytes is over the 20 MiB limit]"; got != want {
 		t.Fatalf("prompt =\n%s\nwant\n%s", got, want)
 	}
@@ -121,9 +121,6 @@ func TestAttachImagesRefusesAnImageOverTheCap(t *testing.T) {
 // form, without imeta and with upper-case hex, is found too. A row without
 // a type has no imeta tag.
 func TestAttachImagesRefusesOnOneLine(t *testing.T) {
-	saved := buzzRelayURL
-	t.Cleanup(func() { buzzRelayURL = saved })
-	buzzRelayURL = "wss://relay.example"
 	declared, named := strings.Repeat("c", 64), strings.Repeat("d", 64)
 	for _, tc := range []struct {
 		name, url, mime, sha, want string
@@ -154,7 +151,7 @@ func TestAttachImagesRefusesOnOneLine(t *testing.T) {
 				prompt = "<buzz-event type=\"@mention\">\nContent: what is this? " + tc.url + "\nTags: [[\"h\",\"chan\"]]\n</buzz-event>"
 			}
 			want := strings.ReplaceAll(tc.want, "{dir}", dir)
-			got, ok := strings.CutPrefix(attachImages(root, prompt), strings.TrimRight(prompt, "\n")+"\n\n")
+			got, ok := strings.CutPrefix(attachImages(root, "wss://relay.example", prompt), strings.TrimRight(prompt, "\n")+"\n\n")
 			if !ok || strings.Contains(got, "\n") || !utf8.ValidString(got) || (want != "" && got != want) {
 				t.Fatalf("lines = %q, want one valid line %q", got, want)
 			}
@@ -175,20 +172,20 @@ func TestAttachImagesStopsADownloadPastTheCap(t *testing.T) {
 	if err := os.WriteFile(cli, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv(envBuzzCLI, cli)
-	savedID, savedRelay := buzzIdentity, buzzRelayURL
-	buzzIdentity, buzzRelayURL = []string{"BUZZ_PRIVATE_KEY=test"}, "wss://relay.example"
+	t.Setenv(buzzcli.EnvCLI, cli)
+	savedID := buzzPort
+	buzzPort = buzzcli.New([]string{"BUZZ_PRIVATE_KEY=test"})
 	sha := strings.Repeat("e", 64)
 	root, prompt := canonicalTempDir(t), imagePrompt("https://relay.example/"+sha+".png", sha, 100)
 	done := make(chan string, 1)
-	go func() { done <- attachImages(root, prompt) }()
+	go func() { done <- attachImages(root, "wss://relay.example", prompt) }()
 	// Only a CLI the test gave up on is still running; a returned run was
 	// reaped, and its pid may belong to another process by now.
 	timedOut := false
 	t.Cleanup(func() {
 		if !timedOut {
 			<-done
-			buzzIdentity, buzzRelayURL = savedID, savedRelay
+			buzzPort = savedID
 			return
 		}
 		if raw, err := os.ReadFile(pidFile); err == nil {
@@ -199,7 +196,7 @@ func TestAttachImagesStopsADownloadPastTheCap(t *testing.T) {
 			}
 		}
 		<-done
-		buzzIdentity, buzzRelayURL = savedID, savedRelay
+		buzzPort = savedID
 	})
 	select {
 	case got := <-done:

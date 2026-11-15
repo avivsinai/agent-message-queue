@@ -18,6 +18,8 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 )
 
@@ -194,6 +196,10 @@ type Server struct {
 	streamClosed bool
 	// late is the late-reply sweep state (binding mode only).
 	late lateReplySweep
+	// id is the managed agent's Buzz identity (Config.Identity), fixed at
+	// construction. Its owner is the only key whose reactions and messages
+	// answer a dialog.
+	id buzzop.Identity
 	// lastChannel is the DM channel of the latest DM prompt in this
 	// process. Each DM is also written for the lifecycle leader (recordDM);
 	// the leader falls back to its own value when that file is unreadable.
@@ -205,6 +211,12 @@ type Server struct {
 	// machine is the machine leader's pacing, used only by the machine
 	// worker.
 	machine machineState
+	// buzz are the machine lifecycle's Buzz operations; each runs through
+	// call.
+	buzz buzzcli.Ops
+	// posts are the Buzz writes and reads of dialogs, the session mirror
+	// and the hook warnings.
+	posts posts
 	// dialogs is the dialog poster's state, used only by the worker that
 	// runs dialogTick.
 	dialogs dialogState
@@ -247,12 +259,16 @@ func NewServer(cfg Config, version string) *Server {
 	if cfg.PostTimeout <= 0 {
 		cfg.PostTimeout = defaultPostTimeout
 	}
-	return &Server{
+	s := &Server{
 		cfg:      cfg,
+		id:       cfg.Identity,
 		version:  version,
 		sessions: make(map[string]*sessionState),
 		store:    newSessionStore(cfg),
 	}
+	s.buzz = buzzcli.Ops{Exec: s.lifecycleExec}
+	s.posts = cliPosts{s: s}
+	return s
 }
 
 // responseWriter serializes JSON-RPC writes. Prompt turns respond from

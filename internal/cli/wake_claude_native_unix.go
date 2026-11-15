@@ -79,8 +79,8 @@ func prepareClaudeNativeLaunch(ticket *launch.ExecutionTicket) (*claudeNativeLau
 		return nil, fmt.Errorf("claude-native requires macOS")
 	}
 	if ticket == nil || ticket.Provider != launch.ClaudeProvider || ticket.Mode != launch.AdapterModeMint ||
-		ticket.ProviderVersion != launch.ClaudeNativeVersion || ticket.ConversationID == "" || ticket.ConversationID != ticket.LaunchNonce || ticket.Wrapper != nil {
-		return nil, fmt.Errorf("claude-native requires a fresh managed Claude %s launch without a wrapper", launch.ClaudeNativeVersion)
+		!launch.ClaudeNativeVersionSupported(ticket.ProviderVersion) || ticket.ConversationID == "" || ticket.ConversationID != ticket.LaunchNonce || ticket.Wrapper != nil {
+		return nil, fmt.Errorf("claude-native requires a fresh managed Claude %s or later launch without a wrapper", launch.ClaudeNativeMinimumVersion)
 	}
 	if os.Getenv("CLAUDE_CONFIG_DIR") != "" {
 		return nil, fmt.Errorf("claude-native does not support a custom CLAUDE_CONFIG_DIR")
@@ -119,8 +119,13 @@ func readClaudeNativeRegistry(binding claudeNativeLaunch) (claudeNativeRegistry,
 	if err != nil {
 		return reg, err
 	}
-	if reg.SessionID != binding.SessionID || reg.Cwd != binding.Cwd ||
-		reg.Version != launch.ClaudeNativeVersion || reg.Protocol != 1 || reg.Kind != "interactive" || !filepath.IsAbs(reg.Socket) {
+	if reg.SessionID != binding.SessionID || reg.Cwd != binding.Cwd {
+		return reg, errClaudeNativeRegistryMismatch
+	}
+	if reg.Protocol != 1 {
+		return reg, fmt.Errorf("this Claude Code session states peer protocol %d; claude-native speaks protocol 1: %w", reg.Protocol, errClaudeNativeRegistryMismatch)
+	}
+	if reg.Kind != "interactive" || !filepath.IsAbs(reg.Socket) {
 		return reg, errClaudeNativeRegistryMismatch
 	}
 	return reg, nil

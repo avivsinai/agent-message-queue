@@ -68,7 +68,7 @@ func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
 			}, hooksTrusted: hooksTrusted.Load, spacedHome: scenario == "spaced_home",
 				automaticReviewer: scenario == "automatic_reviewer"})
 			t.Setenv("CODEX_HOME", home)
-			executable := nativeProvider(t)
+			executable := nativeProvider(t, "0.167.0")
 			amq, err := os.Executable()
 			if err != nil {
 				t.Fatal(err)
@@ -97,7 +97,7 @@ func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
 				t.Fatalf("plan approval reviewer = %q, want %q", plan.ApprovalReviewer, want)
 			}
 			ticket, err := launch.NewExecutionTicket(launch.ExecutionTicketRequest{Handle: plan.Handle, LaunchNonce: nonce,
-				Mode: plan.AdapterMode, Provider: launch.CodexProvider, ProviderVersion: launch.CodexDaemonVersion,
+				Mode: plan.AdapterMode, Provider: launch.CodexProvider, ProviderVersion: launch.CodexDaemonMinimumVersion,
 				PreSpawnAcquire: true, Backend: launch.CommandsBackendName, Profile: launch.CommandsProfile().Identity(),
 				ProjectRoot: project, SessionRoot: session, Cwd: project, ProviderExecutable: executable, AMQExecutable: amq,
 				TargetArgv: plan.Argv, DynamicArgv: plan.DynamicArgv, InitialInput: plan.InitialInput})
@@ -115,7 +115,7 @@ func TestNativeLaunchPublishesOnlyItsAcquiredEndpoint(t *testing.T) {
 				t.Fatal(err)
 			}
 			if err := launch.WriteConversation(root, lease, launch.ConversationRecord{Version: launch.ConversationVersion,
-				Handle: "codex", State: launch.CapturePending, ProviderVersion: launch.CodexDaemonVersion, LaunchNonce: nonce}); err != nil {
+				Handle: "codex", State: launch.CapturePending, ProviderVersion: launch.CodexDaemonMinimumVersion, LaunchNonce: nonce}); err != nil {
 				t.Fatal(err)
 			}
 			if err := lease.Release(); err != nil {
@@ -270,7 +270,7 @@ func TestInheritedExecutorExclusionsRetainEmbeddedPlan(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Setenv("CODEX_HOME", nativeDaemon(t, project))
-			plan, err := New(nativeProvider(t)).PlanFresh(launch.PlanRequest{Handle: "codex", LaunchNonce: "97979797-9797-4979-8979-979797979797",
+			plan, err := New(nativeProvider(t, "0.167.0")).PlanFresh(launch.PlanRequest{Handle: "codex", LaunchNonce: "97979797-9797-4979-8979-979797979797",
 				ProjectRoot: project, SessionRoot: project, Cwd: project, AMQExecutable: "/usr/bin/true", ResumePolicy: launch.ResumeEnabled})
 			if err != nil || plan.PreSpawnAcquire || plan.TerminalOnlyReason != "the configured executor requires an embedded app-server" {
 				t.Fatalf("excluded plan = %#v, %v", plan, err)
@@ -292,10 +292,12 @@ func daemonTemplate(t *testing.T, executable, home, project string) []string {
 		"-c", "check_for_update_on_startup=false", "resume", "-C", project}
 }
 
-func nativeProvider(t *testing.T) string {
+func nativeProvider(t *testing.T, version string) string {
 	t.Helper()
 	executable := filepath.Join(t.TempDir(), "codex")
-	script := "#!/bin/sh\ncase \"$1 $2\" in\n'--version ') echo 'codex-cli 0.167.0';;\n'--help ') echo resume;;\n'resume --help') echo '[SESSION_ID]';;\n'login status') exit 0;;\n*) exit 1;;\nesac\n"
+	// resume --help dumps the real lines from `codex resume --help` at 0.167.0.
+	// The daemon-attach fixture depends on these tokens for DaemonSeatReason.
+	script := "#!/bin/sh\ncase \"$1 $2\" in\n'--version ') echo 'codex-cli " + version + "';;\n'--help ') echo resume;;\n'resume --help') printf '%s\\n' '[SESSION_ID]' '      --remote <ADDR>' '          Accepted forms: `ws://host:port`, `wss://host:port`, `unix://`, or `unix://PATH`.';;\n'login status') exit 0;;\n*) exit 1;;\nesac\n"
 	if err := os.WriteFile(executable, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +308,10 @@ func nativeProvider(t *testing.T) string {
 // WebSocket connections, including kernel peer identity and routing writes.
 type nativeDaemonOptions struct {
 	initializeVersion func(int32) string
-	hooksTrusted      func() bool
+	// providerVersion is what the CLI script reports in `--version`.
+	// "" means 0.167.0.
+	providerVersion string
+	hooksTrusted    func() bool
 	// spacedHome ends the Codex home's name in a space, which Codex keeps.
 	spacedHome bool
 	// automaticReviewer configures Codex's automatic approvals reviewer.
@@ -482,7 +487,7 @@ func TestPublicPrepareRetainsEmbeddedWrappedCodexPlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("CODEX_HOME", nativeDaemon(t, project))
-	executable := nativeProvider(t)
+	executable := nativeProvider(t, "0.167.0")
 	wrapper := filepath.Join(t.TempDir(), "wrapper")
 	if err := os.WriteFile(wrapper, []byte("#!/bin/sh\nexec \"$@\"\n"), 0o700); err != nil {
 		t.Fatal(err)
@@ -538,7 +543,7 @@ func TestConfigurationAndSearchSettingsRetainEmbeddedExecution(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Setenv("CODEX_HOME", nativeDaemon(t, project))
-			plan, err := New(nativeProvider(t)).PlanFresh(launch.PlanRequest{Handle: "codex", LaunchNonce: "adadadad-adad-4dad-8dad-adadadadadad",
+			plan, err := New(nativeProvider(t, "0.167.0")).PlanFresh(launch.PlanRequest{Handle: "codex", LaunchNonce: "adadadad-adad-4dad-8dad-adadadadadad",
 				ProjectRoot: project, SessionRoot: project, Cwd: project, AMQExecutable: "/usr/bin/true", ResumePolicy: launch.ResumeEnabled, CommittedArgs: args})
 			if err != nil || plan.PreSpawnAcquire || plan.TerminalOnlyReason != "command-line configuration or search overrides require verified TUI resume equivalence" {
 				t.Fatalf("unverified native settings=%#v, %v", plan, err)
@@ -622,7 +627,7 @@ func TestDaemonResumeReadsItsThreadAtTheVerifiedVersion(t *testing.T) {
 		t.Fatalf("resume plan = %#v, %v", resumed, err)
 	}
 	ticket, err := launch.NewExecutionTicket(launch.ExecutionTicketRequest{Handle: "codex", LaunchNonce: resumed.LaunchNonce,
-		Mode: resumed.AdapterMode, Provider: launch.CodexProvider, ProviderVersion: launch.CodexDaemonVersion, ConversationID: resumed.ConversationID,
+		Mode: resumed.AdapterMode, Provider: launch.CodexProvider, ProviderVersion: launch.CodexDaemonMinimumVersion, ConversationID: resumed.ConversationID,
 		PreSpawnAcquire: true, Backend: launch.CommandsBackendName, Profile: launch.CommandsProfile().Identity(),
 		ProjectRoot: project, SessionRoot: root.Base(), Cwd: project, ProviderExecutable: executable, AMQExecutable: amq,
 		TargetArgv: resumed.Argv, DynamicArgv: resumed.DynamicArgv})
@@ -739,19 +744,24 @@ func nativeSeat(t *testing.T, options ...nativeDaemonOptions) (*fsq.DeliveryRoot
 	if err != nil {
 		t.Fatal(err)
 	}
-	return root, project, nativeProvider(t), amq
+	version := "0.167.0"
+	for _, o := range options {
+		if o.providerVersion != "" {
+			version = o.providerVersion
+			break
+		}
+	}
+	return root, project, nativeProvider(t, version), amq
 }
 
-// executeNative writes plan's ticket, as reconcile does, and runs the managed
-// execution boundary to its resolved provider argv.
-func executeNative(t *testing.T, root *fsq.DeliveryRoot, plan launch.AgentPlan, fresh bool) (launch.ExecutionTicket, []string) {
+func executeNativeAtVersion(t *testing.T, root *fsq.DeliveryRoot, plan launch.AgentPlan, version string, fresh bool) (launch.ExecutionTicket, []string) {
 	t.Helper()
 	amq, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
 	ticket, err := launch.NewExecutionTicket(launch.ExecutionTicketRequest{Handle: plan.Handle, LaunchNonce: plan.LaunchNonce,
-		Mode: plan.AdapterMode, Provider: launch.CodexProvider, ProviderVersion: launch.CodexDaemonVersion, ConversationID: plan.ConversationID,
+		Mode: plan.AdapterMode, Provider: launch.CodexProvider, ProviderVersion: version, ConversationID: plan.ConversationID,
 		PreSpawnAcquire: true, Backend: launch.CommandsBackendName, Profile: launch.CommandsProfile().Identity(),
 		ProjectRoot: plan.Cwd, SessionRoot: root.Base(), Cwd: plan.Cwd, ProviderExecutable: plan.Argv[0], AMQExecutable: amq,
 		TargetArgv: plan.Argv, DynamicArgv: plan.DynamicArgv})
@@ -770,7 +780,7 @@ func executeNative(t *testing.T, root *fsq.DeliveryRoot, plan launch.AgentPlan, 
 	}
 	if fresh {
 		if err := launch.WriteConversation(root, lease, launch.ConversationRecord{Version: launch.ConversationVersion,
-			Handle: plan.Handle, State: launch.CapturePending, ProviderVersion: launch.CodexDaemonVersion, LaunchNonce: plan.LaunchNonce}); err != nil {
+			Handle: plan.Handle, State: launch.CapturePending, ProviderVersion: version, LaunchNonce: plan.LaunchNonce}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -789,4 +799,77 @@ func executeNative(t *testing.T, root *fsq.DeliveryRoot, plan launch.AgentPlan, 
 		t.Fatal(err)
 	}
 	return prepared, argv
+}
+
+// executeNative writes plan's ticket, as reconcile does, and runs the managed
+// execution boundary to its resolved provider argv.
+func executeNative(t *testing.T, root *fsq.DeliveryRoot, plan launch.AgentPlan, fresh bool) (launch.ExecutionTicket, []string) {
+	return executeNativeAtVersion(t, root, plan, launch.CodexDaemonMinimumVersion, fresh)
+}
+
+// Regression for bead r4uc. A strict release at or above the floor is
+// admitted when the running Codex confirms --remote for unix://PATH and
+// the daemon's reported release matches. Pre-fix, the admission refused any
+// provider release above the floor.
+func TestManagedSeatBindsDaemonOnNewerCodexRelease(t *testing.T) {
+	root, project, executable, amq := nativeSeat(t, nativeDaemonOptions{providerVersion: "0.169.0", initializeVersion: func(int32) string { return "0.169.0" }})
+	plan, err := New(executable).PlanFresh(launch.PlanRequest{Handle: "codex", LaunchNonce: "96969696-9696-4969-8969-969696969696", ProjectRoot: project,
+		SessionRoot: root.Base(), Cwd: project, AMQExecutable: amq, ResumePolicy: launch.ResumeEnabled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.PreSpawnAcquire {
+		t.Fatalf("PlanFresh on CLI 0.169.0 must admit PreSpawnAcquire; TerminalOnlyReason=%q", plan.TerminalOnlyReason)
+	}
+	if plan.TerminalOnlyReason != "" {
+		t.Fatalf("TerminalOnlyReason on a supported strict release must be empty, got %q", plan.TerminalOnlyReason)
+	}
+	ticket, argv := executeNativeAtVersion(t, root, plan, "0.169.0", true)
+	if ticket.State != launch.ExecutionAcknowledged {
+		t.Fatalf("executeNative ticket state = %q; want ExecutionAcknowledged", ticket.State)
+	}
+	expected := daemonTemplate(t, executable, os.Getenv("CODEX_HOME"), project)
+	conversation, err := launch.LoadConversation(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected = append(expected, conversation.Identity.ID)
+	if !slices.Equal(argv, expected) {
+		t.Fatalf("argv = %q, want the daemon template and the thread %q", argv, expected)
+	}
+}
+
+// Two refusals the floor launch must give as reasons. Each row asserts the
+// precise text of the refusal and that the seat stays terminal-only.
+func TestManagedSeatStaysTerminalOnlyBelowFloorOrOnReleaseSkew(t *testing.T) {
+	t.Run("CLI below the floor", func(t *testing.T) {
+		root, project, executable, amq := nativeSeat(t, nativeDaemonOptions{providerVersion: "0.166.0"})
+		plan, err := New(executable).PlanFresh(launch.PlanRequest{Handle: "codex", LaunchNonce: "96969696-9696-4969-8969-969696969696", ProjectRoot: project,
+			SessionRoot: root.Base(), Cwd: project, AMQExecutable: amq, ResumePolicy: launch.ResumeEnabled})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if plan.PreSpawnAcquire {
+			t.Fatal("PreSpawnAcquire must be false on a CLI below the floor")
+		}
+		wantReason := "Codex 0.166.0 is not a release at or above " + launch.CodexDaemonMinimumVersion + ", the first whose --remote attaches a seat to the local daemon"
+		if plan.TerminalOnlyReason != wantReason {
+			t.Fatalf("TerminalOnlyReason = %q; want %q", plan.TerminalOnlyReason, wantReason)
+		}
+	})
+	t.Run("daemon release does not equal CLI release", func(t *testing.T) {
+		root, project, executable, amq := nativeSeat(t, nativeDaemonOptions{providerVersion: "0.169.0", initializeVersion: func(int32) string { return "0.167.0" }})
+		plan, err := New(executable).PlanFresh(launch.PlanRequest{Handle: "codex", LaunchNonce: "96969696-9696-4969-8969-969696969696", ProjectRoot: project,
+			SessionRoot: root.Base(), Cwd: project, AMQExecutable: amq, ResumePolicy: launch.ResumeEnabled})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if plan.PreSpawnAcquire {
+			t.Fatal("PreSpawnAcquire must be false when daemon release != CLI release")
+		}
+		wantReason := "the running Codex daemon reports release \"0.167.0\" and this Codex is 0.169.0; restart the daemon so both run one release"
+		if plan.TerminalOnlyReason != wantReason {
+			t.Fatalf("TerminalOnlyReason = %q; want %q", plan.TerminalOnlyReason, wantReason)
+		}
+	})
 }

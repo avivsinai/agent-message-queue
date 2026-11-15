@@ -493,7 +493,7 @@ func TestRunDrainWritesOnlyItsDocumentedSet(t *testing.T) {
 		if rel == "agents/alice" {
 			return true // the parent of presence.json and .presence.lock
 		}
-		for _, p := range []string{"inbox/new", "inbox/cur", "receipts", "receipts-pending", "dlq/tmp", "dlq/new", ".presence.lock", "presence.json"} {
+		for _, p := range []string{"inbox/tmp", "inbox/new", "inbox/cur", "receipts", "receipts-pending", "dlq/tmp", "dlq/new", "follow-ups", ".presence.lock", "presence.json"} {
 			p = "agents/alice/" + p
 			if rel == p || strings.HasPrefix(rel, p+"/") {
 				return true
@@ -517,6 +517,87 @@ func TestRunDrainWritesOnlyItsDocumentedSet(t *testing.T) {
 	for rel := range before {
 		if _, ok := after[rel]; !ok && !allowed(rel) {
 			t.Errorf("drain removed %s outside its documented set", rel)
+		}
+	}
+}
+
+// A sandbox that grants write access to exactly `<root>/agents` (the fixed
+// token a Codex seat can pin as sandbox_workspace_write.writable_roots)
+// relies on `amq send` and `amq reply` writing only under the mailbox
+// root: the recipient's inbox, the sender's outbox, and the receipts /
+// presence dirs of both.
+func TestRunSendAndReplyWriteOnlyUnderAgents(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	for _, agent := range []string{"alice", "qa"} {
+		if err := fsq.EnsureAgentDirs(root, agent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	configureSendTestRoot(t, root, "alice", "qa")
+
+	type stamp struct {
+		mod  time.Time
+		size int64
+	}
+	snapshot := func() map[string]stamp {
+		out := map[string]stamp{}
+		if err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			rel, _ := filepath.Rel(root, path)
+			out[filepath.ToSlash(rel)] = stamp{info.ModTime(), info.Size()}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	isWritableInsideAgents := func(rel string) bool {
+		return strings.HasPrefix(rel, "agents/")
+	}
+
+	before := snapshot()
+	if err := runSend([]string{
+		"--root", root, "--me", "alice", "--to", "qa",
+		"--subject", "probe", "--body", "needle",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	after := snapshot()
+	for rel, info := range after {
+		if old, ok := before[rel]; (!ok || old != info) && !isWritableInsideAgents(rel) {
+			t.Errorf("amq send changed %q outside agents/", rel)
+		}
+	}
+
+	// Now reply as qa -> alice, and check again.
+	// The --id of the just-received message: sole file in qa's inbox/new.
+	names, err := os.ReadDir(fsq.AgentInboxNew(root, "qa"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 1 {
+		t.Fatalf("qa/inbox/new holds %d files, want 1", len(names))
+	}
+	id := strings.TrimSuffix(names[0].Name(), ".md")
+	if err := runReply([]string{
+		"--root", root, "--me", "qa", "--id", id,
+		"--body", "answer",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	after = snapshot()
+	for rel, info := range after {
+		if old, ok := before[rel]; (!ok || old != info) && !isWritableInsideAgents(rel) {
+			t.Errorf("amq reply changed %q outside agents/", rel)
 		}
 	}
 }

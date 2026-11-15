@@ -340,6 +340,10 @@ func (ticket ExecutionTicket) Validate() error {
 				return fmt.Errorf("dynamic codex identity slot is invalid")
 			}
 			identityKeys[key] = true
+		case DynamicArgCodexMailboxesPath:
+			if ticket.TargetArgv[dynamic.Index] != codexMailboxesArgPrefix+codexMailboxesToken {
+				return fmt.Errorf("dynamic codex mailbox slot does not hold the token")
+			}
 		default:
 			return fmt.Errorf("dynamic argv[%d] kind is invalid", i)
 		}
@@ -435,9 +439,13 @@ func validateCodexNotifyTargetArgv(ticket ExecutionTicket) error {
 		return err
 	}
 	identitySlots := make(map[int]bool)
+	mailboxesSlots := make(map[int]bool)
 	for _, dynamic := range ticket.DynamicArgv {
-		if dynamic.Kind == DynamicArgCodexIdentity {
+		switch dynamic.Kind {
+		case DynamicArgCodexIdentity:
 			identitySlots[dynamic.Index] = true
+		case DynamicArgCodexMailboxesPath:
+			mailboxesSlots[dynamic.Index] = true
 		}
 	}
 	count := 0
@@ -453,9 +461,19 @@ func validateCodexNotifyTargetArgv(ticket ExecutionTicket) error {
 			return fmt.Errorf("codex notify override does not match the execution ticket")
 		}
 		value := ticket.TargetArgv[i+1]
-		if value == expected {
+		switch {
+		case value == expected:
 			count++
-		} else if !identitySlots[i+1] && !validCodexConfigOverride(value) {
+		case identitySlots[i+1]:
+		case mailboxesSlots[i+1]:
+			// Mailbox slots must hold the un-filled token in the ticket;
+			// `ResolveExecutionArgv` fills a copy, never mutates the ticket.
+			if value != codexMailboxesArgPrefix+codexMailboxesToken {
+				return fmt.Errorf("codex mailboxes slot %d does not hold the token", i+1)
+			}
+		case value == codexMailboxesArgPrefix+codexMailboxesToken:
+			return fmt.Errorf("codex writable-roots token at argv %d has no slot", i+1)
+		case !validCodexConfigOverride(value):
 			return fmt.Errorf("codex notify execution ticket contains unsupported configuration override")
 		}
 		i++
@@ -1159,6 +1177,12 @@ func ResolveExecutionArgv(ticket ExecutionTicket, env []string) ([]string, error
 				return nil, err
 			}
 			argv[dynamic.Index] = filled
+		case DynamicArgCodexMailboxesPath:
+			filled, err := fillCodexMailboxesSlot(ticket.TargetArgv, dynamic.Index, ticket.SessionRoot)
+			if err != nil {
+				return nil, err
+			}
+			argv[dynamic.Index] = filled
 		default:
 			return nil, fmt.Errorf("unsupported dynamic argv kind %q", dynamic.Kind)
 		}
@@ -1331,9 +1355,6 @@ func ValidateExecutionEnvelope(root *fsq.DeliveryRoot, ticket ExecutionTicket, e
 	if ticket.Provider == CodexProvider && ticket.PreSpawnAcquire {
 		if err := ticket.Validate(); err != nil {
 			return err
-		}
-		if ticket.ProviderVersion != CodexDaemonVersion {
-			return fmt.Errorf("codex daemon execution was planned for Codex %s; this AMQ runs native seats only on Codex %s", ticket.ProviderVersion, CodexDaemonVersion)
 		}
 		if CodexDaemonSocket(ticket) == "" {
 			return fmt.Errorf("codex daemon execution was planned without an explicit daemon endpoint; launch again")

@@ -1,6 +1,6 @@
 //go:build aix
 
-package acp
+package buzzcli
 
 // canExecute is false on AIX: golang.org/x/sys/unix has no AT_EACCESS there
 // to check the effective ids, and the bundled CLI it gates ships only inside

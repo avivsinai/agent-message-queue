@@ -44,6 +44,9 @@ const (
 	// DynamicArgCodexIdentity is one AMQ identity variable in a Codex
 	// shell_environment_policy.set override; the slot names the variable.
 	DynamicArgCodexIdentity DynamicArgKind = "codex_identity"
+	// DynamicArgCodexMailboxesPath is the writable_roots value of a Codex seat;
+	// the slot is filled with <session root>/agents and the trust digest binds the kind.
+	DynamicArgCodexMailboxesPath DynamicArgKind = "codex_mailboxes_path"
 )
 
 type InitialInputKind string
@@ -174,6 +177,11 @@ func (a AgentPlan) validate() error {
 				return fmt.Errorf("dynamic_argv[%d]: argv value is not a distinct codex identity slot", i)
 			}
 			identityKeys[key] = true
+			continue
+		case DynamicArgCodexMailboxesPath:
+			if a.Argv[dynamic.Index] != codexMailboxesArgPrefix+codexMailboxesToken {
+				return fmt.Errorf("dynamic_argv[%d]: mailbox slot does not hold the token", i)
+			}
 			continue
 		default:
 			return fmt.Errorf("dynamic_argv[%d]: invalid kind %q", i, dynamic.Kind)
