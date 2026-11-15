@@ -4,7 +4,10 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -94,5 +97,42 @@ func TestNativeWakeWaitsForTheActualDrainReceipt(t *testing.T) {
 	exists, err := n.readState(&saved)
 	if err != nil || !exists || saved.Phase != "consumed" || h.cfg.doorbell.phase != wakeDoorbellIdle || len(h.injected) != 0 {
 		t.Fatalf("drain not reconciled: saved=%+v exists=%v error=%v input=%q", saved, exists, err, h.injected)
+	}
+}
+
+// Bead upbr regression: the registry admits a newer Claude release that
+// states peer protocol 1, and refuses protocol 2 with the named line.
+func TestClaudeNativeRegistryAdmitsNewerReleaseOnPeerProtocol1(t *testing.T) {
+	dir := t.TempDir()
+	pid := os.Getpid()
+	sessions := filepath.Join(dir, "sessions")
+	if err := os.MkdirAll(sessions, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeRecord := func(version string, protocol int) {
+		reg := claudeNativeRegistry{
+			PID: pid, SessionID: "abc", Name: "s", Cwd: dir, Version: version,
+			Protocol: protocol, Kind: "interactive", Socket: filepath.Join(dir, "sock"),
+		}
+		raw, _ := json.Marshal(reg)
+		if err := os.WriteFile(filepath.Join(sessions, strconv.Itoa(pid)+".json"), raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeRecord("2.1.325", 1)
+	binding := claudeNativeLaunch{SessionID: "abc", Cwd: dir, Home: dir, Launch: launch.HolderIdentity{PID: pid, ProcessStart: "x", BootID: "y"}}
+	if _, err := readClaudeNativeRegistry(binding); err != nil {
+		t.Fatalf("registry for release 2.1.325 protocol 1 must be admitted: %v", err)
+	}
+	writeRecord("2.1.325", 2)
+	_, err := readClaudeNativeRegistry(binding)
+	if err == nil {
+		t.Fatal("registry for protocol 2 must be refused")
+	}
+	if !strings.Contains(err.Error(), "states peer protocol 2; claude-native speaks protocol 1") {
+		t.Fatalf("wrong refusal text: %v", err)
+	}
+	if !errors.Is(err, errClaudeNativeRegistryMismatch) {
+		t.Fatalf("a protocol mismatch must still classify as the registry mismatch that disables the injector: %v", err)
 	}
 }
