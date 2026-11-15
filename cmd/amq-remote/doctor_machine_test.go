@@ -116,6 +116,55 @@ func TestDoctorHookPassFindsEveryHook(t *testing.T) {
 	}
 }
 
+// Live probe on Claude Code 2.1.325, bead agent-message-queue-4jxv: a
+// second PermissionRequest hook's decision is not applied while AMQ's
+// approval hook waits; doctor says so.
+func TestDoctorNotesAnotherPermissionRequestHook(t *testing.T) {
+	settings, _ := machineFixture(t)
+	installHooks(t, true, true)
+	saved := runHookProbe
+	t.Cleanup(func() { runHookProbe = saved })
+	runHookProbe = func(command, gate string) (string, error) {
+		return "amq-remote " + version + "\n", nil
+	}
+	notesOf := func() []boundaryFailure {
+		t.Helper()
+		out, code, err := doctor([]string{"--root", canonicalTempDir(t)})
+		if code != 0 || err != nil {
+			t.Fatalf("doctor: code=%d err=%v", code, err)
+		}
+		notes, _ := out.(map[string]any)["notes"].([]boundaryFailure)
+		return notes
+	}
+	for _, n := range notesOf() {
+		if n.Boundary == "hooks" && n.Subject == settings && n.Detail == claude.OtherPermissionHookNote {
+			t.Fatal("a foreign-hook note before a foreign hook was present")
+		}
+	}
+	raw, err := os.ReadFile(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var file map[string]any
+	if err := json.Unmarshal(raw, &file); err != nil {
+		t.Fatal(err)
+	}
+	hooks, _ := file["hooks"].(map[string]any)
+	hooks["PermissionRequest"] = append(hooks["PermissionRequest"].([]any), map[string]any{
+		"hooks": []any{map[string]any{"type": "command", "command": "/usr/bin/true"}},
+	})
+	edited, _ := json.Marshal(file)
+	if err := os.WriteFile(settings, edited, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range notesOf() {
+		if n.Boundary == "hooks" && n.Subject == settings && n.Detail == claude.OtherPermissionHookNote {
+			return
+		}
+	}
+	t.Fatalf("notes = %+v; want the foreign permission-hook note", notesOf())
+}
+
 // Observed 2026-11-05: an approval hook removed from settings.json left
 // every approval of a mailbox session in the terminal for 8 hours, and
 // `amq-remote doctor` returned before any hook check because no endpoint

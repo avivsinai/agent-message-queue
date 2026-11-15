@@ -87,6 +87,27 @@ func PermissionHookCommand(settings string) (string, error) {
 	return cmds[0], nil
 }
 
+// OtherPermissionHookNote is what doctor and the installer say when a
+// settings file holds a PermissionRequest hook that is not AMQ's.
+const OtherPermissionHookNote = "another PermissionRequest hook is installed; Claude Code applies its decision only after AMQ's approval hook ends, so it has no effect while a dialog waits for Buzz"
+
+// OtherPermissionHooks returns the commands of the PermissionRequest
+// command hooks in the settings file settings that are not AMQ's. Every
+// hook command AMQ installs starts with an AMQ_ marker.
+func OtherPermissionHooks(settings string) ([]string, error) {
+	cmds, err := hookfile.InstalledCommands(settings, hookfile.Spec{Event: permissionHookType, Match: func(string) bool { return true }})
+	if err != nil {
+		return nil, err
+	}
+	var others []string
+	for _, cmd := range cmds {
+		if cmd != "" && !strings.HasPrefix(cmd, "AMQ_") {
+			others = append(others, cmd)
+		}
+	}
+	return others, nil
+}
+
 // Forms of an installed hook command (StopHookForm, PermissionHookForm).
 const (
 	// HookFormCurrent is what the installer writes now for that binary.
