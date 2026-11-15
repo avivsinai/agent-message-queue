@@ -114,10 +114,6 @@ func readClaudeNativeLaunch() (*claudeNativeLaunch, error) {
 	return &binding, nil
 }
 
-// errClaudeNativeProtocolMismatch names the one unsupported-peer-protocol case.
-// (Registries may state protocol 2 or higher: this injector speaks 1.)
-var errClaudeNativeProtocolMismatch = errors.New("this Claude Code session states an unsupported peer protocol")
-
 func readClaudeNativeRegistry(binding claudeNativeLaunch) (claudeNativeRegistry, error) {
 	reg, err := readClaudeSessionRecord(binding.Home, binding.Launch.PID)
 	if err != nil {
@@ -127,7 +123,7 @@ func readClaudeNativeRegistry(binding claudeNativeLaunch) (claudeNativeRegistry,
 		return reg, errClaudeNativeRegistryMismatch
 	}
 	if reg.Protocol != 1 {
-		return reg, fmt.Errorf("this Claude Code session states peer protocol %d; claude-native speaks protocol 1: %w", reg.Protocol, errClaudeNativeProtocolMismatch)
+		return reg, fmt.Errorf("this Claude Code session states peer protocol %d; claude-native speaks protocol 1: %w", reg.Protocol, errClaudeNativeRegistryMismatch)
 	}
 	if reg.Kind != "interactive" || !filepath.IsAbs(reg.Socket) {
 		return reg, errClaudeNativeRegistryMismatch

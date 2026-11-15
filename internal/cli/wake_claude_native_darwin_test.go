@@ -4,6 +4,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -110,7 +111,7 @@ func TestClaudeNativeRegistryAdmitsNewerReleaseOnPeerProtocol1(t *testing.T) {
 	}
 	writeRecord := func(version string, protocol int) {
 		reg := claudeNativeRegistry{
-			PID: pid, SessionID: "abc", Name: "s", Cwd: "/tmp", Version: version,
+			PID: pid, SessionID: "abc", Name: "s", Cwd: dir, Version: version,
 			Protocol: protocol, Kind: "interactive", Socket: filepath.Join(dir, "sock"),
 		}
 		raw, _ := json.Marshal(reg)
@@ -119,7 +120,7 @@ func TestClaudeNativeRegistryAdmitsNewerReleaseOnPeerProtocol1(t *testing.T) {
 		}
 	}
 	writeRecord("2.1.325", 1)
-	binding := claudeNativeLaunch{SessionID: "abc", Cwd: "/tmp", Home: dir, Launch: launch.HolderIdentity{PID: pid, ProcessStart: "x", BootID: "y"}}
+	binding := claudeNativeLaunch{SessionID: "abc", Cwd: dir, Home: dir, Launch: launch.HolderIdentity{PID: pid, ProcessStart: "x", BootID: "y"}}
 	if _, err := readClaudeNativeRegistry(binding); err != nil {
 		t.Fatalf("registry for release 2.1.325 protocol 1 must be admitted: %v", err)
 	}
@@ -130,5 +131,8 @@ func TestClaudeNativeRegistryAdmitsNewerReleaseOnPeerProtocol1(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "states peer protocol 2; claude-native speaks protocol 1") {
 		t.Fatalf("wrong refusal text: %v", err)
+	}
+	if !errors.Is(err, errClaudeNativeRegistryMismatch) {
+		t.Fatalf("a protocol mismatch must still classify as the registry mismatch that disables the injector: %v", err)
 	}
 }
