@@ -250,6 +250,12 @@ func codexDaemonArgumentsReason(args []string) string {
 	return ""
 }
 
+// CodexDaemonReleaseReadable reports whether version is a strict release at
+// or above CodexDaemonMinimumVersion.
+func CodexDaemonReleaseReadable(version string) bool {
+	return codexDaemonVersionReadable(version)
+}
+
 // codexDaemonVersionReadable admits a strict release at or above
 // CodexDaemonMinimumVersion.
 func codexDaemonVersionReadable(version string) bool {
