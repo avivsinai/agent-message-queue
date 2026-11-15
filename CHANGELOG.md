@@ -8,6 +8,18 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.149.0](https://github.com/avivsinai/agent-message-queue/compare/v0.148.0...v0.149.0) (2026-11-15)
+
+
+### Features
+
+* **launch:** a Codex seat with sandbox and approval pins runs on the daemon ([#1522](https://github.com/avivsinai/agent-message-queue/issues/1522)) ([2f9a59a](https://github.com/avivsinai/agent-message-queue/commit/2f9a59a3a0bacdcae0181f9a77acf4d8ba8a789e))
+
+
+### Bug Fixes
+
+* **remote:** doctor notes an approval hook that AMQ's hook holds back ([#1521](https://github.com/avivsinai/agent-message-queue/issues/1521)) ([cc9b752](https://github.com/avivsinai/agent-message-queue/commit/cc9b7521624926dd9b34db29acbfe205660a2e3e))
+
 ## [0.148.0](https://github.com/avivsinai/agent-message-queue/compare/v0.147.1...v0.148.0) (2026-11-15)
 
 
