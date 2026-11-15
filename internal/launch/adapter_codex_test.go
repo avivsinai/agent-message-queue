@@ -108,6 +108,12 @@ func TestCodexDaemonSettingsSplitIntoTerminalArgumentsAndPins(t *testing.T) {
 			t.Fatalf("split %v: reason %q; want %q", tc.options, got, tc.reason)
 		}
 	}
+	if got := codexDaemonArgumentsReason([]string{"--model", "read-only", "--sandbox", "read-only"}); got != "" {
+		t.Fatalf("a value two flags share = duplicate: %q", got)
+	}
+	if got := codexDaemonArgumentsReason([]string{"--no-alt-screen", "--no-alt-screen"}); got != "duplicate launch options require verified TUI resume equivalence" {
+		t.Fatalf("duplicate flag reason = %q", got)
+	}
 }
 
 // Execution resolves the thread slot in the original ticket, then starts

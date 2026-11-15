@@ -314,15 +314,20 @@ func codexDaemonArgumentsReason(args []string) string {
 	if err := validateCommittedArgs(args, codexArgRules()); err != nil {
 		return "launch arguments do not match the verified Codex resume grammar"
 	}
+	rules := codexArgRules()
 	seen := make(map[string]bool)
-	for _, arg := range args {
-		if arg == "-c" {
+	for i := 0; i < len(args); i++ {
+		flag := args[i]
+		if rules[flag].value {
+			i++
+		}
+		if flag == "-c" {
 			continue
 		}
-		if seen[arg] {
+		if seen[flag] {
 			return "duplicate launch options require verified TUI resume equivalence"
 		}
-		seen[arg] = true
+		seen[flag] = true
 	}
 	_, _, reason := splitCodexDaemonArgs(args)
 	return reason
