@@ -1101,11 +1101,6 @@ func mirrorWord(text string) (on bool, ok bool) {
 	return false, false
 }
 
-// mirrorSwitch is mirrorSwitchOf for an ACP prompt.
-func (s *Server) mirrorSwitch(channel, eventID, prompt string) (name string, on bool, at time.Time, ok bool) {
-	return s.mirrorSwitchOf(s.acpOwner(channel, eventID, prompt))
-}
-
 // mirrorSwitchOf reads the owner's message m in a machine agent's channel
 // whose verified content is exactly "mirror off" or "mirror on". It returns
 // the channel's binding, the switch, and when the owner signed it

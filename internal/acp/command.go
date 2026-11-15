@@ -39,11 +39,6 @@ type ownerCommand struct {
 	refusal  string
 }
 
-// ownerCommandFor is ownerCommandOf for an ACP prompt.
-func (s *Server) ownerCommandFor(channel, eventID, prompt string) (cmd ownerCommand, ok bool) {
-	return s.ownerCommandOf(s.acpOwner(channel, eventID, prompt))
-}
-
 // ownerCommandOf reads the owner's message m whose verified content is one
 // line that starts with "/", and queues it for the wake of the channel's
 // mailbox seat, which types it into the terminal like Remote Control. ok is

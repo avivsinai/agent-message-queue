@@ -970,11 +970,6 @@ func writeAnswer(dir string, a dialog.Answer) (string, error) {
 	return "Answered.", nil
 }
 
-// dialogReply is dialogReplyOf for an ACP prompt.
-func (s *Server) dialogReply(channel, eventID, prompt string) (string, dialog.Answer, bool) {
-	return s.dialogReplyOf(s.acpOwner(channel, eventID, prompt))
-}
-
 // dialogReplyOf returns the answer that the owner's Buzz message m gives
 // to an open dialog posted in its channel, and the dialog's directory. The
 // words only select a message that looks like an answer; the answer itself
