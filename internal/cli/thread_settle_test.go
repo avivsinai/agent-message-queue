@@ -34,13 +34,14 @@ func TestThreadSettleSendsOneMarkerPerThreadAndOwner(t *testing.T) {
 		from string
 		to   string
 		time time.Time
+		kind string
 		body string
 	}
 	openers := []msg{
-		{"2026-11-13T00-00-00.000Z_pid1_t1", "alpha", "beta", old, "todo 1"},
-		{"2026-11-13T00-00-01.000Z_pid2_t2", "alpha", "beta", old, "todo 2"},
-		{"2026-11-13T00-00-02.000Z_pid3_t3", "alpha", "beta", old, "todo 3"},
-		{"2026-11-13T00-00-03.000Z_pid4_t4", "alpha", "beta", fresh, "todo 4"},
+		{"2026-11-13T00-00-00.000Z_pid1_t1", "alpha", "beta", old, format.KindTodo, "todo 1"},
+		{"2026-11-13T00-00-01.000Z_pid2_t2", "alpha", "beta", old, format.KindTodo, "todo 2"},
+		{"2026-11-13T00-00-02.000Z_pid3_t3", "alpha", "beta", old, format.KindReviewRequest, "review 1"},
+		{"2026-11-13T00-00-03.000Z_pid4_t4", "alpha", "beta", fresh, format.KindTodo, "todo 4"},
 	}
 	writeOpener := func(m msg) {
 		e := format.Message{
@@ -53,7 +54,7 @@ func TestThreadSettleSendsOneMarkerPerThreadAndOwner(t *testing.T) {
 				Subject:  m.body,
 				Created:  m.time.UTC().Format(time.RFC3339Nano),
 				Priority: format.PriorityNormal,
-				Kind:     format.KindTodo,
+				Kind:     m.kind,
 			},
 			Body: m.body,
 		}
@@ -110,8 +111,8 @@ func TestThreadSettleSendsOneMarkerPerThreadAndOwner(t *testing.T) {
 	if g.MessageID != "" {
 		t.Fatalf("dry-run must not fabricate a message id: got %q", g.MessageID)
 	}
-	if g.Through.Opener.Subject != "todo 3" {
-		t.Fatalf("anchor picked the wrong old todo: %q", g.Through.Opener.Subject)
+	if g.Through.Opener.Subject != "review 1" {
+		t.Fatalf("anchor picked the wrong old request: %q", g.Through.Opener.Subject)
 	}
 
 	// The real run: one decision, labelled settled-through, in beta's inbox.
@@ -193,6 +194,58 @@ func TestThreadSettleSendsOneMarkerPerThreadAndOwner(t *testing.T) {
 				_ = ob.OwedBy.Session
 			}
 		}
+	}
+
+	// --json shape of this same dry-run call: one JSON document on stdout,
+	// nothing else. (A second real --json after the settle would correctly
+	// print settled:[].)
+	jStdout := dryStdout
+	var jr threadSettleResult
+	if err := json.Unmarshal([]byte(strings.TrimSpace(jStdout)), &jr); err != nil {
+		t.Fatalf("--json not single JSON object: %v\nstdout: %s", err, jStdout)
+	}
+	if len(jr.Settled) != 1 || jr.Settled[0].Count != 3 {
+		t.Fatalf("--json dry-run does not report the same three old requests: %+v", jr.Settled)
+	}
+	// Text mode must not carry any JSON-shaped fragment, the anchor's subject is
+	// the review request (through the new `closesObligation` review branch), the
+	// kept count is only the newest surviving obligation, and the line ends with
+	// the marker id.
+	if strings.Contains(realStdout, "{") {
+		t.Fatalf("text output includes JSON content:\n%s", realStdout)
+	}
+	if !strings.Contains(realStdout, "settled 3 requests to beta in p2p/alpha__beta through 2026-11-13T00-00-02.000Z_pid3_t3") {
+		t.Fatalf("text output lost the anchor or its count:\n%s", realStdout)
+	}
+	if !strings.Contains(realStdout, " (\"review 1\")") {
+		t.Fatalf("text output does not name the old review request: %s", realStdout)
+	}
+	if !strings.Contains(realStdout, "kept: 1 requests newer than 24h") {
+		t.Fatalf("kept count is not the newer-than-bound count: %s", realStdout)
+	}
+	// The marker is also in the requester's outbox/sent.
+	sentFiles, err := filepath.Glob(filepath.Join(fsq.AgentOutboxSent(root, "alpha"), "*.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sentFiles) != len(openers)+1 {
+		t.Fatalf("alpha/outbox/sent holds %d files; want %d", len(sentFiles), len(openers)+1)
+	}
+	var sentID string
+	for _, p := range sentFiles {
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), "settled-through") {
+			sentID = strings.TrimSuffix(filepath.Base(p), ".md")
+		}
+	}
+	if sentID == "" {
+		t.Fatal("marker missing from alpha/outbox/sent")
+	}
+	if !strings.Contains(realStdout, " as "+sentID) {
+		t.Fatalf("text line does not end with the delivered marker id: %s", realStdout)
 	}
 }
 

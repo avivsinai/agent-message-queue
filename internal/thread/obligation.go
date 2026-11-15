@@ -337,16 +337,15 @@ func (red *Reduction) settle(rec *record, lineage []*Obligation) {
 
 // settleThrough closes every open obligation of anchor's requester/owner
 // pair in anchor's thread whose opener sorts at or before anchor's opener.
-// Obligations with other owners, or created after the anchor, are untouched.
+// Owned by `actOnParent` after the anchor's own `act` has already marked
+// the anchor. Each touched obligation keeps its most recent activity by the
+// same rule `act` uses.
 func (red *Reduction) settleThrough(anchor *Obligation, msg *Entry) {
 	for _, ob := range red.byThread[anchor.Opener.Thread] {
 		if ob == anchor {
 			continue
 		}
-		if ob.Requester.Handle != anchor.Requester.Handle || ob.Owner.Handle != anchor.Owner.Handle {
-			continue
-		}
-		if ob.Requester.Project != anchor.Requester.Project || ob.Owner.Project != anchor.Owner.Project {
+		if ob.Requester != anchor.Requester || ob.Owner != anchor.Owner {
 			continue
 		}
 		if ob.Closed {
@@ -355,6 +354,7 @@ func (red *Reduction) settleThrough(anchor *Obligation, msg *Entry) {
 		if lessEntries(anchor.Opener, ob.Opener) {
 			continue // ob created after the anchor, untouched
 		}
+		touch(ob, msg)
 		ob.Closed = true
 		ob.ClosedBy = msg
 	}
@@ -636,7 +636,7 @@ func closesObligation(openerKind string, fromOwner bool, msg *Entry) bool {
 	}
 	if !fromOwner {
 		if openerKind == format.KindReviewRequest {
-			return hasLabel("withdrawn", "done", "merged", "closed")
+			return hasLabel(SettledThrough, "withdrawn", "done", "merged", "closed")
 		}
 		return hasLabel(SettledThrough, "withdrawn", "done", "closed")
 	}

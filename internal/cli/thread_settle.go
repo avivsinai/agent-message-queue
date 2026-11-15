@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -96,13 +97,9 @@ func runThreadSettle(args []string) error {
 		return NotFoundError("root not found at %s", root)
 	}
 	scanRoots := []thread.ScanRoot{threadOpenScanRoot(root)}
-	// A shared delivery root is opened for the whole command; the deliverer
-	// does not open it for me. `deliverOutgoing` treats the struct's delivery
-	// fs as owned here, so this command holds it once and closes once.
-	// The reduction reads the whole mailbox. The age bound is applied
-	// afterwards when selecting the open rows closer to now than --older-than;
-	// reducing with that cutoff would skip the very obligations settle finds.
-	_, red, err := reduceObligations(scanRoots, time.Time{}, func(path string, _ error) error { return nil })
+	now := time.Now().UTC()
+	// Same window as `thread open` uses on this root (336h cutoff).
+	_, red, err := reduceObligations(scanRoots, now.Add(-336*time.Hour), func(path string, _ error) error { return nil })
 	if err != nil {
 		return err
 	}
@@ -115,17 +112,33 @@ func runThreadSettle(args []string) error {
 		return err
 	}
 	defer func() { _ = deliveryFS.Close() }()
-	// Group open obligations where I am the requester, by thread + owner.
-	groups := map[string]*threadSettleGroup{}
-	var kept int
-	for _, ob := range red.Obligations {
+	pruneOpenRows := func(ob *thread.Obligation) bool {
 		if !ob.Open() {
-			continue
+			return false
 		}
 		if ob.Requester.Handle != me || !threadMatch(ob.Opener.Thread) {
-			continue
+			return false
 		}
 		if len(allowedOwners) > 0 && !allowedOwners[ob.Owner.Handle] {
+			return false
+		}
+		return true
+	}
+	// One pass: bucket matching rows by (thread, owner) and count the kept
+	// ones (newer than the bound).
+	groups := map[string]*threadSettleGroup{}
+	var result threadSettleResult
+	result.Schema = threadSettleSchema
+	result.GeneratedAt = now.Format(time.RFC3339)
+	result.DryRun = *dryRunFlag
+	result.OlderThanSeconds = int64(bound / time.Second)
+	result.Settled = []threadSettleEntryJSON{}
+	for _, ob := range red.Obligations {
+		if !pruneOpenRows(ob) {
+			continue
+		}
+		if bound > 0 && now.Sub(ob.Opener.RawTime) < bound {
+			result.Kept++
 			continue
 		}
 		key := ob.Opener.Thread + "\x00" + ob.Owner.Project + "\x00" + ob.Owner.Session + "\x00" + ob.Owner.Handle
@@ -136,69 +149,36 @@ func runThreadSettle(args []string) error {
 				OwnerSession: ob.Owner.Session,
 				OwnerHandle:  ob.Owner.Handle,
 			}
-			kept++
 		}
-	}
-	want := map[string]bool{}
-	for _, ob := range red.Obligations {
-		if !ob.Open() {
-			continue
-		}
-		if ob.Requester.Handle != me || !threadMatch(ob.Opener.Thread) {
-			continue
-		}
-		if len(allowedOwners) > 0 && !allowedOwners[ob.Owner.Handle] {
-			continue
-		}
-		key := ob.Opener.Thread + "\x00" + ob.Owner.Project + "\x00" + ob.Owner.Session + "\x00" + ob.Owner.Handle
 		g := groups[key]
-		if g == nil {
-			continue
-		}
-		if bound > 0 && time.Since(ob.Opener.RawTime) < bound {
-			continue
+		if g.Anchor == nil || lessEntries(g.Anchor.Opener, ob.Opener) {
+			g.Anchor = ob
 		}
 		g.Openers = append(g.Openers, ob)
-		want[key] = true
 	}
-	// Any group without an anchor (no old obligations) drops out.
-	keys := make([]string, 0, len(groups))
+	sortingKeys := make([]string, 0, len(groups))
 	for key := range groups {
-		keys = append(keys, key)
+		sortingKeys = append(sortingKeys, key)
 	}
-	sort.Strings(keys)
-	var result threadSettleResult
-	result.Schema = threadSettleSchema
-	result.GeneratedAt = time.Now().UTC().Format(time.RFC3339)
-	result.DryRun = *dryRunFlag
-	result.OlderThanSeconds = int64(bound / time.Second)
-	result.Settled = []threadSettleEntryJSON{}
+	sort.Strings(sortingKeys)
 	var firstErr error
-	for _, key := range keys {
+	for _, key := range sortingKeys {
 		g := groups[key]
-		if !want[key] || len(g.Openers) == 0 {
-			continue
-		}
-		// The newest old obligation is the anchor.
-		newest := g.Openers[0]
-		for _, ob := range g.Openers[1:] {
-			if lessEntries(newest.Opener, ob.Opener) {
-				newest = ob
-			}
-		}
-		g.Anchor = newest
-	}
-	for _, key := range keys {
-		g := groups[key]
-		if g.Anchor == nil {
-			continue
-		}
 		anc := g.Anchor
+		// `anc.Opener` is the newest row at least the bound; that's the anchor.
 		openerIDs := make([]string, 0, len(g.Openers))
+		slices.SortFunc(g.Openers, func(a, b *thread.Obligation) int {
+			if lessEntries(a.Opener, b.Opener) {
+				return -1
+			}
+			if lessEntries(b.Opener, a.Opener) {
+				return 1
+			}
+			return 0
+		})
 		for _, ob := range g.Openers {
 			openerIDs = append(openerIDs, ob.Opener.ID)
 		}
-		sortOpeners(g.Openers)
 		subject := fmt.Sprintf("Settled: %d requests through %q", len(g.Openers), anc.Opener.Subject)
 		body := fmt.Sprintf("These requests from %s need nothing more from you; each one in this thread up to and including %s is closed.\n", me, anc.Opener.ID)
 		for _, ob := range g.Openers {
@@ -225,6 +205,7 @@ func runThreadSettle(args []string) error {
 		msgID := ""
 		err := deliverOutgoing(outgoingMessage{
 			deliveryFS:   deliveryFS,
+			sourceFS:     deliveryFS,
 			deliveryRoot: root,
 			verb:         "settled",
 			me:           me,
@@ -237,6 +218,7 @@ func runThreadSettle(args []string) error {
 			priority:     format.PriorityLow,
 			labels:       []string{thread.SettledThrough},
 			outID:        &msgID,
+			silent:       true,
 		})
 
 		result.Settled = append(result.Settled, threadSettleEntryJSON{
@@ -261,31 +243,21 @@ func runThreadSettle(args []string) error {
 			_ = writeStdout("Nothing to settle.\n")
 		}
 	}
-	result.Kept = 0
-	for _, ob := range red.Obligations {
-		if ob.Open() {
-			result.Kept++
-		}
-	}
 	if common.JSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		return enc.Encode(result)
-	}
-	_ = writeStdout("kept: %d open requests outside the bound\n", result.Kept)
-	return firstErr
-}
-
-func sortOpeners(obs []*thread.Obligation) {
-	// oldest-first matches the source report order
-	for i := 1; i < len(obs); i++ {
-		for j := i; j > 0; j-- {
-			if lessEntries(obs[j-1].Opener, obs[j].Opener) {
-				break
+		if err := enc.Encode(result); err != nil {
+			if firstErr != nil {
+				return errors.Join(firstErr, err)
 			}
-			obs[j-1], obs[j] = obs[j], obs[j-1]
+			return err
 		}
+		return firstErr
 	}
+	if result.Kept > 0 {
+		_ = writeStdout("kept: %d requests newer than %s\n", result.Kept, *olderThanFlag)
+	}
+	return firstErr
 }
 
 // lessEntries is the (created, id) ordering planner used by Reduction.
