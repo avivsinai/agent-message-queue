@@ -11,9 +11,11 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/acp"
+	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/machinecred"
 )
 
 // A session's Buzz agent is known from the markers amq-acp writes for it: a
@@ -40,17 +42,92 @@ type agentInfo struct {
 	// Ready is true for a running helper whose control channel is set up
 	// with the owner in it, so it can send Desktop a create draft.
 	Ready bool
-	// PubKey, RelayKey and Path are those of the marker in the best state,
-	// the newest among equals: its file name (the agent's public key), the
-	// relay key it records, and its file.
-	PubKey, RelayKey, Path string
+	// PubKey, RelayKey, Host and Path are those of the marker in the best
+	// state, the newest among equals: its file name (the agent's public key),
+	// the relay key and host it records, and its file.
+	PubKey, RelayKey, Host, Path string
+	// Status is a standalone machine agent's status file; nil when it has
+	// none or the agent is not standalone.
+	Status *machineStatus
 }
+
+// hostStandalone is the marker host of a machine agent that runs inside
+// amq-remote serve, outside Buzz Desktop.
+const hostStandalone = "standalone"
 
 // helperOf reports this machine's helper agent.
 func helperOf(now time.Time) agentInfo { return agentOf(helperMarkerDir, now) }
 
-// machineOf reports this machine's machine agent.
-func machineOf(now time.Time) agentInfo { return agentOf(machineMarkerDir, now) }
+// machineOf reports this machine's machine agent. With no marker, an
+// enrolled machine credential is a standalone agent that has not run: it
+// reads offline, so nothing offers the Buzz Desktop setup for it. A
+// standalone agent carries its status file.
+func machineOf(now time.Time) agentInfo {
+	info := agentOf(machineMarkerDir, now)
+	if info.State != agentMissing && info.Host != hostStandalone {
+		return info
+	}
+	home, err := amqhome.Dir()
+	if err != nil {
+		return info
+	}
+	if info.State == agentMissing {
+		agents, err := machinecred.Agents(home)
+		if err != nil || len(agents) == 0 {
+			return info
+		}
+		info.State, info.Host, info.PubKey = agentOffline, hostStandalone, agents[0]
+	}
+	raw, err := fsq.ReadRegularNoFollowBounded(filepath.Join(home, "remote", "machine", info.PubKey, machineStatusFile), maxMarkerBytes)
+	var st machineStatus
+	if err == nil && json.Unmarshal(raw, &st) == nil {
+		info.Status = &st
+	}
+	return info
+}
+
+// standalone reports a machine agent that runs inside amq-remote serve.
+func (a agentInfo) standalone() bool { return a.Host == hostStandalone }
+
+// serves reports whether the machine agent serves sessions now: its marker
+// reads running and, for a standalone agent, its status does not say it
+// waits or refused. A standalone marker reads running while its serve
+// process lives, even after the serve stopped the agent.
+func (a agentInfo) serves() bool {
+	if a.State != agentRunning {
+		return false
+	}
+	return !a.standalone() || a.Status == nil || a.Status.State == "serving"
+}
+
+// refusal is the standalone agent's refusal code, or "".
+func (a agentInfo) refusal() string {
+	if a.standalone() && a.Status != nil && a.Status.State == "refused" {
+		return a.Status.Code
+	}
+	return ""
+}
+
+// notServingLine says why a standalone agent does not serve and the user's
+// next step: its status line, else the grant's refusal when it does not
+// load, else to start the login service.
+func (a agentInfo) notServingLine() string {
+	if a.Status != nil && a.Status.State != "serving" && a.Status.Line != "" {
+		return a.Status.Line
+	}
+	if home, err := amqhome.Dir(); err == nil && a.PubKey != "" {
+		if _, err := machinecred.Load(home, a.PubKey); err != nil {
+			return noAuthorityLine(a.PubKey, err)
+		}
+	}
+	return "run amq-remote up."
+}
+
+// notServing is the line attach prints for a standalone agent that does
+// not serve.
+func (a agentInfo) notServing() string {
+	return "The machine agent runs inside amq-remote serve and is not running: " + a.notServingLine()
+}
 
 // stateRank orders agent states: the best state of any marker wins.
 var stateRank = map[string]int{agentMissing: 0, agentOffline: 1, agentIdle: 2, agentRunning: 3}
@@ -84,6 +161,7 @@ func agentOf(dirName string, now time.Time) agentInfo {
 			Worker     launch.HolderIdentity `json:"worker"`
 			Parent     launch.HolderIdentity `json:"parent"`
 			RelayKey   string                `json:"relay_key"`
+			Host       string                `json:"host"`
 		}
 		if err != nil || json.Unmarshal(raw, &m) != nil {
 			continue
@@ -104,7 +182,7 @@ func agentOf(dirName string, now time.Time) agentInfo {
 		}
 		if rank := stateRank[state]; rank > bestRank || rank == bestRank && updated.After(bestAt) {
 			bestRank, bestAt = rank, updated
-			info.PubKey, info.RelayKey = strings.TrimSuffix(e.Name(), ".json"), m.RelayKey
+			info.PubKey, info.RelayKey, info.Host = strings.TrimSuffix(e.Name(), ".json"), m.RelayKey, m.Host
 			info.Path = filepath.Join(dir, e.Name())
 		}
 	}
@@ -177,7 +255,7 @@ func viewOf(b binding.Binding, name string, reused bool) attachView {
 		if c, ok := acp.MachineChannelOf(b); ok {
 			v.channel = &c
 		}
-		if v.machine.State != agentRunning || v.unproven != "" || (v.channel != nil && v.channel.State != "creating") || !time.Now().Before(deadline) {
+		if !v.machine.serves() || v.unproven != "" || (v.channel != nil && v.channel.State != "creating") || !time.Now().Before(deadline) {
 			return v
 		}
 		time.Sleep(250 * time.Millisecond)
@@ -193,7 +271,7 @@ func (v attachView) channelState() string {
 		return ""
 	case v.channel != nil:
 		return v.channel.State
-	case v.machine.State == agentRunning && v.unproven == "":
+	case v.machine.serves() && v.unproven == "":
 		return "creating"
 	}
 	return ""
@@ -206,18 +284,24 @@ func connected(w io.Writer, v attachView) {
 	say(w, "Connected: %s.", nonEmpty(v.label, v.name))
 	display := agentDisplay(v.agent, v.label, v.name)
 	machine := nonEmpty(v.machine.Display, "AMQ Remote @ "+nonEmpty(binding.Machine(), "this machine"))
+	serves := v.machine.serves()
 	switch state := v.channelState(); {
 	case v.agent.State == agentRunning:
 		say(w, "DM %q in Buzz.", display)
 	case v.agent.State == agentIdle:
 		say(w, "DM %q in Buzz; Buzz starts it on the next message.", display)
-	case v.machine.State == agentRunning && state == "active":
+	case serves && state == "active":
 		say(w, "Open the %q channel in Buzz.", v.channel.Name)
-	case v.machine.State == agentRunning && state == "creating":
+	case serves && state == "creating" && v.machine.standalone():
+		say(w, "AMQ Remote is making the channel; it appears in Buzz within a minute.")
+	case serves && state == "creating":
 		say(w, "Buzz is making the channel; it appears within a minute.")
+	case v.machine.standalone() && !serves:
+		// Nothing makes, looks for or retries a channel until serve runs it.
+		say(w, "%s", v.machine.notServing())
 	case v.machine.State != agentMissing && state == "" && v.unproven != "":
 		say(w, "%s makes a channel only for a session proven live, and this session is not (%s).", machine, v.unproven)
-	case v.machine.State != agentRunning && v.machine.State != agentMissing && (state == "uncertain" || state == "failed"):
+	case !serves && v.machine.State != agentMissing && (state == "uncertain" || state == "failed"):
 		// No worker runs, so nothing looks for the channel or tries again
 		// until the machine agent is started.
 		say(w, "Start %q in Buzz Desktop (Agents, the agent, Start). This session's channel is %s (%s); nothing is done about it while the machine agent is stopped.", machine, state, v.channel.Error)
@@ -248,6 +332,15 @@ func connectedJSON(out map[string]any, v attachView) map[string]any {
 	}
 	if v.machine.State != agentMissing {
 		out["machine_name"] = nonEmpty(v.machine.Display, "AMQ Remote @ "+binding.Machine())
+	}
+	if v.machine.standalone() {
+		out["machine_host"] = hostStandalone
+		if code := v.machine.refusal(); code != "" {
+			out["machine_refusal"] = code
+		}
+		if !v.machine.serves() {
+			out["machine_line"] = v.machine.notServing()
+		}
 	}
 	if v.served && v.channel == nil && v.unproven != "" {
 		out["unproven"] = v.unproven

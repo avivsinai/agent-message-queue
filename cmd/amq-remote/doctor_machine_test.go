@@ -11,9 +11,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/dialogguard"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
+	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
+	"github.com/avivsinai/agent-message-queue/internal/remote/machinecred"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
@@ -191,6 +196,68 @@ func TestDoctorMailboxesWarnsOfAWakeBeforeDialogEntries(t *testing.T) {
 
 // A failing channel prints once, as its FAIL line, not again as an INFO row
 // from the channels map (audit 2026-11-10).
+// A machine agent that serves inside amq-remote serve is checked from its
+// enrolled credential and status file, with no Buzz Desktop check.
+func TestDoctorChecksAStandaloneMachineAgent(t *testing.T) {
+	machineFixture(t)
+	installHooks(t, true, true)
+	saved := runHookProbe
+	t.Cleanup(func() { runHookProbe = saved })
+	runHookProbe = func(string, string) (string, error) { return "amq-remote " + version + "\n", nil }
+	self, err := launch.HolderOf(os.Getpid())
+	if err != nil {
+		t.Skip("no process identity on this platform")
+	}
+	home, err := amqhome.EnsureDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := machinecred.Mint(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var owner [32]byte
+	owner[31] = 7
+	tag, err := bodykey.SignAuthTag(owner, agent, bodykey.MachineConditions(time.Now().Add(90*24*time.Hour).Unix()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant, err := machinecred.EncodeGrant(agent, "wss://relay.example", *tag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cred, err := machinecred.Enroll(home, grant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markers := filepath.Join(filepath.Dir(os.Getenv(binding.EnvPath)), "acp", "agents", machineMarkerDir)
+	if err := os.Remove(filepath.Join(markers, strings.Repeat("ab", 32)+".json")); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	marker, _ := json.Marshal(map[string]any{"name": "_machine", "pubkey": agent, "display_name": "AMQ Remote @ m", "relay_key": "rk",
+		"host": hostStandalone, "worker": self, "updated": now})
+	if err := os.WriteFile(filepath.Join(markers, agent+".json"), marker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	status, _ := json.Marshal(machineStatus{State: "serving", RelayURL: "wss://relay.example", RelayState: string(relay.StateAuthenticated),
+		GrantNotAfter: grantEnd(cred), PID: os.Getpid(), Updated: now})
+	if err := os.WriteFile(filepath.Join(home, "remote", "machine", agent, machineStatusFile), status, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, code, err := doctor([]string{"--root", canonicalTempDir(t)})
+	if err != nil || code != 0 {
+		t.Fatalf("doctor: code=%d err=%v failing=%v", code, err, out.(map[string]any)["failing"])
+	}
+	row := out.(map[string]any)["machine_agent"].(machineAgentRow)
+	want := machineAgentRow{State: agentRunning, Name: "AMQ Remote @ m", RelayKey: true, Host: hostStandalone, Agent: agent[:8],
+		Owner: tag.OwnerPubKey[:8], Relay: "wss://relay.example", RelayState: string(relay.StateAuthenticated), GrantEnd: grantEnd(cred)}
+	if row != want {
+		t.Fatalf("machine_agent row = %+v; want %+v", row, want)
+	}
+}
+
 func TestDoctorTextPrintsAFailingChannelOnce(t *testing.T) {
 	var text bytes.Buffer
 	printDoctor(&text, doctorReport{

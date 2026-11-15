@@ -12,11 +12,15 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/acp"
+	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/dialogguard"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
+	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
+	"github.com/avivsinai/agent-message-queue/internal/remote/machinecred"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/roster"
 	"github.com/avivsinai/agent-message-queue/internal/route"
@@ -318,12 +322,33 @@ type machineAgentRow struct {
 	Name             string `json:"name,omitempty"`
 	RelayKey         bool   `json:"relay_key"`
 	StartOnAppLaunch *bool  `json:"start_on_app_launch,omitempty"`
+	// A standalone agent's host, the first 8 characters of its key and of
+	// the owner's key, its relay and relay state, its grant's end and its
+	// refusal code.
+	Host       string `json:"host,omitempty"`
+	Agent      string `json:"agent,omitempty"`
+	Owner      string `json:"owner,omitempty"`
+	Relay      string `json:"relay,omitempty"`
+	RelayState string `json:"relay_state,omitempty"`
+	GrantEnd   string `json:"grant_end,omitempty"`
+	Refusal    string `json:"refusal,omitempty"`
 }
 
+// Doctor's bounds for a standalone machine agent: a relay not
+// authenticated for longer fails, and a grant that ends sooner is noted.
+const (
+	standaloneRelayGrace  = time.Minute
+	standaloneGrantNotice = 14 * 24 * time.Hour
+)
+
 // doctorMachineAgent checks that the machine agent runs (its marker is
-// fresh), has a relay, and that Buzz Desktop starts it when it opens.
+// fresh), has a relay, and that Buzz Desktop starts it when it opens; a
+// standalone agent has its own checks.
 func doctorMachineAgent(machine agentInfo, fail, note reportFunc) machineAgentRow {
 	row := machineAgentRow{State: machine.State}
+	if machine.standalone() {
+		return doctorStandalone(machine, row, time.Now(), fail, note)
+	}
 	if machine.State == agentMissing {
 		note("machine_agent", "", "this machine has no AMQ Remote machine agent, so no session gets a channel of its own",
 			"run `amq-acp setup --machine --out \"$HOME/"+machineImportFile+"\"`, then in Buzz Desktop: Agents, +, Import that file, Start, and turn on Auto-start")
@@ -355,6 +380,52 @@ func doctorMachineAgent(machine agentInfo, fail, note reportFunc) machineAgentRo
 		row.StartOnAppLaunch = auto
 	}
 	return row
+}
+
+// doctorStandalone checks the machine agent that runs inside amq-remote
+// serve, from its enrolled credential and its status file: it serves, its
+// relay is authenticated, and its grant does not end soon. Buzz Desktop has
+// no part in it.
+func doctorStandalone(machine agentInfo, row machineAgentRow, now time.Time, fail, note reportFunc) machineAgentRow {
+	row.Name = nonEmpty(machine.Display, "AMQ Remote @ "+nonEmpty(binding.Machine(), "this machine"))
+	row.Host, row.Agent, row.RelayKey = hostStandalone, short(machine.PubKey), machine.RelayKey != ""
+	st := machine.Status
+	if st != nil {
+		row.Relay, row.RelayState, row.GrantEnd, row.Refusal = st.RelayURL, st.RelayState, st.GrantNotAfter, machine.refusal()
+	}
+	var end time.Time
+	if home, err := amqhome.Dir(); err == nil {
+		if cred, err := machinecred.Load(home, machine.PubKey); err == nil {
+			row.Owner, row.Relay, row.GrantEnd = short(cred.Tag.OwnerPubKey), buzzop.NormalizeRelay(cred.Relay), grantEnd(cred)
+			if n, err := cred.Tag.NotAfter(); err == nil {
+				end = time.Unix(n, 0)
+			}
+		}
+	}
+	switch {
+	case !machine.serves():
+		// The line ends with the user's next step.
+		fail("machine_agent", row.Name, "the machine agent runs inside amq-remote serve and is not running: "+machine.notServingLine(), "")
+	case st != nil && st.RelayState != string(relay.StateAuthenticated) && statusAge(st, now) > standaloneRelayGrace:
+		fail("machine_agent", row.Name, fmt.Sprintf("the machine agent's relay %s has not been authenticated for more than a minute (%s%s), so no channel is made and no owner message arrives",
+			st.RelayURL, nonEmpty(st.RelayState, "no state"), errSuffix(st.RelayError)), "check the network and the relay "+st.RelayURL+"; amq-remote serve reconnects by itself")
+	}
+	if !end.IsZero() && end.After(now) && end.Sub(now) < standaloneGrantNotice {
+		note("machine_agent", row.Name, "the owner's grant for the machine agent ends "+row.GrantEnd,
+			"run `amq-remote machine request`, have the owner sign it with `amq-owner-sign --machine FILE --out FILE --relay "+row.Relay+"`, then run `amq-remote machine enroll --grant FILE`")
+	}
+	return row
+}
+
+// statusAge is how long a status file has said what it says: serve
+// rewrites it on every change, so its update time is when that began. An
+// unreadable time is no age.
+func statusAge(st *machineStatus, now time.Time) time.Duration {
+	at, err := time.Parse(time.RFC3339, st.Updated)
+	if err != nil {
+		return 0
+	}
+	return now.Sub(at)
 }
 
 // maxManagedAgentsBytes bounds the Buzz Desktop agents file read.
