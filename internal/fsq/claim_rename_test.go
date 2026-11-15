@@ -4,6 +4,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -108,5 +110,41 @@ func TestMoveNewToCurLoserForMissingMessage(t *testing.T) {
 	}
 	if !os.IsNotExist(err) {
 		t.Fatalf("error = %T %v, want os.IsNotExist", err, err)
+	}
+}
+
+// Bead ax6w (observed by the 1ni3 live check 2026-11-15):
+// a read-only inbox/cur must make MoveNewToCur name the step and the path,
+// matching how send names openat refusals. Pre-fix the syscall error was
+// returned bare ("operation not permitted" with no path).
+func TestMoveNewToCurPermissionErrorNamesThePath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits do not apply the same way")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory modes")
+	}
+	base := setupClaimAgent(t, "alice")
+	writeClaimMessage(t, base, "alice", "a.md")
+	curDir := AgentInboxCur(base, "alice")
+	if err := os.Chmod(curDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(curDir, 0o700) })
+	root := openDeliveryRootForTest(t, base)
+	err := MoveNewToCur(root, "alice", "a.md")
+	if err == nil {
+		t.Fatal("read-only inbox/cur must refuse the claim")
+	}
+	wantPrefix := "claim "
+	msg := err.Error()
+	if !strings.HasPrefix(msg, wantPrefix) {
+		t.Fatalf("error %q does not start with the claim operation", msg)
+	}
+	if !strings.Contains(msg, "/agents/alice/inbox/new/a.md") || !strings.Contains(msg, "/agents/alice/inbox/cur/a.md") {
+		t.Fatalf("error %q does not name the source and destination paths", msg)
+	}
+	if !strings.Contains(msg, "permission denied") && !strings.Contains(msg, "operation not permitted") {
+		t.Fatalf("error %q does not include the underlying errno", msg)
 	}
 }

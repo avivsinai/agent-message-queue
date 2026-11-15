@@ -3,6 +3,7 @@ package fsq
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 )
 
@@ -42,7 +43,18 @@ func MoveNewToCur(root *DeliveryRoot, agent, filename string) error {
 				Err:       residue.Err,
 			}
 		}
-		return err
+		// ENOENT is the advertised meaning of a lost claim race (another
+		// caller already claimed). It must remain bare so callers can
+		// treat it as "not your message" rather than as a delivery fault.
+		// Every other error (typically EACCES) gets the operation and the
+		// path in its wrapping, so the printed line is not a bare errno.
+		if os.IsNotExist(err) {
+			return err
+		}
+		return fmt.Errorf("claim %s into %s: %w",
+			root.displayPath(newPath),
+			root.displayPath(curPath),
+			err)
 	}
 
 	// The rename is already visible. Sync the destination first so a crash is
