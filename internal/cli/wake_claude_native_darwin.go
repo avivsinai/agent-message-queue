@@ -79,7 +79,7 @@ func newWakeClaudeNative(s *wakeStart, cfg *wakeConfig) (wakeNativeNotifier, err
 	}
 	if ticket.State != launch.ExecutionPending || ticket.ConversationID != s.nativeLaunch.SessionID ||
 		ticket.ConversationID != ticket.LaunchNonce || ticket.Provider != launch.ClaudeProvider ||
-		ticket.ProviderVersion != launch.ClaudeNativeVersion || ticket.Mode != launch.AdapterModeMint || ticket.Wrapper != nil ||
+		!launch.ClaudeNativeVersionSupported(ticket.ProviderVersion) || ticket.Mode != launch.AdapterModeMint || ticket.Wrapper != nil ||
 		ticket.Cwd != s.nativeLaunch.Cwd || ticket.Execution == nil || ticket.Execution.InjectorMode != wakeInjectModeClaudeNative {
 		return nil, fmt.Errorf("native launch does not match a fresh pending Claude ticket")
 	}

@@ -208,9 +208,16 @@ func ExecuteLegacyTrustMove(move LegacyTrustMove) error {
 const preparePlaceholderUUID = "00000000-0000-4000-8000-000000000000"
 const MaxInitialInputBytes = 256 * 1024
 
-// ClaudeNativeVersion is the one Claude Code release the claude-native
-// injector is built and proven against.
-const ClaudeNativeVersion = "2.1.311"
+// ClaudeNativeMinimumVersion is the oldest Claude Code release the
+// claude-native injector was proven against. Newer releases are admitted
+// when the running session states peer protocol 1.
+const ClaudeNativeMinimumVersion = "2.1.311"
+
+// ClaudeNativeVersionSupported reports whether a provider version is a
+// strict release at or above the floor.
+func ClaudeNativeVersionSupported(version string) bool {
+	return releaseAtLeast(version, ClaudeNativeMinimumVersion)
+}
 
 const (
 	PrepareOutcomeReady          = "ready"
@@ -1236,8 +1243,8 @@ func prepareOneParticipant(ctx context.Context, participant PrepareParticipant, 
 		if err := ValidateAdapterCapabilities(adapter, capabilities); err != nil {
 			return prepared, observation, nil, nil, err
 		}
-		if !capabilities.Available || !capabilities.Fresh || capabilities.ProviderVersion != ClaudeNativeVersion {
-			return prepared, observation, nil, nil, fmt.Errorf("claude-native requires Claude Code %s", ClaudeNativeVersion)
+		if !capabilities.Available || !capabilities.Fresh || !ClaudeNativeVersionSupported(capabilities.ProviderVersion) {
+			return prepared, observation, nil, nil, fmt.Errorf("claude-native requires Claude Code %s or later; this is %s", ClaudeNativeMinimumVersion, capabilities.ProviderVersion)
 		}
 	}
 	if useResume {
