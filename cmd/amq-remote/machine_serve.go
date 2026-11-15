@@ -223,7 +223,8 @@ func (ms *machineSet) reconcile(now time.Time) (st machineStatus, agents []strin
 	}
 	delete(ms.said, "start")
 	if !started {
-		return st.waiting(anotherServeLine(agent, now)), agents, true
+		// The status file is the lock holder's to write.
+		return st.waiting(anotherServeLine(agent, now)), nil, true
 	}
 	if st, ok := ms.keep(agents, now); ok {
 		return st, agents, true
@@ -256,11 +257,19 @@ func (ms *machineSet) keep(agents []string, now time.Time) (st machineStatus, ok
 		delete(ms.said, "adopt")
 	}
 	cs := run.client.Status()
+	// Each attempt clears the client's error, so a refusal holds until a
+	// connection authenticates.
+	switch {
+	case cs.Err == relay.ErrAuthRefused.Error():
+		run.authRefused = true
+	case cs.State == relay.StateAuthenticated:
+		run.authRefused = false
+	}
 	st = machineStatus{State: "serving", RelayURL: run.id.RelayURL, RelayState: string(cs.State), RelayError: cs.Err, GrantNotAfter: grantEnd(cred)}
 	switch {
 	case grantEnded(agent, cred, now) != "":
 		st = st.refused(codeAuthorityExpired, grantEnded(agent, cred, now))
-	case cs.Err == relay.ErrAuthRefused.Error():
+	case run.authRefused:
 		st = st.refused(codeAuthRefused, fmt.Sprintf("%s refused the machine agent's key %s; the owner must allow it on %s.", run.id.RelayURL, short(agent), run.id.RelayURL))
 	}
 	return st, true
@@ -372,6 +381,7 @@ type machineRun struct {
 	conn atomic.Pointer[relay.Conn]
 
 	started     bool
+	authRefused bool // the relay refused the key; set and read by keep
 	stopWorkers func()
 	out         *outbox.Outbox
 	client      *relay.Client
@@ -616,9 +626,9 @@ func (h *portHolder) Lookup(ctx context.Context, eventID string) (bool, error) {
 // machineMarker is what serve reads of one machine agent marker
 // (agents/_machine/<pubkey>.json).
 type machineMarker struct {
-	key, display string
-	worker       launch.HolderIdentity
-	state        string
+	key, display, host string
+	worker             launch.HolderIdentity
+	state              string
 }
 
 // machineMarkers reads every machine agent marker as it reads at now.
@@ -638,6 +648,7 @@ func machineMarkers(now time.Time) []machineMarker {
 		raw, err := fsq.ReadRegularNoFollowBounded(filepath.Join(dir, e.Name()), maxMarkerBytes)
 		var m struct {
 			DisplayName string                `json:"display_name"`
+			Host        string                `json:"host"`
 			Updated     string                `json:"updated"`
 			Worker      launch.HolderIdentity `json:"worker"`
 			Parent      launch.HolderIdentity `json:"parent"`
@@ -645,17 +656,20 @@ func machineMarkers(now time.Time) []machineMarker {
 		if err != nil || json.Unmarshal(raw, &m) != nil {
 			continue
 		}
-		out = append(out, machineMarker{key: key, display: m.DisplayName, worker: m.Worker, state: acp.AgentState(m.Updated, m.Worker, m.Parent, now)})
+		out = append(out, machineMarker{key: key, display: m.DisplayName, host: m.Host, worker: m.Worker,
+			state: acp.AgentState(m.Updated, m.Worker, m.Parent, now)})
 	}
 	return out
 }
 
-// otherMachineAgent names a machine agent of another key whose marker
-// reads running or idle, or returns "". A marker this process wrote is an
-// agent this serve ran and stopped, not another one.
+// otherMachineAgent names a Buzz Desktop machine agent of another key whose
+// marker reads running or idle, or returns "". A standalone marker of
+// another key is an agent a serve here ran before its credential changed,
+// since one AMQ home enrolls one key at a time: its serve outlives it and
+// keeps the marker reading running.
 func otherMachineAgent(agent string, now time.Time) string {
 	for _, m := range machineMarkers(now) {
-		if m.key == agent || m.worker.PID == os.Getpid() {
+		if m.key == agent || m.host == "standalone" {
 			continue
 		}
 		if m.state == agentRunning || m.state == agentIdle {
