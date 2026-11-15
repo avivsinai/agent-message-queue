@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.146.1](https://github.com/avivsinai/agent-message-queue/compare/v0.146.0...v0.146.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* **thread:** settle selects only the caller's own requests ([#1509](https://github.com/avivsinai/agent-message-queue/issues/1509)) ([cffe10a](https://github.com/avivsinai/agent-message-queue/commit/cffe10a09995dffb8cd48a74f3e493ff2f5822f3))
+
 ## [0.146.0](https://github.com/avivsinai/agent-message-queue/compare/v0.145.2...v0.146.0) (2026-11-15)
 
 
