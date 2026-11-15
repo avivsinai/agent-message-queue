@@ -1057,8 +1057,10 @@ func answerTarget(dir string, evt nostr.Event, open []dialog.Request, posted map
 }
 
 // ownerSkew bounds how far the clock that dates an owner's signed message
-// may be from this machine's.
+// may be from this machine's. OwnerSkew is the same bound for a frontend
+// that checks an owner message before Owner.
 const ownerSkew = 60 * time.Second
+const OwnerSkew = ownerSkew
 
 // signedWithin is the time rule of every owner decision: evt was signed no
 // earlier than floor and at most ownerSkew after now. A replayed message is

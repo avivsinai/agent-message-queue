@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"fiatjaf.com/nostr"
+
 	"github.com/avivsinai/agent-message-queue/internal/acp"
 	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -21,6 +23,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzdirect"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzevent"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/machinecred"
@@ -46,6 +49,25 @@ const (
 	machineReplayEvery = 30 * time.Second
 	// machineReplayTimeout bounds one replayed post.
 	machineReplayTimeout = 30 * time.Second
+
+	// machineInboundSub is the subscription id of the owner's messages.
+	machineInboundSub = "amq-msg"
+	// machineInboundEvery paces the inbound loop while no event arrives: a
+	// changed cursor is written at most this often, and an ended
+	// subscription is sent again within it.
+	machineInboundEvery = time.Second
+	// machineRoutesEvery is how often the loop compares Routes() with the
+	// channels its subscription asks for.
+	machineRoutesEvery = 2 * time.Second
+	// machineAskEvery is how often the subscription is sent again even
+	// when nothing changed: the loop does not rely on live delivery after
+	// the relay's end of stored events.
+	machineAskEvery = 60 * time.Second
+	// machineOverlap is how far before the cursor the subscription asks,
+	// and how far before now the cursor of a first run starts.
+	machineOverlap = 120 * time.Second
+	// machineFilterChannels bounds the channels of one filter.
+	machineFilterChannels = 500
 )
 
 // Refusal codes in the machine agent's status file.
@@ -207,7 +229,7 @@ func (ms *machineSet) reconcile(now time.Time) (st machineStatus, agents []strin
 		ms.drop()
 	}
 	if ms.run == nil {
-		run, err := newMachineRun(ms.home, agent, cred, ms.self)
+		run, err := newMachineRun(ms.home, agent, cred, ms.self, ms.stderr)
 		if err != nil {
 			line := fmt.Sprintf("%s: %v", short(agent), err)
 			ms.sayOnce("start", "machine agent: "+line)
@@ -373,12 +395,14 @@ func (ms *machineSet) sayOnce(key, msg string) {
 // tries to start it, and, once StartMachine took the machine lock, its
 // outbox, port and relay client.
 type machineRun struct {
-	home string
-	id   buzzop.Identity
-	ops  string // the outbox directory
-	srv  *acp.Server
-	port portHolder
-	conn atomic.Pointer[relay.Conn]
+	home   string
+	id     buzzop.Identity
+	state  string // the engine's state directory
+	ops    string // the outbox directory
+	srv    *acp.Server
+	port   portHolder
+	conn   atomic.Pointer[relay.Conn]
+	stderr io.Writer
 
 	started     bool
 	authRefused bool // the relay refused the key; set and read by keep
@@ -388,16 +412,22 @@ type machineRun struct {
 	cancel      context.CancelFunc
 	done        chan struct{}
 
-	// A replay pass holds replayMu; stop sets stopping and takes it, so no
-	// pass writes the outbox after the machine lock is released.
-	replayMu sync.Mutex
+	// A step that writes what the machine lock guards (a replay pass, an
+	// owner message handed to the engine, a cursor write) holds held for
+	// reading and returns when stopping is set; stop sets stopping and
+	// takes held, so no such step runs after the lock is released.
+	held     sync.RWMutex
 	stopping atomic.Bool
+
+	// in is the inbound loop's state. The loop runs on one connection at a
+	// time, and only it touches in.
+	in inbound
 }
 
 // newMachineRun builds the agent's server. Its state is the binding mode
 // state directory, as the engine's; the outbox is <state>/ops/<relay
 // key>/<agent>.
-func newMachineRun(home, agent string, cred machinecred.Credential, self string) (*machineRun, error) {
+func newMachineRun(home, agent string, cred machinecred.Credential, self string, stderr io.Writer) (*machineRun, error) {
 	path, err := binding.Path()
 	if err != nil {
 		return nil, err
@@ -406,7 +436,8 @@ func newMachineRun(home, agent string, cred machinecred.Credential, self string)
 		RelayURL: buzzop.NormalizeRelay(cred.Relay), RelayKey: buzzop.RelayKey(cred.Relay), RelaySelf: self,
 		Owner: cred.Tag.OwnerPubKey, Agent: agent, DisplayName: defaultMachineName(),
 	}
-	run := &machineRun{home: home, id: id, ops: filepath.Join(filepath.Dir(path), "acp", "ops", id.RelayKey, agent), done: make(chan struct{})}
+	state := filepath.Join(filepath.Dir(path), "acp")
+	run := &machineRun{home: home, id: id, state: state, ops: filepath.Join(state, "ops", id.RelayKey, agent), stderr: stderr, done: make(chan struct{})}
 	run.srv = acp.NewStandalone(acp.Standalone{Identity: id, Transport: &run.port, Online: run.online}, version)
 	return run, nil
 }
@@ -451,9 +482,9 @@ func (run *machineRun) stop() {
 		return
 	}
 	run.stopping.Store(true)
-	run.replayMu.Lock()
+	run.held.Lock()
 	run.stopWorkers()
-	run.replayMu.Unlock()
+	run.held.Unlock()
 	run.cancel()
 	<-run.done
 }
@@ -500,11 +531,18 @@ func (run *machineRun) config() (relay.Config, error) {
 }
 
 // onConnect serves one authenticated connection: the port and the engine
-// use it until it ends, and posts of unknown outcome are sent again at once
-// and every machineReplayEvery.
+// use it until it ends, posts of unknown outcome are sent again at once and
+// every machineReplayEvery, and the inbound loop hands the owner's messages
+// to the engine. It returns once the inbound loop has.
 func (run *machineRun) onConnect(ctx context.Context, conn *relay.Conn) {
 	run.conn.Store(conn)
 	defer run.conn.CompareAndSwap(conn, nil)
+	looped := make(chan struct{})
+	go func() {
+		defer close(looped)
+		run.inbound(ctx, conn)
+	}()
+	defer func() { <-looped }()
 	t := time.NewTicker(machineReplayEvery)
 	defer t.Stop()
 	for {
@@ -522,8 +560,8 @@ func (run *machineRun) onConnect(ctx context.Context, conn *relay.Conn) {
 // is due. A not_sent record is the engine's to retry, and the engine
 // resolves its own channel creates, member adds and archives.
 func (run *machineRun) replay(ctx context.Context) {
-	run.replayMu.Lock()
-	defer run.replayMu.Unlock()
+	run.held.RLock()
+	defer run.held.RUnlock()
 	port := run.port.p.Load()
 	if port == nil || run.stopping.Load() {
 		return
@@ -543,6 +581,264 @@ func (run *machineRun) replay(ctx context.Context) {
 		rctx, cancel := context.WithTimeout(ctx, machineReplayTimeout)
 		port.Replay(rctx, buzzop.Key(r.Key))
 		cancel()
+	}
+}
+
+// inbound is the inbound loop's state, kept across the connections of one
+// run.
+//
+// handed holds each event handed to Owner, with the channel that closes
+// once the engine has handled it; dropped holds each event whose drop was
+// reported. Both forget an event dated before the cursor minus
+// machineOverlap, which no subscription asks for again; an event still in
+// work is never forgotten. Every event in them is one the owner signed,
+// the subscription's only author, so they are bounded by the owner's
+// messages of the last machineOverlap before the cursor, plus those still
+// in work and those dated after the cursor.
+type inbound struct {
+	loaded bool
+	// cursor is the cursor at the last pass; newest is the newest event a
+	// subscription delivered after its relay's end of stored events, or
+	// before it when that end came, never below the cursor read at start.
+	cursor, newest int64
+	handed         map[string]handedEvent
+	dropped        map[string]int64 // event id: created_at
+
+	written   int64 // the cursor last written
+	writtenAt time.Time
+	writeErr  string // the write error last reported
+}
+
+// handedEvent is one event handed to Owner: its created_at, and the channel
+// that closes once it has been handled.
+type handedEvent struct {
+	at   int64
+	done <-chan struct{}
+}
+
+// inboundCursor is <state>/inbound/<relay key>/<agent>.json: the time from
+// which the owner's messages are asked for again, less machineOverlap.
+type inboundCursor struct {
+	Since   int64  `json:"since"`
+	Updated string `json:"updated,omitempty"`
+}
+
+// inbound subscribes on conn to the owner's channel messages in the
+// agent's routes and hands each to the engine, until ctx ends. The
+// subscription is sent again, after the old one is closed, when Routes()
+// changes, when it ends (overflow, a relay CLOSED), and every
+// machineAskEvery; a reconnect runs a new loop. The loop starts nothing
+// that outlives it: the subscription is closed on return, and an Owner
+// channel is only polled, never waited on.
+func (run *machineRun) inbound(ctx context.Context, conn *relay.Conn) {
+	run.loadCursor(time.Now())
+	var (
+		sub            *relay.Sub
+		want, routes   []string  // Routes() as last read; the channels sub asks for
+		checked, asked time.Time // when Routes() was read; when sub was sent
+		stored         bool      // sub's relay has ended its stored events
+		seen           int64     // the newest event sub delivered before that end
+		subErr         string    // the subscribe error last reported
+	)
+	end := func() {
+		if sub != nil {
+			sub.Close()
+			sub = nil
+		}
+	}
+	defer end()
+	tick := time.NewTicker(machineInboundEvery)
+	defer tick.Stop()
+	for {
+		now := time.Now()
+		if now.Sub(checked) >= machineRoutesEvery {
+			want, checked = run.srv.Routes(), now
+			slices.Sort(want)
+		}
+		if sub != nil && (isClosed(sub.Done()) || now.Sub(asked) >= machineAskEvery) || !slices.Equal(want, routes) {
+			end()
+			routes, stored, seen = nil, false, 0
+			if len(want) > 0 {
+				s, err := run.subscribe(ctx, conn, want)
+				switch {
+				case err == nil:
+					sub, routes, asked, subErr = s, want, now, ""
+				case err.Error() != subErr && ctx.Err() == nil:
+					subErr = err.Error()
+					say(run.stderr, "machine agent: the owner's messages cannot be asked for, so it asks again: %v", err)
+				}
+			}
+		}
+		run.settle(now)
+		var events <-chan nostr.Event
+		var eose <-chan struct{}
+		if sub != nil {
+			events = sub.Events
+			if !stored {
+				eose = sub.EOSE
+			}
+		}
+		select {
+		case <-ctx.Done():
+			run.settle(time.Now())
+			return
+		case <-tick.C:
+		case <-eose:
+			stored = true
+			run.in.newest = max(run.in.newest, seen)
+		case evt := <-events:
+			// Before the end of stored events, a subscription that then
+			// overflows may have skipped an older event, so what it
+			// delivered counts only once that end comes.
+			at, delivered := run.take(evt, time.Now())
+			switch {
+			case !delivered:
+			case stored:
+				run.in.newest = max(run.in.newest, at)
+			default:
+				seen = max(seen, at)
+			}
+		}
+	}
+}
+
+// subscribe sends the inbound subscription for routes: kind 9 by the owner,
+// since the cursor less machineOverlap, at most machineFilterChannels
+// channels per filter.
+func (run *machineRun) subscribe(ctx context.Context, conn *relay.Conn, routes []string) (*relay.Sub, error) {
+	owner, err := nostr.PubKeyFromHex(run.id.Owner)
+	if err != nil {
+		return nil, err
+	}
+	since := nostr.Timestamp(run.in.cursor - int64(machineOverlap/time.Second))
+	var filters []nostr.Filter
+	for chunk := range slices.Chunk(routes, machineFilterChannels) {
+		filters = append(filters, nostr.Filter{Kinds: []nostr.Kind{buzzevent.KindChannelMessage}, Authors: []nostr.PubKey{owner},
+			Tags: nostr.TagMap{"h": chunk}, Since: since})
+	}
+	return conn.Subscribe(ctx, machineInboundSub, filters...)
+}
+
+// take checks evt and hands it to the engine. A failed check drops it and
+// is reported once per event id; it is checked again when it comes again.
+// delivered is false when evt was dropped or the run is stopping.
+func (run *machineRun) take(evt nostr.Event, now time.Time) (at int64, delivered bool) {
+	in := &run.in
+	id, at := evt.ID.Hex(), int64(evt.CreatedAt)
+	if _, ok := in.handed[id]; ok {
+		return at, true
+	}
+	channel := ""
+	if h := evt.Tags.Find("h"); len(h) >= 2 {
+		channel = h[1]
+	}
+	why := ""
+	if err := buzzevent.Verify(evt, channel); err != nil {
+		why = err.Error()
+	} else if !slices.Contains(run.srv.Routes(), channel) {
+		why = "its channel is not a route of this agent"
+	} else if evt.PubKey.Hex() != run.id.Owner {
+		why = "its author is not the owner"
+	} else if evt.CreatedAt.Time().After(now.Add(acp.OwnerSkew)) {
+		why = fmt.Sprintf("it is dated more than %s after this machine's clock", acp.OwnerSkew)
+	}
+	if why != "" {
+		if _, said := in.dropped[id]; !said {
+			in.dropped[id] = at
+			say(run.stderr, "machine agent: owner message %s dropped: %s", id, why)
+		}
+		return at, false
+	}
+	run.held.RLock()
+	defer run.held.RUnlock()
+	if run.stopping.Load() {
+		return at, false
+	}
+	in.handed[id] = handedEvent{at: at, done: run.srv.Owner(buzzop.Inbound{Channel: channel, Event: evt})}
+	return at, true
+}
+
+// cursorRel is the cursor file below the engine's state directory.
+func (run *machineRun) cursorRel() string {
+	return filepath.Join("inbound", run.id.RelayKey, run.id.Agent+".json")
+}
+
+// loadCursor reads the cursor once per run. With none, the cursor starts
+// machineOverlap before now, so a first run does not ask for old history.
+func (run *machineRun) loadCursor(now time.Time) {
+	in := &run.in
+	if in.loaded {
+		return
+	}
+	in.loaded, in.handed, in.dropped = true, map[string]handedEvent{}, map[string]int64{}
+	in.newest = now.Add(-machineOverlap).Unix()
+	raw, err := fsq.ReadRegularNoFollowBounded(filepath.Join(run.state, run.cursorRel()), 4096)
+	var c inboundCursor
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+	case err == nil && json.Unmarshal(raw, &c) == nil && c.Since > 0:
+		in.newest, in.written = min(c.Since, now.Unix()), c.Since
+	default:
+		say(run.stderr, "machine agent: the inbound cursor %s does not read, so it starts %s before now", filepath.Join(run.state, run.cursorRel()), machineOverlap)
+	}
+	in.cursor = in.newest
+}
+
+// settle moves the cursor to the oldest event handed to Owner whose
+// handling is still open or, with none open, to the newest delivered, and
+// never later than now; forgets what no subscription asks for again; and
+// writes a changed cursor at most once a machineInboundEvery. An event
+// whose handling never ends (a turn cut by a stop) holds the cursor, so
+// the next run asks for it again.
+func (run *machineRun) settle(now time.Time) {
+	in := &run.in
+	c, open := in.newest, false
+	for _, h := range in.handed {
+		if !isClosed(h.done) && (!open || h.at < c) {
+			c, open = h.at, true
+		}
+	}
+	in.cursor = min(c, now.Unix())
+	floor := in.cursor - int64(machineOverlap/time.Second)
+	for id, h := range in.handed {
+		if h.at < floor && isClosed(h.done) {
+			delete(in.handed, id)
+		}
+	}
+	for id, at := range in.dropped {
+		if at < floor {
+			delete(in.dropped, id)
+		}
+	}
+	if in.cursor == in.written || now.Sub(in.writtenAt) < machineInboundEvery {
+		return
+	}
+	run.held.RLock()
+	defer run.held.RUnlock()
+	if run.stopping.Load() {
+		return
+	}
+	raw, err := json.Marshal(inboundCursor{Since: in.cursor, Updated: now.UTC().Format(time.RFC3339)})
+	if err == nil {
+		_, err = fsq.WriteStateFile(run.state, run.cursorRel(), append(raw, '\n'), 0o600)
+	}
+	if err != nil {
+		if err.Error() != in.writeErr {
+			in.writeErr = err.Error()
+			say(run.stderr, "machine agent: the inbound cursor is not written: %v", err)
+		}
+		return
+	}
+	in.written, in.writtenAt, in.writeErr = in.cursor, now, ""
+}
+
+// isClosed reports whether ch has closed.
+func isClosed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
 	}
 }
 
