@@ -39,10 +39,12 @@ const routeSessionPrefix = "route/"
 // the refusal of runRemote, posted once per event.
 //
 // The returned channel closes once the handling has returned: after the
-// acknowledgement of a decision, or after the turn. Turns run only while
-// the machine workers run (StartMachine): a turn queued outside them, cut
-// by their stop, or still queued at the stop is not handled, its channel
-// stays open, and its claim lets a later delivery run it. On a server
+// acknowledgement of a decision, or after the turn. Messages are handled
+// only while the machine workers run (StartMachine), and their stop waits
+// for every decision in flight, so nothing is posted after it. A message
+// that arrives outside them, a turn cut by their stop, or one still queued
+// at the stop is not handled: its channel stays open, and a later delivery
+// handles it (a turn's claim lets it run again). On a server
 // that is not standalone, Owner does nothing and returns a closed channel.
 func (s *Server) Owner(in buzzop.Inbound) <-chan struct{} {
 	done := make(chan struct{})
@@ -53,6 +55,9 @@ func (s *Server) Owner(in buzzop.Inbound) <-chan struct{} {
 	r, routed := s.channelRoute(in.Channel)
 	if !routed {
 		close(done)
+		return done
+	}
+	if !s.owners.running() {
 		return done
 	}
 	evt, ch, id := in.Event, in.Channel, in.Event.ID.Hex()
@@ -76,11 +81,17 @@ func (s *Server) Owner(in buzzop.Inbound) <-chan struct{} {
 		case !won:
 			return s.Owner(in)
 		}
-		go func() {
+		started := s.owners.spawn(func() {
 			defer close(done)
 			ack, _ := s.act(ch, d)
 			s.postOnce(id, postFinal, []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), ch, ack)
-		}()
+		})
+		if !started {
+			// The workers stopped after the claim was written: the decision
+			// is not carried out, and its claim keeps a replay from doing it.
+			fmt.Fprintf(os.Stderr, "amq-acp: the owner's %s in %s was not carried out: the machine agent stopped\n", d.kind, ch)
+			close(done)
+		}
 		return done
 	}
 	// A claim that cannot be written here is written, or refused, by
@@ -149,6 +160,29 @@ func (o *ownerTurns) stop() {
 	o.quit, o.queues = nil, nil
 	o.mu.Unlock()
 	o.workers.Wait()
+}
+
+// running reports whether the machine workers run.
+func (o *ownerTurns) running() bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.quit != nil && !closed(o.quit)
+}
+
+// spawn runs fn as a worker that stop waits for. Outside start and stop it
+// runs nothing and reports false.
+func (o *ownerTurns) spawn(fn func()) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.quit == nil || closed(o.quit) {
+		return false
+	}
+	o.workers.Add(1)
+	go func() {
+		defer o.workers.Done()
+		fn()
+	}()
+	return true
 }
 
 // queue adds t to the FIFO of route ch and starts its worker when none

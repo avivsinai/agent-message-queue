@@ -95,8 +95,13 @@ type machineStatus struct {
 	RelayState    string `json:"relay_state,omitempty"`
 	RelayError    string `json:"relay_error,omitempty"`
 	GrantNotAfter string `json:"grant_not_after,omitempty"`
-	PID           int    `json:"pid"`
-	Updated       string `json:"updated,omitempty"`
+	// NotAuthenticatedSince is when the relay connection was last seen to
+	// be not authenticated after it was, or when the agent started; absent
+	// while it is authenticated. It does not change with each reconnect
+	// attempt.
+	NotAuthenticatedSince string `json:"not_authenticated_since,omitempty"`
+	PID                   int    `json:"pid"`
+	Updated               string `json:"updated,omitempty"`
 }
 
 func (st machineStatus) refused(code, line string) machineStatus {
@@ -289,7 +294,16 @@ func (ms *machineSet) keep(agents []string, now time.Time) (st machineStatus, ok
 	case cs.State == relay.StateAuthenticated:
 		run.authRefused = false
 	}
+	switch {
+	case cs.State == relay.StateAuthenticated:
+		run.downSince = time.Time{}
+	case run.downSince.IsZero():
+		run.downSince = now
+	}
 	st = machineStatus{State: "serving", RelayURL: run.id.RelayURL, RelayState: string(cs.State), RelayError: cs.Err, GrantNotAfter: grantEnd(cred)}
+	if !run.downSince.IsZero() {
+		st.NotAuthenticatedSince = run.downSince.UTC().Format(time.RFC3339)
+	}
 	switch {
 	case grantEnded(agent, cred, now) != "":
 		st = st.refused(codeAuthorityExpired, grantEnded(agent, cred, now))
@@ -408,6 +422,9 @@ type machineRun struct {
 
 	started     bool
 	authRefused bool // the relay refused the key; set and read by keep
+	// downSince is when keep first saw the relay not authenticated; zero
+	// while it is authenticated.
+	downSince   time.Time
 	stopWorkers func()
 	out         *outbox.Outbox
 	client      *relay.Client

@@ -469,7 +469,8 @@ use.
 `~/.amq/remote/machine/<agent pubkey>/status.json`: `state` (`serving`,
 `waiting` or `refused`), the refusal `code` and its `line`, which ends with
 the next step, `relay_url`, `relay_state`, `relay_error`, `grant_not_after`,
-`pid` and `updated` (when the state last changed). It is a snapshot that
+`not_authenticated_since` (present while the relay connection is not
+authenticated), `pid` and `updated` (when the file was last written). It is a snapshot that
 `attach`, `bindings` and `doctor` read, not a setting. The codes are
 `identity_ambiguous`, `no_authority`, `authority_expired`,
 `relay_self_unknown`, `relay_self_changed`, `auth_refused` and

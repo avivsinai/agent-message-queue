@@ -192,6 +192,11 @@ func TestStandaloneOwnerMirrorOffIsAcknowledgedOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	activeChannel(t, f.s, b, machineChanA)
+	stop, ok := f.s.StartMachine()
+	if !ok {
+		t.Fatal("the machine agent did not start")
+	}
+	t.Cleanup(stop)
 	in := f.ownerSays(t, machineChanA, "mirror off")
 
 	waitClosed(t, f.s.Owner(in))

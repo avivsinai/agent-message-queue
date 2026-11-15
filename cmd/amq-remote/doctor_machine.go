@@ -16,7 +16,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/dialogguard"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
-	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
@@ -406,7 +405,7 @@ func doctorStandalone(machine agentInfo, row machineAgentRow, now time.Time, fai
 	case !machine.serves():
 		// The line ends with the user's next step.
 		fail("machine_agent", row.Name, "the machine agent runs inside amq-remote serve and is not running: "+machine.notServingLine(), "")
-	case st != nil && st.RelayState != string(relay.StateAuthenticated) && statusAge(st, now) > standaloneRelayGrace:
+	case st != nil && notAuthenticatedFor(st, now) > standaloneRelayGrace:
 		fail("machine_agent", row.Name, fmt.Sprintf("the machine agent's relay %s has not been authenticated for more than a minute (%s%s), so no channel is made and no owner message arrives",
 			st.RelayURL, nonEmpty(st.RelayState, "no state"), errSuffix(st.RelayError)), "check the network and the relay "+st.RelayURL+"; amq-remote serve reconnects by itself")
 	}
@@ -417,11 +416,10 @@ func doctorStandalone(machine agentInfo, row machineAgentRow, now time.Time, fai
 	return row
 }
 
-// statusAge is how long a status file has said what it says: serve
-// rewrites it on every change, so its update time is when that began. An
-// unreadable time is no age.
-func statusAge(st *machineStatus, now time.Time) time.Duration {
-	at, err := time.Parse(time.RFC3339, st.Updated)
+// notAuthenticatedFor is how long the status says the relay connection has
+// not been authenticated; zero while it is, or when the time does not read.
+func notAuthenticatedFor(st *machineStatus, now time.Time) time.Duration {
+	at, err := time.Parse(time.RFC3339, st.NotAuthenticatedSince)
 	if err != nil {
 		return 0
 	}
