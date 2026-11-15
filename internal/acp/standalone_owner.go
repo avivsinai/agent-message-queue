@@ -167,18 +167,15 @@ func (o *ownerTurns) queue(s *Server, ch string, t ownerTurn) {
 }
 
 // work runs the turns of route ch in order until its FIFO is empty or quit
-// closes.
+// closes. The pop of a run turn and the check for the next are one hold of
+// mu, so queue never sees an empty FIFO while this worker still runs.
 func (o *ownerTurns) work(s *Server, ch string, quit <-chan struct{}) {
 	defer o.workers.Done()
-	for {
-		o.mu.Lock()
-		if o.quit != quit || closed(quit) {
-			o.mu.Unlock()
-			return
-		}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for o.quit == quit && !closed(quit) {
 		if len(o.queues[ch]) == 0 {
 			delete(o.queues, ch)
-			o.mu.Unlock()
 			return
 		}
 		t := o.queues[ch][0]
@@ -190,7 +187,6 @@ func (o *ownerTurns) work(s *Server, ch string, quit <-chan struct{}) {
 		if o.quit == quit {
 			o.queues[ch] = o.queues[ch][1:]
 		}
-		o.mu.Unlock()
 	}
 }
 
