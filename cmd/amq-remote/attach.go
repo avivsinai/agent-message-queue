@@ -1037,11 +1037,18 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	if ended == nil {
 		ended = match
 	}
+	// The roots are resolved before anything is detached, so a root that
+	// cannot be resolved refuses with no change.
+	roots, err := c.linkRoots()
+	if err != nil {
+		return protocol.ExitActionRequired, err
+	}
 	// A session the machine agent serves stops taking messages in its
 	// channel as soon as the binding is gone; the machine agent archives the
 	// channel after that.
 	channel := false
-	removed, keptOff, err := binding.Detach(func(b binding.Binding) bool {
+	var removed, keptOff []string
+	removed, keptOff, err = binding.Detach(func(b binding.Binding) bool {
 		if !match(b) {
 			return false
 		}
@@ -1052,10 +1059,8 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
-	if roots, rootErr := c.linkRoots(); rootErr != nil {
-		return protocol.ExitActionRequired, rootErr
-	} else if err := removeDetachedLinkShares(roots, append(removed, keptOff...)); err != nil {
-		return protocol.ExitActionRequired, err
+	if err := removeDetachedLinkShares(roots, slices.Concat(removed, keptOff)); err != nil {
+		return protocol.ExitActionRequired, fmt.Errorf("the session is detached, but its link share entry was not removed: %w", err)
 	}
 	if c.json {
 		if removed == nil {

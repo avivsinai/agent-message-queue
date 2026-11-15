@@ -463,15 +463,8 @@ Protocol: [`amq.remote.link/1`](../../docs/remote-link-protocol.md).
    `attach --self --link NAME` again, which keeps the share's binding name. `amq-remote link remove NAME`
    retires the link's sink and deletes its device key; the records it created
    settle without network. The server keeps the machine until you unlink it
-   on the server's connections page.
-
-While the link's endpoint runs, a pi `/new` or another session change in the
-same live process moves the binding to the new session. A pi session resumed
-in a new process comes back when its live bridge proves that it runs the
-recorded session. The next bindings frame shares it again. A native Claude
-session resumed in a new process needs `attach --self --link NAME` again;
-a Claude `/clear` in the same process needs no new attach. Detach removes the
-share's manifest entry, and a detached session never comes back by itself.
+   on the server's connections page. `detach` removes the share's entry, and
+   a detached session never comes back by itself.
 
 ### Restart after a reboot
 

@@ -51,7 +51,7 @@ type linkSet struct {
 	mf       manifestBytes
 	mfErr    string // the manifest read error last reported
 	statuses map[string]linkio.Status
-	restored time.Time
+	restored time.Time   // when restore last ran
 	pages    *pageServer // the endpoint's own local pages
 }
 
@@ -339,13 +339,17 @@ func (ls *linkSet) bindings(run *linkRun, pin linkio.Pin) []linkio.Binding {
 	return out
 }
 
+// linkRestoreEvery is how often the endpoint checks whether a share's
+// session changed or came back.
+const linkRestoreEvery = 30 * time.Second
+
 // restore brings a share's binding back under one of two proofs: the live
 // holder process now reports another native session, or the native proof of
 // a restarted process that runs the recorded session again. Unknown liveness
 // is never a proof, and an owner's detach remains off.
 func (ls *linkSet) restore(now time.Time) {
 	ls.mu.Lock()
-	if now.Sub(ls.restored) < 30*time.Second {
+	if now.Sub(ls.restored) < linkRestoreEvery {
 		ls.mu.Unlock()
 		return
 	}
@@ -359,7 +363,10 @@ func (ls *linkSet) restore(now time.Time) {
 	if ep == nil {
 		return
 	}
-	tombs, _ := binding.Tombstones()
+	tombs, err := binding.Tombstones()
+	if err != nil {
+		return
+	}
 	for _, l := range links {
 		for _, sh := range l.Shares {
 			b, err := binding.ReadNamed(sh.Binding)
@@ -1109,10 +1116,9 @@ type linkStatusRow struct {
 	ShareStates map[string]string `json:"share_states,omitempty"`
 }
 
-// removeDetachedLinkShare removes entries for one link name whose binding was
-// detached, leaving shares with no detached binding untouched. It returns
-// whether the link changed.
-func removeDetachedLinkShare(l *manifest.Link, names map[string]bool) bool {
+// dropShares removes from l the shares of the bindings in names and
+// reports whether it removed one.
+func dropShares(l *manifest.Link, names map[string]bool) bool {
 	kept := make([]manifest.LinkShare, 0, len(l.Shares))
 	removed := false
 	for _, sh := range l.Shares {
@@ -1142,14 +1148,14 @@ func removeDetachedLinkShares(roots, names []string) error {
 		}
 		changed := false
 		for i := range mf.Links {
-			changed = removeDetachedLinkShare(&mf.Links[i], gone) || changed
+			changed = dropShares(&mf.Links[i], gone) || changed
 		}
 		if !changed {
 			continue
 		}
 		if err := editManifest(filepath.Join(root, stateDirName), func(mf *manifest.File) {
 			for i := range mf.Links {
-				removeDetachedLinkShare(&mf.Links[i], gone)
+				dropShares(&mf.Links[i], gone)
 			}
 		}); err != nil {
 			return err
