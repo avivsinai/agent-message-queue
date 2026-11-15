@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -166,22 +167,30 @@ func TestServeRunsTheEnrolledMachineAgent(t *testing.T) {
 // cursor then stands at or after the message.
 func TestServeHandsTheOwnersChannelMessageToTheSession(t *testing.T) {
 	f := enrolledMachine(t)
-	f.relay.BeforeReq = f.answerGroupState
+	// When the agent first asks for its channel's messages, two owner
+	// messages are stored, newest first as a relay returns them; the older
+	// one reaches the session first (found in pre-merge review: stored
+	// messages ran newest first).
+	at, first := nostr.Now()-10, "what is the build status?"
+	var published atomic.Bool
+	f.relay.BeforeReq = func(filters []nostr.Filter) {
+		f.answerGroupState(filters)
+		for _, filter := range filters {
+			if hs := filter.Tags["h"]; len(hs) == 1 && published.CompareAndSwap(false, true) {
+				for _, m := range []nostr.Event{
+					{Kind: 9, Tags: nostr.Tags{{"h", hs[0]}}, Content: "and the release?", CreatedAt: at + 1},
+					{Kind: 9, Tags: nostr.Tags{{"h", hs[0]}}, Content: first, CreatedAt: at},
+				} {
+					if m.Sign(f.owner) == nil {
+						f.relay.Inject(m)
+					}
+				}
+			}
+		}
+	}
 	ms, log := f.serve(t)
 	root := f.bind(t, "alpha")
-	var channel string
-	await(t, ms, "the session's channel to be routed", func() bool {
-		if routes := ms.run.srv.Routes(); len(routes) == 1 {
-			channel = routes[0]
-		}
-		return channel != ""
-	}, log)
 
-	msg := nostr.Event{Kind: 9, Tags: nostr.Tags{{"h", channel}}, Content: "what is the build status?", CreatedAt: nostr.Now()}
-	if err := msg.Sign(f.owner); err != nil {
-		t.Fatal(err)
-	}
-	f.relay.Inject(msg)
 	var prompt format.Message
 	inbox := fsq.AgentInboxNew(root, "agent")
 	await(t, ms, "the owner's message in the session's inbox", func() bool {
@@ -193,8 +202,8 @@ func TestServeHandsTheOwnersChannelMessageToTheSession(t *testing.T) {
 		prompt = m
 		return err == nil
 	}, log)
-	if !strings.HasPrefix(prompt.Body, msg.Content+"\n") {
-		t.Fatalf("prompt body %q; want the owner's text", prompt.Body)
+	if !strings.HasPrefix(prompt.Body, first+"\n") {
+		t.Fatalf("prompt body %q; want the owner's older message", prompt.Body)
 	}
 
 	now := time.Now()
@@ -224,7 +233,7 @@ func TestServeHandsTheOwnersChannelMessageToTheSession(t *testing.T) {
 	await(t, ms, "the inbound cursor at or after the owner's message", func() bool {
 		raw, err := os.ReadFile(cursor)
 		var c inboundCursor
-		return err == nil && json.Unmarshal(raw, &c) == nil && c.Since >= int64(msg.CreatedAt)
+		return err == nil && json.Unmarshal(raw, &c) == nil && c.Since >= int64(at)
 	}, log)
 }
 

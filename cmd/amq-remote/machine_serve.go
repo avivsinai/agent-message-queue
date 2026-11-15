@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -52,13 +53,14 @@ const (
 
 	// machineInboundSub is the subscription id of the owner's messages.
 	machineInboundSub = "amq-msg"
-	// machineInboundEvery paces the inbound loop while no event arrives: a
-	// changed cursor is written at most this often, and an ended
-	// subscription is sent again within it.
+	// machineInboundEvery paces the inbound loop: Routes() is compared with
+	// the channels the subscription asks for, an ended subscription is sent
+	// again, and a changed cursor is written, each at most this often.
 	machineInboundEvery = time.Second
-	// machineRoutesEvery is how often the loop compares Routes() with the
-	// channels its subscription asks for.
-	machineRoutesEvery = 2 * time.Second
+	// machineHeldMax bounds the owner's messages one subscription delivers
+	// before its relay's end of stored events. More is treated as a
+	// subscription that ended before that end.
+	machineHeldMax = 1000
 	// machineAskEvery is how often the subscription is sent again even
 	// when nothing changed: the loop does not rely on live delivery after
 	// the relay's end of stored events.
@@ -630,6 +632,17 @@ type inboundCursor struct {
 // machineAskEvery; a reconnect runs a new loop. The loop starts nothing
 // that outlives it: the subscription is closed on return, and an Owner
 // channel is only polled, never waited on.
+//
+// A relay sends stored events newest first, and a route runs its turns in
+// the order Owner gets them. So the events a subscription delivers before
+// its relay's end of stored events are held, and at that end they are
+// checked and handed to Owner in ascending created_at, ties by ascending
+// event id; events after that end are handed as they arrive. A subscription
+// that ends before that end (overflow, a relay CLOSED, the connection
+// ending, more than machineHeldMax held) discards what it held without
+// handing it or moving the cursor: the next subscription brings it again.
+// The held events are bounded by machineHeldMax: the relay client's own
+// buffer bounds only what the loop has not yet read.
 func (run *machineRun) inbound(ctx context.Context, conn *relay.Conn) {
 	run.loadCursor(time.Now())
 	var (
@@ -637,35 +650,49 @@ func (run *machineRun) inbound(ctx context.Context, conn *relay.Conn) {
 		want, routes   []string  // Routes() as last read; the channels sub asks for
 		checked, asked time.Time // when Routes() was read; when sub was sent
 		stored         bool      // sub's relay has ended its stored events
-		seen           int64     // the newest event sub delivered before that end
-		subErr         string    // the subscribe error last reported
+		held           []nostr.Event
+		subErr         string // the subscribe error last reported
+		overSaid       bool   // too many held was reported since the last end of stored events
 	)
 	end := func() {
 		if sub != nil {
 			sub.Close()
 			sub = nil
 		}
+		routes, stored, held = nil, false, nil
 	}
 	defer end()
+	// hold keeps evt until the end of stored events; past machineHeldMax the
+	// subscription ends.
+	hold := func(evt nostr.Event) {
+		if len(held) < machineHeldMax {
+			held = append(held, evt)
+			return
+		}
+		end()
+		if !overSaid {
+			overSaid = true
+			say(run.stderr, "machine agent: more than %d owner messages came before the relay's end of stored events; they are asked for again", machineHeldMax)
+		}
+	}
 	tick := time.NewTicker(machineInboundEvery)
 	defer tick.Stop()
 	for {
 		now := time.Now()
-		if now.Sub(checked) >= machineRoutesEvery {
+		if now.Sub(checked) >= machineInboundEvery {
 			want, checked = run.srv.Routes(), now
 			slices.Sort(want)
-		}
-		if sub != nil && (isClosed(sub.Done()) || now.Sub(asked) >= machineAskEvery) || !slices.Equal(want, routes) {
-			end()
-			routes, stored, seen = nil, false, 0
-			if len(want) > 0 {
-				s, err := run.subscribe(ctx, conn, want)
-				switch {
-				case err == nil:
-					sub, routes, asked, subErr = s, want, now, ""
-				case err.Error() != subErr && ctx.Err() == nil:
-					subErr = err.Error()
-					say(run.stderr, "machine agent: the owner's messages cannot be asked for, so it asks again: %v", err)
+			if sub != nil && (isClosed(sub.Done()) || now.Sub(asked) >= machineAskEvery) || !slices.Equal(want, routes) {
+				end()
+				if len(want) > 0 {
+					s, err := run.subscribe(ctx, conn, want)
+					switch {
+					case err == nil:
+						sub, routes, asked, subErr = s, want, now, ""
+					case err.Error() != subErr && ctx.Err() == nil:
+						subErr = err.Error()
+						say(run.stderr, "machine agent: the owner's messages cannot be asked for, so it asks again: %v", err)
+					}
 				}
 			}
 		}
@@ -684,19 +711,34 @@ func (run *machineRun) inbound(ctx context.Context, conn *relay.Conn) {
 			return
 		case <-tick.C:
 		case <-eose:
-			stored = true
-			run.in.newest = max(run.in.newest, seen)
+			// The relay client queues every stored event before it marks
+			// their end, so they are all in sub.Events now.
+			for drained := false; !drained && sub != nil; {
+				select {
+				case evt := <-sub.Events:
+					hold(evt)
+				default:
+					drained = true
+				}
+			}
+			if sub == nil {
+				continue
+			}
+			stored, overSaid = true, false
+			slices.SortFunc(held, func(a, b nostr.Event) int {
+				return cmp.Or(cmp.Compare(a.CreatedAt, b.CreatedAt), strings.Compare(a.ID.Hex(), b.ID.Hex()))
+			})
+			for _, evt := range held {
+				if at, delivered := run.take(evt, time.Now()); delivered {
+					run.in.newest = max(run.in.newest, at)
+				}
+			}
+			held = nil
 		case evt := <-events:
-			// Before the end of stored events, a subscription that then
-			// overflows may have skipped an older event, so what it
-			// delivered counts only once that end comes.
-			at, delivered := run.take(evt, time.Now())
-			switch {
-			case !delivered:
-			case stored:
+			if !stored {
+				hold(evt)
+			} else if at, delivered := run.take(evt, time.Now()); delivered {
 				run.in.newest = max(run.in.newest, at)
-			default:
-				seen = max(seen, at)
 			}
 		}
 	}
