@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.145.1](https://github.com/avivsinai/agent-message-queue/compare/v0.145.0...v0.145.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* **wake:** the claude-native wake works on Claude Code from 2.1.311 ([#1501](https://github.com/avivsinai/agent-message-queue/issues/1501)) ([c336376](https://github.com/avivsinai/agent-message-queue/commit/c336376abfd5601b167d413e77d91cf2a166e898))
+
 ## [0.145.0](https://github.com/avivsinai/agent-message-queue/compare/v0.144.0...v0.145.0) (2026-11-14)
 
 
