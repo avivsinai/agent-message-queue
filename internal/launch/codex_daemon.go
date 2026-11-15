@@ -250,6 +250,14 @@ func codexDaemonArgumentsReason(args []string) string {
 	return ""
 }
 
+// CodexDaemonReleaseReadable reports whether version is a strict release at
+// or above the daemon-side floor. Exported because codexlaunch admission
+// needs the same predicate for the daemon's reported release that the CLI
+// uses for itself.
+func CodexDaemonReleaseReadable(version string) bool {
+	return codexDaemonVersionReadable(version)
+}
+
 // codexDaemonVersionReadable admits a strict release at or above
 // CodexDaemonMinimumVersion.
 func codexDaemonVersionReadable(version string) bool {

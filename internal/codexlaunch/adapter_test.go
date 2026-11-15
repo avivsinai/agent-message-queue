@@ -857,19 +857,58 @@ func TestManagedSeatStaysTerminalOnlyBelowFloorOrOnReleaseSkew(t *testing.T) {
 			t.Fatalf("TerminalOnlyReason = %q; want %q", plan.TerminalOnlyReason, wantReason)
 		}
 	})
-	t.Run("daemon release does not equal CLI release", func(t *testing.T) {
+	t.Run("CLI newer than daemon is admitted (skew observed live 2026-11-15, bead s4ud)", func(t *testing.T) {
 		root, project, executable, amq := nativeSeat(t, nativeDaemonOptions{providerVersion: "0.169.0", initializeVersion: func(int32) string { return "0.167.0" }})
 		plan, err := New(executable).PlanFresh(launch.PlanRequest{Handle: "codex", LaunchNonce: "96969696-9696-4969-8969-969696969696", ProjectRoot: project,
 			SessionRoot: root.Base(), Cwd: project, AMQExecutable: amq, ResumePolicy: launch.ResumeEnabled})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if plan.PreSpawnAcquire {
-			t.Fatal("PreSpawnAcquire must be false when daemon release != CLI release")
+		if !plan.PreSpawnAcquire {
+			t.Fatalf("CLI newer than daemon is normal when the daemon self-updates; got PreSpawnAcquire=false and reason %q", plan.TerminalOnlyReason)
 		}
-		wantReason := "the running Codex daemon reports release \"0.167.0\" and this Codex is 0.169.0; restart the daemon so both run one release"
+		if plan.TerminalOnlyReason != "" {
+			t.Fatalf("TerminalOnlyReason must be empty after the floor rule change: %q", plan.TerminalOnlyReason)
+		}
+	})
+	t.Run("daemon below the floor is refused", func(t *testing.T) {
+		root, project, executable, amq := nativeSeat(t, nativeDaemonOptions{initializeVersion: func(int32) string { return "0.166.0" }})
+		plan, err := New(executable).PlanFresh(launch.PlanRequest{Handle: "codex", LaunchNonce: "96969696-9696-4969-8969-969696969696", ProjectRoot: project,
+			SessionRoot: root.Base(), Cwd: project, AMQExecutable: amq, ResumePolicy: launch.ResumeEnabled})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if plan.PreSpawnAcquire {
+			t.Fatal("PreSpawnAcquire must be false on a daemon below the floor")
+		}
+		wantReason := "the running Codex daemon reports release \"0.166.0\"; AMQ needs " + launch.CodexDaemonMinimumVersion + " or later"
 		if plan.TerminalOnlyReason != wantReason {
 			t.Fatalf("TerminalOnlyReason = %q; want %q", plan.TerminalOnlyReason, wantReason)
 		}
 	})
+}
+
+// Regression for bead s4ud: the daemon self-updates, so after a restart it
+// may report a newer release than the seat CLI. That is normal, not a
+// refusal. CLI floor 0.167.0, daemon package 0.169.0 must still reach the
+// daemon template. Pre-fix on main, admission returns
+// "restart the daemon so both run one release" and the seat is terminal.
+func TestManagedSeatBindsWhenDaemonIsNewerThanCLI(t *testing.T) {
+	root, project, executable, amq := nativeSeat(t, nativeDaemonOptions{providerVersion: "0.167.0", initializeVersion: func(int32) string { return "0.169.0" }})
+	plan, err := New(executable).PlanFresh(launch.PlanRequest{Handle: "codex", LaunchNonce: "96969696-9696-4969-8969-969696969696", ProjectRoot: project,
+		SessionRoot: root.Base(), Cwd: project, AMQExecutable: amq, ResumePolicy: launch.ResumeEnabled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.PreSpawnAcquire {
+		t.Fatalf("CLI 0.167.0 daemon 0.169.0 must admit PreSpawnAcquire; TerminalOnlyReason=%q", plan.TerminalOnlyReason)
+	}
+	if plan.TerminalOnlyReason != "" {
+		t.Fatalf("TerminalOnlyReason must be empty, got %q", plan.TerminalOnlyReason)
+	}
+	ticket, argv := executeNativeAtVersion(t, root, plan, "0.169.0", true)
+	if ticket.State != launch.ExecutionAcknowledged {
+		t.Fatalf("executeNative ticket state = %q; want ExecutionAcknowledged", ticket.State)
+	}
+	_ = argv
 }

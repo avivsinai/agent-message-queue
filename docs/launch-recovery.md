@@ -141,11 +141,11 @@ again under the lease. It leaves all Codex threads, evidence, routing records,
 conversations, and launch journals untouched. Cleanup does not require the old
 executable or daemon to remain available. Tickets and evidence from an earlier
 supported Codex release stay readable after an upgrade, so inspection and
-cleanup still work. A release at or above 0.167.0 runs a new or recovered
-execution when the daemon reports the same release as the CLI. After a Codex
-upgrade a managed seat is terminal-only until the owner restarts the daemon;
-AMQ restarts nothing. Recovery refusals use exit 6 and name the retry or
-cleanup command.
+cleanup still work. A CLI at or above 0.167.0 runs a new or recovered
+execution when the daemon reports a release at or above 0.167.0 too. The CLI
+and the daemon need not be the same release: Codex updates the daemon package
+by itself, and a daemon newer than the seat CLI is a normal state.
+Recovery refusals use exit 6 and name the retry or cleanup command.
 
 Every execution attempt, including recovery, checks inherited native-backend
 exclusions and runs the full startup admission on the bound daemon before

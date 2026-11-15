@@ -284,9 +284,12 @@ func admission(executable string, endpoint endpoint, cwd string) (reason, review
 	if err != nil {
 		return "the Codex daemon did not answer AMQ's startup probe", "", ""
 	}
-	if state.Version != version {
-		return "the running Codex daemon reports release \"" + state.Version + "\" and this Codex is " + version + "; restart the daemon so both run one release", "", ""
+	// the daemon's reported release carries the floor; same-tuple with the
+	// CLI is not required because Codex updates its daemon by itself.
+	if state.Version == "" || !launch.CodexDaemonReleaseReadable(state.Version) {
+		return "the running Codex daemon reports release \"" + state.Version + "\"; AMQ needs " + launch.CodexDaemonMinimumVersion + " or later", "", ""
 	}
+	version = state.Version
 	if state.Hooks == nil {
 		return "the Codex daemon did not answer hooks/list", "", ""
 	}
