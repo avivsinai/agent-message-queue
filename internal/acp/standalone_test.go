@@ -34,6 +34,10 @@ type standaloneFixture struct {
 	relay    *relaytest.Relay
 	relayKey nostr.SecretKey // signs the relay's group state
 	owner    nostr.SecretKey
+	out      *outbox.Outbox
+	// reconnect uses a new transport for the same relay and outbox, as a
+	// client that comes back after a connection drops.
+	reconnect func() Transport
 }
 
 func standalone(t *testing.T, opts ...func(*relaytest.Relay)) *standaloneFixture {
@@ -73,7 +77,7 @@ func standalone(t *testing.T, opts ...func(*relaytest.Relay)) *standaloneFixture
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &standaloneFixture{relay: lr, relayKey: nostr.Generate(), owner: nostr.Generate()}
+	f := &standaloneFixture{relay: lr, relayKey: nostr.Generate(), owner: nostr.Generate(), out: out}
 	id := buzzop.Identity{Agent: body.PublicKeyHex(), Owner: f.owner.Public().Hex(), RelaySelf: f.relayKey.Public().Hex(),
 		RelayURL: buzzop.NormalizeRelay(url), RelayKey: buzzop.RelayKey(url)}
 	port, err := buzzdirect.New(buzzdirect.Config{Identity: id, Secret: body.Secret(),
@@ -82,6 +86,22 @@ func standalone(t *testing.T, opts ...func(*relaytest.Relay)) *standaloneFixture
 		t.Fatal(err)
 	}
 	f.s = NewStandalone(Standalone{Identity: id, Transport: port}, "test")
+	f.reconnect = func() Transport {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		next, err := relay.Connect(ctx, relay.Config{URL: id.RelayURL, Secret: body.Secret(), AuthTag: authTag})
+		t.Cleanup(next.Close)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nextPort, err := buzzdirect.New(buzzdirect.Config{Identity: id, Secret: body.Secret(),
+			Conn: func() buzzdirect.Conn { return next }, Outbox: out, ReadTimeout: 5 * time.Second})
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.s.direct, f.s.posts = nextPort, nextPort
+		return nextPort
+	}
 	t.Cleanup(f.s.resign)
 	return f
 }
