@@ -41,11 +41,10 @@ import (
 //
 // Only the leader writes records, under its lock, one step at a time: each
 // outcome is written before the next step, and each step first re-reads the
-// record. The buzz CLI makes a fresh channel id on every create and takes no
-// idempotency key, so a create whose outcome is unknown, including one whose
-// worker stopped before it wrote the result, is never sent again for that
-// record; the leader looks for the channel it may have made instead. A
-// record that exists but cannot be read stops all work on its name.
+// record. A create whose outcome is unknown, including one whose worker
+// stopped before it wrote the result, is resolved by the channel id the
+// record chose (lookupChosen). A record that exists but cannot be read stops
+// all work on its name.
 
 // machineName is the machine agent's marker directory under agents/. It is
 // not a valid binding name, so it never meets a session's.
@@ -102,10 +101,9 @@ type channelRecord struct {
 	// Reg is made once per record and written into the channel's
 	// description, so an uncertain create can be found.
 	Reg string `json:"reg"`
-	// Chosen is the channel id a create on the direct transport asks for,
-	// written before any create is signed, so the channel an uncertain
-	// create may have made is found by its id. Empty on the buzz CLI, which
-	// chooses the id itself.
+	// Chosen is the channel id a create asks for, written before any create
+	// is signed, so the channel an uncertain create may have made is found
+	// by its id.
 	Chosen     string `json:"chosen_id,omitempty"`
 	State      string `json:"state"`
 	Archived   bool   `json:"archived"`
@@ -341,9 +339,7 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) (p pace) {
 		dir := s.agentMarkerDir(machineName)
 		m, _ := readAgentMarker(filepath.Join(dir, s.id.Agent+".json"))
 		m.Name, m.DisplayName, m.RelayKey = machineName, s.id.DisplayName, s.id.RelayKey
-		if s.direct != nil {
-			m.Host = "standalone"
-		}
+		m.Host = "standalone"
 		s.writeAgentMarker(dir, m, now)
 		s.machine.marked = now.UTC().Format(time.RFC3339)
 	}
@@ -385,26 +381,16 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) (p pace) {
 		s.machine.swept = now.UTC().Format(time.RFC3339)
 		s.sweepRetired(now)
 	}
-	if !s.stopped() && s.direct != nil && due(s.machine.judged, routeJudgeInterval, now) {
+	if !s.stopped() && due(s.machine.judged, routeJudgeInterval, now) {
 		s.machine.judged = now.UTC().Format(time.RFC3339)
 		s.judgeRoutes(now)
 	}
 	for _, r := range s.snapshot().records {
-		if at, ok := recordDue(r, s.uncertainGap(), now); ok {
+		if at, ok := recordDue(r, channelStepGap, now); ok {
 			p.due(at)
 		}
 	}
 	return p
-}
-
-// uncertainGap separates the lookups of an uncertain create: on the direct
-// transport an observation by the chosen id is cheap and exact, so it runs
-// at channelStepGap; on the buzz CLI at channelRetryGap.
-func (s *Server) uncertainGap() time.Duration {
-	if s.direct != nil {
-		return channelStepGap
-	}
-	return channelRetryGap
 }
 
 // recordDue is when the slot record r needs its next step: at once while
@@ -609,10 +595,8 @@ func (s *Server) provision(b binding.Binding, now time.Time) {
 		}
 		r = channelRecord{Relay: s.id.RelayURL, Machine: s.id.Agent, Name: b.Name, Identity: b.SessionIdentity(),
 			Label: sessionAgentName(b), Reg: reg, State: channelCreating}
-		if s.direct != nil {
-			if r.Chosen, err = newChannelID(); err != nil {
-				return
-			}
+		if r.Chosen, err = newChannelID(); err != nil {
+			return
 		}
 		if s.save(&r, now) != nil {
 			return
@@ -640,7 +624,7 @@ func (s *Server) advance(r *channelRecord, now time.Time) {
 			return
 		}
 	case channelUncertain:
-		if !due(r.LastTry, s.uncertainGap(), now) || !s.lookup(r, now) {
+		if !due(r.LastTry, channelStepGap, now) || !s.lookup(r, now) {
 			return
 		}
 	default:
@@ -734,10 +718,10 @@ func (s *Server) judgeRoutes(now time.Time) {
 // anything else may have made one, so the record is in doubt. It reports
 // whether a channel id is known.
 //
-// On the direct transport the create asks for r.Chosen under the key
-// create/<reg>, so every attempt of r sends one signed event. An attempt
-// made with no relay connection sent nothing and leaves r to be created on
-// a later pass without using up a try.
+// The create asks for r.Chosen under the key create/<reg>, so every attempt
+// of r sends one signed event. An attempt made with no relay connection
+// sent nothing and leaves r to be created on a later pass without using up
+// a try.
 func (s *Server) create(r *channelRecord, now time.Time) bool {
 	if r.Doubted || r.Creates >= channelCreateTries || !s.stillServes(*r, now) {
 		return false
@@ -750,7 +734,7 @@ func (s *Server) create(r *channelRecord, now time.Time) bool {
 	c := s.buzz.CreateChannel(s.lifeCtx(), s.createSpec(*r))
 	r.Pending = false
 	switch {
-	case s.direct != nil && c.Reason == buzzop.ReasonNoConnection && (c.Outcome == buzzop.NotSent || c.Outcome == buzzop.Rejected):
+	case c.Reason == buzzop.ReasonNoConnection && (c.Outcome == buzzop.NotSent || c.Outcome == buzzop.Rejected):
 		// Nothing was sent: the outcome is what an earlier attempt left,
 		// and that attempt was counted when it was made.
 		r.Creates--
@@ -768,74 +752,23 @@ func (s *Server) create(r *channelRecord, now time.Time) bool {
 	return c.Outcome == buzzop.Accepted
 }
 
-// createSpec is the create of r: one key per registration, and on the
-// direct transport the chosen id.
+// createSpec is the create of r: one key per registration, and the chosen
+// id.
 func (s *Server) createSpec(r channelRecord) buzzop.ChannelSpec {
 	spec := buzzop.ChannelSpec{Key: buzzop.Key("create/" + r.Reg), Name: r.Label, About: "amq-remote " + r.Reg}
-	if s.direct != nil {
-		spec.ID = r.Chosen
-	}
+	spec.ID = r.Chosen
 	return spec
 }
 
-// lookup looks for the channel an uncertain create of r may have made, and
-// adopts it when there is exactly one. Two are both refused. It reports
-// whether r now has a channel to set up. On the direct transport it is
-// lookupChosen.
+// lookup looks for the channel an uncertain create of r may have made
+// (lookupChosen). It reports whether r now has a channel to set up.
 func (s *Server) lookup(r *channelRecord, now time.Time) bool {
 	if !s.stillServes(*r, now) {
 		return false
 	}
 	r.LastTry = now.UTC().Format(time.RFC3339)
-	if s.direct != nil {
-		s.lookupChosen(r)
-		return s.save(r, now) == nil && r.ChannelID != ""
-	}
-	ids, ok := s.findChannels(*r)
-	switch {
-	case !ok:
-	case len(ids) == 1:
-		r.ChannelID, r.State, r.LastError = ids[0], channelCreating, ""
-	case len(ids) > 1:
-		r.State, r.Orphans = channelFailed, ids
-		r.LastError = "several channels carry this registration (" + strings.Join(ids, ", ") + "); none is used"
-	}
+	s.lookupChosen(r)
 	return s.save(r, now) == nil && r.ChannelID != ""
-}
-
-// findChannels lists the private channels the machine agent belongs to and
-// returns those named r.Label that it owns and whose description holds
-// r.Reg. The list does not promise a description, so each candidate is read
-// with channels get. ok is false when any read failed, which proves nothing.
-//
-// The members of a candidate are read only once its description holds
-// r.Reg, so a channel of another registration never makes the answer
-// unknown.
-func (s *Server) findChannels(r channelRecord) (ids []string, ok bool) {
-	listed, err := s.buzz.FindChannels(s.lifeCtx(), r.Label)
-	if err != nil {
-		return nil, false
-	}
-	for _, id := range listed {
-		out, err := s.call("channels", "get", "--channel", id)
-		var got struct {
-			Description string `json:"description"`
-		}
-		if err != nil || json.Unmarshal(out, &got) != nil {
-			return nil, false
-		}
-		if !strings.Contains(got.Description, r.Reg) {
-			continue
-		}
-		owner, known := s.ownerOf(s.call("channels", "members", "--channel", id))
-		if !known {
-			return nil, false
-		}
-		if owner {
-			ids = append(ids, strings.ToLower(id))
-		}
-	}
-	return ids, true
 }
 
 // acceptedFor reports whether the CLI write named by args succeeded. The
@@ -872,11 +805,11 @@ func acceptedFor(args []string, out []byte, err error) error {
 // pushes, and activates the channel. Each step's outcome is written before
 // the next; a failed step is retried after channelStepGap.
 //
-// On the direct transport the relay-signed state decides: the owner is
-// added only while it does not show them as an admin or the owner, and the
-// channel becomes active only once it shows a route (routeReady). A state
-// that cannot be read, or does not show that yet, changes nothing and is
-// read again after channelStepGap.
+// The relay-signed state decides: the owner is added only while it does
+// not show them as an admin or the owner, and the channel becomes active
+// only once it shows a route (routeReady). A state that cannot be read, or
+// does not show that yet, changes nothing and is read again after
+// channelStepGap.
 func (s *Server) finishSetup(r *channelRecord, now time.Time) {
 	if r.State != channelCreating || r.ChannelID == "" {
 		return
@@ -902,14 +835,12 @@ func (s *Server) finishSetup(r *channelRecord, now time.Time) {
 	}
 	ctx := s.lifeCtx()
 	if !step(&r.OwnerAdded, func() buzzop.Result {
-		if s.direct != nil {
-			f, err := s.observe(r.ChannelID)
-			switch {
-			case err != nil:
-				return buzzop.Result{Outcome: buzzop.NotSent, Reason: unreadableState + ": " + err.Error()}
-			case ownerSeated(f, s.id):
-				return buzzop.Result{Outcome: buzzop.Accepted}
-			}
+		f, err := s.observe(r.ChannelID)
+		switch {
+		case err != nil:
+			return buzzop.Result{Outcome: buzzop.NotSent, Reason: unreadableState + ": " + err.Error()}
+		case ownerSeated(f, s.id):
+			return buzzop.Result{Outcome: buzzop.Accepted}
 		}
 		return s.buzz.AddMember(ctx, buzzop.Key("member/"+r.Reg+"/"+s.id.Owner), r.ChannelID, s.id.Owner, "admin")
 	}) {
@@ -922,18 +853,16 @@ func (s *Server) finishSetup(r *channelRecord, now time.Time) {
 	}) {
 		return
 	}
-	if s.direct != nil {
-		f, err := s.observe(r.ChannelID)
-		if err != nil || !routeReady(f, s.id) {
-			r.LastTry, r.LastError = now.UTC().Format(time.RFC3339), waitingForState
-			if err != nil {
-				r.LastError = unreadableState + ": " + err.Error()
-			}
-			_ = s.save(r, now)
-			return
+	f, err := s.observe(r.ChannelID)
+	if err != nil || !routeReady(f, s.id) {
+		r.LastTry, r.LastError = now.UTC().Format(time.RFC3339), waitingForState
+		if err != nil {
+			r.LastError = unreadableState + ": " + err.Error()
 		}
-		r.LastError = ""
+		_ = s.save(r, now)
+		return
 	}
+	r.LastError = ""
 	if !s.stillServes(*r, now) {
 		return
 	}
@@ -1127,12 +1056,11 @@ func (s *Server) retiredRecords() []channelRecord {
 // is retried after channelRetryGap without limit. A retired record never
 // gets add-member, a welcome or activation.
 //
-// On the direct transport the uncertain create is looked for by its chosen
-// id, and the channel's relay-signed state is read before anything is
-// sent: a channel it shows archived is recorded archived with no post and
-// no archive, and a state that cannot be read, or that has no metadata
-// event, sends nothing. The archive is keyed by the state it changes
-// (stateKey).
+// The uncertain create is looked for by its chosen id, and the channel's
+// relay-signed state is read before anything is sent: a channel it shows
+// archived is recorded archived with no post and no archive, and a state
+// that cannot be read, or that has no metadata event, sends nothing. The
+// archive is keyed by the state it changes (stateKey).
 func (s *Server) cleanRetired(r channelRecord, now time.Time) {
 	if r.Archived || s.stopped() || (r.LastTry != "" && r.LastError != "" && !due(r.LastTry, channelRetryGap, now)) {
 		return
@@ -1150,11 +1078,7 @@ func (s *Server) cleanRetired(r channelRecord, now time.Time) {
 	}
 	ctx := s.lifeCtx()
 	if r.inDoubt() {
-		find := s.findChannels
-		if s.direct != nil {
-			find = s.findChosen
-		}
-		ids, ok := find(r)
+		ids, ok := s.findChosen(r)
 		if !ok {
 			fail("could not look for the channel of an uncertain create")
 			return
@@ -1170,7 +1094,7 @@ func (s *Server) cleanRetired(r channelRecord, now time.Time) {
 		}
 	}
 	archiveKey := retiredKey("archive", r)
-	if s.direct != nil && r.ChannelID != "" {
+	if r.ChannelID != "" {
 		f, err := s.observe(r.ChannelID)
 		switch {
 		case err != nil:
@@ -1287,18 +1211,15 @@ func (s *Server) restorable(b binding.Binding, r channelRecord) bool {
 
 // restore brings back the channel of the same session attaching again: the
 // newest retired record of b's name and identity that was active and ended
-// with its session. A channel whose archive was sent is unarchived first,
-// and only a confirmed unarchive, or the relay's refusal that the channel is
-// not archived, lets it become active. It reports whether such a record
-// exists, so no new channel is made while it is being brought back. On the
-// direct transport only an observation that the channel is not archived
-// lets it become active (unarchived), and a record whose channel the
-// owner archived (Archived without ArchiveSent) is never brought back: the
-// session gets a new channel.
+// with its session. It reports whether such a record exists, so no new
+// channel is made while it is being brought back. Only an observation that
+// the channel is not archived lets it become active (unarchived), and a
+// record whose channel the owner archived (Archived without ArchiveSent) is
+// never brought back: the session gets a new channel.
 func (s *Server) restore(b binding.Binding, now time.Time) bool {
 	var found *channelRecord
 	for _, r := range s.retiredRecords() {
-		if s.direct != nil && r.Archived && !r.ArchiveSent {
+		if r.Archived && !r.ArchiveSent {
 			continue
 		}
 		if r.Name == b.Name && r.Identity == b.SessionIdentity() && left(r) &&
@@ -1313,32 +1234,14 @@ func (s *Server) restore(b binding.Binding, now time.Time) bool {
 	if !s.restorable(b, r) {
 		return true
 	}
-	if s.direct != nil {
-		switch s.unarchived(&r, now) {
-		case restoreWaits:
-			return true
-		case restoreOwnerArchived:
-			return false
-		}
-		if !s.restorable(b, r) {
-			return true
-		}
-	} else if r.Archived || r.ArchiveSent {
-		if r.LastError != "" && !due(r.LastTry, channelStepGap, now) {
-			return true
-		}
-		r.LastTry = now.UTC().Format(time.RFC3339)
-		if res := s.buzz.SetArchived(s.lifeCtx(), retiredKey("unarchive", r), r.ChannelID, false); res.Outcome != buzzop.Accepted && !notArchived(res) {
-			r.LastError = res.Reason
-			_ = s.save(&r, now)
-			return true
-		}
-		// The channel is unarchived now; if the session left meanwhile, the
-		// retired record archives it again.
-		r.Archived, r.ArchiveSent, r.LastError = false, false, ""
-		if s.save(&r, now) != nil || !s.restorable(b, r) {
-			return true
-		}
+	switch s.unarchived(&r, now) {
+	case restoreWaits:
+		return true
+	case restoreOwnerArchived:
+		return false
+	}
+	if !s.restorable(b, r) {
+		return true
 	}
 	retiredPath := s.recordPath(r)
 	r.State, r.RetiredBy, r.RetiredFrom, r.SaidEnded, r.LastError = channelActive, "", "", false, ""
@@ -1354,7 +1257,7 @@ func (s *Server) restore(b binding.Binding, now time.Time) bool {
 	return true
 }
 
-// restoreStep is what a restore on the direct transport may do next.
+// restoreStep is what a restore may do next.
 type restoreStep int
 
 const (
@@ -1419,15 +1322,6 @@ func (s *Server) unarchived(r *channelRecord, now time.Time) restoreStep {
 // gives the same key, so a repeat sends nothing new.
 func stateKey(what string, r channelRecord, f buzzop.ChannelFacts) buzzop.Key {
 	return buzzop.Key(what + "/" + r.Reg + "/" + f.MetaEvent)
-}
-
-// notArchived reports whether the relay refused an unarchive because the
-// channel is not archived. That refusal proves the state a restore needs: an
-// archive recorded as sent never reached the relay, or the channel was
-// unarchived since. A failure that proves nothing, such as a timeout, is not
-// one.
-func notArchived(res buzzop.Result) bool {
-	return res.Outcome != buzzop.Accepted && strings.Contains(strings.ToLower(res.Reason), "channel is not archived")
 }
 
 // resetRequest asks the leader to retire the record with Reg and make a

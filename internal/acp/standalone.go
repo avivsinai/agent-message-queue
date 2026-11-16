@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"os"
 
 	"github.com/avivsinai/agent-message-queue/internal/launch"
@@ -121,7 +120,6 @@ type lifecycle interface {
 	AddMember(ctx context.Context, key buzzop.Key, channel, pubkey, role string) buzzop.Result
 	SetArchived(ctx context.Context, key buzzop.Key, channel string, archived bool) buzzop.Result
 	Send(context.Context, buzzop.Message) buzzop.Result
-	FindChannels(ctx context.Context, name string) ([]string, error)
 }
 
 // directOps are the lifecycle operations on the direct transport. As call
@@ -170,12 +168,6 @@ func (d directOps) Send(ctx context.Context, m buzzop.Message) buzzop.Result {
 	return d.t.Send(ctx, m)
 }
 
-// FindChannels is never called on the direct transport: a channel is found
-// by its chosen id (findChosen).
-func (directOps) FindChannels(context.Context, string) ([]string, error) {
-	return nil, errors.New("the direct transport finds a channel only by its chosen id")
-}
-
 // offline reports whether the direct transport is known to have no relay
 // connection, so no step can be sent or observed.
 func (s *Server) offline() bool { return s.online != nil && !s.online() }
@@ -222,7 +214,7 @@ func routeReady(f buzzop.ChannelFacts, id buzzop.Identity) bool {
 	return f.Private == buzzop.TriYes && f.Roles[id.Agent] == "owner" && ownerSeated(f, id) && f.Archived == buzzop.TriNo
 }
 
-// findChosen is findChannels on the direct transport: the record's chosen
+// findChosen finds the channel a create of r made: the record's chosen
 // channel when its relay-signed state names this agent as the creator,
 // none when it does not. ok is false when the state could not be read,
 // which proves nothing.
@@ -240,8 +232,8 @@ func (s *Server) findChosen(r channelRecord) (ids []string, ok bool) {
 	return nil, true
 }
 
-// lookupChosen resolves an uncertain create of r on the direct transport.
-// The observation comes first: the chosen channel, when the relay shows it,
+// lookupChosen resolves an uncertain create of r. The observation comes
+// first: the chosen channel, when the relay shows it,
 // is adopted. Otherwise the create is made again under the same key: the
 // transport sends the event it stored for that key, or signs the first one
 // when none was prepared, so a registration never has two creates. A

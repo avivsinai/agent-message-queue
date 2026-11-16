@@ -276,17 +276,17 @@ func (s *Server) recordFinal(eventID, result string, err error) string {
 	return result
 }
 
-// post is publish that also returns the post's error. key names the post
-// on the direct transport; the buzz CLI ignores it.
+// post is publish that also returns the post's error. key names the post.
+// A server with no transport sends nothing: its post is not sent.
 func (s *Server) post(key buzzop.Key, channel, text string) (string, error) {
 	if channel == "" || strings.TrimSpace(text) == "" {
 		return "", nil
 	}
 	var err error
-	if s.direct != nil {
-		err = resultError(s.posts.Send(context.Background(), buzzop.Message{Key: key, Channel: channel, Content: text}))
+	if s.posts == nil {
+		err = resultError(buzzop.Result{Outcome: buzzop.NotSent, Reason: "this server has no Buzz transport"})
 	} else {
-		_, err = postAnswer(channel, text, s.cfg.PostTimeout)
+		err = resultError(s.posts.Send(context.Background(), buzzop.Message{Key: key, Channel: channel, Content: text}))
 	}
 	switch {
 	case err == nil:

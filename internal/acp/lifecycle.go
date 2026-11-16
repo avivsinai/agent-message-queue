@@ -208,24 +208,6 @@ func (s *Server) writeAgentMarker(dir string, m agentMarker, now time.Time) {
 	_ = s.writeState(path, append(raw, '\n'))
 }
 
-// ownerOf reads a channels members result: whether this agent is the
-// channel's owner, and whether the members could be read at all.
-func (s *Server) ownerOf(out []byte, err error) (owner, ok bool) {
-	var members []struct {
-		PubKey string `json:"pubkey"`
-		Role   string `json:"role"`
-	}
-	if err != nil || json.Unmarshal(out, &members) != nil {
-		return false, false
-	}
-	for _, mb := range members {
-		if mb.PubKey == s.id.Agent && mb.Role == "owner" {
-			return true, true
-		}
-	}
-	return false, true
-}
-
 // sessionAgentName is the Buzz agent name for b's session: its label, else
 // "AMQ: <name>" for a binding written before labels.
 func sessionAgentName(b binding.Binding) string {

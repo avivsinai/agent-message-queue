@@ -45,14 +45,9 @@ const routeSessionPrefix = "route/"
 // for every decision in flight, so nothing is posted after it. A message
 // that arrives outside them, a turn cut by their stop, or one still queued
 // at the stop is not handled: its channel stays open, and a later delivery
-// handles it (a turn's claim lets it run again). On a server
-// that is not standalone, Owner does nothing and returns a closed channel.
+// handles it (a turn's claim lets it run again).
 func (s *Server) Owner(in buzzop.Inbound) <-chan struct{} {
 	done := make(chan struct{})
-	if s.direct == nil {
-		close(done)
-		return done
-	}
 	r, routed := s.channelRoute(in.Channel)
 	if !routed {
 		close(done)
