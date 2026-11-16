@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -425,4 +426,26 @@ func (f *standaloneFixture) startMachine(t *testing.T) {
 		t.Fatal("the machine agent did not start")
 	}
 	t.Cleanup(stop)
+}
+
+// ownerMsg is the selection of a direct, signed owner event. Another
+// signature cannot become the owner through paraphrased text.
+func (f *standaloneFixture) ownerMsg(channel, text string, evt nostr.Event) ownerMsg {
+	return ownerMsg{channel: channel, words: dropMentions(text), verified: func() (nostr.Event, error) {
+		if evt.PubKey.Hex() != f.s.id.Owner {
+			return nostr.Event{}, errors.New("not a verified owner event")
+		}
+		return evt, nil
+	}}
+}
+
+// signedBy is a plaintext channel message with any tags a test gives it.
+// eventMeta on the direct path supplies bytes through the relay, not text.
+func signedBy(t *testing.T, key nostr.SecretKey, content, channel string, tags ...nostr.Tag) nostr.Event {
+	t.Helper()
+	evt := nostr.Event{CreatedAt: nostr.Now(), Kind: 9, Content: content, Tags: append(nostr.Tags{{"h", channel}}, tags...)}
+	if err := evt.Sign(key); err != nil {
+		t.Fatal(err)
+	}
+	return evt
 }

@@ -37,6 +37,12 @@ type Relay struct {
 	// DropOnce closes the first authenticated connection, to exercise
 	// reconnect.
 	DropOnce atomic.Bool
+	// RejectKind, when non-zero, refuses events of this kind instead of
+	// storing them. Rejected counts their refused publishes.
+	RejectKind nostr.Kind
+	Rejected   atomic.Int32
+	// BeforePublish runs just before one event's OK is sent.
+	BeforePublish func(nostr.Event)
 	// BeforeReq, when set before the first connection, runs on each REQ
 	// before its stored events are sent, so a test can store an event
 	// between two reads.
@@ -136,11 +142,17 @@ func (r *Relay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 				}
 			}
 		case *nostr.EventEnvelope:
+			if r.BeforePublish != nil {
+				r.BeforePublish(e.Event)
+			}
 			reason := ""
 			if !authed {
 				reason = "auth-required: authenticate first"
 			} else if !e.VerifySignature() {
 				reason = "invalid: bad signature"
+			} else if e.Kind == r.RejectKind {
+				r.Rejected.Add(1)
+				reason = "blocked: test relay refused the event kind"
 			}
 			ok, _ := nostr.OKEnvelope{EventID: e.Event.ID, OK: reason == "", Reason: reason}.MarshalJSON()
 			send(ok)
