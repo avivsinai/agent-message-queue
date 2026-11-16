@@ -24,9 +24,6 @@ func fixSandbox(t *testing.T) (home string) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", filepath.Dir(self))
-	saved := runMachineSetup
-	t.Cleanup(func() { runMachineSetup = saved })
-	runMachineSetup = func(out string) error { return os.WriteFile(out, []byte("{}\n"), 0o600) }
 	return home
 }
 
@@ -45,8 +42,8 @@ func TestDoctorFixInstallsEverythingOnceOnAFreshHome(t *testing.T) {
 		t.Fatal(err)
 	}
 	fixed := out.(map[string]any)["fixed"].([]string)
-	if len(fixed) != 3 {
-		t.Fatalf("fixed = %q; want the approval hook, the guard and the import file", fixed)
+	if len(fixed) != 2 {
+		t.Fatalf("fixed = %q; want the approval hook and the wake guard", fixed)
 	}
 	if state, _ := claude.PermissionHookState(settings); state != claude.HookPresent {
 		t.Fatalf("approval hook %q after --fix", state)
@@ -56,9 +53,6 @@ func TestDoctorFixInstallsEverythingOnceOnAFreshHome(t *testing.T) {
 	}
 	if in, err := claude.ReadHookOptIn(settings); err != nil || in.Approval == nil {
 		t.Fatalf("opt-in = %+v, %v", in, err)
-	}
-	if !fileExists(filepath.Join(home, filepath.FromSlash(machineImportFile))) {
-		t.Fatal("no import file")
 	}
 	before, err := os.Stat(settings)
 	if err != nil {

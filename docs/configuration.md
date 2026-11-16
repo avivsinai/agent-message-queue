@@ -83,7 +83,7 @@ read and write:
 ## Machine agent credential
 
 The AMQ Remote machine agent that runs inside `amq-remote serve` (see
-[Machine agent without Buzz Desktop](../cmd/amq-remote/README.md#machine-agent-without-buzz-desktop))
+[Machine agent](../cmd/amq-remote/README.md#machine-agent))
 keeps its credential in the user scope, in
 `~/.amq/remote/machine/<agent pubkey>/` (mode 0700):
 

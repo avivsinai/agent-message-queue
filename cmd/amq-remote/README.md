@@ -425,17 +425,17 @@ Privacy: Buzz DM content is not end-to-end encrypted. The relay operator can
 read the prompts and the result rows. Do not share a session whose prompts or
 results the relay operator must not see.
 
-## Machine agent without Buzz Desktop
+## Machine agent
 
-The machine agent "AMQ Remote @ <machine>" can run inside `amq-remote serve`
-instead of Buzz Desktop. It is then a standalone agent: it has its own key on
-this machine and connects to the relay itself, so the owner needs only the
-Buzz phone app. For each session that attaches, it does what the Buzz Desktop
-machine agent does: it makes a private channel, adds the owner as an admin
-and mentions them, and posts the session's approval dialogs and its mirror
-there. An owner's message in the channel reaches the session, and until the
-session's answer is posted the channel shows the agent as working (a Buzz
-typing pulse every 3 seconds, for at most 30 minutes).
+One machine agent per machine runs inside `amq-remote serve`.
+It has its own key, a grant the owner signs, and connects
+directly to the relay. The owner reads and writes in the Buzz app. No Buzz
+desktop app is needed. For each session that attaches it makes a private
+channel, adds the owner as an admin and mentions them, and posts that
+session's approval dialogs and its mirror. An owner's message in that
+channel reaches the session. Until the session answers, the channel shows
+the agent as working (a Buzz typing pulse every 3 seconds, for at most
+30 minutes).
 
 Set it up once per machine:
 
@@ -799,16 +799,14 @@ to it. The bindings live
 in `$AMQ_REMOTE_BINDING`'s directory when that is set; its missing directories
 are created 0700 below an existing ancestor that has no symlink on its path,
 is owned by you, and is not group- or world-writable. Several sessions can be
-connected at once. The machine agent (`amq-acp setup --machine`, imported
-once per machine) makes a private Buzz channel for each live session that
-has no Buzz agent of its own that runs or is idle, adds the owner and
-mentions them, and runs each owner message in that channel in that session
-only (see the [amq-acp README](../amq-acp/README.md#binding-mode)). Attach
-writes only the binding and holds no Buzz key. A session may instead keep its
-own Buzz agent, pinned to its binding by the system prompt line `AMQ Remote
-session: <name>`, which `amq-acp setup --session <name>` writes into its
-import file, or by the model `amq-remote:<name>`; such a session keeps its DM
-while its agent runs or is idle.
+connected at once. The machine agent inside `amq-remote serve` makes a private
+channel for each live session that has no Buzz agent of its own that runs or
+is idle, adds the owner and mentions them, and runs each owner message in
+that channel in that session only. Attach writes only the binding and holds
+no Buzz key. A session may instead have its own Buzz agent pinned to its
+binding by the system prompt line `AMQ Remote session: <name>`, or by the
+model `amq-remote:<name>`; such a session keeps its DM while its agent runs
+or is idle.
 
 When a shared session's process ends and the same session comes back in a
 new process (for example a resumed conversation), its share comes back
@@ -848,28 +846,26 @@ first that applies:
 - the machine agent runs and the channel is active: open that channel in
   Buzz;
 - the machine agent runs and the channel is being made: it appears within a
-  minute (for a [standalone](#machine-agent-without-buzz-desktop) agent:
+  minute (for a [standalone](#machine-agent) agent:
   `AMQ Remote is making the channel; it appears in Buzz within a minute.`);
 - a standalone machine agent does not serve: `The machine agent runs inside
   amq-remote serve and is not running: <line>`, where the line is its status
-  line, else `run amq-remote up.`; a standalone agent never gets a Buzz
-  Desktop step;
+  line, else `run amq-remote up.`;
 - the session is not proven live and has no channel: the machine agent makes
   a channel only for a session proven live, with the liveness evidence (JSON
   `unproven`);
 - the machine agent is offline or idle and the channel is uncertain or
-  failed: start the machine agent in Buzz Desktop, with the channel's state
-  and error; nothing looks for the channel or tries again while no worker
-  runs;
+  failed: one-time setup of the agent inside `amq-remote serve`, with the
+  channel's state and error and [the four commands](#machine-agent).
 - the channel is uncertain: Buzz did not confirm the create; AMQ keeps
   looking for it and never makes a second one, and `amq-remote channel reset
   <name>` gives it up;
 - the channel failed: the error, and that AMQ tries again in 10 minutes, or,
   after the third refusal, `amq-remote channel reset <name>`;
-- the session's own agent is offline and there is no machine agent: DM it
-  first, and start it in Buzz Desktop if it does not answer within a minute;
-- there is no machine agent: `amq-acp setup --machine`, once per machine;
-- the machine agent is offline: start it in Buzz Desktop.
+- the session's own agent is offline and there is no machine agent: use the
+  [four one-time setup commands](#machine-agent);
+- there is no machine agent, or the machine agent is not running and is not
+  inside `amq-remote serve`: the [one-time setup](#machine-agent);
 
 A Codex thread is proven live while its app-server daemon has it loaded, as
 the machine agent judges it. When the thread runs Codex's automatic approvals
@@ -1000,11 +996,11 @@ state directory:
   `AMQ_HOOK_PROBE`. A command
   that prints nothing did not reach amq-remote (`probe` `closed`). A file
   that sets `disableAllHooks` is a note.
-- The machine agent: its marker is fresh, it records a relay key, and Buzz
-  Desktop starts it when it opens (`start_on_app_launch` in Buzz Desktop's
-  `agents/managed-agents.json`; when that file cannot be read, a note). A
-  standalone machine agent has no Buzz Desktop check: doctor reads its
-  enrolled key and status file, fails with the status line while `serve`
+- The machine agent: its marker is fresh and it records a relay key. When a
+  machine agent that does not run inside `amq-remote serve` is not running,
+  doctor fails with its cause and the [one-time setup](#machine-agent).
+  For a machine agent inside `amq-remote serve`, doctor reads its enrolled key and
+  status file, fails with the status line while `serve`
   does not run it or refuses it, fails when its relay has not been
   authenticated for more than a minute, and notes a grant that ends within
   14 days, with the renew commands. Its `machine_agent` row adds `host`,
@@ -1058,23 +1054,16 @@ step is idempotent: a second run changes nothing.
   installed binary unless it is the versioned target of the stable path it
   would write. The hooks run the `amq-remote` and `amq` on PATH when those
   are the installed binaries, so an upgrade keeps them working.
-- While this machine has no machine agent and no enrolled machine key, it
-  writes the import file
-  `~/Downloads/AMQ Remote machine.agent.json` with `amq-acp setup --machine`
-  (which also writes the AMQ Remote harness that file names). Then in Buzz
-  Desktop: Agents, +, Import that file, Start, and turn on Auto-start.
 - While no login service is installed, it installs the one that runs
   `amq-remote up` for the machine root.
 
 An approval or Stop hook that `--fix` installs or keeps records the owner's
-opt-in (see the approval hook below). `--fix` never restarts amq-acp or a
-wake, never deletes a request record, and never writes Buzz Desktop's own
-agent list.
+opt-in (see the approval hook below). `--fix` never restarts amq-acp or a wake or deletes a request record.
 
 | Link | Fails when |
 | --- | --- |
 | `hooks` | A settings file lacks the approval hook or the wake dialog guard, holds one in a stale form, cannot be read, or its approval command does not reach amq-remote. It also fails without the Stop hook when a native binding or an endpoint manifest entry exists; on a mailbox-only machine that is a note. The subject is the settings file; the remedy names its `CLAUDE_CONFIG_DIR`. |
-| `machine_agent` | The machine agent is not running, records no relay key, or Buzz Desktop does not start it on launch; a standalone agent does not serve, or its relay has not been authenticated for more than a minute. |
+| `machine_agent` | The machine agent is not running, records no relay key, or a standalone agent does not serve, or its relay has not been authenticated for more than a minute. |
 | `channel` | A binding's channel is `uncertain` or `failed`. |
 | `mailbox` | A mailbox binding's handle is unregistered, or its wake is not live or runs another image. |
 | `stale_harness` | A running amq-acp runs an executable that an upgrade deleted. |

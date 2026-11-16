@@ -1,7 +1,7 @@
 ---
 name: amq-remote
 version: 0.151.0 # x-release-please-version
-description: Let the owner reach this running agent from Buzz, on the phone or in Buzz Desktop. Use when the user types /amq-remote (Claude Code) or $amq-remote (Codex), /amq-remote --native, /amq-remote off, or /amq-remote status, or asks to control this session from Buzz. Not for AMQ messaging between agents (use amq-cli).
+description: Let the owner reach this running agent from the Buzz app, on the phone or a computer. Use when the user types /amq-remote (Claude Code) or $amq-remote (Codex), /amq-remote --native, /amq-remote off, or /amq-remote status, or asks to control this session from Buzz. Not for AMQ messaging between agents (use amq-cli).
 metadata:
   short-description: Reach this agent from Buzz
   compatibility: claude-code, codex-cli
@@ -9,11 +9,10 @@ metadata:
 
 # AMQ Remote
 
-`/amq-remote` gives this session its own private Buzz channel. One Buzz
-agent per machine, "AMQ Remote @ <machine>", imported once, makes the
-channel, adds the owner and mentions them. The owner writes in that channel
-from the Buzz phone app or Buzz Desktop. Several sessions can be connected
-at once; each has its own channel. The same session connecting again gets
+`/amq-remote` gives this session its own private Buzz channel. One machine
+agent per machine runs inside `amq-remote serve`; an owner-signed grant
+configures it once. The owner reads and writes in the Buzz app. Several
+sessions can be connected at once; each has its own channel. The same session connecting again gets
 its own channel back. A resumed session gets its channel back by itself
 unless the owner turned it off: a pi session within about 35 s; on macOS, a
 Claude mailbox seat started directly by `amq coop exec claude` within about
@@ -42,7 +41,7 @@ command's own message. Do not work around a refusal.
 
 ## `/amq-remote` (connect)
 
-1. **Tools.** Run `command -v amq-remote amq-acp`. If either is missing, tell
+1. **Tools.** Run `command -v amq-remote`. If it is missing, tell
    the user to run `brew install avivsinai/tap/amq`, then stop.
 2. **Connect.**
    - Default: run `amq-remote attach --self --json`. It uses `AM_ROOT` and
@@ -65,7 +64,7 @@ command's own message. Do not work around a refusal.
    `channel_name`, and `channel_error` and `channel_retry` when the channel
    is uncertain or failed, and `approval_reviewer` when a Codex thread runs
    Codex's automatic approvals reviewer. A machine agent that runs inside
-   `amq-remote serve` instead of Buzz Desktop adds `machine_host`
+   `amq-remote serve` adds `machine_host`
    (`standalone`), `machine_refusal` while serve refuses it, and
    `machine_line` while it does not serve. Attach already waited up to 15 s
    for the channel.
@@ -76,7 +75,6 @@ command's own message. Do not work around a refusal.
      next message."
    - The JSON has `machine_line`: show it as it is (it says the machine agent
      runs inside amq-remote serve and is not running, with the next step).
-     Never give a Buzz Desktop step when `machine_host` is `standalone`.
    - `machine` is `running` and `channel` is `active`: "Open the
      **<channel_name>** channel in Buzz." Nothing else is needed.
    - `machine_host` is `standalone`, `machine` is `running` and `channel` is
@@ -88,9 +86,8 @@ command's own message. Do not work around a refusal.
      agent makes a channel only for a session proven live, and this session
      is not (<unproven>)."
    - `machine` is `offline` or `idle` and `channel` is `uncertain` or
-     `failed`: "Start **<machine_name>** in Buzz Desktop (Agents, the agent,
-     Start)." Then show the channel state and `channel_error`, and say that
-     nothing is done about it while the machine agent is stopped.
+     `failed`: "This machine's AMQ Remote agent is not running," then the
+     setup under `machine` is `missing` below.
    - `channel` is `uncertain`: "Buzz did not confirm the channel
      (<channel_error>). AMQ keeps looking for it and will not make a second
      one. If it never appears, run `amq-remote channel reset <name>`."
@@ -100,27 +97,18 @@ command's own message. Do not work around a refusal.
    - `channel` is `suspended`: "This session's channel is suspended
      (<channel_error>). Undo it in Buzz, or run `amq-remote channel reset
      <name>` for a new channel."
-   - `agent` is `offline` and `machine` is `missing`: "DM **<agent_name>**
-     first; if it does not answer within a minute, start it in Buzz Desktop
-     (Agents, the agent, Start)."
-   - `machine` is `missing`: this machine's one-time setup (no machine key
-     is enrolled). Offer the two setups, one sentence each, and do the one
-     the user picks:
-     - Buzz Desktop: run
-       `amq-acp setup --machine --out "$HOME/Downloads/AMQ Remote machine.agent.json"`
-       once, and show its printed steps as they are (Buzz Desktop: Agents,
-       then + then Import, pick that file, then Start, and turn on
-       Auto-start).
-     - No Buzz Desktop: run `amq-remote machine request > request.txt`; the
-       owner runs `amq-owner-sign --machine request.txt --out grant.json
-       --relay <wss-url>` in their own terminal (only the owner runs this
-       step; never run it for them); then run
-       `amq-remote machine enroll --grant grant.json`, and `amq-remote up`
-       runs the agent.
+   - `agent` is `offline` and `machine` is `missing`: use the setup below.
+   - `machine` is `missing`: this machine's one-time setup (no enrolled
+     machine key):
+       1. Run `amq-remote machine request > request.txt`.
+       2. The owner runs `amq-owner-sign --machine request.txt --out grant.json
+          --relay <wss-url>` in their own terminal. Only the owner runs this
+          signing step; never run it for them.
+       3. Run `amq-remote machine enroll --grant grant.json`.
+       4. Run `amq-remote service install`; it starts the agent now and at each login.
      Every later session then gets its channel by itself.
-   - `machine` is `offline` or `idle`: "Start **<machine_name>** in Buzz
-     Desktop (Agents, the agent, Start); it then makes this session's
-     channel."
+   - `machine` is `offline` or `idle`: "This machine's AMQ Remote agent is
+     not running." Then the same one-time setup.
    If the JSON has `warning`, show it too. If it has `approval_reviewer`,
    say: "Buzz gets no Codex approvals: Codex's automatic reviewer answers
    them (approvals_reviewer = <approval_reviewer>)." It is the owner's
@@ -142,8 +130,7 @@ command's own message. Do not work around a refusal.
    - `stale`: say the installed hook is an older form, then run
      `amq-remote claude install-approval-hook`, which replaces only that
      entry. You may offer `amq-remote doctor --fix` as a question (it also
-     installs the other hooks, the login service and the machine agent's
-     import file); never run it without a yes.
+     installs the other hooks and the login service); never run it without a yes.
    - `missing`: tell the user: "This adds one approval hook. The first
      approval dialog of each Claude Code session on this machine connects
      that session to its own Buzz channel, even one that never ran
@@ -181,8 +168,7 @@ Codex with `--native`: attach needs `CODEX_THREAD_ID` and a thread loaded in
 the Codex app-server daemon. A session started with plain `codex` is not in
 the daemon; start it with `codex app-server daemon start`, then
 `codex --remote unix://`. Run `amq-remote` and `amq-acp` outside Codex's
-sandbox (request escalation): the sandbox blocks the daemon socket, and
-`amq-acp setup` writes files outside the workspace.
+sandbox (request escalation): the sandbox blocks the daemon socket.
 
 ## Answering a Buzz message (default mailbox)
 
@@ -218,7 +204,7 @@ Run `amq-remote bindings` and show its output. It lists the machine agent
 and each connected session as `live` or `unknown` with its own agent
 (`running`, `idle`, `offline` or `missing`) and its channel, prunes the
 sessions proven ended, and names, once, old per-session agents the owner
-should delete in Buzz Desktop.
+should delete in Buzz.
 
 ## Status line
 
@@ -238,12 +224,9 @@ id: `amq-remote statusline --session <id>`.
 
 ## Trust limits
 
-The Buzz agent's identity belongs to Buzz Desktop. Its grant has no kind limit
-and no expiry. Archiving the agent does not invalidate a copied key and
-grant; only removing the agent's relay access does that. Buzz "owner only"
-also admits the owner's other agents. A standalone machine agent's key lives
-in `~/.amq/remote/machine/`; its grant has no kind limit and ends at the date
-the owner signed (see
-[Machine agent without Buzz Desktop](https://github.com/avivsinai/agent-message-queue/blob/main/cmd/amq-remote/README.md#machine-agent-without-buzz-desktop)).
+The machine agent's key is in `~/.amq/remote/machine/`. The owner's
+grant lets that key act as the owner's Buzz agent for every event kind
+until its signed end date. A copied key and grant stay valid until that date; only
+removing the agent's access on the relay ends them earlier.
 See the
-[amq-acp README](https://github.com/avivsinai/agent-message-queue/blob/main/cmd/amq-acp/README.md).
+[Machine agent](https://github.com/avivsinai/agent-message-queue/blob/main/cmd/amq-remote/README.md#machine-agent).

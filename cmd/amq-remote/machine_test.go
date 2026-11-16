@@ -78,7 +78,7 @@ func TestAttachReportsTheMachineChannel(t *testing.T) {
 		var text bytes.Buffer
 		connected(&text, attachView{name: "claude-p-session3", label: "claude · p/session3 @ box", agent: agentInfo{State: agentMissing},
 			machine: agentInfo{State: agentOffline, Display: "AMQ Remote @ box"}, served: true, channel: &ch})
-		if out := text.String(); !strings.Contains(out, `Start "AMQ Remote @ box"`) || strings.Contains(out, "keeps looking") || strings.Contains(out, "tries again") {
+		if out := text.String(); !strings.Contains(out, "this session's channel") || !strings.Contains(out, machineSetupSteps) || strings.Contains(out, "keeps looking") || strings.Contains(out, "tries again") {
 			t.Fatalf("%s channel with the machine agent offline: %q", ch.State, out)
 		}
 	}

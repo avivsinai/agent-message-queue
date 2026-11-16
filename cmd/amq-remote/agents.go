@@ -55,6 +55,10 @@ type agentInfo struct {
 // amq-remote serve, outside Buzz Desktop.
 const hostStandalone = "standalone"
 
+// machineSetupSteps is the one-time setup of the machine agent, for a
+// machine that has none inside amq-remote serve.
+const machineSetupSteps = "run `amq-remote machine request > request.txt`; the owner signs it in their own terminal with `amq-owner-sign --machine request.txt --out grant.json --relay <wss-url>`; then run `amq-remote machine enroll --grant grant.json` and `amq-remote service install`"
+
 // helperOf reports this machine's helper agent.
 func helperOf(now time.Time) agentInfo { return agentOf(helperMarkerDir, now) }
 
@@ -286,8 +290,8 @@ func (v attachView) channelState() string {
 }
 
 // connected prints what attach did and the one thing the owner still has to
-// do: DM the session's own agent, open its channel, wait for the channel,
-// reset it, set up or start the machine agent, or start the session's agent.
+// do: DM the session's own agent, open its channel, or set up the machine
+// agent inside amq-remote serve.
 func connected(w io.Writer, v attachView) {
 	say(w, "Connected: %s.", nonEmpty(v.label, v.name))
 	display := agentDisplay(v.agent, v.label, v.name)
@@ -314,7 +318,7 @@ func connected(w io.Writer, v attachView) {
 	case !serves && v.machine.State != agentMissing && (state == "uncertain" || state == "failed"):
 		// No worker runs, so nothing looks for the channel or tries again
 		// until the machine agent is started.
-		say(w, "Start %q in Buzz Desktop (Agents, the agent, Start). This session's channel is %s (%s); nothing is done about it while the machine agent is stopped.", machine, state, v.channel.Error)
+		say(w, "This machine's AMQ Remote agent is not running, so nothing is done about this session's channel (%s: %s). One-time setup of the agent inside amq-remote serve: %s.", state, v.channel.Error, machineSetupSteps)
 	case state == "uncertain":
 		say(w, "Buzz did not confirm the channel (%s). AMQ keeps looking for it and will not make a second one. If it never appears, run amq-remote channel reset %s.", v.channel.Error, v.name)
 	case state == "failed" && v.channel.Retry:
@@ -322,11 +326,11 @@ func connected(w io.Writer, v attachView) {
 	case state == "failed":
 		say(w, "Buzz refused the channel (%s). Run amq-remote channel reset %s.", v.channel.Error, v.name)
 	case v.agent.State == agentOffline && v.machine.State == agentMissing:
-		say(w, "Its Buzz agent %q is offline: DM it first; if it does not answer within a minute, start it in Buzz Desktop (Agents, the agent, Start).", display)
+		say(w, "Its Buzz agent %q is offline, and this machine has no AMQ Remote agent. One-time setup: %s.", display, machineSetupSteps)
 	case v.machine.State == agentMissing:
-		say(w, "This machine has no AMQ Remote agent yet: run amq-acp setup --machine and import the file in Buzz Desktop, once per machine. Each session then gets its own private channel.")
+		say(w, "This machine has no AMQ Remote agent yet. One-time setup: %s. Each session then gets its own private channel.", machineSetupSteps)
 	default:
-		say(w, "Start %q in Buzz Desktop (Agents, the agent, Start); it then makes this session's channel.", machine)
+		say(w, "This machine's AMQ Remote agent %q is not running. One-time setup of the agent inside amq-remote serve: %s.", machine, machineSetupSteps)
 	}
 	if v.reviewer != "" {
 		say(w, "%s.", launch.CodexReviewerLine(v.reviewer))
