@@ -15,14 +15,11 @@ import (
 	"unicode/utf8"
 
 	"fiatjaf.com/nostr"
-	"fiatjaf.com/nostr/nip19"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
-	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
-	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzevent"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
@@ -68,83 +65,6 @@ func reactionPollGap(age time.Duration) time.Duration {
 	return min(gap, reactionPollMax)
 }
 
-// agentOwner is the owner that Buzz Desktop gave this agent: the NIP-OA
-// BUZZ_AUTH_TAG ["auth", owner, conditions, sig], verified against the
-// agent's own key as buzz-acp verifies it (resolve_agent_owner), else
-// BUZZ_ACP_AGENT_OWNER, which Desktop sets only for an agent with no auth
-// tag. A tag that does not verify yields no owner.
-func agentOwner(authTag, secret, fallback string) string {
-	if authTag = strings.TrimSpace(authTag); authTag != "" {
-		var tag []string
-		if json.Unmarshal([]byte(authTag), &tag) != nil {
-			return ""
-		}
-		t, err := bodykey.ParseAuthTag(tag)
-		if err != nil {
-			return ""
-		}
-		agent, err := agentPubKey(strings.TrimSpace(secret))
-		if err != nil || t.Verify(agent) != nil {
-			return ""
-		}
-		return t.OwnerPubKey
-	}
-	if fallback = strings.ToLower(strings.TrimSpace(fallback)); len(fallback) == 64 {
-		if _, err := nostr.PubKeyFromHex(fallback); err == nil {
-			return fallback
-		}
-	}
-	return ""
-}
-
-// agentPubKey is the hex public key of a hex or nsec secret.
-func agentPubKey(secret string) (string, error) {
-	sk, err := agentSecret(secret)
-	if err != nil {
-		return "", err
-	}
-	return sk.Public().Hex(), nil
-}
-
-// agentSecret parses a hex or nsec secret.
-func agentSecret(secret string) (nostr.SecretKey, error) {
-	if strings.HasPrefix(secret, "nsec1") {
-		prefix, val, err := nip19.Decode(secret)
-		sk, ok := val.(nostr.SecretKey)
-		if err != nil || prefix != "nsec" || !ok {
-			return nostr.SecretKey{}, errors.New("invalid nsec")
-		}
-		return sk, nil
-	}
-	return nostr.SecretKeyFromHex(secret)
-}
-
-// reaction is one emoji on a message and who reacted with it.
-type reaction struct {
-	Emoji   string   `json:"emoji"`
-	PubKeys []string `json:"pubkeys"`
-}
-
-// readReactions reads the reactions on one event. A variable so tests can
-// supply reactions without a relay.
-var readReactions = reactionsWithBuzzCLI
-
-// reactionsWithBuzzCLI runs `buzz reactions get --event <id>`, which prints
-// {"reactions":[{"emoji","count","pubkeys"}]}.
-func reactionsWithBuzzCLI(eventID string, budget time.Duration) ([]reaction, error) {
-	out, err := buzzPort.Run(budget, nil, "reactions", "get", "--event", eventID)
-	if err != nil {
-		return nil, err
-	}
-	var got struct {
-		Reactions []reaction `json:"reactions"`
-	}
-	if err := json.Unmarshal(out, &got); err != nil {
-		return nil, fmt.Errorf("buzz reactions get: %v", err)
-	}
-	return got.Reactions, nil
-}
-
 // reacted reports whether owner reacted with emoji.
 func reacted(rs []buzzop.Reaction, owner, emoji string) bool {
 	for _, r := range rs {
@@ -153,18 +73,6 @@ func reacted(rs []buzzop.Reaction, owner, emoji string) bool {
 		}
 	}
 	return false
-}
-
-// editMessage replaces the content of a message this agent posted. A
-// variable so tests can record edits without a relay.
-var editMessage = editWithBuzzCLI
-
-// editWithBuzzCLI runs `buzz messages edit --event <id> --content <text>`.
-// A refused edit (accepted:false on exit 0) returns a
-// *buzzcli.NotAcceptedError.
-func editWithBuzzCLI(eventID, content string, budget time.Duration) error {
-	out, err := buzzPort.Run(budget, nil, "messages", "edit", "--event", eventID, "--content", content)
-	return buzzcli.WriteError(buzzcli.ShapeAccepted, out, err)
 }
 
 // dialogPost is the record of one posted dialog.
@@ -1025,44 +933,6 @@ func signedWithin(evt nostr.Event, floor, now time.Time) bool {
 	return !at.Before(floor) && !at.After(now.Add(ownerSkew))
 }
 
-// buzzEvent returns the one <buzz-event> block of a buzz-acp prompt, or "".
-func buzzEvent(prompt string) string {
-	start := strings.Index(prompt, "<buzz-event")
-	if start < 0 || strings.Count(prompt, "<buzz-event") != 1 {
-		return ""
-	}
-	end := strings.Index(prompt[start:], "</buzz-event>")
-	if end < 0 {
-		return ""
-	}
-	return prompt[start : start+end]
-}
-
-// ownerWords is the text a buzz-acp prompt shows the owner typed: the
-// Content of its one Buzz event, else what follows the <context> block, with
-// leading mentions dropped. It only says whether a prompt may be an owner
-// decision; the decision itself reads the verified event (ownerEvent).
-func ownerWords(prompt string) string {
-	text := prompt
-	if evt := buzzEvent(prompt); evt != "" {
-		_, content, ok := strings.Cut(evt, "\nContent: ")
-		if !ok {
-			return ""
-		}
-		var lines []string
-		for line := range strings.SplitSeq(content, "\n") {
-			if strings.HasPrefix(line, "Tags: ") || strings.HasPrefix(line, "Parsed: ") {
-				break
-			}
-			lines = append(lines, line)
-		}
-		text = strings.Join(lines, "\n")
-	} else if _, after, ok := strings.Cut(prompt, "</context>"); ok {
-		text = after
-	}
-	return dropMentions(text)
-}
-
 // dropMentions trims text and drops its leading mentions
 // (buzzevent.DropMentions).
 func dropMentions(text string) string { return buzzevent.DropMentions(text) }
@@ -1072,28 +942,6 @@ var errNotOwner = errors.New("the event is not the owner's")
 
 // errNoEventID is a prompt that names no Nostr event to verify.
 var errNoEventID = errors.New("the message names no signed event")
-
-// ownerEvent is the one source of an owner decision: the prompt's
-// triggering event (lookupEventID of its _meta id eventID and its text) as
-// the relay serves it to this agent, accepted by buzzevent.Fetch as the
-// plaintext message in channel, and signed by the owner. A decision acts on
-// its content and tags, never on the prompt text. errNotOwner means it
-// verified but another key signed it; any other error means there is no
-// verified event.
-func ownerEvent(owner, eventID, prompt, channel string) (nostr.Event, error) {
-	id := lookupEventID(eventID, prompt)
-	if id == "" {
-		return nostr.Event{}, errNoEventID
-	}
-	evt, err := buzzevent.Fetch(context.Background(), buzzRelay, id, channel)
-	if err != nil {
-		return nostr.Event{}, err
-	}
-	if owner == "" || evt.PubKey.Hex() != owner {
-		return nostr.Event{}, errNotOwner
-	}
-	return evt, nil
-}
 
 // unverifiedNoticeEvery is how often one decision may say why it was not
 // taken.

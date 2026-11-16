@@ -148,12 +148,10 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 			}
 			return r.say(postStatus, r.settle(turnReplied), StopReasonRefusal, text)
 		}
-		// Both carriers name the images of the owner's message as local
-		// files. A standalone turn's message is the owner's event itself.
+		// Both carriers name the images of the owner's message, which is the
+		// owner's event itself.
 		if turn.event != nil {
 			text = unfetchedImages(*turn.event, text)
-		} else {
-			text = attachImages(b.Root, s.id.RelayURL, text)
 		}
 		if b.Mailbox() {
 			return s.runMailbox(sessionID, text, eventID, b, turn, emit)
@@ -864,8 +862,8 @@ func (r *remoteTurn) say(kind string, outcome turnOutcome, stopReason, text stri
 //     Config.PostTimeout bounds the hold, and a crash releases the flock.
 //
 // A post that failed is not retried, because the post has no idempotency
-// key, with one exception: a mailbox answer whose post failed before the
-// buzz CLI started is posted again by the late-reply sweep (finalUnsent). The
+// key, with one exception: a mailbox answer whose post was not sent is
+// posted again by the late-reply sweep (finalUnsent). The
 // event id is 64 lowercase hex, checked when the prompt is parsed (event.go
 // eventIDsFromMeta), or a mailbox turn's own AMQ message id (localEvent), so
 // it cannot leave the state dir. Without an event id

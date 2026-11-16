@@ -10,9 +10,8 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 )
 
-// A standalone machine agent runs outside Buzz Desktop: the same server in
-// machine mode, with a relay transport in place of the buzz CLI. The relay
-// lets the agent choose each channel id and key each write, so one
+// A machine agent is the server in machine mode on a relay transport. The
+// relay lets the agent choose each channel id and key each write, so one
 // intention is one signed event, and lets it read the relay-signed state
 // of a channel. Only an observation of that state proves a channel usable;
 // an acknowledged write never does.
@@ -45,7 +44,7 @@ type Standalone struct {
 }
 
 // NewStandalone builds a machine agent's server on sa.Transport. Its state
-// is the binding mode state directory, beside the binding file. The marker
+// directory is BindingStateDir, beside the binding file. The marker
 // it writes records this process as the worker and no parent.
 func NewStandalone(sa Standalone, version string) *Server {
 	s := NewServer(Config{RemoteBinding: true, Machine: true, Identity: sa.Identity}, version)
@@ -90,7 +89,7 @@ func (s *Server) bound(ctx context.Context) (context.Context, context.CancelFunc
 	return context.WithTimeout(ctx, s.cfg.PostTimeout)
 }
 
-// boundedPosts are posts on the direct transport, each bounded by bound.
+// boundedPosts are posts on the transport, each bounded by bound.
 type boundedPosts struct {
 	s *Server
 	t Transport
@@ -122,9 +121,8 @@ type lifecycle interface {
 	Send(context.Context, buzzop.Message) buzzop.Result
 }
 
-// directOps are the lifecycle operations on the direct transport. As call
-// does for the CLI, each is bounded by PostTimeout and is not sent once
-// ctx, the machine worker's, has ended.
+// directOps are the lifecycle operations on the transport. Each is bounded
+// by PostTimeout and is not sent once ctx, the machine worker's, has ended.
 type directOps struct {
 	s *Server
 	t Transport
@@ -168,7 +166,7 @@ func (d directOps) Send(ctx context.Context, m buzzop.Message) buzzop.Result {
 	return d.t.Send(ctx, m)
 }
 
-// offline reports whether the direct transport is known to have no relay
+// offline reports whether the transport is known to have no relay
 // connection, so no step can be sent or observed.
 func (s *Server) offline() bool { return s.online != nil && !s.online() }
 

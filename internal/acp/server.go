@@ -20,7 +20,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
-	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 )
 
@@ -207,25 +206,22 @@ type Server struct {
 	// machine is the machine leader's pacing, used only by the machine
 	// worker.
 	machine machineState
-	// buzz are the machine lifecycle's Buzz operations: the buzz CLI, each
-	// run through call, or the direct transport (NewStandalone).
-	buzz lifecycle
-	// posts are the Buzz writes and reads of dialogs, the session mirror
-	// and the hook warnings.
-	posts posts
-	// direct is the relay transport of a standalone server, nil on the buzz
-	// CLI. A step that only the relay can serve (a chosen channel id, an
-	// observation of relay-signed state, a keyed post) runs only when it is
-	// set.
+	// buzz are the machine lifecycle's Buzz operations, posts the Buzz
+	// writes and reads of dialogs, the session mirror and the hook warnings,
+	// and direct the relay transport that serves both. Only NewStandalone
+	// sets them: an ACP stdio server has none, and nothing it runs reaches
+	// them.
+	buzz   lifecycle
+	posts  posts
 	direct Transport
 	// working holds each route's working indication (*working);
 	// workingFailed says the first failed pulse once.
 	working       sync.Map
 	workingFailed sync.Once
-	// online reports whether the direct transport has a relay connection;
-	// nil means it is not known, and the machine tick runs.
+	// online reports whether the transport has a relay connection; nil
+	// means it is not known, and the machine tick runs.
 	online func() bool
-	// owners are a standalone server's owner turns (Owner), run while its
+	// owners are a machine agent's owner turns (Owner), run while its
 	// machine workers run.
 	owners ownerTurns
 	// dialogs is the dialog poster's state, used only by the worker that
@@ -270,16 +266,13 @@ func NewServer(cfg Config, version string) *Server {
 	if cfg.PostTimeout <= 0 {
 		cfg.PostTimeout = defaultPostTimeout
 	}
-	s := &Server{
+	return &Server{
 		cfg:      cfg,
 		id:       cfg.Identity,
 		version:  version,
 		sessions: make(map[string]*sessionState),
 		store:    newSessionStore(cfg),
 	}
-	s.buzz = buzzcli.Ops{Exec: s.lifecycleExec}
-	s.posts = cliPosts{s: s}
-	return s
 }
 
 // responseWriter serializes JSON-RPC writes. Prompt turns respond from
@@ -553,9 +546,8 @@ type newSessionResult struct {
 	Models    sessionModels   `json:"models"`
 }
 
-// sessionModels is the ACP session model state. Buzz Desktop requires at
-// least one model before it saves an agent. This bridge runs no model, so it
-// advertises exactly one: its fixed destination.
+// sessionModels is the ACP session model state. This bridge runs no model,
+// so it advertises exactly one: its fixed destination.
 type sessionModels struct {
 	CurrentModelID  string      `json:"currentModelId"`
 	AvailableModels []modelInfo `json:"availableModels"`
@@ -636,7 +628,7 @@ func (s *Server) newSession(params json.RawMessage) (any, *rpcError) {
 	if err != nil {
 		return nil, newRPCError(codeInternalError, "generate session id: %v", err)
 	}
-	// Buzz sends no channel id, so each session gets a fresh synthetic one.
+	// A session whose client sends no channel id gets a fresh synthetic one.
 	// It can never be looked up again, so it is not persisted: persisting it
 	// grew the state file by one entry per session until load refused it.
 	synthetic := channelID == ""

@@ -1,7 +1,6 @@
 package acp
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -22,7 +21,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/receipt"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
-	"github.com/avivsinai/agent-message-queue/internal/remote/buzzevent"
 )
 
 // mailboxSender is the AMQ handle Buzz prompts come from in a mailbox
@@ -86,15 +84,9 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 		eventID = key
 	}
 	r := &remoteTurn{s: s, sessionID: sessionID, eventID: eventID, nostrID: nostrID, emit: emit, turn: turn, meta: remoteMeta{Target: b.Handle}}
-	// The relay round trip runs once per turn, before the cancel and budget
-	// checks and the publish lock, so nothing slow runs between the last
-	// check and the publish. A standalone turn already holds its verified
-	// event.
-	switch {
-	case turn.event != nil:
+	// A machine agent's turn holds its verified event.
+	if turn.event != nil {
 		r.signed = eventContext(*turn.event)
-	case nostrID != "":
-		r.signed = signedEventContext(nostrID, turn.channel)
 	}
 	s.mu.Lock()
 	threadID := ""
@@ -198,8 +190,7 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 			return nil, newRPCError(codeInternalError, "poll AMQ thread %s: %v", threadID, err)
 		}
 		for _, note := range progress {
-			// buzz-acp shows thought chunks only as "typing…", so the owner
-			// reads a status reply only as a post.
+			// The owner reads a status reply only as a post.
 			s.postProgress(eventID, r.postChannel(), note)
 			if err := emitText(emit, sessionID, "agent_thought_chunk", note); err != nil {
 				return nil, newRPCError(codeInternalError, "emit ACP session update: %v", err)
@@ -475,8 +466,8 @@ func isLocalEvent(eventID string) bool {
 	return eventID != "" && !nostrEventIDRe.MatchString(eventID)
 }
 
-// localEvent keys a prompt that carries no Nostr event id (Buzz Desktop sends
-// none) on the AMQ message id it is forwarded as, and claims it for b and this
+// localEvent keys a prompt that carries no Nostr event id on the AMQ
+// message id it is forwarded as, and claims it for b and this
 // agent as turnBinding claims an event. The late-reply sweep finds the claim,
 // so a final reply that arrives after the turn ends is still posted, once. A
 // local event is never redelivered.
@@ -650,19 +641,6 @@ func publishOnce(b binding.Binding, threadID, id, nostrID string, signed map[str
 			"This came from the owner's Buzz DM. Answer with `amq reply --id " + id + "`; your reply is shown in that DM. " +
 			"A reply with `--kind status` shows as progress; any other reply is the final answer.",
 	})
-}
-
-// signedEventContext is the header context {"buzz": {"event": <event>}}
-// holding the signed fields of event eventID, re-encoded, present only when
-// buzzevent.Fetch accepts it for channel. Any failure is
-// logged and gives nil: the prompt is then delivered unverified, never held.
-func signedEventContext(eventID, channel string) map[string]any {
-	evt, err := buzzevent.Fetch(context.Background(), buzzRelay, eventID, channel)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "amq-acp: event %s is delivered without its signed event: %v\n", eventID, err)
-		return nil
-	}
-	return eventContext(evt)
 }
 
 // eventContext is the header context {"buzz": {"event": <evt>}} of a

@@ -13,7 +13,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
-	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
 )
 
 // lateReplyInterval is how often the sweep worker sweeps for late replies.
@@ -412,7 +411,7 @@ func (s *Server) loadLateClaim(eventID string, now time.Time) (*lateClaim, bool)
 // resendFinal posts an answer that is its event's outcome but was never
 // posted. Under the event's post lock it renames the unsent marker to
 // sending before the post, so a crash during the post leaves the answer
-// uncertain, never unsent. Only a post proved not started renames it back
+// uncertain, never unsent. Only a post proved not sent renames it back
 // for the next sweep.
 func (s *Server) resendFinal(c *lateClaim) {
 	text := ""
@@ -437,7 +436,7 @@ func (s *Server) resendFinal(c *lateClaim) {
 			return err
 		}
 		result, err := s.post(finalKey(c.eventID), c.channel, text)
-		if buzzcli.NeverSent(err) || notSent(err) {
+		if notSent(err) {
 			if err := os.Rename(sending, unsent); err != nil {
 				return err
 			}

@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -21,7 +20,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
-	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 )
@@ -284,26 +282,6 @@ func (s *Server) lifeCtx() context.Context {
 		return ctx
 	}
 	return context.Background()
-}
-
-// call runs one buzz command for the machine lifecycle. A call cut off by
-// the worker's stop fails like a timeout: its outcome is unknown.
-func (s *Server) call(args ...string) ([]byte, error) {
-	ctx := s.lifeCtx()
-	if ctx.Err() != nil {
-		return nil, &buzzcli.NotSentError{Err: errMachineStopped}
-	}
-	return machineCall(ctx, s.cfg.PostTimeout, args...)
-}
-
-// lifecycleExec is the Exec of s.buzz: it runs one invocation through call,
-// so the worker's context bounds it whatever ctx the operation got. The
-// lifecycle sends no stdin; an invocation with stdin is not sent.
-func (s *Server) lifecycleExec(_ context.Context, stdin io.Reader, args ...string) ([]byte, error) {
-	if stdin != nil {
-		return nil, &buzzcli.NotSentError{Err: errors.New("the machine lifecycle sends no stdin")}
-	}
-	return s.call(args...)
 }
 
 // retiredKey names an intention of the retired record r: what, r's reg, and
@@ -769,36 +747,6 @@ func (s *Server) lookup(r *channelRecord, now time.Time) bool {
 	r.LastTry = now.UTC().Format(time.RFC3339)
 	s.lookupChosen(r)
 	return s.save(r, now) == nil && r.ChannelID != ""
-}
-
-// acceptedFor reports whether the CLI write named by args succeeded. The
-// subcommand selects the shape, by what that command prints (block/buzz
-// f3b127e buzz-cli):
-//
-//   - write response {event_id, accepted, message}: messages send, messages
-//     edit, channels create, channels archive, channels unarchive, channels
-//     add-member, users set-status, agents draft-create.
-//   - ok response: agents archive, agents unarchive.
-//
-// A subcommand outside this table is an error: its output is not known
-// here, so success is not assumed.
-func acceptedFor(args []string, out []byte, err error) error {
-	if err != nil {
-		return err
-	}
-	if len(args) >= 2 {
-		switch args[0] + " " + args[1] {
-		case "messages send", "messages edit",
-			"channels create", "channels archive", "channels unarchive", "channels add-member",
-			"users set-status",
-			"agents draft-create":
-			return buzzcli.WriteError(buzzcli.ShapeAccepted, out, nil)
-		case "agents archive", "agents unarchive":
-			return buzzcli.WriteError(buzzcli.ShapeOK, out, nil)
-		}
-	}
-	return fmt.Errorf("buzz %s: response shape unknown to acceptedFor: %s",
-		strings.Join(args[:min(len(args), 2)], " "), strings.TrimSpace(string(out)))
 }
 
 // finishSetup adds the owner, welcomes them with a mention so the phone
@@ -1484,7 +1432,7 @@ type MachineChannel struct {
 	identity string
 }
 
-// BindingStateDir is amq-acp's state directory in binding mode, beside the
+// BindingStateDir is the machine agent's state directory, beside the
 // binding file.
 func BindingStateDir() (string, error) {
 	path, err := binding.Path()

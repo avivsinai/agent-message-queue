@@ -2,227 +2,25 @@ package acp
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
-	"slices"
 	"strings"
 	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/relay"
-	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 )
 
-// A Buzz agent's chat reply exists only if the agent publishes it: buzz-acp
-// sends ACP answer text to the owner's activity observer, not to the
-// conversation (block/buzz crates/buzz-acp/src/acp.rs:1799, base_prompt.md:71).
-// So amq-acp posts every text the owner must read into the triggering
-// channel itself, as the managed agent.
+// A machine agent's chat reply exists only if the agent publishes it, so the
+// server posts every text the owner must read into the channel of the turn
+// itself.
 
-// buzzIdentityKeys are the managed agent's credentials that the buzz CLI
-// needs. PrepareWorkerEnv captures them before it strips BUZZ_* from the
-// environment; they leave this process only as the buzz child's env.
-var buzzIdentityKeys = []string{"BUZZ_PRIVATE_KEY", "BUZZ_AUTH_TAG", "BUZZ_RELAY_URL"}
-
-// buzzPort runs the buzz CLI with "KEY=value" entries for buzzIdentityKeys.
-// It is set once at worker start, before any server runs.
-var buzzPort *buzzcli.Port
-
-// defaultPostTimeout bounds one post, including the wait for the CLI's
-// output pipes to close (Config.PostTimeout).
+// defaultPostTimeout bounds one post (Config.PostTimeout).
 const defaultPostTimeout = 30 * time.Second
 
-// postAnswer publishes content into channel and returns the posted event
-// id. A variable so tests can record posts without a relay.
-var postAnswer = postWithBuzzCLI
-
-// channelRe finds the channel UUID in the Channel line of the prompt's
-// <context> block, the reply destination buzz-acp supplies.
-var channelRe = regexp.MustCompile(`(?m)^Channel: [^\n]*\(#([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\)`)
-
-// dmScopeRe finds the scope line buzz-acp writes for a DM in the <context>
-// block (block/buzz crates/buzz-acp/src/queue.rs).
-var dmScopeRe = regexp.MustCompile(`(?m)^Scope: dm\r?$`)
-
-// buzzDM reports whether a buzz-acp prompt came from a DM with a channel.
-func buzzDM(prompt string) bool {
-	start := strings.Index(prompt, "<context>")
-	end := strings.Index(prompt, "</context>")
-	return start >= 0 && end > start && dmScopeRe.MatchString(prompt[start:end]) && buzzChannel(prompt) != ""
-}
-
-// buzzChannel returns the reply channel named by a buzz-acp prompt, or "".
-func buzzChannel(prompt string) string {
-	start := strings.Index(prompt, "<context>")
-	end := strings.Index(prompt, "</context>")
-	if start < 0 || end < start {
-		return ""
-	}
-	if m := channelRe.FindStringSubmatch(prompt[start:end]); m != nil {
-		return strings.ToLower(m[1])
-	}
-	return ""
-}
-
-// uuidRe is a channel UUID as buzz-acp writes it.
-var uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
-
-// hostScopes are the values buzz-acp writes on the Scope and Session scope
-// lines of its <context> section (queue.rs format_context_hints).
-var hostScopes = []struct {
-	prefix  string
-	allowed []string
-}{
-	{"Scope: ", []string{"dm", "thread", "channel"}},
-	{"Session scope: ", []string{"dm conversation", "thread", "channel"}},
-}
-
-// hostContext returns the channel UUID of the prompt's host context, the
-// <context> section buzz-acp emits as its own content block, or "" when the
-// prompt has no usable one. It examines the blocks one by one, never the
-// joined text, so a Channel line inside conversation context or an event
-// cannot become the route. The section must be the only text block that
-// starts with the line <context> and ends with the line </context>, and
-// must hold exactly one column-0 Channel line and at most one of each scope
-// line, every one well formed. buzz-acp indents and escapes descriptions, so
-// only a channel name with a line break can add a structural line; such a
-// prompt is refused, never resolved. The UUID is the one at the end of the
-// Channel line, so a name that contains "(#...)" cannot move it.
-func hostContext(blocks []contentBlock) string {
-	var section []string
-	found := false
-	for _, b := range blocks {
-		if b.Type != "text" {
-			continue
-		}
-		lines := strings.Split(b.Text, "\n")
-		if len(lines) < 2 || lines[0] != "<context>" || lines[len(lines)-1] != "</context>" {
-			continue
-		}
-		if found {
-			return ""
-		}
-		found, section = true, lines[1:len(lines)-1]
-	}
-	channel, channels := "", 0
-	seen := make([]bool, len(hostScopes))
-	for _, line := range section {
-		if strings.HasPrefix(line, "Channel:") {
-			channels++
-			if channel = hostChannel(line); channel == "" {
-				return ""
-			}
-			continue
-		}
-		for i, scope := range hostScopes {
-			if !strings.HasPrefix(line, strings.TrimSuffix(scope.prefix, " ")) {
-				continue
-			}
-			value, ok := strings.CutPrefix(line, scope.prefix)
-			if seen[i] || !ok || !slices.Contains(scope.allowed, value) {
-				return ""
-			}
-			seen[i] = true
-		}
-	}
-	if channels != 1 {
-		return ""
-	}
-	return channel
-}
-
-// hostChannel parses one Channel line: "Channel: <name> (#<uuid>)", or
-// "Channel: <uuid>" when buzz-acp has no channel info.
-func hostChannel(line string) string {
-	rest, ok := strings.CutPrefix(line, "Channel: ")
-	if !ok {
-		return ""
-	}
-	if uuidRe.MatchString(rest) {
-		return strings.ToLower(rest)
-	}
-	open := strings.LastIndex(rest, " (#")
-	if open < 0 || !strings.HasSuffix(rest, ")") {
-		return ""
-	}
-	if id := rest[open+3 : len(rest)-1]; uuidRe.MatchString(id) {
-		return strings.ToLower(id)
-	}
-	return ""
-}
-
-// captureBuzzIdentity records the credentials the buzz CLI needs and the
-// relay credential, and returns the agent's public identity: its own public
-// key, under which it archives and unarchives itself (lifecycle.go), its
-// owner (dialog.go), its relay and its display name.
-func captureBuzzIdentity() buzzop.Identity {
-	var env []string
-	for _, key := range buzzIdentityKeys {
-		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-			env = append(env, key+"="+v)
-		}
-	}
-	buzzPort = buzzcli.New(env)
-	var id buzzop.Identity
-	if secret := strings.TrimSpace(os.Getenv("BUZZ_PRIVATE_KEY")); secret != "" {
-		if pub, err := agentPubKey(secret); err == nil {
-			id.Agent = pub
-		}
-	}
-	id.Owner = agentOwner(os.Getenv("BUZZ_AUTH_TAG"), os.Getenv("BUZZ_PRIVATE_KEY"), os.Getenv("BUZZ_ACP_AGENT_OWNER"))
-	id.RelayURL, id.RelayKey = buzzop.NormalizeRelay(os.Getenv("BUZZ_RELAY_URL")), buzzop.RelayKey(os.Getenv("BUZZ_RELAY_URL"))
-	id.DisplayName = strings.TrimSpace(os.Getenv(envBuzzDisplayName))
-	// The relay credential connects to the URL as given, not the normalized
-	// one.
-	buzzRelay = agentRelay(strings.TrimSpace(os.Getenv("BUZZ_RELAY_URL")), os.Getenv("BUZZ_PRIVATE_KEY"), os.Getenv("BUZZ_AUTH_TAG"))
-	return id
-}
-
-// buzzRelay is the managed agent's own relay identity: the relay URL, the
-// agent key and its NIP-OA grant. It is zero when the key or the grant is
-// unreadable, and a zero Config never authenticates.
-var buzzRelay relay.Config
-
-// agentRelay is the relay identity for url, a hex or nsec secret, and the
-// JSON auth tag, or a zero Config when the secret or the tag does not parse.
-func agentRelay(url, secret, authTag string) relay.Config {
-	sk, err := agentSecret(strings.TrimSpace(secret))
-	if err != nil {
-		return relay.Config{}
-	}
-	var tag []string
-	if json.Unmarshal([]byte(strings.TrimSpace(authTag)), &tag) != nil {
-		return relay.Config{}
-	}
-	return relay.Config{URL: url, Secret: sk, AuthTag: tag}
-}
-
-// postWithBuzzCLI runs `buzz messages send --channel <channel> --content -`
-// with only the agent identity and a minimal environment, and returns the
-// event_id the CLI prints. A refused messages-send (accepted:false on HTTP
-// 200) still prints event_id, so a write that is not accepted returns
-// buzzcli.WriteError's *buzzcli.NotAcceptedError to the caller.
-func postWithBuzzCLI(channel, content string, budget time.Duration) (string, error) {
-	out, err := buzzPort.Run(budget, strings.NewReader(content), "messages", "send", "--channel", channel, "--content", "-")
-	if err := buzzcli.WriteError(buzzcli.ShapeAccepted, out, err); err != nil {
-		return "", err
-	}
-	var sent struct {
-		EventID string `json:"event_id"`
-	}
-	if err := json.Unmarshal(out, &sent); err != nil || sent.EventID == "" {
-		return "", fmt.Errorf("buzz messages send: no event_id in its output")
-	}
-	return sent.EventID, nil
-}
-
-// publish posts text for the owner when the prompt came from Buzz. It
-// reports the outcome for the result meta: "posted", "" when there is no
-// Buzz channel or identity, or the error.
+// publish posts text for the owner when the turn came from Buzz. It reports
+// the outcome for the result meta: "posted", "" when there is no Buzz
+// channel, or the error.
 func (s *Server) publish(channel, text string) string {
 	result, _ := s.post(noteKey(), channel, text)
 	return result
@@ -246,9 +44,8 @@ const (
 )
 
 // publishFinal is publish for an event's final text: it also records what
-// the post proves. Only a post that failed before the CLI started, or one
-// the direct transport did not send, is unsent, and the late-reply sweep
-// may make it again (resendFinal) under the same key.
+// the post proves. Only a post the transport did not send is unsent, and
+// the late-reply sweep may make it again (resendFinal) under the same key.
 func (s *Server) publishFinal(eventID, channel, text string) string {
 	s.stopWorking(channel)
 	result, err := s.post(finalKey(eventID), channel, text)
@@ -260,12 +57,9 @@ func (s *Server) publishFinal(eventID, channel, text string) string {
 
 // recordFinal records what a final post proves and returns its result.
 func (s *Server) recordFinal(eventID, result string, err error) string {
-	if errors.Is(err, buzzcli.ErrNoIdentity) {
-		return result
-	}
 	state := finalPostAccepted
 	switch {
-	case buzzcli.NeverSent(err), notSent(err):
+	case notSent(err):
 		state = finalPostUnsent
 	case err != nil:
 		state = finalPostUncertain
@@ -288,14 +82,10 @@ func (s *Server) post(key buzzop.Key, channel, text string) (string, error) {
 	} else {
 		err = resultError(s.posts.Send(context.Background(), buzzop.Message{Key: key, Channel: channel, Content: text}))
 	}
-	switch {
-	case err == nil:
-		return "posted", nil
-	case errors.Is(err, buzzcli.ErrNoIdentity):
-		return "", err
-	default:
+	if err != nil {
 		return "error: " + err.Error(), err
 	}
+	return "posted", nil
 }
 
 func (s *Server) finalStatePath(eventID string, state finalPost) string {

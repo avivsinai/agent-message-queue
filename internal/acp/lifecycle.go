@@ -1,7 +1,6 @@
 package acp
 
 import (
-	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -12,8 +11,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 )
-
-const envBuzzDisplayName = "BUZZ_ACP_DISPLAY_NAME"
 
 // unpinnedError is an owner message that names no active channel of a
 // session. It chooses no session, so its answer lists the connected ones.
@@ -60,8 +57,7 @@ const agentMarkerRefresh = 2 * time.Minute
 const (
 	// AgentRunning: the marker's worker runs.
 	AgentRunning = "running"
-	// AgentIdle: the worker is gone, but its parent buzz-acp still runs, so
-	// Buzz starts a worker on the next message (a lazy per-session agent).
+	// AgentIdle: the worker is gone, but the parent it recorded still runs.
 	AgentIdle = "idle"
 	// AgentOffline: neither process runs.
 	AgentOffline = "offline"
@@ -140,13 +136,6 @@ func (s *Server) agentMarkers(pin string) []agentMarker {
 		}
 	}
 	return out
-}
-
-// machineCall is buzzCall for the machine agent's lifecycle: it stops when
-// the worker's context ends. A variable so tests can record calls without a
-// relay.
-var machineCall = func(ctx context.Context, budget time.Duration, args ...string) ([]byte, error) {
-	return buzzPort.RunContext(ctx, budget, nil, args...)
 }
 
 // lead reports whether this worker leads the lifecycle of its Buzz identity
