@@ -2,6 +2,7 @@ package acp
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -58,6 +59,22 @@ func promptOf(t *testing.T, b binding.Binding) (string, format.Message) {
 		t.Fatal(err)
 	}
 	return ids[0], msg
+}
+
+// replyInCur delivers an answer to prompt that is already in the buzz
+// inbox's cur, the way another consumer that drained it leaves it, so a
+// running turn never sees it in new. It returns the reply's id.
+func replyInCur(t *testing.T, root, thread, prompt, body string) string {
+	t.Helper()
+	staging := canonicalTempDir(t)
+	if err := fsq.EnsureAgentDirs(staging, mailboxSender); err != nil {
+		t.Fatal(err)
+	}
+	id := replyAs(t, staging, thread, prompt, format.KindAnswer, body)
+	if err := os.Rename(filepath.Join(fsq.AgentInboxNew(staging, mailboxSender), id+".md"), filepath.Join(fsq.AgentInboxCur(root, mailboxSender), id+".md")); err != nil {
+		t.Fatal(err)
+	}
+	return id
 }
 
 // waitAgentPosts waits up to 5 s until the agent has n messages in channel.

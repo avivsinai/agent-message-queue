@@ -83,36 +83,22 @@ func replyAs(t *testing.T, root, thread, prompt, kind, body string) string {
 // leaves other messages in buzz/inbox/new. The prompt carries the
 // nostr:<eventID> label, so a layer can fetch the DM event (#1155).
 func TestMailboxBindingDeliversAndEndsOnTheFinalReply(t *testing.T) {
-	s, root := mailboxServer(t)
-	other := replyAs(t, root, cockpitThread("session/s"), "another-prompt", format.KindAnswer, "not for this turn")
-	eventID := strings.Repeat("1", 64)
-	var thoughts []string
-	var answer string
-	replied := false
-	result, rpcErr := s.runRemote("s", "say hi", eventID, newTurn(), func(v any) error {
-		note := v.(sessionUpdateNotification)
-		if note.Params.Update.SessionUpdate == "agent_thought_chunk" {
-			thoughts = append(thoughts, note.Params.Update.Content.Text)
-		}
-		if !replied {
-			if ids := inboxPrompts(t, root); len(ids) == 1 {
-				replied = true
-				prompt, err := format.ReadMessageFile(filepath.Join(fsq.AgentInboxNew(root, "agent"), ids[0]+".md"))
-				if err != nil || !slices.Equal(prompt.Header.Labels, []string{"acp", "buzz", "nostr:" + eventID}) {
-					t.Errorf("prompt labels=%q err=%v", prompt.Header.Labels, err)
-				}
-				replyAs(t, root, cockpitThread("session/s"), ids[0], format.KindStatus, "working on it")
-				answer = replyAs(t, root, cockpitThread("session/s"), ids[0], format.KindAnswer, "hi from the agent")
-			}
-		}
-		return nil
-	})
-	if rpcErr != nil {
-		t.Fatal(rpcErr)
+	f, b := mailboxRoute(t)
+	root := b.Root
+	other := replyAs(t, root, cockpitThread(routeSessionPrefix+machineChanA), "another-prompt", format.KindAnswer, "not for this turn")
+	f.machine(t)
+	in := f.ownerSays(t, machineChanA, "say hi")
+	eventID := in.Event.ID.Hex()
+	done := f.s.Owner(in)
+	id, prompt := promptOf(t, b)
+	if !slices.Equal(prompt.Header.Labels, []string{"acp", "buzz", "nostr:" + eventID}) {
+		t.Errorf("prompt labels=%q", prompt.Header.Labels)
 	}
-	got := result.(remotePromptResult)
-	if got.StopReason != StopReasonEndTurn || !strings.Contains(strings.Join(thoughts, "|"), "agent: working on it") {
-		t.Fatalf("result=%+v thoughts=%q", got, thoughts)
+	replyAs(t, root, prompt.Header.Thread, id, format.KindStatus, "working on it")
+	answer := replyAs(t, root, prompt.Header.Thread, id, format.KindAnswer, "hi from the agent")
+	waitClosed(t, done)
+	if out, _ := f.s.mailboxAnswered(eventID); out.ReplyID != answer || f.posts(machineChanA, "agent: working on it") != 1 {
+		t.Fatalf("outcome=%+v posts=%q; want the final reply and the status posted", out, f.agentTexts(machineChanA))
 	}
 	for _, path := range []string{
 		filepath.Join(fsq.AgentInboxCur(root, mailboxSender), answer+".md"),
@@ -216,22 +202,18 @@ func TestMailboxMoverEmitsTheDrainedReceipt(t *testing.T) {
 // consumer moved to buzz/inbox/cur before the turn saw it was never read, and
 // the turn timed out. The turn recovers it, once.
 func TestMailboxRecoversAReplyDrainedToCur(t *testing.T) {
-	s, root := mailboxServer(t)
-	prompt := ""
-	result, rpcErr := s.runRemote("s", "say hi", strings.Repeat("3", 64), newTurn(), func(any) error {
-		if ids := inboxPrompts(t, root); prompt == "" && len(ids) == 1 {
-			prompt = ids[0]
-			moveToCur(t, root, replyAs(t, root, cockpitThread("session/s"), prompt, format.KindAnswer, "drained elsewhere"))
-		}
-		return nil
-	})
-	if rpcErr != nil {
-		t.Fatal(rpcErr)
+	f, b := mailboxRoute(t)
+	s, root := f.s, b.Root
+	f.machine(t)
+	in := f.ownerSays(t, machineChanA, "say hi")
+	done := s.Owner(in)
+	prompt, msg := promptOf(t, b)
+	reply := replyInCur(t, root, msg.Header.Thread, prompt, "drained elsewhere")
+	waitClosed(t, done)
+	if out, _ := s.mailboxAnswered(in.Event.ID.Hex()); out.ReplyID != reply {
+		t.Fatalf("outcome=%+v; want the reply from cur", out)
 	}
-	if got := result.(remotePromptResult); got.StopReason != StopReasonEndTurn {
-		t.Fatalf("result=%+v; want the reply from cur", got)
-	}
-	watch := s.watchMailbox(binding.Binding{Root: root, Handle: "agent"}, cockpitThread("session/s"), prompt, time.Now().Add(-time.Minute))
+	watch := s.watchMailbox(binding.Binding{Root: root, Handle: "agent"}, msg.Header.Thread, prompt, time.Now().Add(-time.Minute))
 	if _, final, _, err := watch.poll(true); err != nil || final != "" {
 		t.Fatalf("recovered again: final=%q err=%v", final, err)
 	}
@@ -340,26 +322,19 @@ func TestRedeliveredPromptStillGetsTheBuzzMailbox(t *testing.T) {
 // say not delivered, record that as the event's outcome, and never publish
 // the event afterwards.
 func TestMailboxMissingMailboxIsNotDelivered(t *testing.T) {
-	s, _ := mailboxServer(t)
-	root := canonicalTempDir(t)
-	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent", Name: "agent"}); err != nil {
+	f, b := mailboxRoute(t)
+	s, root := f.s, b.Root
+	if err := os.RemoveAll(filepath.Join(root, "agents")); err != nil {
 		t.Fatal(err)
 	}
-	eventID := strings.Repeat("5", 64)
-	var said []string
-	emit := func(v any) error {
-		if note := v.(sessionUpdateNotification); note.Params.Update.SessionUpdate == "agent_message_chunk" {
-			said = append(said, note.Params.Update.Content.Text)
-		}
-		return nil
-	}
-	result, rpcErr := s.runRemote("s", "say hi", eventID, newTurn(), emit)
-	if rpcErr != nil {
-		t.Fatal(rpcErr)
-	}
-	got := result.(remotePromptResult)
-	if got.Meta.Remote.State != remoteNotSubmitted || len(said) != 1 || !strings.HasPrefix(said[0], "Not delivered to agent: ") {
-		t.Fatalf("result=%+v said=%q", got, said)
+	f.machine(t)
+	in := f.ownerSays(t, machineChanA, "say hi")
+	eventID := in.Event.ID.Hex()
+	waitClosed(t, s.Owner(in))
+	said := f.agentTexts(machineChanA)
+	out, _ := s.mailboxAnswered(eventID)
+	if !out.NotSubmitted || len(said) != 1 || !strings.HasPrefix(said[0], "Not delivered to agent: ") {
+		t.Fatalf("outcome=%+v said=%q", out, said)
 	}
 	if _, err := os.Lstat(filepath.Join(root, "agents", "agent")); !os.IsNotExist(err) {
 		t.Fatalf("the handle mailbox was created: %v", err)
@@ -372,9 +347,7 @@ func TestMailboxMissingMailboxIsNotDelivered(t *testing.T) {
 	if err := fsq.EnsureAgentDirs(root, "agent"); err != nil {
 		t.Fatal(err)
 	}
-	if _, rpcErr := s.runRemote("s", "say hi", eventID, newTurn(), emit); rpcErr != nil {
-		t.Fatal(rpcErr)
-	}
+	waitClosed(t, s.Owner(in))
 	if ids := inboxPrompts(t, root); len(ids) != 0 {
 		t.Fatalf("a redelivery published the refused event: %v", ids)
 	}
@@ -640,11 +613,11 @@ func TestMailboxCancelWhilePublishLockHeldPublishesNothing(t *testing.T) {
 // Regression: #895, an expired turn budget still published when the lock
 // was free.
 func TestMailboxExpiredBudgetPublishesNothing(t *testing.T) {
-	s, root := mailboxServer(t)
-	s.cfg.TurnTimeout = time.Nanosecond
-	if _, rpcErr := s.runRemote("s", "hello", strings.Repeat("7", 64), newTurn(), func(any) error { return nil }); rpcErr != nil {
-		t.Fatal(rpcErr)
-	}
+	f, b := mailboxRoute(t)
+	root := b.Root
+	f.s.cfg.TurnTimeout = time.Nanosecond
+	f.machine(t)
+	waitClosed(t, f.s.Owner(f.ownerSays(t, machineChanA, "hello")))
 	if ids := inboxPrompts(t, root); len(ids) != 0 {
 		t.Fatalf("the turn budget expired before publish, but the inbox has %d prompt(s)", len(ids))
 	}
@@ -654,40 +627,19 @@ func TestMailboxExpiredBudgetPublishesNothing(t *testing.T) {
 // the ACP turn but never reached the Buzz DM, because buzz-acp does not post
 // ACP answer text. amq-acp posts it into the prompt's channel itself.
 func TestBuzzAnswerIsPostedIntoTheDMChannel(t *testing.T) {
-	s, root := mailboxServer(t)
-	type post struct{ channel, content string }
-	var posts []post
-	saved := postAnswer
-	t.Cleanup(func() { postAnswer = saved })
-	postAnswer = func(channel, content string, _ time.Duration) (string, error) {
-		posts = append(posts, post{channel, content})
-		return "", nil
-	}
-	prompt := "<context>\nScope: dm\nChannel: DM (#6eff60e4-32ab-48ec-bd3d-f4c97872f370)\n</context>\nhi"
-	turn := newTurn()
-	turn.channel = buzzChannel(prompt)
-	replied := false
-	status := false
-	result, rpcErr := s.runRemote("s", prompt, "", turn, func(any) error {
-		ids := inboxPrompts(t, root)
-		switch {
-		case len(ids) != 1:
-		case !status:
-			status = true
-			replyAs(t, root, cockpitThread("session/s"), ids[0], format.KindStatus, "on it")
-		case !replied && len(posts) == 1:
-			replied = true
-			replyAs(t, root, cockpitThread("session/s"), ids[0], format.KindAnswer, "hi back")
-		}
-		return nil
-	})
-	if rpcErr != nil {
-		t.Fatal(rpcErr)
-	}
-	got := result.(remotePromptResult)
-	want := []post{{"6eff60e4-32ab-48ec-bd3d-f4c97872f370", "agent: on it"}, {"6eff60e4-32ab-48ec-bd3d-f4c97872f370", "hi back"}}
-	if !slices.Equal(posts, want) || got.Meta.Remote.Posted != "posted" {
-		t.Fatalf("posts=%+v meta=%+v; want the status reply, then the final", posts, got.Meta.Remote)
+	f, b := mailboxRoute(t)
+	root := b.Root
+	f.machine(t)
+	in := f.ownerSays(t, machineChanA, "hi")
+	done := f.s.Owner(in)
+	id, prompt := promptOf(t, b)
+	replyAs(t, root, prompt.Header.Thread, id, format.KindStatus, "on it")
+	f.waitAgentPosts(t, machineChanA, 1)
+	replyAs(t, root, prompt.Header.Thread, id, format.KindAnswer, "hi back")
+	waitClosed(t, done)
+	posts, state := f.agentTexts(machineChanA), f.s.finalPostState(in.Event.ID.Hex())
+	if want := []string{"agent: on it", "hi back"}; !slices.Equal(posts, want) || state != finalPostAccepted {
+		t.Fatalf("posts=%q final post %q; want the status reply, then the final", posts, state)
 	}
 }
 
@@ -717,61 +669,37 @@ func TestLateReplyWithoutAnEventIDIsPostedOnce(t *testing.T) {
 // Regression: #959, a redelivered event posted the
 // same reply into the Buzz DM a second time. The event posts once.
 func TestRedeliveredEventPostsOnce(t *testing.T) {
-	s, root := mailboxServer(t)
-	s.cfg.TurnTimeout = 300 * time.Millisecond
-	posts := 0
-	saved := postAnswer
-	t.Cleanup(func() { postAnswer = saved })
-	postAnswer = func(string, string, time.Duration) (string, error) {
-		posts++
-		return "", nil
-	}
-	prompt := "<context>\nScope: dm\nChannel: DM (#6eff60e4-32ab-48ec-bd3d-f4c97872f370)\n</context>\nhi"
-	eventID := strings.Repeat("7", 64)
-	replied := false
-	for range 2 {
-		turn := newTurn()
-		turn.channel = buzzChannel(prompt)
-		if _, rpcErr := s.runRemote("s", prompt, eventID, turn, func(any) error {
-			if !replied {
-				if ids := inboxPrompts(t, root); len(ids) == 1 {
-					replied = true
-					replyAs(t, root, cockpitThread("session/s"), ids[0], format.KindAnswer, "hi back")
-				}
-			}
-			return nil
-		}); rpcErr != nil {
-			t.Fatal(rpcErr)
-		}
-	}
-	if posts != 1 {
-		t.Fatalf("posts=%d after a redelivery; want 1", posts)
+	f, b := mailboxRoute(t)
+	f.machine(t)
+	in := f.ownerSays(t, machineChanA, "hi")
+	done := f.s.Owner(in)
+	id, prompt := promptOf(t, b)
+	replyAs(t, b.Root, prompt.Header.Thread, id, format.KindAnswer, "hi back")
+	waitClosed(t, done)
+	waitClosed(t, f.s.Owner(in))
+	if posts := f.agentTexts(machineChanA); len(posts) != 1 {
+		t.Fatalf("posts=%q after a redelivery; want 1", posts)
 	}
 }
 
 // Regression: #961, a reply written after the turn
 // timed out never reached the DM. The sweep posts it once and records it.
 func TestLateReplyIsPostedOnceAfterTheTurn(t *testing.T) {
-	s, root := mailboxServer(t)
+	f, b := mailboxRoute(t)
+	s, root := f.s, b.Root
 	s.cfg.TurnTimeout = 300 * time.Millisecond
-	var posts []string
-	saved := postAnswer
-	t.Cleanup(func() { postAnswer = saved })
-	postAnswer = func(_, content string, _ time.Duration) (string, error) {
-		posts = append(posts, content)
-		return "", nil
-	}
-	prompt := "<context>\nScope: dm\nChannel: DM (#6eff60e4-32ab-48ec-bd3d-f4c97872f370)\n</context>\nhi"
-	eventID := strings.Repeat("8", 64)
-	turn := newTurn()
-	turn.channel = buzzChannel(prompt)
-	if _, rpcErr := s.runRemote("s", prompt, eventID, turn, func(any) error { return nil }); rpcErr != nil {
-		t.Fatal(rpcErr)
-	}
-	replyAs(t, root, cockpitThread("session/s"), inboxPrompts(t, root)[0], format.KindAnswer, "late answer")
+	stop := f.machine(t)
+	in := f.ownerSays(t, machineChanA, "hi")
+	eventID := in.Event.ID.Hex()
+	done := s.Owner(in)
+	id, prompt := promptOf(t, b)
+	waitClosed(t, done)
+	stop()
+	replyAs(t, root, prompt.Header.Thread, id, format.KindAnswer, "late answer")
 	for range 2 {
 		s.sweepLateReplies(time.Now().Add(time.Hour))
 	}
+	posts := f.agentTexts(machineChanA)
 	if got := strings.Count(strings.Join(posts, "|"), "late answer"); got != 1 {
 		t.Fatalf("late answer posted %d times; posts=%q", got, posts)
 	}
