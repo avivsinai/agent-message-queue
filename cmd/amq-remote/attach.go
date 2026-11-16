@@ -53,7 +53,7 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	self := fs.Bool("self", false, "bind the session this command runs in")
 	nativeMode := fs.Bool("native", false, "drive the exact native session through amq-remote, not the AMQ mailbox")
 	me := fs.String("me", os.Getenv("AM_ME"), "AMQ handle of this session (default AM_ME)")
-	name := fs.String("name", "", "binding name, which names this session's Buzz agent (default <handle>-<project>-<session>, or the native target)")
+	name := fs.String("name", "", "binding name (default <handle>-<project>-<session>, or the native target)")
 	linkName := fs.String("link", "", "share this session with the linked server of that name (implies --native)")
 	consent := fs.String("consent", "passkey", "with --link: passkey, or local to also confirm each task on this machine")
 	tools := fs.String("tools", "read", "with --link: the server tool profile agents in this session may call; empty for none")
