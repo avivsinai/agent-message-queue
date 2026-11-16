@@ -591,18 +591,19 @@ func canonicalTempDir(t *testing.T) string {
 // Regression: #885, a concurrent first delivery that lost the event claim
 // used its own captured binding. The loser must follow the winner.
 func TestEventClaimLoserFollowsTheWinner(t *testing.T) {
-	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
-	s := NewServer(Config{RemoteBinding: true, Pin: "winner", StateDir: canonicalTempDir(t)}, "test")
+	f := standalone(t)
 	eventID := strings.Repeat("b", 64)
 	winner := binding.Binding{Root: "/winner", Target: "claude:1", NativeSession: "s-winner"}
-	raw, _ := json.Marshal(eventClaim{Binding: winner, Name: "winner"})
-	if won, err := createExclusive(filepath.Join(s.cfg.StateDir, "remote-events", eventID+".json"), raw); err != nil || !won {
+	raw, _ := json.Marshal(eventClaim{Binding: winner, Name: "winner", Agent: f.s.id.Agent})
+	if won, err := createExclusive(filepath.Join(f.s.eventDir(eventID), eventID+".json"), raw); err != nil || !won {
 		t.Fatalf("seed claim: won=%v err=%v", won, err)
 	}
-	if err := binding.WriteNamed(binding.Binding{Root: "/loser", Target: "claude:2", NativeSession: "s-loser", Name: "loser"}); err != nil {
+	loser := binding.Binding{Root: "/loser", Target: "claude:2", NativeSession: "s-loser", Name: "loser"}
+	if err := binding.WriteNamed(loser); err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.turnBinding("s", eventID)
+	activeChannel(t, f.s, loser, machineChanA)
+	got, err := f.s.turnBinding(routeSessionPrefix+machineChanA, eventID)
 	if err != nil || !got.Same(winner) {
 		t.Fatalf("turn binding = %+v %v; want the winner's", got, err)
 	}
@@ -611,10 +612,10 @@ func TestEventClaimLoserFollowsTheWinner(t *testing.T) {
 // Regression: #885, a reader used a visible claim before its directory entry
 // was durable. Every returned claim is synced first.
 func TestExistingEventClaimIsMadeDurableBeforeUse(t *testing.T) {
-	s := NewServer(Config{RemoteBinding: true, Pin: "r", StateDir: canonicalTempDir(t)}, "test")
+	f := standalone(t)
 	eventID := strings.Repeat("c", 64)
-	claimDir := filepath.Join(s.cfg.StateDir, "remote-events")
-	raw, _ := json.Marshal(eventClaim{Binding: binding.Binding{Root: "/r", Target: "claude:1", NativeSession: "s"}, Name: "r"})
+	claimDir := f.s.eventDir(eventID)
+	raw, _ := json.Marshal(eventClaim{Binding: binding.Binding{Root: "/r", Target: "claude:1", NativeSession: "s"}, Name: "r", Agent: f.s.id.Agent})
 	if won, err := createExclusive(filepath.Join(claimDir, eventID+".json"), raw); err != nil || !won {
 		t.Fatalf("seed claim: %v %v", won, err)
 	}
@@ -626,7 +627,7 @@ func TestExistingEventClaimIsMadeDurableBeforeUse(t *testing.T) {
 		return nil
 	})
 	defer restore()
-	if _, err := s.turnBinding("s", eventID); err != nil {
+	if _, err := f.s.turnBinding(routeSessionPrefix+machineChanA, eventID); err != nil {
 		t.Fatal(err)
 	}
 	if !synced {
@@ -781,18 +782,11 @@ func TestRedeliveryPostsEachKindOnce(t *testing.T) {
 // posted its notice as the final answer, so the answer it later resolved to
 // was suppressed on the next delivery.
 func TestUncertainNoticeDoesNotHideTheAnswer(t *testing.T) {
-	var posts []string
-	saved := postAnswer
-	t.Cleanup(func() { postAnswer = saved })
-	postAnswer = func(_, content string, _ time.Duration) (string, error) {
-		posts = append(posts, content)
-		return "", nil
-	}
-	s := NewServer(Config{StateDir: canonicalTempDir(t)}, "test")
+	f := standalone(t)
 	deliver := func(snap protocol.Snapshot) {
 		turn := newTurn()
-		turn.channel = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
-		r := &remoteTurn{s: s, eventID: strings.Repeat("f", 64), emit: func(any) error { return nil }, turn: turn, meta: remoteMeta{Target: "fake"}}
+		turn.channel = machineChanA
+		r := &remoteTurn{s: f.s, eventID: strings.Repeat("f", 64), emit: func(any) error { return nil }, turn: turn, meta: remoteMeta{Target: "fake"}}
 		if _, rpcErr := r.settled("replied", snap); rpcErr != nil {
 			t.Fatal(rpcErr)
 		}
@@ -801,7 +795,7 @@ func TestUncertainNoticeDoesNotHideTheAnswer(t *testing.T) {
 	for range 2 {
 		deliver(protocol.Snapshot{State: protocol.StateCompleted, RequestRef: "ref", Result: &protocol.Result{Text: "the answer"}})
 	}
-	if len(posts) != 2 || posts[1] != "the answer" {
+	if posts := directContents(f.agentMessages(machineChanA)); len(posts) != 2 || posts[1] != "the answer" {
 		t.Fatalf("posts=%q; want one uncertainty notice and one answer", posts)
 	}
 }
