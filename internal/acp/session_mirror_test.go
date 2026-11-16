@@ -628,3 +628,23 @@ func TestMirrorNeverPostsAnOffPeriodTurnAfterLostProgress(t *testing.T) {
 		t.Fatalf("off-period turn posted after the progress was lost: %q", sent)
 	}
 }
+
+// A turn that ended while its route was suspended is not posted when the
+// route returns; a turn that ends after the return is.
+func TestMirrorPostsNoTurnThatEndedWhileItsRouteWasSuspended(t *testing.T) {
+	f := newMirrorFixture(t)
+	after, err := time.Parse(time.RFC3339Nano, f.ts(60))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.target.since = after.UnixMilli()
+	f.add(f.userLine("o1", "p1", 0, "while suspended", nil), f.assistantLine("m0", 0, "end_turn", textBlock("do not send this")))
+	if got := f.tick(100); len(got) != 0 {
+		t.Fatalf("suspended route's turn posted: %q", got)
+	}
+	f.add(f.userLine("o2", "p2", 62, "after return", nil), f.assistantLine("m2", 63, "end_turn", textBlock("send this one")))
+	got := f.tick(64)
+	if len(got) == 0 || !strings.Contains(strings.Join(got, "\n"), "after return") || strings.Contains(strings.Join(got, "\n"), "do not send this") {
+		t.Fatalf("posts = %q; want only the post after return", got)
+	}
+}

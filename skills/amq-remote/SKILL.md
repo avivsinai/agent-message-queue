@@ -97,6 +97,9 @@ command's own message. Do not work around a refusal.
    - `channel` is `failed`: show `channel_error`, then "AMQ tries again in 10
      minutes" when `channel_retry` is true, else "Run
      `amq-remote channel reset <name>`."
+   - `channel` is `suspended`: "This session's channel is suspended
+     (<channel_error>). Undo it in Buzz, or run `amq-remote channel reset
+     <name>` for a new channel."
    - `agent` is `offline` and `machine` is `missing`: "DM **<agent_name>**
      first; if it does not answer within a minute, start it in Buzz Desktop
      (Agents, the agent, Start)."

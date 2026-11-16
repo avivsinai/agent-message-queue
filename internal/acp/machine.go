@@ -78,6 +78,9 @@ const (
 	// channelStepGap separates retries of add-member, the welcome and
 	// unarchive.
 	channelStepGap = 30 * time.Second
+	// routeJudgeInterval is how often the relay-signed state of the active
+	// routes is read.
+	routeJudgeInterval = time.Minute
 	// channelCreateTries bounds the refused creates of one record.
 	channelCreateTries = 3
 	// retiredKeep is how many retired records are kept before the prunable
@@ -108,7 +111,14 @@ type channelRecord struct {
 	Archived   bool   `json:"archived"`
 	OwnerAdded bool   `json:"owner_added"`
 	Welcomed   bool   `json:"welcomed"`
-	Creates    int    `json:"creates"`
+	// Suspended is why the channel's relay-signed state denies this active
+	// route; empty while it does not. A suspended route sends nothing and
+	// takes no message. Only judgeRoutes sets it.
+	Suspended string `json:"suspended,omitempty"`
+	// Resumed is when the route last left suspension. The mirror posts no
+	// turn that ended before it.
+	Resumed string `json:"resumed,omitempty"`
+	Creates int    `json:"creates"`
 	// Pending is written before a create is sent and cleared with its
 	// result, so a create whose worker stopped in between stays unresolved.
 	Pending bool `json:"pending,omitempty"`
@@ -375,6 +385,10 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) (p pace) {
 		s.machine.swept = now.UTC().Format(time.RFC3339)
 		s.sweepRetired(now)
 	}
+	if !s.stopped() && s.direct != nil && due(s.machine.judged, routeJudgeInterval, now) {
+		s.machine.judged = now.UTC().Format(time.RFC3339)
+		s.judgeRoutes(now)
+	}
 	for _, r := range s.snapshot().records {
 		if at, ok := recordDue(r, s.uncertainGap(), now); ok {
 			p.due(at)
@@ -442,9 +456,9 @@ func (s *Server) awaitsThread(b binding.Binding) bool {
 // and the settings files it watches (machine_hooks.go). The context is
 // read from other goroutines (a steered command's wait), so it is atomic.
 type machineState struct {
-	ctx                    atomic.Pointer[context.Context]
-	marked, swept, rebound string
-	settings               map[string]settingsSeen
+	ctx                            atomic.Pointer[context.Context]
+	marked, swept, rebound, judged string
+	settings                       map[string]settingsSeen
 	// goneDaemons is each binding name whose recorded app-server daemon the
 	// last tick saw gone (daemonGone), with that daemon.
 	goneDaemons map[string]launch.HolderIdentity
@@ -662,6 +676,55 @@ func (s *Server) stillServes(r channelRecord, now time.Time) bool {
 		return false
 	}
 	return true
+}
+
+// judgeRoute judges an active route from its channel's relay-signed state.
+// fault is the first required fact that f denies, in the owner's words;
+// sound is true when f shows every required fact. A fact that f does not
+// show is neither.
+func judgeRoute(f buzzop.ChannelFacts, id buzzop.Identity) (fault string, sound bool) {
+	switch {
+	case f.Archived == buzzop.TriYes:
+		return "the channel is archived", false
+	case f.Private == buzzop.TriNo:
+		return "the channel is not private", false
+	case f.AdminsEvent != "" && f.Roles[id.Agent] != "owner":
+		return "the machine agent is not the channel's owner", false
+	case f.AdminsEvent != "" && !ownerSeated(f, id):
+		return "the owner is not an admin of the channel", false
+	}
+	return "", routeReady(f, id)
+}
+
+// judgeRoutes reads the relay-signed state of each active record's channel.
+// It suspends a route whose state denies a required fact and returns a
+// suspended route whose state shows them all. A read that fails ends the
+// pass: it proves nothing, and the relay is likely not answering.
+func (s *Server) judgeRoutes(now time.Time) {
+	for _, r := range s.activeRecords() {
+		if s.stopped() {
+			return
+		}
+		if r.State != channelActive || r.ChannelID == "" || r.Machine != s.id.Agent || r.Relay != s.id.RelayURL {
+			continue
+		}
+		f, err := s.observe(r.ChannelID)
+		if err != nil {
+			return
+		}
+		fault, sound := judgeRoute(f, s.id)
+		switch {
+		case fault != "" && fault != r.Suspended:
+			r.Suspended = fault
+		case sound && r.Suspended != "":
+			r.Suspended, r.Resumed = "", now.UTC().Format(time.RFC3339)
+		default:
+			continue
+		}
+		if s.unchanged(r) {
+			_ = s.save(&r, now)
+		}
+	}
 }
 
 // create counts and sends one channels create. The count and the pending
@@ -1279,6 +1342,7 @@ func (s *Server) restore(b binding.Binding, now time.Time) bool {
 	}
 	retiredPath := s.recordPath(r)
 	r.State, r.RetiredBy, r.RetiredFrom, r.SaidEnded, r.LastError = channelActive, "", "", false, ""
+	r.Suspended = ""
 	if s.save(&r, now) != nil {
 		return true
 	}
@@ -1413,7 +1477,7 @@ func (s *Server) channelRoute(channel string) (channelRecord, bool) {
 		return channelRecord{}, false
 	}
 	for _, r := range s.activeRecords() {
-		if r.ChannelID == channel && r.State == channelActive && r.Machine == s.id.Agent && r.Relay == s.id.RelayURL {
+		if r.ChannelID == channel && routable(r, s.id) {
 			return r, true
 		}
 	}
@@ -1490,6 +1554,8 @@ func (s *Server) machineDirectory() string {
 		label := sessionAgentName(bd)
 		r, ok := records[bd.Name]
 		switch {
+		case ok && r.State == channelActive && r.Suspended != "" && r.Identity == bd.SessionIdentity():
+			fmt.Fprintf(&b, "\n- %s: its channel %q is suspended (%s)", label, r.Label, r.Suspended)
 		case ok && r.State == channelActive && r.Identity == bd.SessionIdentity():
 			fmt.Fprintf(&b, "\n- %s: write in the %q channel", label, r.Label)
 		case !s.provisionable(bd):
@@ -1510,7 +1576,9 @@ func (s *Server) machineDirectory() string {
 // MachineChannel is the machine agent's channel record of one session, as
 // amq-remote reports it.
 type MachineChannel struct {
-	// State is creating, uncertain, active, failed or retired.
+	// State is creating, uncertain, active, failed, retired or suspended.
+	// A suspended active channel's relay-signed state denies the route;
+	// Error is why.
 	State string
 	// Name is the channel's name in Buzz.
 	Name  string
@@ -1582,6 +1650,9 @@ func machineChannel(name string) (MachineChannel, bool) {
 	if r.State == channelUncertain || r.State == channelFailed {
 		c.Error = r.LastError
 		c.Retry = r.State == channelFailed && !r.Doubted && r.Creates < channelCreateTries
+	}
+	if r.State == channelActive && r.Suspended != "" {
+		c.State, c.Error = "suspended", r.Suspended
 	}
 	return c, true
 }

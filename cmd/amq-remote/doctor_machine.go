@@ -502,7 +502,7 @@ func startOnAppLaunch(pubkey string) (*bool, error) {
 }
 
 // doctorChannels checks the machine agent's channel record of each binding:
-// it must be active. A channel being made is a note.
+// it must be active. A channel being made, and a suspended one, is a note.
 func doctorChannels(all []binding.Binding, fail, note reportFunc) map[string]string {
 	out := map[string]string{}
 	for _, b := range all {
@@ -516,6 +516,9 @@ func doctorChannels(all []binding.Binding, fail, note reportFunc) map[string]str
 		case "active":
 		case "creating":
 			note("channel", subject, "the machine agent is making the channel of binding "+b.Name, "wait a minute, then run doctor again")
+		case "suspended":
+			note("channel", subject, "the channel of binding "+b.Name+" is suspended: "+ch.Error+"; the session's dialogs, turns and answers are not sent there",
+				"undo it in Buzz, or run `amq-remote channel reset "+b.Name+"` for a new channel")
 		default:
 			remedy := "run `amq-remote channel reset " + b.Name + "`"
 			if ch.Retry {

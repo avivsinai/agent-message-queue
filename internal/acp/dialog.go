@@ -179,6 +179,9 @@ type dialogPost struct {
 // dialogTarget is one binding whose dialogs this worker posts, and where.
 type dialogTarget struct {
 	name, channel, label string
+	// since is when the target's route last left suspension, in Unix
+	// milliseconds; zero when it never did.
+	since int64
 	// binding is the target's binding as dialogTargets read it.
 	binding binding.Binding
 }
@@ -373,9 +376,9 @@ func (s *Server) dialogStopped() bool {
 }
 
 // routable reports whether r is an active channel record of this machine
-// agent on its relay.
+// agent on its relay that is not suspended.
 func routable(r channelRecord, id buzzop.Identity) bool {
-	return r.State == channelActive && r.ChannelID != "" && r.Machine == id.Agent && r.Relay == id.RelayURL
+	return r.State == channelActive && r.ChannelID != "" && r.Machine == id.Agent && r.Relay == id.RelayURL && r.Suspended == ""
 }
 
 // serves reports whether the routable record r is the channel of b's live
@@ -412,7 +415,11 @@ func (s *Server) machineTargets() []dialogTarget {
 			continue
 		}
 		if b, ok := snap.binding(r.Name); ok && s.serves(r, b) {
-			out = append(out, dialogTarget{name: r.Name, channel: r.ChannelID, label: sessionAgentName(b), binding: b})
+			target := dialogTarget{name: r.Name, channel: r.ChannelID, label: sessionAgentName(b), binding: b}
+			if resumed, err := time.Parse(time.RFC3339, r.Resumed); err == nil {
+				target.since = resumed.UnixMilli()
+			}
+			out = append(out, target)
 		}
 	}
 	c.snap, c.judge, c.at, c.targets = snap, judge, now, out
