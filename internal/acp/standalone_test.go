@@ -36,7 +36,7 @@ type standaloneFixture struct {
 	owner    nostr.SecretKey
 }
 
-func standalone(t *testing.T) *standaloneFixture {
+func standalone(t *testing.T, opts ...func(*relaytest.Relay)) *standaloneFixture {
 	t.Helper()
 	if !lock.AdvisoryLockAvailable() {
 		t.Skip("no advisory lock on this platform")
@@ -59,6 +59,9 @@ func standalone(t *testing.T) *standaloneFixture {
 	authTag := []string{"auth", grant.OwnerPubKey, grant.Conditions, grant.SigHex()}
 	lr, srv, url := relaytest.Start(body.PublicKeyHex(), authTag)
 	t.Cleanup(srv.Close)
+	for _, opt := range opts {
+		opt(lr)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	conn, err := relay.Connect(ctx, relay.Config{URL: url, Secret: body.Secret(), AuthTag: authTag})

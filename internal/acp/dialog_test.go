@@ -15,6 +15,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
+	"github.com/avivsinai/agent-message-queue/internal/relay/relaytest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
@@ -81,12 +82,6 @@ func TestDialogTickPostsReactsEdits(t *testing.T) {
 	}
 }
 
-// Regression (idle profile of a machine agent): every open dialog, hours
-// old or new, read its reactions every 3 s, oldest first, so stale dialogs
-// spawned a process each and delayed a new one. An old dialog backs off; a
-// fresh one is read at 3 s, and first.
-// A Claude subagent's dialog that the hook closes early says why in Buzz;
-// a plain expiry stays plain (stale Buzz dialog open 20 h, 2026-11-11).
 func TestOutcomeLineShowsWhyADialogExpired(t *testing.T) {
 	for _, row := range []struct{ label, want string }{
 		{"the asking agent ended", "→ Expired: the asking agent ended"},
@@ -98,8 +93,27 @@ func TestOutcomeLineShowsWhyADialogExpired(t *testing.T) {
 	}
 }
 
+// Regression (idle profile of a machine agent): every open dialog, hours
+// old or new, read its reactions every 3 s, oldest first, so stale dialogs
+// spawned a process each and delayed a new one. An old dialog backs off; a
+// fresh one is read at 3 s, and first.
 func TestDialogReactionReadsBackOffByAgeNewestFirst(t *testing.T) {
-	f := standalone(t)
+	var reads []string
+	var f *standaloneFixture
+	f = standalone(t, func(r *relaytest.Relay) {
+		r.BeforeReq = func(filters []nostr.Filter) {
+			for _, filter := range filters {
+				for _, id := range filter.Tags["e"] {
+					for _, post := range f.agentMessages(machineChanA) {
+						if post.ID.Hex() == id {
+							reads = append(reads, strings.Fields(strings.SplitN(post.Content, "\n", 2)[1])[1])
+							return
+						}
+					}
+				}
+			}
+		}
+	})
 	b := liveSession(t, "alpha")
 	activeChannel(t, f.s, b, machineChanA)
 	f.groupState(t, machineChanA)
@@ -116,20 +130,7 @@ func TestDialogReactionReadsBackOffByAgeNewestFirst(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	var reads []string
-	f.relay.BeforeReq = func(filters []nostr.Filter) {
-		for _, filter := range filters {
-			for _, id := range filter.Tags["e"] {
-				for _, post := range f.agentMessages(machineChanA) {
-					if post.ID.Hex() == id {
-						reads = append(reads, strings.Fields(strings.SplitN(post.Content, "\n", 2)[1])[1])
-						return
-					}
-				}
-			}
-		}
-	}
-	f.s.dialogTick(now) // posts both
+	f.s.dialogTick(now)
 	f.s.dialogTick(now)
 	if strings.Join(reads, ",") != "new,old" {
 		t.Fatalf("first reads = %v", reads)
@@ -150,7 +151,7 @@ func TestDialogReactionReadsBackOffByAgeNewestFirst(t *testing.T) {
 // was tried again on every 2 s tick, one buzz process each, for about 20
 // minutes. A failed edit now waits 4 s, then 8 s; the first is immediate.
 func TestDialogFailedEditBacksOff(t *testing.T) {
-	f := standalone(t)
+	f := standalone(t, func(r *relaytest.Relay) { r.RejectKind.Store(40003) })
 	b := liveSession(t, "alpha")
 	activeChannel(t, f.s, b, machineChanA)
 	f.groupState(t, machineChanA)
@@ -168,7 +169,6 @@ func TestDialogFailedEditBacksOff(t *testing.T) {
 	if _, err := dialog.Resolve(dir, dialog.Resolved{ID: req.ID, Outcome: dialog.OutcomeTerminal, By: dialog.ByTerminal, At: now}); err != nil {
 		t.Fatal(err)
 	}
-	f.relay.RejectKind = 40003
 	for _, step := range []struct {
 		after time.Duration
 		edits int32
@@ -347,7 +347,10 @@ func TestPendingPromptEventDoesNotMoveToTheNextDialog(t *testing.T) {
 // A recordless off marker still wins over an hour-old "mirror on".
 func TestOldMirrorOnDoesNotUndoARecordlessOff(t *testing.T) {
 	f, dir := ownerDialogServer(t)
-	if err := os.MkdirAll(dir, 0700); err == nil && os.WriteFile(filepath.Join(dir, "off"), nil, 0600) != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "off"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	old := f.ownerSignedAt(t, machineChanA, "mirror on", time.Now().Add(-time.Hour))
@@ -393,7 +396,7 @@ func openPostedDialog(t *testing.T, s *Server, dir, text string) dialog.Request 
 // its resolution. The directory stays while the seam runs, for seamGrace.
 func TestGoneBindingKeepsDialogsUntilTheSeamLeaves(t *testing.T) {
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
-	s := NewServer(Config{RemoteBinding: true, Pin: "gone", StateDir: canonicalTempDir(t)}, "test")
+	s := standalone(t).s
 	dir, err := dialog.DirFor("gone")
 	if err != nil {
 		t.Fatal(err)
@@ -421,9 +424,8 @@ func TestGoneBindingKeepsDialogsUntilTheSeamLeaves(t *testing.T) {
 // name from the snapshot it took before a loop of relay calls. Session bbb
 // attached again during aaa's edit, and its open dialog was expired as the
 // dialog of an ended session.
-func TestDropGoneDialogsKeptTheDialogOfASessionThatAttachedAgain(t *testing.T) {
-	f := standalone(t)
-	s := f.s
+func TestDropGoneDialogsKeepsTheDialogOfASessionThatAttachedAgain(t *testing.T) {
+	var attached bool
 	liveRoot := canonicalTempDir(t)
 	if err := fsq.EnsureAgentDirs(liveRoot, "agent"); err != nil {
 		t.Fatal(err)
@@ -433,9 +435,20 @@ func TestDropGoneDialogsKeptTheDialogOfASessionThatAttachedAgain(t *testing.T) {
 		t.Skip("no process identity on this platform")
 	}
 	old := binding.Binding{Carrier: binding.CarrierMailbox, Root: filepath.Join(liveRoot, "gone"), Handle: "agent", Holder: holder, Name: "bbb", Label: "old"}
-	if err := binding.WriteNamed(old); err != nil {
-		t.Fatal(err)
-	}
+	f := standalone(t, func(r *relaytest.Relay) {
+		r.BeforePublish = func(evt nostr.Event) {
+			if attached || evt.Kind != 40003 {
+				return
+			}
+			attached = true
+			nb := old
+			nb.Root = liveRoot
+			if err := binding.WriteNamed(nb); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	s := f.s
 	activeChannel(t, s, old, machineChanA)
 	f.groupState(t, machineChanA)
 	aDir, _ := dialog.DirFor("aaa")
@@ -446,12 +459,12 @@ func TestDropGoneDialogsKeptTheDialogOfASessionThatAttachedAgain(t *testing.T) {
 	if _, err := dialog.Resolve(aDir, dialog.Resolved{ID: aReq.ID, Outcome: dialog.OutcomeExpired, By: dialog.ByTimeout, At: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	var posted nostr.Event
-	for _, msg := range []buzzop.Message{{Key: "direct/dialog-post/aaa", Channel: machineChanA, Content: "t"}} {
-		res := s.direct.Send(context.Background(), msg)
-		posted.ID, _ = nostr.IDFromHex(res.EventID)
+	res := s.direct.Send(context.Background(), buzzop.Message{Key: "direct/dialog-post/aaa", Channel: machineChanA, Content: "t"})
+	if res.EventID == "" {
+		t.Fatalf("direct post outcome = %s", res.Outcome)
 	}
-	raw, _ := json.Marshal(dialogPost{Channel: machineChanA, Event: posted.ID.Hex(), Text: "t"})
+	postID := nostr.MustIDFromHex(res.EventID)
+	raw, _ := json.Marshal(dialogPost{Channel: machineChanA, Event: postID.Hex(), Text: "t"})
 	if _, err := fsq.WriteFileAtomicFollowLinks(s.dialogPostDir("aaa"), aReq.ID+".json", raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -460,25 +473,11 @@ func TestDropGoneDialogsKeptTheDialogOfASessionThatAttachedAgain(t *testing.T) {
 	if err := dialog.Open(bDir, bReq); err != nil {
 		t.Fatal(err)
 	}
-	// The actual direct publish of aaa's closing edit triggers bbb's
-	// re-attachment before the loop reaches bbb, just as the old read hook did.
-	var attached bool
-	f.relay.BeforePublish = func(evt nostr.Event) {
-		if attached || evt.Kind != 40003 || evt.Tags.Find("e")[1] != posted.ID.Hex() {
-			return
-		}
-		attached = true
-		nb := old
-		nb.Root = liveRoot
-		if err := binding.WriteNamed(nb); err != nil {
-			t.Fatal(err)
-		}
-	}
 	s.dropGoneDialogs(nil, time.Now())
 	if res, ok, _ := dialog.ReadResolved(bDir, bReq.ID); ok {
 		t.Fatalf("the open dialog of live session bbb was resolved: %+v", res)
 	}
 	if !attached {
-		t.Fatal("the direct closing edit never reached its publish")
+		t.Fatal("the real closing edit was not published")
 	}
 }

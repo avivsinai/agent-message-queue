@@ -39,7 +39,7 @@ type Relay struct {
 	DropOnce atomic.Bool
 	// RejectKind, when non-zero, refuses events of this kind instead of
 	// storing them. Rejected counts their refused publishes.
-	RejectKind nostr.Kind
+	RejectKind atomic.Uint64
 	Rejected   atomic.Int32
 	// BeforePublish runs just before one event's OK is sent.
 	BeforePublish func(nostr.Event)
@@ -150,7 +150,7 @@ func (r *Relay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 				reason = "auth-required: authenticate first"
 			} else if !e.VerifySignature() {
 				reason = "invalid: bad signature"
-			} else if e.Kind == r.RejectKind {
+			} else if r.RejectKind.Load() != 0 && uint64(e.Kind) == r.RejectKind.Load() {
 				r.Rejected.Add(1)
 				reason = "blocked: test relay refused the event kind"
 			}
