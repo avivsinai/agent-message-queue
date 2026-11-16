@@ -120,6 +120,7 @@ type mirrorBackoff struct {
 // and the transcript as stat saw it before the read.
 type mirrorSeen struct {
 	channel, harness, source string
+	since                    int64
 	off                      bool
 	path                     string
 	info                     os.FileInfo
@@ -148,7 +149,7 @@ func smallDir(dir string) bool {
 // unchanged reports whether a tick with these inputs would read nothing new:
 // the transcript is the same file, with the same size and modification time.
 func (m mirrorSeen) unchanged(t dialogTarget, b binding.Binding, off bool) bool {
-	if m.info == nil || m.channel != t.channel || m.harness != b.Harness || m.off != off {
+	if m.info == nil || m.channel != t.channel || m.harness != b.Harness || m.off != off || m.since != t.since {
 		return false
 	}
 	src := mirror.SourceFor(m.source)
@@ -365,6 +366,8 @@ func (s *Server) mirrorBinding(t dialogTarget, b binding.Binding, now time.Time,
 	}
 	st, saved, _ := readMirrorFile(dir)
 	st.Channel = t.channel
+	// A turn that ended while the route was suspended is not posted.
+	st.Watermark = max(st.Watermark, t.since)
 	if b.Harness != "" {
 		st.Harness = b.Harness
 	}
@@ -418,7 +421,7 @@ func (s *Server) mirrorBinding(t dialogTarget, b binding.Binding, now time.Time,
 		if prev.path != path {
 			dir = smallDir(filepath.Dir(path))
 		}
-		s.mirrors.seen[t.name] = mirrorSeen{channel: t.channel, harness: b.Harness, source: st.Harness, off: off, path: path, info: read, dir: dir}
+		s.mirrors.seen[t.name] = mirrorSeen{channel: t.channel, harness: b.Harness, source: st.Harness, since: t.since, off: off, path: path, info: read, dir: dir}
 	} else if waits && len(st.Queue) == 0 {
 		if s.mirrors.settled == nil {
 			s.mirrors.settled = map[string]bool{}

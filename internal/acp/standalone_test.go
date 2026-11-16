@@ -288,3 +288,74 @@ func TestStandaloneDialogIsAnsweredByTheOwnersReaction(t *testing.T) {
 		t.Fatalf("answer = %+v; want option 1", a)
 	}
 }
+
+// Archive, public, ownership change and an owner who left are failures
+// that relay-signed state must show before they suspend the route.
+func TestJudgeRoute(t *testing.T) {
+	id := buzzop.Identity{Agent: "agent", Owner: "owner"}
+	sound := buzzop.ChannelFacts{Private: buzzop.TriYes, Archived: buzzop.TriNo,
+		AdminsEvent: "x", Roles: map[string]string{"agent": "owner", "owner": "admin"}}
+	for _, tc := range []struct {
+		name   string
+		change func(*buzzop.ChannelFacts)
+		fault  string
+		sound  bool
+	}{
+		{"sound", func(f *buzzop.ChannelFacts) {}, "", true},
+		{"archived", func(f *buzzop.ChannelFacts) { f.Archived = buzzop.TriYes }, "the channel is archived", false},
+		{"public", func(f *buzzop.ChannelFacts) { f.Private = buzzop.TriNo }, "the channel is not private", false},
+		{"agent not owner", func(f *buzzop.ChannelFacts) { f.Roles["agent"] = "admin" }, "the machine agent is not the channel's owner", false},
+		{"owner left", func(f *buzzop.ChannelFacts) { delete(f.Roles, "owner") }, "the owner is not an admin of the channel", false},
+		{"no admin state read", func(f *buzzop.ChannelFacts) { f.AdminsEvent, f.Roles = "", nil }, "", false},
+		{"no facts", func(f *buzzop.ChannelFacts) { *f = buzzop.ChannelFacts{} }, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			facts := sound
+			facts.Roles = map[string]string{}
+			for k, v := range sound.Roles {
+				facts.Roles[k] = v
+			}
+			tc.change(&facts)
+			got, ready := judgeRoute(facts, id)
+			if got != tc.fault || ready != tc.sound {
+				t.Fatalf("judgeRoute = %q, %v; want %q, %v", got, ready, tc.fault, tc.sound)
+			}
+		})
+	}
+}
+
+// The real relay state suspends an archived channel and unarchive alone
+// returns the same record to service. Unknown state never makes the route
+// a failure.
+func TestOwnerArchiveSuspendsTheRouteAndUnarchiveReturnsIt(t *testing.T) {
+	f := standalone(t)
+	b := liveSession(t, "alpha")
+	activeChannel(t, f.s, b, machineChanA)
+	f.groupState(t, machineChanA)
+	archived := nostr.Event{Kind: 39000, Tags: nostr.Tags{{"d", machineChanA}, {"archived", "true"}, {"private"}, {"P", f.s.id.Agent}}, CreatedAt: nostr.Now() + 1}
+	if err := archived.Sign(f.relayKey); err != nil {
+		t.Fatal(err)
+	}
+	f.relay.Inject(archived)
+	f.s.judgeRoutes(time.Now())
+	r := channelState(t, f.s, "alpha")
+	if r.Suspended != "the channel is archived" {
+		t.Fatalf("stored suspension = %+v", r)
+	}
+	if got := f.s.Routes(); len(got) != 0 || len(f.s.machineTargets()) != 0 {
+		t.Fatalf("suspended route still routed: %v / %+v", got, f.s.machineTargets())
+	}
+	unarchived := nostr.Event{Kind: 39000, Tags: nostr.Tags{{"d", machineChanA}, {"private"}, {"restricted"}, {"closed"}, {"P", f.s.id.Agent}}, CreatedAt: nostr.Now() + 2}
+	if err := unarchived.Sign(f.relayKey); err != nil {
+		t.Fatal(err)
+	}
+	f.relay.Inject(unarchived)
+	f.s.judgeRoutes(time.Now().Add(time.Second))
+	r = channelState(t, f.s, "alpha")
+	if r.Suspended != "" || r.Resumed == "" {
+		t.Fatalf("record after unarchive = %+v; want resumed", r)
+	}
+	if got := f.s.Routes(); !slices.Equal(got, []string{machineChanA}) {
+		t.Fatalf("routes after unarchive = %v", got)
+	}
+}

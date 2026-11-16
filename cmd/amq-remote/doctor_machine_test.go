@@ -370,3 +370,40 @@ func TestDoctorNotesAnOldUnknownOutboxRecord(t *testing.T) {
 	}
 	t.Fatalf("notes = %+v; want the old unknown outbox note", notes)
 }
+
+// A suspended channel tells the owner why, with no dialog, turn or answer
+// sent and a channel reset as the alternative. It is not a failure.
+func TestDoctorNotesASuspendedChannel(t *testing.T) {
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	root := filepath.Join(dir, "p", ".agent-mail", "session3")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pub, relayKey := strings.Repeat("e", 64), strings.Repeat("f", 64)
+	writeMarker(t, dir, machineMarkerDir, map[string]any{"name": "_machine", "pubkey": pub, "display_name": "AMQ Remote @ box",
+		"relay_key": relayKey, "updated": time.Now().UTC().Format(time.RFC3339)})
+	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "claude", Name: "claude-p-session3"}
+	if err := binding.WriteNamed(b); err != nil {
+		t.Fatal(err)
+	}
+	records := filepath.Join(dir, "remote", "acp", "channels", relayKey, pub)
+	if err := os.MkdirAll(records, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	record, _ := json.Marshal(map[string]any{"name": b.Name, "identity": b.SessionIdentity(), "reg": "r1",
+		"state": "active", "suspended": "the channel is archived", "channel_id": "6eff60e4-32ab-48ec-bd3d-f4c97872f370"})
+	if err := os.WriteFile(filepath.Join(records, b.Name+".json"), record, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var fails, notes []boundaryFailure
+	channels := doctorChannels([]binding.Binding{b}, func(boundary, subject, detail, remedy string) {
+		fails = append(fails, boundaryFailure{Boundary: boundary, Subject: subject, Detail: detail, Remedy: remedy})
+	}, func(boundary, subject, detail, remedy string) {
+		notes = append(notes, boundaryFailure{Boundary: boundary, Subject: subject, Detail: detail, Remedy: remedy})
+	})
+	if channels[b.Name] != "suspended" || len(fails) != 0 || len(notes) != 1 || !strings.Contains(notes[0].Detail, "the channel is archived") {
+		t.Fatalf("channels = %v, failures = %+v, notes = %+v", channels, fails, notes)
+	}
+}

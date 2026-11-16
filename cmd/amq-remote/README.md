@@ -464,6 +464,14 @@ The machine agent keeps a record of each relay write for three days after
 its outcome is known. A write with no known outcome stays until it is
 known; `amq-remote doctor` notes one that is older than a day.
 
+The machine agent reads each channel's relay-signed state once a minute. A
+channel that the owner archived, made public, or left, or that the machine
+agent no longer owns, is suspended: nothing is sent there and no message is
+taken from it, and `amq-remote bindings`, `attach` and `doctor` say why.
+The agent never undoes the owner's change; when the state is good again the
+channel works again, and turns that ended meanwhile are not posted.
+`amq-remote channel reset NAME` makes a new channel.
+
 One machine agent serves a machine. While a Buzz Desktop machine agent runs
 or is idle here, `serve` refuses with `Buzz Desktop's machine agent <name>
 runs on this Mac; stop it in Buzz Desktop (Agents, <name>, Stop).`, and it

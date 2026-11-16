@@ -294,6 +294,8 @@ func connected(w io.Writer, v attachView) {
 	machine := nonEmpty(v.machine.Display, "AMQ Remote @ "+nonEmpty(binding.Machine(), "this machine"))
 	serves := v.machine.serves()
 	switch state := v.channelState(); {
+	case state == "suspended":
+		say(w, "This session's channel %q is suspended: %s. Nothing is sent there until that changes in Buzz; for a new channel run amq-remote channel reset %s.", v.channel.Name, v.channel.Error, v.name)
 	case v.agent.State == agentRunning:
 		say(w, "DM %q in Buzz.", display)
 	case v.agent.State == agentIdle:
@@ -360,7 +362,7 @@ func connectedJSON(out map[string]any, v attachView) map[string]any {
 		out["channel"] = state
 		if v.channel != nil {
 			out["channel_name"] = v.channel.Name
-			if state == "uncertain" || state == "failed" {
+			if state == "uncertain" || state == "failed" || state == "suspended" {
 				out["channel_error"], out["channel_retry"] = v.channel.Error, v.channel.Retry
 			}
 		}
