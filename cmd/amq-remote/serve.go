@@ -195,6 +195,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		_ = ep.Close()
 		return 0, err
 	}
+	server.SetVersion(version)
 	server.SetRegistrar(liveRegistrar(c.root, stateDir, *me, ep))
 	server.SetLinkHandler(links.request)
 	// amq-acp mirrors a Buzz-started request's native activity into Desktop.

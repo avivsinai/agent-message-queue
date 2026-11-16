@@ -168,6 +168,7 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 	// not proof the relay materialized ownership.
 	doctorRelay(c.root, stateDir, report, fail, note)
 	noteNoService(note, c.root, stateDir)
+	noteEndpointVersion(note, c.root, stateDir)
 	if len(notes) > 0 {
 		report["notes"] = notes
 	}
