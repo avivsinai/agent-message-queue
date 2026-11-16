@@ -1064,7 +1064,14 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
-	if err := removeDetachedLinkShares(roots, slices.Concat(removed, keptOff)); err != nil {
+	// A named detach also drops a share entry that no binding backs: such an
+	// entry can never be shared again, and nothing else removes it.
+	gone := slices.Concat(removed, keptOff)
+	if *name != "" {
+		gone = append(gone, *name)
+	}
+	unshared, err := removeDetachedLinkShares(roots, gone)
+	if err != nil {
 		return protocol.ExitActionRequired, fmt.Errorf("the session is detached, but its link share entry was not removed: %w", err)
 	}
 	if c.json {
@@ -1075,11 +1082,18 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		if len(keptOff) > 0 {
 			out["kept_off"] = keptOff
 		}
+		if len(removed) == 0 && len(keptOff) == 0 && unshared {
+			out["share_removed"] = true
+		}
 		emitJSON(stdout, out)
 		return 0, nil
 	}
 	if len(removed) == 0 && len(keptOff) > 0 {
 		say(stdout, "Kept off: %d (already ended).", len(keptOff))
+		return 0, nil
+	}
+	if len(removed) == 0 && unshared {
+		say(stdout, "Not connected. Removed its link share entry.")
 		return 0, nil
 	}
 	if len(removed) == 0 {

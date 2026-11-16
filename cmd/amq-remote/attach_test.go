@@ -1569,3 +1569,29 @@ func TestDetachRemovesShareFromManifest(t *testing.T) {
 		t.Fatalf("shares after detach = %+v, %v; want only claude-8", mf.Links, err)
 	}
 }
+
+// Regression for bead agent-message-queue-w5hl: a share entry left by a
+// session whose end record has no reason stayed in link status with no
+// command to remove it.
+func TestDetachByNameDropsAShareEntryWithNoBinding(t *testing.T) {
+	root := canonicalTempDir(t)
+	t.Setenv(binding.EnvPath, filepath.Join(root, "binding.json"))
+	stateDir := filepath.Join(root, stateDirName)
+	mf := manifest.File{SchemaVersion: manifest.RelaySchemaVersion, Layer: manifest.Layer,
+		Links: []manifest.Link{{Name: "ada", URL: "wss://link.example.test/link",
+			Shares: []manifest.LinkShare{{Binding: "ghost", Consent: "passkey", Tools: "read"}}}}}
+	if err := manifest.Write(manifest.DefaultPath(stateDir), mf); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if code, err := detach([]string{"--name", "ghost", "--root", root}, &out, io.Discard); code != 0 || err != nil {
+		t.Fatalf("detach = %d, %v", code, err)
+	}
+	if got := strings.TrimSpace(out.String()); got != "Not connected. Removed its link share entry." {
+		t.Fatalf("detach said %q", got)
+	}
+	got, err := manifest.Load(manifest.DefaultPath(stateDir))
+	if err != nil || len(got.Links) != 1 || len(got.Links[0].Shares) != 0 {
+		t.Fatalf("manifest after named detach = %+v, %v", got, err)
+	}
+}
