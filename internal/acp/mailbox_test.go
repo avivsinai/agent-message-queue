@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,7 +17,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
-	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 )
 
@@ -227,28 +227,29 @@ func TestMailboxRecoversAReplyDrainedToCur(t *testing.T) {
 // first delivery and nothing was published (seen on #1179's load runs). A
 // client that leaves records no event outcome, so the second attempt is a
 // real redelivery and must reach delivery too.
+//
+// On the direct transport the client that leaves is the machine workers
+// stopping; the redelivery runs once they start again, and its reply proves
+// it reached delivery.
 func TestMailboxRedeliveryPublishesOnce(t *testing.T) {
-	s, root := mailboxServer(t)
-	eventID := strings.Repeat("2", 64)
-	for attempt := range 2 {
-		turn := newTurn()
-		result, rpcErr := s.runRemote("s", "say hi", eventID, turn, func(v any) error {
-			if !strings.HasPrefix(v.(sessionUpdateNotification).Params.Update.Content.Text, "Delivered to") {
-				return nil
-			}
-			s.mu.Lock()
-			if turn.settleLocked("client_disconnected") {
-				close(turn.done)
-			}
-			s.mu.Unlock()
-			return nil
-		})
-		if rpcErr != nil {
-			t.Fatal(rpcErr)
-		}
-		if got := result.(remotePromptResult).Meta.Remote; got.State != DeliveryStateQueued || got.Reason != "client_disconnected" {
-			t.Fatalf("attempt %d ended %+v; want delivered, then the client left", attempt+1, got)
-		}
+	f, b := mailboxRoute(t)
+	root := b.Root
+	in := f.ownerSays(t, machineChanA, "say hi")
+	eventID := in.Event.ID.Hex()
+	stop := f.machine(t)
+	first := f.s.Owner(in)
+	promptOf(t, b)
+	stop()
+	if _, decided := f.s.mailboxAnswered(eventID); !isOpen(first) || decided {
+		t.Fatal("the first attempt ended or recorded an outcome; want delivered, then the client left")
+	}
+	f.machine(t)
+	second := f.s.Owner(in)
+	id, prompt := promptOf(t, b)
+	replyAs(t, root, prompt.Header.Thread, id, format.KindAnswer, "hi")
+	waitClosed(t, second)
+	if f.posts(machineChanA, "hi") != 1 {
+		t.Fatalf("posts=%q; want the redelivery to post the reply", f.agentTexts(machineChanA))
 	}
 	if ids := inboxPrompts(t, root); len(ids) != 1 {
 		t.Fatalf("inbox holds %d prompts after a redelivery; want 1", len(ids))
@@ -356,29 +357,25 @@ func TestMailboxMissingMailboxIsNotDelivered(t *testing.T) {
 // Regression: #964, a message was delivered, then the handle's
 // mailbox was deleted; a redelivery found it absent and recorded "not
 // delivered, send it again". Only the attempt that created the claim may.
+// The first delivery ends when the machine workers stop, which posts
+// nothing, so the redelivery's status is the event's one status post.
 func TestMailboxRedeliveryAfterTheMailboxWentIsUncertain(t *testing.T) {
-	s, root := mailboxServer(t)
-	s.cfg.TurnTimeout = 50 * time.Millisecond
-	eventID := strings.Repeat("7", 64)
-	if _, rpcErr := s.runRemote("s", "say hi", eventID, newTurn(), func(any) error { return nil }); rpcErr != nil {
-		t.Fatal(rpcErr)
-	}
+	f, b := mailboxRoute(t)
+	s, root := f.s, b.Root
+	in := f.ownerSays(t, machineChanA, "say hi")
+	eventID := in.Event.ID.Hex()
+	stop := f.machine(t)
+	s.Owner(in)
+	promptOf(t, b)
+	stop()
 	if err := os.RemoveAll(filepath.Join(root, "agents", "agent")); err != nil {
 		t.Fatal(err)
 	}
-	var said []string
-	result, rpcErr := s.runRemote("s", "say hi", eventID, newTurn(), func(v any) error {
-		if note := v.(sessionUpdateNotification); note.Params.Update.SessionUpdate == "agent_message_chunk" {
-			said = append(said, note.Params.Update.Content.Text)
-		}
-		return nil
-	})
-	if rpcErr != nil {
-		t.Fatal(rpcErr)
-	}
-	got := result.(remotePromptResult)
-	if got.Meta.Remote.State != remoteUncertain || len(said) != 1 || !strings.Contains(said[0], "amq thread --id") {
-		t.Fatalf("result=%+v said=%q", got, said)
+	f.machine(t)
+	waitClosed(t, s.Owner(in))
+	said := f.agentTexts(machineChanA)
+	if len(said) != 1 || !strings.Contains(said[0], "the delivery outcome is unknown") || !strings.Contains(said[0], "amq thread --id") {
+		t.Fatalf("said=%q", said)
 	}
 	if _, ok := s.mailboxAnswered(eventID); ok {
 		t.Fatal("a redelivery recorded the delivered event as not delivered")
@@ -1390,44 +1387,35 @@ func TestDamagedFinalMarkerIsNeverAReply(t *testing.T) {
 // #1149 review found the retry kept the event unsent while its post was in
 // flight, so a crash before the post's state was recorded let a later sweep
 // post the answer a second time.
+//
+// On the direct transport a post that never started is one made with no
+// relay connection.
 func TestUnsentFinalAnswerIsPostedByTheNextSweep(t *testing.T) {
-	s, root := mailboxServer(t)
-	var posts []string
-	broken := true
-	event := strings.Repeat("6", 64)
-	saved := postAnswer
-	t.Cleanup(func() { postAnswer = saved })
-	postAnswer = func(_, content string, _ time.Duration) (string, error) {
-		if broken {
-			return "", &buzzcli.NotSentError{Err: errors.New("buzz CLI not found in Buzz.app; set " + buzzcli.EnvCLI + " to the buzz executable")}
-		}
+	f, b := mailboxRoute(t)
+	s, root := f.s, b.Root
+	in := f.ownerSays(t, machineChanA, "hi")
+	event := in.Event.ID.Hex()
+	var down atomic.Bool
+	down.Store(true)
+	f.postsOffline(&down, func() {
 		// A crash here leaves the disk as it is now; a restarted sweep
 		// must not see an unsent answer.
 		if c, _ := s.loadLateClaim(event, time.Now().Add(time.Hour)); c != nil && c.unsentReply != "" {
 			t.Errorf("while the retry posts, the answer still reads as unsent")
 		}
-		posts = append(posts, content)
-		return "id", nil
-	}
-	prompt := "<context>\nScope: dm\nChannel: DM (#6eff60e4-32ab-48ec-bd3d-f4c97872f370)\n</context>\nhi"
-	turn := newTurn()
-	turn.channel = buzzChannel(prompt)
-	replied := false
-	if _, rpcErr := s.runRemote("s", prompt, event, turn, func(any) error {
-		if ids := inboxPrompts(t, root); !replied && len(ids) == 1 {
-			replied = true
-			replyAs(t, root, cockpitThread("session/s"), ids[0], format.KindAnswer, "the answer")
-		}
-		return nil
-	}); rpcErr != nil {
-		t.Fatal(rpcErr)
-	}
-	broken = false
+	})
+	stop := f.machine(t)
+	done := s.Owner(in)
+	id, prompt := promptOf(t, b)
+	replyAs(t, root, prompt.Header.Thread, id, format.KindAnswer, "the answer")
+	waitClosed(t, done)
+	stop()
+	down.Store(false)
 	for range 2 {
 		s.sweepLateReplies(time.Now().Add(time.Hour))
 	}
-	if len(posts) != 1 || posts[0] != "the answer" {
-		t.Fatalf("posts after the CLI was fixed: %q; want the answer once", posts)
+	if posts := f.agentTexts(machineChanA); len(posts) != 1 || posts[0] != "the answer" {
+		t.Fatalf("posts after the connection returned: %q; want the answer once", posts)
 	}
 }
 
@@ -1435,46 +1423,33 @@ func TestUnsentFinalAnswerIsPostedByTheNextSweep(t *testing.T) {
 // a lone sending marker that no reader named; it is in doubt, never posted
 // again.
 func TestFinalPostThatCrashedWhileSendingIsInDoubt(t *testing.T) {
-	s, root := mailboxServer(t)
-	var posts []string
-	broken := true
-	event := strings.Repeat("5", 64)
-	saved := postAnswer
-	t.Cleanup(func() { postAnswer = saved })
-	postAnswer = func(_, content string, _ time.Duration) (string, error) {
-		if broken {
-			return "", &buzzcli.NotSentError{Err: errors.New("buzz CLI not found in Buzz.app; set " + buzzcli.EnvCLI + " to the buzz executable")}
-		}
-		posts = append(posts, content)
-		return "id", nil
-	}
-	prompt := "<context>\nScope: dm\nChannel: DM (#6eff60e4-32ab-48ec-bd3d-f4c97872f370)\n</context>\nhi"
-	turn := newTurn()
-	turn.channel = buzzChannel(prompt)
-	replied := false
-	if _, rpcErr := s.runRemote("s", prompt, event, turn, func(any) error {
-		if ids := inboxPrompts(t, root); !replied && len(ids) == 1 {
-			replied = true
-			replyAs(t, root, cockpitThread("session/s"), ids[0], format.KindAnswer, "the answer")
-		}
-		return nil
-	}); rpcErr != nil {
-		t.Fatal(rpcErr)
-	}
+	f, b := mailboxRoute(t)
+	s, root := f.s, b.Root
+	in := f.ownerSays(t, machineChanA, "hi")
+	event := in.Event.ID.Hex()
+	var down atomic.Bool
+	down.Store(true)
+	f.postsOffline(&down, nil)
+	stop := f.machine(t)
+	done := s.Owner(in)
+	id, prompt := promptOf(t, b)
+	replyAs(t, root, prompt.Header.Thread, id, format.KindAnswer, "the answer")
+	waitClosed(t, done)
+	stop()
 	if got := s.finalPostState(event); got != finalPostUnsent {
 		t.Fatalf("state after a post that never started: %q; want unsent", got)
 	}
 	if err := os.Rename(s.finalStatePath(event, finalPostUnsent), s.finalStatePath(event, finalPostSending)); err != nil {
 		t.Fatal(err)
 	}
-	broken = false
+	down.Store(false)
 	for range 2 {
 		s.sweepLateReplies(time.Now().Add(time.Hour))
 	}
 	if got := s.finalPostState(event); got != finalPostSending {
 		t.Fatalf("state after a crash while sending: %q; want sending", got)
 	}
-	if len(posts) != 0 {
+	if posts := f.agentTexts(machineChanA); len(posts) != 0 {
 		t.Fatalf("an in-doubt final answer was posted again: %q", posts)
 	}
 }
