@@ -81,3 +81,55 @@ func TestRecordKeepsItsEventAcrossAttemptAndReopen(t *testing.T) {
 		t.Fatalf("second prepare returned event %v (err %v), want the first %s", stored.ID.Hex(), err, first.ID.Hex())
 	}
 }
+
+// The outbox forgets old accepted and rejected records, whose intentions
+// no writer asks again after its keep. Unknown stays forever: only its
+// own event may be sent again without a risk of a second delivery.
+func TestPruneForgetsOldSettledRecordsAndKeepsUnknown(t *testing.T) {
+	dir := t.TempDir()
+	o, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t0 := time.Unix(1794689428, 0)
+	sk := nostr.MustSecretKeyFromHex("0000000000000000000000000000000000000000000000000000000000000002")
+	evt := nostr.Event{Kind: 9, Tags: nostr.Tags{{"h", "e4788682-3227-4e30-9e96-34684b749593"}}, CreatedAt: nostr.Timestamp(t0.Unix())}
+	if err := evt.Sign(sk); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range []struct {
+		key     string
+		outcome buzzop.Outcome
+		at      time.Time
+	}{
+		{"a", buzzop.Accepted, t0}, {"b", buzzop.Rejected, t0},
+		{"c", buzzop.Unknown, t0}, {"d", buzzop.Accepted, t0.Add(80 * time.Hour)},
+	} {
+		if _, err := o.Prepare(r.key, "reg", evt, r.at); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := o.BeginAttempt(r.key, r.at); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := o.Settle(r.key, r.outcome, "", r.at, r.at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if removed, err := o.Prune(t0.Add(81*time.Hour), 72*time.Hour); err != nil || removed != 2 {
+		t.Fatalf("Prune = %d, %v; want 2 removed", removed, err)
+	}
+	for _, key := range []string{"c", "d"} {
+		if _, ok, err := o.Get(key); err != nil || !ok {
+			t.Fatalf("%q must stay: %v, %v", key, ok, err)
+		}
+	}
+	for _, key := range []string{"a", "b"} {
+		if _, ok, err := o.Get(key); err != nil || ok {
+			t.Fatalf("%q settled long ago must be forgotten: %v, %v", key, ok, err)
+		}
+	}
+	stats, err := Stat(dir)
+	if err != nil || stats.Records != 2 || stats.OldestUnknown != t0.Unix() {
+		t.Fatalf("Stat = %+v, %v; want two records and unknown from t0", stats, err)
+	}
+}

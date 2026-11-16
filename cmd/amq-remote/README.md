@@ -460,6 +460,10 @@ default, at most one year. To renew, run `amq-remote machine request` again
 enroll --grant FILE`. A running `serve` adopts a renewed grant for the same
 key, relay and owner with no restart.
 
+The machine agent keeps a record of each relay write for three days after
+its outcome is known. A write with no known outcome stays until it is
+known; `amq-remote doctor` notes one that is older than a day.
+
 One machine agent serves a machine. While a Buzz Desktop machine agent runs
 or is idle here, `serve` refuses with `Buzz Desktop's machine agent <name>
 runs on this Mac; stop it in Buzz Desktop (Agents, <name>, Stop).`, and it

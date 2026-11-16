@@ -48,6 +48,13 @@ const (
 	// machineReplayEvery is how often posts of unknown outcome are sent
 	// again while connected, besides once on each connect.
 	machineReplayEvery = 30 * time.Second
+	// machineOutboxKeep is how long a settled outbox record stays. It is
+	// longer than every time after which a writer asks again for a key; the
+	// longest is the engine's late-reply horizon of one day.
+	machineOutboxKeep = 72 * time.Hour
+	// machinePruneEvery is the time between two prune passes, and between
+	// the start and the first one.
+	machinePruneEvery = time.Hour
 	// machineReplayTimeout bounds one replayed post.
 	machineReplayTimeout = 30 * time.Second
 
@@ -285,6 +292,11 @@ func (ms *machineSet) keep(agents []string, now time.Time) (st machineStatus, ok
 	} else {
 		delete(ms.said, "adopt")
 	}
+	if err := run.prune(now); err != nil {
+		ms.sayOnce("prune", fmt.Sprintf("machine agent %s: the outbox was not pruned: %v", short(agent), err))
+	} else {
+		delete(ms.said, "prune")
+	}
 	cs := run.client.Status()
 	// Each attempt clears the client's error, so a refusal holds until a
 	// connection authenticates.
@@ -424,7 +436,10 @@ type machineRun struct {
 	authRefused bool // the relay refused the key; set and read by keep
 	// downSince is when keep first saw the relay not authenticated; zero
 	// while it is authenticated.
-	downSince   time.Time
+	downSince time.Time
+	// pruned is when the outbox was last pruned; the start counts as one,
+	// so every ask that a restart repeats finds its record.
+	pruned      time.Time
 	stopWorkers func()
 	out         *outbox.Outbox
 	client      *relay.Client
@@ -443,6 +458,12 @@ type machineRun struct {
 	in inbound
 }
 
+// machineOutboxDir is the outbox of agent on the relay relayKey under the
+// engine's state directory.
+func machineOutboxDir(state, relayKey, agent string) string {
+	return filepath.Join(state, "ops", relayKey, agent)
+}
+
 // newMachineRun builds the agent's server. Its state is the binding mode
 // state directory, as the engine's; the outbox is <state>/ops/<relay
 // key>/<agent>.
@@ -456,7 +477,7 @@ func newMachineRun(home, agent string, cred machinecred.Credential, self string,
 		Owner: cred.Tag.OwnerPubKey, Agent: agent, DisplayName: defaultMachineName(),
 	}
 	state := filepath.Join(filepath.Dir(path), "acp")
-	run := &machineRun{home: home, id: id, state: state, ops: filepath.Join(state, "ops", id.RelayKey, agent), stderr: stderr, done: make(chan struct{})}
+	run := &machineRun{home: home, id: id, state: state, ops: machineOutboxDir(state, id.RelayKey, agent), stderr: stderr, done: make(chan struct{})}
 	run.srv = acp.NewStandalone(acp.Standalone{Identity: id, Transport: &run.port, Online: run.online}, version)
 	return run, nil
 }
@@ -483,6 +504,7 @@ func (run *machineRun) start(cred machinecred.Credential) (started bool, err err
 	}
 	run.port.p.Store(port)
 	run.started, run.stopWorkers, run.out = true, stop, out
+	run.pruned = time.Now()
 	run.client = relay.NewClient(run.config)
 	run.client.OnConnect = run.onConnect
 	ctx, cancel := context.WithCancel(context.Background())
@@ -601,6 +623,22 @@ func (run *machineRun) replay(ctx context.Context) {
 		port.Replay(rctx, buzzop.Key(r.Key))
 		cancel()
 	}
+}
+
+// prune forgets the outbox's old settled records, at most once in
+// machinePruneEvery.
+func (run *machineRun) prune(now time.Time) error {
+	if now.Sub(run.pruned) < machinePruneEvery {
+		return nil
+	}
+	run.held.RLock()
+	defer run.held.RUnlock()
+	if run.stopping.Load() {
+		return nil
+	}
+	run.pruned = now
+	_, err := run.out.Prune(now, machineOutboxKeep)
+	return err
 }
 
 // inbound is the inbound loop's state, kept across the connections of one
