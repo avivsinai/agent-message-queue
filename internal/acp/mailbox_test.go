@@ -143,7 +143,7 @@ func moveToCur(t *testing.T, root, id string) {
 // six folders, so a big mailbox cost a core per open turn. A poll reads only
 // buzz/inbox/new; cur is read at the turn start and on the heartbeat.
 func TestMailboxRepliesReadOnlyNew(t *testing.T) {
-	s, root := mailboxServer(t)
+	s, root := standalone(t).s, liveSession(t, "alpha").Root
 	thread := cockpitThread("session/s")
 	id := replyAs(t, root, thread, "prompt", format.KindAnswer, "already consumed")
 	moveToCur(t, root, id)
@@ -157,7 +157,7 @@ func TestMailboxRepliesReadOnlyNew(t *testing.T) {
 // one reply in new; the one whose move failed with ENOENT also read it from
 // cur, so both returned it. Only one poller returns a reply.
 func TestMailboxTwoPollersReturnOneReply(t *testing.T) {
-	s, root := mailboxServer(t)
+	s, root := standalone(t).s, liveSession(t, "alpha").Root
 	thread := cockpitThread("session/s")
 	b := binding.Binding{Root: root, Handle: "agent"}
 	since := time.Now().Add(-time.Minute)
@@ -185,7 +185,7 @@ func TestMailboxTwoPollersReturnOneReply(t *testing.T) {
 // the drained receipt only if it also won forwarding. When another watch's
 // cur recovery won first, no drained receipt was ever written.
 func TestMailboxMoverEmitsTheDrainedReceipt(t *testing.T) {
-	s, root := mailboxServer(t)
+	s, root := standalone(t).s, liveSession(t, "alpha").Root
 	thread := cockpitThread("session/s")
 	b := binding.Binding{Root: root, Handle: "agent"}
 	since := time.Now().Add(-time.Minute)
@@ -615,12 +615,14 @@ func TestMailboxCancelBeforeDeliveryPublishesNothing(t *testing.T) {
 
 // Regression: #895, a cancel while the publish lock was held still
 // delivered the prompt once the lock was released. The claim is now created
-// inside the locked operation, so the re-check is exercised there.
+// inside the locked operation, so the re-check is exercised there. On the
+// direct transport a turn stops when the machine workers stop, as a client
+// that left.
 func TestMailboxCancelWhilePublishLockHeldPublishesNothing(t *testing.T) {
-	s, root := mailboxServer(t)
+	s, root := standalone(t).s, liveSession(t, "alpha").Root
 	turn := newTurn()
 	s.mu.Lock()
-	if turn.settleLocked("session_cancelled") {
+	if turn.settleLocked(turnDisconnected) {
 		close(turn.done)
 	}
 	s.mu.Unlock()
@@ -1239,8 +1241,8 @@ func TestEarlyCancelIsDecidedBeforeTheSweep(t *testing.T) {
 // showed A. It returns the winner, B.
 func TestLosingReplyReturnsTheWinner(t *testing.T) {
 	const chanA = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
-	s, root := mailboxServer(t)
-	posts := recordPosts(t)
+	f, root := standalone(t), liveSession(t, "alpha").Root
+	s := f.s
 	eventID := strings.Repeat("2", 63) + "c"
 	winner := replyAs(t, root, cockpitThread("session/s"), "prompt", format.KindAnswer, "reply B")
 	moveToCur(t, root, winner)
@@ -1257,8 +1259,8 @@ func TestLosingReplyReturnsTheWinner(t *testing.T) {
 	if _, rpcErr := s.sayReply(r, binding.Binding{Root: root, Handle: "agent"}, "own", "reply A"); rpcErr != nil {
 		t.Fatal(rpcErr)
 	}
-	if strings.Join(shown, "|") != "reply B" || len(posts()) != 0 {
-		t.Fatalf("shown=%q posts=%q; want reply B shown and nothing posted", shown, posts())
+	if posts := f.agentTexts(chanA); strings.Join(shown, "|") != "reply B" || len(posts) != 0 {
+		t.Fatalf("shown=%q posts=%q; want reply B shown and nothing posted", shown, posts)
 	}
 }
 
@@ -1364,8 +1366,8 @@ func TestStatusNeverPostsAfterTheFinal(t *testing.T) {
 		t.Skip("no advisory file lock on this platform")
 	}
 	const chanA = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
-	s, _ := mailboxServer(t)
-	posts := recordPosts(t)
+	f := standalone(t)
+	s := f.s
 	eventID := strings.Repeat("6", 64)
 	dir := s.eventDir(eventID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -1386,7 +1388,7 @@ func TestStatusNeverPostsAfterTheFinal(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("the status post never finished")
 	}
-	if got := posts(); len(got) != 1 || got[0] != chanA+": the answer" {
+	if got := f.agentTexts(chanA); len(got) != 1 || got[0] != "the answer" {
 		t.Fatalf("posts=%q; want only the final", got)
 	}
 }
