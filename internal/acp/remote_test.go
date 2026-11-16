@@ -499,39 +499,32 @@ func TestBindingModeFollowsTheBoundSession(t *testing.T) {
 
 // Regression: #885, a redelivered event followed the current binding, so a
 // rebind between deliveries ran it again in the new session.
+// A final answer is posted once per event, so the first delivery ends on
+// its turn timeout with A's work still running, and the redelivery brings
+// the answer.
 func TestRedeliveryAfterRebindStaysOnTheFirstSession(t *testing.T) {
-	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	f := standalone(t)
 	a, b := fake.New("fake", "e_1"), fake.New("fake", "e_1")
-	serverA, serverB := remoteServer(t, a, nil), remoteServer(t, b, nil)
-	s := NewServer(Config{RemoteBinding: true, StateDir: t.TempDir(), TurnTimeout: time.Second, HeartbeatInterval: 10 * time.Millisecond, Identity: testAgent}, "test")
-	eventID := strings.Repeat("a", 64)
-	id, _ := remoteRequestID(eventID)
-	run := func(rt *fake.Runtime, label string) string {
-		t.Helper()
-		out := ""
-		if _, rpcErr := s.runRemote("s", "hello", eventID, newTurn(), func(v any) error {
-			note := v.(sessionUpdateNotification)
-			if note.Params.Update.SessionUpdate == "agent_thought_chunk" {
-				rt.Complete(id, "result from "+label)
-			}
-			if note.Params.Update.SessionUpdate == "agent_message_chunk" {
-				out += note.Params.Update.Content.Text
-			}
-			return nil
-		}); rpcErr != nil {
-			t.Fatal(rpcErr)
-		}
-		return out
-	}
-	if err := binding.WriteNamed(binding.Binding{Root: serverA.cfg.Root, Target: "fake", NativeSession: "fake", Name: "fake"}); err != nil {
+	bindA, bindB := directNative(remoteServer(t, a, nil).cfg.Root, "fake"), directNative(remoteServer(t, b, nil).cfg.Root, "fake")
+	if err := binding.WriteNamed(bindA); err != nil {
 		t.Fatal(err)
 	}
-	first := run(a, "A")
-	if err := binding.WriteNamed(binding.Binding{Root: serverB.cfg.Root, Target: "fake", NativeSession: "fake", Name: "fake"}); err != nil {
+	activeChannel(t, f.s, bindA, machineChanA)
+	directTiming(f, 200*time.Millisecond)
+	f.startMachine(t)
+	in := f.ownerSays(t, machineChanA, "hello")
+	id, _ := remoteRequestID(in.Event.ID.Hex())
+	waitClosed(t, f.s.Owner(in))
+	if !a.Complete(id, "result from A") {
+		t.Fatal("the first delivery did not run in session A")
+	}
+	if err := binding.WriteNamed(bindB); err != nil {
 		t.Fatal(err)
 	}
-	if second := run(b, "B"); first != "result from A" || second != first {
-		t.Fatalf("first=%q second=%q; the redelivery must return the first session's result", first, second)
+	directComplete(t, b, id, "result from B")
+	waitClosed(t, f.s.Owner(in))
+	if f.posts(machineChanA, "result from A") != 1 || f.posts(machineChanA, "result from B") != 0 || b.HasRun(id) {
+		t.Fatalf("posts=%q ranInB=%v; the redelivery must return the first session's result", directContents(f.agentMessages(machineChanA)), b.HasRun(id))
 	}
 }
 
@@ -807,44 +800,53 @@ func TestRecoveredBusyRefusalDoesNotHideTheAnswer(t *testing.T) {
 		}
 		return nil
 	})
-	s.cfg.StateDir = canonicalTempDir(t)
-	s.cfg.TurnTimeout = 4 * time.Second
-	var posts []string
-	saved := postAnswer
-	t.Cleanup(func() { postAnswer = saved })
-	postAnswer = func(_, content string, _ time.Duration) (string, error) {
-		posts = append(posts, content)
-		return "", nil
+	f := standalone(t)
+	b := directNative(s.cfg.Root, "fake")
+	if err := binding.WriteNamed(b); err != nil {
+		t.Fatal(err)
 	}
+	activeChannel(t, f.s, b, machineChanA)
+	directTiming(f, 4*time.Second)
+	f.startMachine(t)
+	dir := filepath.Join(s.cfg.Root, remoteStateDir)
 	busyID := "d2c80e1d-feb7-4c10-959e-23456789abcf"
-	resp, err := ipc.Call(filepath.Join(s.cfg.Root, remoteStateDir), ipc.Request{Command: &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit, RequestID: busyID, TargetID: "fake", Epoch: "e_1", NotAfter: protocol.FormatTime(time.Now().Add(time.Minute)), Input: &protocol.SubmitInput{Text: "occupy", Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn}}})
+	resp, err := ipc.Call(dir, ipc.Request{Command: &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit, RequestID: busyID, TargetID: "fake", Epoch: "e_1", NotAfter: protocol.FormatTime(time.Now().Add(time.Minute)), Input: &protocol.SubmitInput{Text: "occupy", Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn}}})
 	if err != nil || resp.AsError() != nil {
 		t.Fatal(err, resp.AsError())
 	}
-	eventID := strings.Repeat("b", 64)
-	id, _ := remoteRequestID(eventID)
-	emit := func(v any) error {
-		text := v.(sessionUpdateNotification).Params.Update.Content.Text
-		switch {
-		case strings.HasPrefix(text, "Queued:"):
-			// The session frees up, and the reply to the next submit is lost.
-			rt.Complete(busyID, "occupied")
-			loseReply.Lock()
-			lose = true
-			loseReply.Unlock()
-		case strings.HasPrefix(text, "Submitted to"):
-			rt.Complete(id, "the answer")
+	in := f.ownerSays(t, machineChanA, "hello")
+	id, _ := remoteRequestID(in.Event.ID.Hex())
+	ref := protocol.EncodeRef(ipc.LocalHost, "fake", id)
+	stop, done := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() { close(stop); <-done })
+	go func() {
+		defer close(done)
+		freed := false
+		for {
+			// Once the first submit is refused busy, the session frees up
+			// within the turn's busy pause, and the reply to the next submit
+			// is lost. Then the admitted run completes.
+			if !freed && directBusy(dir, ref) {
+				rt.Complete(busyID, "occupied")
+				loseReply.Lock()
+				lose = true
+				loseReply.Unlock()
+				freed = true
+			}
+			if freed && rt.Complete(id, "the answer") {
+				return
+			}
+			select {
+			case <-stop:
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
 		}
-		return nil
-	}
+	}()
 	for range 3 {
-		turn := newTurn()
-		turn.channel = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
-		if _, rpcErr := s.runRemote("s", "hello", eventID, turn, emit); rpcErr != nil {
-			t.Fatal(rpcErr)
-		}
+		waitClosed(t, f.s.Owner(in))
 	}
-	if got := strings.Count(strings.Join(posts, "|"), "the answer"); got != 1 {
+	if posts := directContents(f.agentMessages(machineChanA)); strings.Count(strings.Join(posts, "|"), "the answer") != 1 {
 		t.Fatalf("posts=%q; want the answer once", posts)
 	}
 }
