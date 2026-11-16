@@ -359,3 +359,70 @@ func TestOwnerArchiveSuspendsTheRouteAndUnarchiveReturnsIt(t *testing.T) {
 		t.Fatalf("routes after unarchive = %v", got)
 	}
 }
+
+// ownerSignedAt signs text as the owner at at, with optional thread tags.
+func (f *standaloneFixture) ownerSignedAt(t *testing.T, channel, content string, at time.Time, tags ...nostr.Tag) nostr.Event {
+	t.Helper()
+	evt := nostr.Event{Kind: 9, Tags: append(nostr.Tags{{"h", channel}}, tags...), Content: content,
+		CreatedAt: nostr.Timestamp(at.Unix())}
+	if err := evt.Sign(f.owner); err != nil {
+		t.Fatal(err)
+	}
+	return evt
+}
+
+// ownerReacts injects an owner-signed reaction of emoji on eventID.
+func (f *standaloneFixture) ownerReacts(t *testing.T, channel string, eventID nostr.ID, emoji string) {
+	t.Helper()
+	evt := nostr.Event{Kind: 7, Tags: nostr.Tags{{"h", channel}, {"e", eventID.Hex()}}, Content: emoji, CreatedAt: nostr.Now()}
+	if err := evt.Sign(f.owner); err != nil {
+		t.Fatal(err)
+	}
+	f.relay.Inject(evt)
+}
+
+// agentMessages are the agent's ordinary channel messages in stored order.
+func (f *standaloneFixture) agentMessages(channel string) []nostr.Event {
+	var out []nostr.Event
+	for _, evt := range f.relay.Events() {
+		if evt.Kind == 9 && evt.PubKey.Hex() == f.s.id.Agent {
+			if h := evt.Tags.Find("h"); len(h) > 1 && h[1] == channel {
+				out = append(out, evt)
+			}
+		}
+	}
+	return out
+}
+
+// agentEdits are the agent's edits of eventID in stored order.
+func (f *standaloneFixture) agentEdits(channel string, eventID nostr.ID) []nostr.Event {
+	var out []nostr.Event
+	for _, evt := range f.relay.Events() {
+		if evt.Kind != 40003 || evt.PubKey.Hex() != f.s.id.Agent {
+			continue
+		}
+		if h, e := evt.Tags.Find("h"), evt.Tags.Find("e"); len(h) > 1 && h[1] == channel && len(e) > 1 && e[1] == eventID.Hex() {
+			out = append(out, evt)
+		}
+	}
+	return out
+}
+
+// lastAgentPost is the content of the agent's last channel message.
+func (f *standaloneFixture) lastAgentPost(channel string) string {
+	messages := f.agentMessages(channel)
+	if len(messages) == 0 {
+		return ""
+	}
+	return messages[len(messages)-1].Content
+}
+
+// startMachine starts this fixture's workers and stops them on cleanup.
+func (f *standaloneFixture) startMachine(t *testing.T) {
+	t.Helper()
+	stop, ok := f.s.StartMachine()
+	if !ok {
+		t.Fatal("the machine agent did not start")
+	}
+	t.Cleanup(stop)
+}
