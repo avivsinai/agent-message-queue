@@ -167,51 +167,37 @@ invariants.
 
 The default carrier is the AMQ mailbox. `/amq-remote` binds this session's
 AMQ handle. A Buzz direct message arrives as an AMQ message from `buzz`, and
-the agent's `amq reply` is the answer that `amq-acp` posts into that
-DM. No wake and no Stop hook are required.
+the agent's `amq reply` is the answer that the machine agent posts on that
+channel. No wake and no Stop hook are required.
 
 `--native` drives the exact native session through `amq-remote`. Claude needs
 the Stop hook on that path.
 
-One Buzz agent per machine serves every session, each through its own
-private channel:
+One machine agent per machine runs inside `amq-remote serve` with its own
+key and one owner-signed grant. It makes each private channel:
 
-- **Machine agent.** The agent with the system prompt line `AMQ Remote
-  machine` makes a private channel for each live session that has no agent
-  of its own that runs or is idle, adds the owner, and mentions them. A
-  prompt reaches a session only from that session's active channel, read
-  from buzz-acp's host context block by structure. The route is relay,
-  machine key and channel; the first prompt of an ACP session fixes it, and
-  the session the channel names must still have the identity the channel was
-  made for. A create whose outcome is unknown is never repeated, because the
-  Buzz CLI makes a new channel id on every create; the owner's `amq-remote
-  channel reset` is the only way to allow another. When a binding is gone
-  or its session ended, its channel stops taking messages before it is
-  archived.
-
-A session may instead keep a Buzz agent of its own:
-
-- **Pin.** The agent names its binding with the system prompt line
-  `AMQ Remote session: <name>`, or, for an agent made before that line
-  existed, the model `amq-remote:<name>`. Two pins that name different
-  sessions refuse to deliver. The helper agent (`AMQ Remote helper`) and an
-  unpinned agent with several bindings never choose a session; they answer
-  with the list of sessions and the agent to DM for each.
-- **Reuse.** A binding's name belongs to its session identity: the clean
-  root and handle for a mailbox, the harness, root and working directory for
-  a native session. The same session always gets its name back, and with it
-  its agent and DM. A different session never takes that name, even after
-  the first one ended: a removed binding leaves a tombstone that keeps the
-  name, and the new session gets the next free `<name>-N`.
-- **Archive.** Only proven-ended sessions are pruned. When its binding is
-  gone, the agent archives its own identity, and it unarchives when the same
-  session binds the name again. AMQ never holds the owner's key and never
-  reads Buzz Desktop state; it learns an agent's state from the marker the
-  agent rewrites while it runs.
-- **Helper draft.** A new session's agent is created by the owner in Buzz
-  Desktop. When the per-machine helper agent runs, it sends a Desktop create
-  draft for the session, so the owner only confirms it; otherwise the owner
-  imports the file that `amq-acp setup --session <name>` writes.
+- **Machine agent.** The agent makes a private channel for each live
+  session, adds the owner, and mentions them. A prompt reaches a session
+  only from its active channel. The route is relay, machine key and channel;
+  the first prompt of a channel session fixes it, and the session must
+  retain the identity. A create whose outcome is unknown is never repeated;
+  the endpoint gives the create key's record its stable channel id. The
+  owner's `amq-remote channel reset` is the way to allow another.
+  Session end closes the route before the channel is archived.
+- **Route state.** An active route sends and receives only while its relay
+  state is sound. An archived or public channel, an owner who left, and a
+  change of machine owner suspends it with a reason. When the state shows
+  all required facts again, that record is usable again and turns ended in
+  suspension are not posted. AMQ never reverses the owner's changes on therelay.
+- **Name.** A binding's name belongs to its session identity: the clean
+  root and handle for a mailbox, or the harness, root and working directory
+  for a native session. The same session gets its name back, and its
+  channel again unless the owner detached it. A different session never
+  takes another session's name.
+- **Grant.** The owner's signed grant lets the agent key act as the owner's
+  Buzz agent for every event kind until the signed end date. The key lives
+  in `~/.amq/remote/machine/`; the owner's signing key never enters it.
+  Removing the agent's access on the relay ends it.
 
 A link is the carrier to a server the user linked with `amq-remote link add`.
 The machine dials it (`wss://`, `ws://` only to loopback) and answers only
@@ -241,9 +227,7 @@ signature and, when it implements NIP-OA time bounds, the grant expiry; it
 does not enforce `kind=` conditions at admission, so per-kind limits are the
 endpoint's own restraint.
 
-The Desktop grant is broad and does not expire. Archiving the agent in
-Desktop does not invalidate a copied key and grant; only removing its relay
-access does. An owner-only audience also admits the owner's other agents.
+The owner uses the Buzz app.
 
 ### Advanced relay
 
@@ -260,10 +244,7 @@ and its routing authority do not change.
 On the advanced relay, the companion holds one owned body key per shared
 session or host. The human owner attests the key with a NIP-OA `auth` tag
 signed from their own Buzz identity. Activity is published as NIP-AO kind 24200 observer frames.
-Assistant text is an `acp_read` frame whose payload is a genuine ACP
-`session/update` line, with projection provenance in that line's extension
-metadata. `session_resolved`, `turn_started`, and `turn_completed` use the
-Desktop lifecycle payloads. Buzz Desktop renders those kinds unchanged.
+Activity is projected as NIP-AO kind 24200 observer frames.
 Requests and results are a DM thread between the body and the owner;
 reactions carry typed commands. A pending approval is its own message in
 that thread: ✅ on it approves and ❌ rejects, and the message is edited with
@@ -300,7 +281,7 @@ separate process beside `amq`, as `amq-keepalive` and `amq-bridge` do.
   its completion needs the Stop hook; cancel is unsupported. See the
   [compatibility manifest](remote-compat.md). A session-wide abort is not
   exact cancellation.
-- The request contract does not include native Buzz Desktop panels. Terminal
+- The request contract does not include native Buzz panels. Terminal
   Watch and Decide exist only where a harness advertises them (invariant 5).
 - The Claude Code cross-session socket wire format is not published upstream;
   [the compatibility manifest](remote-compat.md) pins the observed format.

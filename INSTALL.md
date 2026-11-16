@@ -296,16 +296,14 @@ and `arm64`. `amq-keepalive` is only a release asset.
 | --- | --- |
 | `amq-keepalive` | On macOS, attaches and supervises registered wake targets. On native Windows (`amq-keepalive_*_windows_*.zip`), only the direct `inject` adapters; `attach`, `reattach`, and `supervise` are not supported. See [amq-keepalive](docs/amq-keepalive.md). |
 | `amq-bridge` | Signed cross-host courier. See [amq-bridge](cmd/amq-bridge/README.md). |
-| `amq-acp` | Preview ACP v2 stdio companion. See [amq-acp](cmd/amq-acp/README.md). |
+| `amq-acp` | ACP v2 companion: `amq-acp host`, and the ACP v2 stdio server for the mailbox and remote modes. See [amq-acp](cmd/amq-acp/README.md). |
 | `amq-remote` | Remote-session companion. See [amq-remote](cmd/amq-remote/README.md). |
 | `amq-board` | Read-only fleet board: what waits on you, what is in flight, blocked, or unclaimed, and each agent's liveness. See [amq-board](cmd/amq-board/README.md). |
 | `amq-owner-sign` | The owner's signer for a strict relay share or the machine agent's grant; the owner key stays in its process. See [the strict share](cmd/amq-remote/README.md#strict-share-in-one-owner-step). |
 
-AMQ Remote's machine agent needs no Buzz desktop app when a machine
-credential is enrolled: `amq-remote serve` runs it and connects to the relay
-itself, and the owner uses the Buzz phone app. Setup takes `amq-remote`, plus
-`amq-owner-sign` in the owner's own terminal. See [Machine agent without Buzz
-Desktop](cmd/amq-remote/README.md#machine-agent-without-buzz-desktop).
+One machine agent per machine runs inside `amq-remote serve`; set it up
+once with a grant the owner signs in their own terminal. The owner reads
+and writes in the Buzz app. See [the machine agent setup](cmd/amq-remote/README.md#machine-agent).
 
 To install a companion from its release asset, verify its entry in
 `checksums.txt` before you extract it. Asset names follow

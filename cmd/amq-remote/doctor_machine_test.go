@@ -27,9 +27,8 @@ import (
 )
 
 // machineFixture is a machine with no endpoint state directory: a Claude
-// config dir from the environment, a running machine agent that Buzz
-// Desktop starts on launch, and a registered mailbox binding with a live
-// wake. It returns the settings file and the AMQ root.
+// config dir from the environment, a running machine agent, and a registered
+// mailbox binding with a live wake. It returns the settings file and the AMQ root.
 func machineFixture(t *testing.T) (settings, root string) {
 	t.Helper()
 	dir := canonicalTempDir(t)
@@ -54,11 +53,8 @@ func machineFixture(t *testing.T) (settings, root string) {
 	marker, _ := json.Marshal(map[string]any{"name": "machine", "display_name": "AMQ Remote @ m", "relay_key": "rk",
 		"updated": time.Now().UTC().Format(time.RFC3339)})
 	write(filepath.Join(dir, "remote", "acp", "agents", "_machine", key+".json"), string(marker))
-	managed := filepath.Join(dir, "managed-agents.json")
-	write(managed, `[{"pubkey":"`+key+`","start_on_app_launch":true,"name":"machine"}]`)
-	savedPath, savedWake, savedList := buzzManagedAgentsPath, doctorWakeCheck, listACPProcesses
-	t.Cleanup(func() { buzzManagedAgentsPath, doctorWakeCheck, listACPProcesses = savedPath, savedWake, savedList })
-	buzzManagedAgentsPath = func() (string, error) { return managed, nil }
+	savedWake, savedList := doctorWakeCheck, listACPProcesses
+	t.Cleanup(func() { doctorWakeCheck, listACPProcesses = savedWake, savedList })
 	listACPProcesses = func(context.Context) ([]acpProcess, error) { return nil, nil }
 	doctorWakeCheck = func(string, string) (wakeView, error) {
 		return wakeView{LiveWake: true, WakeStatus: "live", ImageStatus: "current"}, nil

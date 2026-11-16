@@ -41,12 +41,7 @@ func run(args []string) int {
 		fmt.Println(version)
 		return 0
 	}
-	if len(args) > 0 && args[0] == "install" {
-		return runInstall(args[1:])
-	}
-	if len(args) > 0 && args[0] == "setup" {
-		return runSetup(args[1:])
-	}
+
 	if len(args) > 0 && args[0] == "host" {
 		return runHost(args[1:])
 	}
@@ -97,14 +92,6 @@ reply. It never listens on a socket.
 Usage:
   amq-acp            serve ACP v2 on stdin and stdout
   amq-acp --version  print the binary version
-  amq-acp install --to <handle>
-                 write the Buzz Desktop harness for mailbox mode
-  amq-acp install --remote-target <target>
-                 write the harness with AMQ_ACP_REMOTE_TARGET set
-  amq-acp install --remove --to <handle>
-                 delete the harness file this command wrote
-  amq-acp setup [--out <file>]
-                 write the AMQ Remote harness and the Desktop import file
   amq-acp host [--check] [--cwd <dir>] -- <agent command>
                  run an ACP agent as the AM_ME participant: each inbox
                  message is one turn, answered on its thread
@@ -126,16 +113,6 @@ Environment:
   AMQ_ACP_TURN_TIMEOUT bounded reply wait (default 10m)
   AMQ_ACP_POLL_INTERVAL reply poll interval (default 100ms)
   AMQ_ACP_HEARTBEAT_INTERVAL session/update heartbeat interval (default 15s)
-
-BUZZ_* variables are read to refuse non-owner inbound and agents!=1, then
-stripped from the environment. agents!=1 is refused in BYOH mode
-(AMQ_ACP_TO or AMQ_ACP_REMOTE_TARGET) and on platforms without advisory
-locks. With AMQ_ACP_REMOTE=binding any parallelism runs: one worker per Buzz
-identity leads the agent's lifecycle. The managed agent identity
-(BUZZ_PRIVATE_KEY, BUZZ_AUTH_TAG, BUZZ_RELAY_URL) stays in process memory only to post each
-owner-facing answer into its Buzz channel with the buzz CLI
-(AMQ_ACP_BUZZ_CLI, else the buzz inside Buzz.app; no implicit PATH fallback). It never
-enters an AMQ message.
 
 A session pin that cannot be authenticated is refused with exit code 5.
 `

@@ -14,7 +14,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/acp"
 	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/dialogguard"
-	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
@@ -321,10 +320,9 @@ func shQuote(s string) string {
 
 // machineAgentRow is what doctor found about the machine agent.
 type machineAgentRow struct {
-	State            string `json:"state"`
-	Name             string `json:"name,omitempty"`
-	RelayKey         bool   `json:"relay_key"`
-	StartOnAppLaunch *bool  `json:"start_on_app_launch,omitempty"`
+	State    string `json:"state"`
+	Name     string `json:"name,omitempty"`
+	RelayKey bool   `json:"relay_key"`
 	// A standalone agent's host, the first 8 characters of its key and of
 	// the owner's key, its relay and relay state, its grant's end and its
 	// refusal code.
@@ -356,8 +354,7 @@ func doctorMachineAgent(machine agentInfo, fail, note reportFunc) machineAgentRo
 		return doctorStandalone(machine, row, time.Now(), fail, note)
 	}
 	if machine.State == agentMissing {
-		note("machine_agent", "", "this machine has no AMQ Remote machine agent, so no session gets a channel of its own",
-			"run `amq-acp setup --machine --out \"$HOME/"+machineImportFile+"\"`, then in Buzz Desktop: Agents, +, Import that file, Start, and turn on Auto-start")
+		note("machine_agent", "", "this machine has no AMQ Remote machine agent, so no session gets a channel of its own", machineSetupSteps)
 		return row
 	}
 	row.Name = nonEmpty(machine.Display, "AMQ Remote @ "+nonEmpty(binding.Machine(), "this machine"))
@@ -365,25 +362,13 @@ func doctorMachineAgent(machine agentInfo, fail, note reportFunc) machineAgentRo
 	if machine.State != agentRunning {
 		why := "its marker is not fresh"
 		if machine.State == agentIdle {
-			why = "its worker is gone while Buzz Desktop still runs it, and only a message to the agent starts a worker again"
+			why = "its worker is gone, and only a message to the agent starts a worker again"
 		}
 		fail("machine_agent", row.Name, "the machine agent is "+machine.State+": "+why+", so it makes no channel and posts no dialog",
-			"in Buzz Desktop: Agents, "+row.Name+", Stop and Start")
+			"set up the machine agent inside amq-remote serve: "+machineSetupSteps)
 	} else if !row.RelayKey {
 		fail("machine_agent", row.Name, "the machine agent records no relay key: it started without a usable BUZZ_RELAY_URL, so it makes no channel",
-			"check the agent's relay in Buzz Desktop (Agents, "+row.Name+"), then Stop and Start it")
-	}
-	auto, err := startOnAppLaunch(machine.PubKey)
-	switch {
-	case err != nil:
-		note("machine_agent", row.Name, "cannot read whether Buzz Desktop starts the machine agent when it opens: "+err.Error(),
-			"in Buzz Desktop: Agents, "+row.Name+", check that Auto-start is on")
-	case !*auto:
-		row.StartOnAppLaunch = auto
-		fail("machine_agent", row.Name, "Buzz Desktop does not start the machine agent when it opens (start_on_app_launch is false), so after a restart no session gets a channel",
-			"in Buzz Desktop: Agents, "+row.Name+", turn on Auto-start")
-	default:
-		row.StartOnAppLaunch = auto
+			"set up the machine agent inside amq-remote serve: "+machineSetupSteps)
 	}
 	return row
 }
@@ -444,61 +429,6 @@ func notAuthenticatedFor(st *machineStatus, now time.Time) time.Duration {
 		return 0
 	}
 	return now.Sub(at)
-}
-
-// maxManagedAgentsBytes bounds the Buzz Desktop agents file read.
-const maxManagedAgentsBytes = 4 << 20
-
-// buzzManagedAgentsPath is Buzz Desktop's list of its agents. Tests replace
-// it.
-var buzzManagedAgentsPath = func() (string, error) {
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "xyz.block.buzz.app", "agents", "managed-agents.json"), nil
-}
-
-// startOnAppLaunch reads Buzz Desktop's start_on_app_launch for the agent
-// with public key pubkey. The file's format is Buzz Desktop's own and not
-// documented, so it is read defensively: a list of agents, or an object
-// keyed by public key, each with a boolean start_on_app_launch. Any other
-// shape, or no entry for pubkey, is an error, never a guess.
-func startOnAppLaunch(pubkey string) (*bool, error) {
-	if pubkey == "" {
-		return nil, errors.New("the machine agent's marker names no public key")
-	}
-	path, err := buzzManagedAgentsPath()
-	if err != nil {
-		return nil, err
-	}
-	raw, err := fsq.ReadRegularNoFollowBounded(path, maxManagedAgentsBytes)
-	if err != nil {
-		return nil, err
-	}
-	type agent struct {
-		PubKey           string `json:"pubkey"`
-		StartOnAppLaunch *bool  `json:"start_on_app_launch"`
-	}
-	var list []agent
-	if json.Unmarshal(raw, &list) != nil {
-		var byKey map[string]agent
-		if err := json.Unmarshal(raw, &byKey); err != nil {
-			return nil, fmt.Errorf("%s has an unknown format", path)
-		}
-		for key, a := range byKey {
-			list = append(list, agent{PubKey: nonEmpty(a.PubKey, key), StartOnAppLaunch: a.StartOnAppLaunch})
-		}
-	}
-	for _, a := range list {
-		if a.PubKey == pubkey {
-			if a.StartOnAppLaunch == nil {
-				return nil, fmt.Errorf("the entry of the machine agent in %s has no start_on_app_launch", path)
-			}
-			return a.StartOnAppLaunch, nil
-		}
-	}
-	return nil, fmt.Errorf("%s lists no agent with the machine agent's public key", path)
 }
 
 // doctorChannels checks the machine agent's channel record of each binding:

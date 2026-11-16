@@ -1,15 +1,9 @@
 package main
 
 import (
-	"context"
 	"errors"
-	"fmt"
 	"io"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
-	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/dialogguard"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
@@ -20,13 +14,12 @@ import (
 // doctor --fix repairs what the check pass flags and doctor can repair
 // without the owner, each step idempotent, and returns one line per change:
 // the approval hook, the Stop hook (where native mode needs it) and the
-// wake dialog guard in each Claude settings file doctor checks, the machine agent's import file while no machine agent
-// exists, and, for the machine root only, the login service for `up` while
-// doctor advises one and none is installed. It never creates a settings file
-// in a Claude config dir that does not exist, never installs a hook the
-// owner removed with its uninstall command (doctor notes it), never
-// restarts amq-acp or a wake, never deletes a request record, and never
-// writes Buzz Desktop's own agent list. An approval or Stop hook it
+// wake dialog guard in each Claude settings file doctor checks, and, for
+// the machine root only, the login service for `up` while doctor advises one
+// and none is installed. It never creates a settings file in a Claude
+// config dir that does not exist, never installs a hook the owner removed
+// with its uninstall command (doctor notes it), never restarts amq-acp or a
+// wake, never deletes a request record, and never writes a Buzz agent list. An approval or Stop hook it
 // installs records the owner's opt-in, so the machine agent restores it
 // when another writer removes it.
 func doctorFix(root, stateDir string, all []binding.Binding, fail reportFunc) []string {
@@ -44,7 +37,6 @@ func doctorFix(root, stateDir string, all []binding.Binding, fail reportFunc) []
 		return fixed
 	}
 	fixHooks(home, stateDir, all, changed, fail)
-	fixMachineImport(home, changed, fail)
 	fixService(root, stateDir, changed, fail)
 	return fixed
 }
@@ -93,52 +85,6 @@ func fixHooks(home, stateDir string, all []binding.Binding, changed func(link, s
 			}
 		}
 	}
-}
-
-// machineImportFile is the import file --fix writes, relative to the home
-// directory.
-const machineImportFile = "Downloads/AMQ Remote machine.agent.json"
-
-// fixMachineImport writes the machine agent's Buzz Desktop import file
-// while this machine has no machine agent and the file is not there yet.
-func fixMachineImport(home string, changed func(link, subject, what string), fail reportFunc) {
-	if machineOf(time.Now()).State != agentMissing {
-		return
-	}
-	out := filepath.Join(home, filepath.FromSlash(machineImportFile))
-	if fileExists(out) {
-		return
-	}
-	if err := os.MkdirAll(filepath.Dir(out), 0o700); err != nil {
-		fail("machine_agent", "", "cannot write the import file: "+err.Error(), "run `amq-acp setup --machine --out "+shQuote(out)+"`")
-		return
-	}
-	if err := runMachineSetup(out); err != nil {
-		fail("machine_agent", "", "cannot write the import file: "+err.Error(), "run `amq-acp setup --machine --out "+shQuote(out)+"`")
-		return
-	}
-	changed("machine_agent", "", "wrote "+out+"; in Buzz Desktop: Agents, +, Import that file, Start, and turn on Auto-start")
-}
-
-// machineSetupTimeout bounds `amq-acp setup --machine`.
-const machineSetupTimeout = 15 * time.Second
-
-// runMachineSetup runs the installed `amq-acp setup --machine --out out`,
-// which writes the import file and the AMQ Remote harness it names. Tests
-// replace it.
-var runMachineSetup = func(out string) error {
-	acp, err := claude.SiblingBinary("amq-acp")
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), machineSetupTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, acp, "setup", "--machine", "--out", out)
-	cmd.WaitDelay = childWaitDelay
-	if raw, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(raw)))
-	}
-	return nil
 }
 
 // fixService installs the login service that runs `up` for root when root

@@ -9,11 +9,17 @@ request with every option the agent offered.
 
 ## One-time setup
 
+The owner uses the Buzz app to read and write. One machine agent per
+machine runs inside `amq-remote serve` with an owner-signed grant.
+
 1. `brew install avivsinai/tap/amq`.
-2. Install Buzz Desktop and the Buzz phone app.
-3. `amq-acp setup --machine`, then import the printed agent file in Buzz
-   Desktop and start it.
-4. `amq-remote claude install-approval-hook`.
+2. Run `amq-remote machine request > request.txt` to make the grant request.
+3. In the owner's own terminal, sign the request:
+   `amq-owner-sign --machine request.txt --out grant.json --relay <wss-url>`.
+   Only the owner runs `amq-owner-sign`.
+4. Enroll `amq-remote machine enroll --grant grant.json`; then run
+   `amq-remote service install` to keep the machine agent running.
+5. Run `amq-remote claude install-approval-hook` for Claude Code.
 
 That is all a Claude desktop-app user needs. Every Claude Code session on the
 machine (terminal, desktop app Code tab, IDE) then mirrors its dialogs to
@@ -72,7 +78,7 @@ channel. A typed answer must be signed no earlier than its dialog opened
 
 A typed answer counts only as its signed event. The agent fetches the
 reply's event from the relay as itself, and the answer is the event's signed
-content and thread tags, signed by the owner's key; the prompt text buzz-acp
+content and thread tags, signed by the owner's key; the prompt text the machine agent
 wrote never decides. When the event cannot be verified (the relay does not
 serve it, it is not a message in this channel, or the relay is unreachable),
 the dialog stays open and the channel gets one line saying why, at most once
