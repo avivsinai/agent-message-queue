@@ -78,8 +78,7 @@ channel. A typed answer must be signed no earlier than its dialog opened
 
 A typed answer counts only as its signed event. The agent fetches the
 reply's event from the relay as itself, and the answer is the event's signed
-content and thread tags, signed by the owner's key; the prompt text the machine agent
-wrote never decides. When the event cannot be verified (the relay does not
+content and thread tags, signed by the owner's key. When the event cannot be verified (the relay does not
 serve it, it is not a message in this channel, or the relay is unreachable),
 the dialog stays open and the channel gets one line saying why, at most once
 every 10 minutes for the same open dialogs.
@@ -199,7 +198,7 @@ binding in `AM_ROOT` when it is an absolute existing directory, else in the
 machine root `~/.amq/remote/root`. The native binding needs only a registry
 entry for the Claude process, no messaging socket. It writes nothing for a
 process whose binding the owner detached; with no binding, the terminal
-decides. The Buzz agent (`amq-acp`) posts it and turns
+decides. The machine agent posts it and turns
 the owner's reaction or reply into `answers/<id>.json`; the waiting seam
 applies it. The first create-exclusive write of `resolved/<id>.json` decides
 how the dialog ended. See [the compatibility manifest](remote-compat.md) for

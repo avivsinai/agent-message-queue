@@ -177,27 +177,36 @@ One machine agent per machine runs inside `amq-remote serve` with its own
 key and one owner-signed grant. It makes each private channel:
 
 - **Machine agent.** The agent makes a private channel for each live
-  session, adds the owner, and mentions them. A prompt reaches a session
-  only from its active channel. The route is relay, machine key and channel;
-  the first prompt of a channel session fixes it, and the session must
-  retain the identity. A create whose outcome is unknown is never repeated;
-  the endpoint gives the create key's record its stable channel id. The
-  owner's `amq-remote channel reset` is the way to allow another.
-  Session end closes the route before the channel is archived.
-- **Route state.** An active route sends and receives only while its relay
-  state is sound. An archived or public channel, an owner who left, and a
-  change of machine owner suspends it with a reason. When the state shows
-  all required facts again, that record is usable again and turns ended in
-  suspension are not posted. AMQ never reverses the owner's changes on therelay.
+  session, adds the owner, and mentions them. A message reaches a session
+  only from that session's active channel, and only when the owner signed
+  it. The route is relay, machine key and channel, and the session the
+  channel names must still have the identity the channel was made for. A
+  create whose outcome is unknown is never repeated: the agent chooses the
+  channel id and records it before it signs the create, so it finds the
+  channel that the create may have made; the owner's `amq-remote channel
+  reset` is the only way to allow another. When a binding is gone or its
+  session ended, its channel stops taking messages before it is archived;
+  when the same session binds the name again, its channel is unarchived.
+- **Route state.** An active route sends and takes messages only while
+  the channel's relay-signed state is sound. A channel that is archived or
+  public, an owner who is not an admin of it, or a machine agent that is not
+  its owner suspends the route, with the reason. When the state shows every
+  required fact again, the route works again, and turns that ended while it
+  was suspended are not posted. AMQ never undoes the owner's change on the
+  relay.
 - **Name.** A binding's name belongs to its session identity: the clean
   root and handle for a mailbox, or the harness, root and working directory
   for a native session. The same session gets its name back, and its
   channel again unless the owner detached it. A different session never
-  takes another session's name.
+  takes that name, even after the first one ended: a removed binding leaves
+  a tombstone that keeps the name, and the new session gets the next free
+  `<name>-N`.
 - **Grant.** The owner's signed grant lets the agent key act as the owner's
-  Buzz agent for every event kind until the signed end date. The key lives
-  in `~/.amq/remote/machine/`; the owner's signing key never enters it.
-  Removing the agent's access on the relay ends it.
+  Buzz agent for every event kind until the signed end date. The key is in
+  `~/.amq/remote/machine/`. The owner's key stays in the `amq-owner-sign`
+  process in the owner's own terminal. A copied agent key and grant stay
+  valid until the end date; only removing the agent's access on the relay
+  ends them earlier.
 
 A link is the carrier to a server the user linked with `amq-remote link add`.
 The machine dials it (`wss://`, `ws://` only to loopback) and answers only
@@ -227,7 +236,6 @@ signature and, when it implements NIP-OA time bounds, the grant expiry; it
 does not enforce `kind=` conditions at admission, so per-kind limits are the
 endpoint's own restraint.
 
-The owner uses the Buzz app.
 
 ### Advanced relay
 
@@ -244,7 +252,10 @@ and its routing authority do not change.
 On the advanced relay, the companion holds one owned body key per shared
 session or host. The human owner attests the key with a NIP-OA `auth` tag
 signed from their own Buzz identity. Activity is published as NIP-AO kind 24200 observer frames.
-Activity is projected as NIP-AO kind 24200 observer frames.
+Assistant text is an `acp_read` frame whose payload is a genuine ACP
+`session/update` line, with projection provenance in that line's extension
+metadata. `session_resolved`, `turn_started`, and `turn_completed` use the
+Desktop lifecycle payloads. Buzz Desktop renders those kinds unchanged.
 Requests and results are a DM thread between the body and the owner;
 reactions carry typed commands. A pending approval is its own message in
 that thread: ✅ on it approves and ❌ rejects, and the message is edited with

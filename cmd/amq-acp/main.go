@@ -41,7 +41,6 @@ func run(args []string) int {
 		fmt.Println(version)
 		return 0
 	}
-
 	if len(args) > 0 && args[0] == "host" {
 		return runHost(args[1:])
 	}

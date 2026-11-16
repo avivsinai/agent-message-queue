@@ -850,7 +850,7 @@ first that applies:
   `AMQ Remote is making the channel; it appears in Buzz within a minute.`);
 - a standalone machine agent does not serve: `The machine agent runs inside
   amq-remote serve and is not running: <line>`, where the line is its status
-  line, else `run amq-remote up.`; a standalone agent never gets a different setup.
+  line, else `run amq-remote up.`;
 - the session is not proven live and has no channel: the machine agent makes
   a channel only for a session proven live, with the liveness evidence (JSON
   `unproven`);
@@ -863,7 +863,9 @@ first that applies:
 - the channel failed: the error, and that AMQ tries again in 10 minutes, or,
   after the third refusal, `amq-remote channel reset <name>`;
 - the session's own agent is offline and there is no machine agent: use the
-  [four one-time setup commands](#machine-agent).
+  [four one-time setup commands](#machine-agent);
+- there is no machine agent, or the machine agent is not running and is not
+  inside `amq-remote serve`: the [one-time setup](#machine-agent);
 
 A Codex thread is proven live while its app-server daemon has it loaded, as
 the machine agent judges it. When the thread runs Codex's automatic approvals
@@ -995,8 +997,8 @@ state directory:
   that prints nothing did not reach amq-remote (`probe` `closed`). A file
   that sets `disableAllHooks` is a note.
 - The machine agent: its marker is fresh and it records a relay key. When a
-  non-standalone agent is not running, doctor fails with its cause and the
-  [one-time setup](#machine-agent). A standalone machine agent reads its
+  doctor fails with its cause and the [one-time setup](#machine-agent).
+  For a machine agent inside `amq-remote serve`, doctor reads its
   enrolled key and status file, fails with the status line while `serve`
   does not run it or refuses it, fails when its relay has not been
   authenticated for more than a minute, and notes a grant that ends within

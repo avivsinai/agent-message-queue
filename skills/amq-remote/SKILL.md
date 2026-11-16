@@ -75,7 +75,6 @@ command's own message. Do not work around a refusal.
      next message."
    - The JSON has `machine_line`: show it as it is (it says the machine agent
      runs inside amq-remote serve and is not running, with the next step).
-
    - `machine` is `running` and `channel` is `active`: "Open the
      **<channel_name>** channel in Buzz." Nothing else is needed.
    - `machine_host` is `standalone`, `machine` is `running` and `channel` is
@@ -104,10 +103,11 @@ command's own message. Do not work around a refusal.
        1. Run `amq-remote machine request > request.txt`.
        2. The owner runs `amq-owner-sign --machine request.txt --out grant.json
           --relay <wss-url>` in their own terminal. Only the owner runs this
-          signing step.
+          signing step; never run it for them.
        3. Run `amq-remote machine enroll --grant grant.json`.
-       4. Run `amq-remote service install` to keep it running at login.
+       4. Run `amq-remote service install`; it starts the agent now and at each login.
      Every later session then gets its channel by itself.
+   - `machine` is `offline` or `idle`: "This machine's AMQ Remote agent is not running." Then the same one-time setup.
    If the JSON has `warning`, show it too. If it has `approval_reviewer`,
    say: "Buzz gets no Codex approvals: Codex's automatic reviewer answers
    them (approvals_reviewer = <approval_reviewer>)." It is the owner's
@@ -226,6 +226,7 @@ id: `amq-remote statusline --session <id>`.
 The machine agent's key is in `~/.amq/remote/machine/`. The owner's
 grant lets that key act as the owner's Buzz agent for every event kind
 until its signed end date. Removing the agent's access on the relay ends
-that access.
+that access. A copied key and grant stay valid until that date; only
+removing the agent's access on the relay ends them earlier.
 See the
 [amq-acp README](https://github.com/avivsinai/agent-message-queue/blob/main/cmd/amq-acp/README.md).
