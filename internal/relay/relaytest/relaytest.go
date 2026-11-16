@@ -40,8 +40,9 @@ type Relay struct {
 	// RejectKind, when non-zero, refuses events of this kind instead of
 	// storing them. Rejected counts their refused publishes.
 	RejectKind atomic.Uint64
-	// DropKind closes a connection after a publish of that event kind,
-	// before an OK or the event is stored, so the outcome is unknown.
+	// DropKind, when non-zero, closes a connection after the next publish of
+	// that event kind, before an OK or the event is stored, so the outcome is
+	// unknown.
 	DropKind atomic.Uint64
 	Rejected atomic.Int32
 	// BeforePublish, when set before the first connection, sees every
@@ -166,7 +167,7 @@ func (r *Relay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			if r.BeforePublish != nil {
 				r.BeforePublish(e.Event)
 			}
-			if r.DropKind.Load() == uint64(e.Kind) && r.DropKind.CompareAndSwap(uint64(e.Kind), 0) {
+			if drop := r.DropKind.Load(); drop != 0 && drop == uint64(e.Kind) && r.DropKind.CompareAndSwap(drop, 0) {
 				return
 			}
 			reason := ""
