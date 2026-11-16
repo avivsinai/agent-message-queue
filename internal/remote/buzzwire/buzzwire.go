@@ -32,8 +32,9 @@ const (
 	KindGroupMembers  nostr.Kind = 39002
 )
 
-// Publishable reports whether kind is in the set a machine agent publishes:
-// 9, 9000, 9002, 9007 and 40003. Any other kind is never sent.
+// Publishable reports whether kind is in the set a machine agent publishes
+// through its outbox: 9, 9000, 9002, 9007 and 40003. The only other kind it
+// sends is the typing pulse (Typing), which has no outbox record.
 func Publishable(kind nostr.Kind) bool {
 	switch kind {
 	case KindMessage, KindAddMember, KindEditMetadata, KindCreateChannel, KindEdit:
@@ -103,6 +104,20 @@ func SetArchived(channel string, archived bool, at time.Time) (nostr.Event, erro
 		value = "true"
 	}
 	return event(KindEditMetadata, nostr.Tags{{"h", channel}, {"archived", value}}, "", at), nil
+}
+
+// KindTyping is the ephemeral typing pulse. A relay does not store it, and
+// a Buzz client shows the author as working in the channel for a few
+// seconds after each one.
+const KindTyping nostr.Kind = 20002
+
+// Typing returns the typing pulse of channel: empty content and the h tag
+// alone, which a client shows in the channel's own timeline.
+func Typing(channel string, at time.Time) (nostr.Event, error) {
+	if err := checkChannel(channel); err != nil {
+		return nostr.Event{}, err
+	}
+	return event(KindTyping, nostr.Tags{{"h", channel}}, "", at), nil
 }
 
 // Message returns the kind 9 message in channel. A non-empty replyTo adds

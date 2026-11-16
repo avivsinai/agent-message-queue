@@ -2,6 +2,7 @@
 package relaytest
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -40,6 +41,9 @@ type Relay struct {
 	// before its stored events are sent, so a test can store an event
 	// between two reads.
 	BeforeReq func(filters []nostr.Filter)
+	// Self, when set before the first request, is the relay's own public
+	// key (hex) that its NIP-11 document names.
+	Self string
 
 	mu     sync.Mutex
 	stored []nostr.Event
@@ -85,6 +89,13 @@ func (r *Relay) store(evt nostr.Event) {
 }
 
 func (r *Relay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if r.Self != "" && req.Header.Get("Accept") == "application/nostr+json" {
+		w.Header().Set("Content-Type", "application/nostr+json")
+		_ = json.NewEncoder(w).Encode(struct {
+			Self string `json:"self"`
+		}{r.Self})
+		return
+	}
 	ws, err := websocket.Accept(w, req, nil)
 	if err != nil {
 		return

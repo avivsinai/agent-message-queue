@@ -520,6 +520,63 @@ func (t AuthTag) Satisfies(kind uint16, createdAt int64) error {
 	return nil
 }
 
+// MachineConditions is the conditions string of a machine grant: one
+// `created_at<notAfter` clause and no kind, so the grant covers every event
+// kind the body signs until notAfter.
+func MachineConditions(notAfter int64) string {
+	return fmt.Sprintf("created_at<%d", notAfter)
+}
+
+// Window checks a machine grant's conditions at createdAt. The conditions
+// must parse strictly, name no kind, and carry at least one `created_at<`
+// clause (a grant without an end is refused); every time clause must hold.
+func (t AuthTag) Window(createdAt int64) error {
+	conds, err := ParseConditions(t.Conditions)
+	if err != nil {
+		return err
+	}
+	sawEnd := false
+	for _, c := range conds {
+		switch {
+		case c.Kind != nil:
+			return errors.New("a machine grant names no kind")
+		case c.CreatedLt != nil:
+			sawEnd = true
+			if createdAt >= int64(*c.CreatedLt) {
+				return fmt.Errorf("created_at %d not < %d", createdAt, *c.CreatedLt)
+			}
+		case c.CreatedGt != nil:
+			if createdAt <= int64(*c.CreatedGt) {
+				return fmt.Errorf("created_at %d not > %d", createdAt, *c.CreatedGt)
+			}
+		}
+	}
+	if !sawEnd {
+		return errors.New("conditions carry no created_at< clause: a machine grant must end")
+	}
+	return nil
+}
+
+// NotAfter is the end of the tag's window: the smallest `created_at<` value,
+// an exclusive bound. It is an error when the conditions do not parse or
+// carry no `created_at<` clause.
+func (t AuthTag) NotAfter() (int64, error) {
+	conds, err := ParseConditions(t.Conditions)
+	if err != nil {
+		return 0, err
+	}
+	end, found := int64(0), false
+	for _, c := range conds {
+		if c.CreatedLt != nil && (!found || int64(*c.CreatedLt) < end) {
+			end, found = int64(*c.CreatedLt), true
+		}
+	}
+	if !found {
+		return 0, errors.New("conditions carry no created_at< clause")
+	}
+	return end, nil
+}
+
 // PreimageHex returns the lowercase hex of the SHA256 preimage digest for
 // this body pubkey and the given conditions string. This is what `share`
 // prints for the owner to sign offline.

@@ -959,8 +959,13 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 		emitJSON(stdout, map[string]any{"bindings": rows, "pruned": pruned, "helper": helper.State, "machine": machine.State, "legacy_agents": legacy})
 		return 0, nil
 	}
-	if machine.State != agentMissing {
-		say(stdout, "Machine agent: %s (%s)", nonEmpty(machine.Display, "AMQ Remote @ "+binding.Machine()), machine.State)
+	switch name := nonEmpty(machine.Display, "AMQ Remote @ "+binding.Machine()); {
+	case machine.standalone() && machine.serves():
+		say(stdout, "Machine agent: %s (running in amq-remote serve)", name)
+	case machine.standalone():
+		say(stdout, "Machine agent: %s (not running: %s)", name, strings.TrimSuffix(machine.notServingLine(), "."))
+	case machine.State != agentMissing:
+		say(stdout, "Machine agent: %s (%s)", name, machine.State)
 	}
 	// An offline helper is shown only without a machine agent: one deleted
 	// in Desktop never rewrites its marker, and the machine agent serves

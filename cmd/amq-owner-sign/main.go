@@ -1,11 +1,14 @@
-// Command amq-owner-sign is the owner's one step for a strict relay share.
-// The owner runs it in their own terminal. It reads the owner key from the
-// terminal without echo, signs every per-kind NIP-OA grant that one
-// `amq-remote share` output printed, writes one bundle file of public signed
-// tags, and publishes the owner's kind 30177 policy for the body.
+// Command amq-owner-sign is the owner's one step for a strict relay share or
+// for the machine agent. The owner runs it in their own terminal. It reads
+// the owner key from the terminal without echo. With --share it signs every
+// per-kind NIP-OA grant that one `amq-remote share` output printed and writes
+// one bundle file of public signed tags. With --machine it signs the one
+// grant that `amq-remote machine request` printed and writes one grant file.
+// Both modes then publish the owner's kind 30177 policy for the body.
 //
 // The key stays inside this process: it is never written, printed, or
-// passed to amq or amq-remote. The bundle holds only public tags.
+// passed to amq or amq-remote. The bundle and the grant hold only public
+// values.
 package main
 
 import (
@@ -32,27 +35,40 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
+	"github.com/avivsinai/agent-message-queue/internal/remote/machinecred"
 )
 
 var version = "dev"
 
 const usage = `Usage: amq-owner-sign --share FILE --out FILE --relay URL [--name NAME]
+       amq-owner-sign --machine FILE --out FILE --relay URL [--name NAME]
 
-Signs every grant in one saved ` + "`amq-remote share`" + ` output with the owner
-key, writes them as one bundle for ` + "`amq-remote share --bundle`" + `, and
-publishes the owner's kind 30177 policy for the body on the relay.
+With --share, signs every grant in one saved ` + "`amq-remote share`" + ` output
+with the owner key, writes them as one bundle for
+` + "`amq-remote share --bundle`" + `, and publishes the owner's kind 30177 policy
+for the body on the relay.
+
+With --machine, signs the one grant in a saved
+` + "`amq-remote machine request`" + ` output, writes it for
+` + "`amq-remote machine enroll --grant`" + `, and publishes the policy. The grant
+lets the agent key act as your Buzz agent for every event kind until the
+date it shows.
 
 It first shows the body and every grant it will sign, and asks you to type
 the first 8 characters of the body pubkey. Check the body pubkey against the
-share output before you confirm. Only then is the owner key (nsec1... or 64
-hex) read from the terminal without echo. It is never written or printed.
+share output or the request before you confirm. Only then is the owner key
+(nsec1... or 64 hex) read from the terminal without echo. It is never
+written or printed.
 
 Flags:
-  --share FILE   saved output of amq-remote share or share --renew (required)
-  --out FILE     bundle file to write, mode 0600 (required)
-  --relay URL    relay wss:// URL for the kind 30177 policy (required)
-  --name NAME    policy name shown in Buzz (default "AMQ session")
-  --version      print the version
+  --share FILE    saved output of amq-remote share or share --renew
+  --machine FILE  saved output of amq-remote machine request
+                  (exactly one of --share and --machine is required)
+  --out FILE      bundle or grant file to write, mode 0600 (required)
+  --relay URL     relay wss:// URL for the kind 30177 policy (required)
+  --name NAME     policy name shown in Buzz (default "AMQ session"; with
+                  --machine, the agent name in the request)
+  --version       print the version
 `
 
 func main() {
@@ -77,6 +93,7 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(io.Discard)
 	var o options
 	fs.StringVar(&o.share, "share", "", "")
+	fs.StringVar(&o.machine, "machine", "", "")
 	fs.StringVar(&o.out, "out", "", "")
 	fs.StringVar(&o.relay, "relay", "", "")
 	fs.StringVar(&o.name, "name", "AMQ session", "")
@@ -88,7 +105,12 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "amq-owner-sign: %v\n\n%s", err, usage)
 		return 2
 	}
-	if o.share == "" || o.out == "" || o.relay == "" || fs.NArg() != 0 {
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "name" {
+			o.nameSet = true
+		}
+	})
+	if (o.share == "") == (o.machine == "") || o.out == "" || o.relay == "" || fs.NArg() != 0 {
 		_, _ = fmt.Fprint(stderr, usage)
 		return 2
 	}
@@ -96,7 +118,11 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "amq-owner-sign: %v\n", err)
 		return 2
 	}
-	if err := run(o, confirmOnTerminal, readKeyFromTerminal(stderr), publishPolicy, stdout); err != nil {
+	confirm := confirmOnTerminal("share output")
+	if o.machine != "" {
+		confirm = confirmOnTerminal("request")
+	}
+	if err := run(o, confirm, readKeyFromTerminal(stderr), publishPolicy, stdout); err != nil {
 		_, _ = fmt.Fprintf(stderr, "amq-owner-sign: %v\n", err)
 		return 1
 	}
@@ -105,6 +131,12 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 
 type options struct {
 	share, out, relay, name string
+	// machine is the saved `amq-remote machine request` output; set
+	// instead of share.
+	machine string
+	// nameSet: --name was given, so machine mode does not take the
+	// request's agent name for the policy.
+	nameSet bool
 }
 
 // bundleTag is one signed grant, the shape `amq-remote share --bundle` reads.
@@ -125,10 +157,18 @@ type grant struct {
 // confirmPrefix is how many body pubkey characters the owner types to confirm.
 const confirmPrefix = 8
 
-// run shows what the share output asks the owner to sign and reads the key
-// only after confirm accepts. It signs, writes the bundle, then publishes the
-// policy, so a published policy always names a body whose bundle exists.
+// run shows what the share output or the machine request asks the owner to
+// sign and reads the key only after confirm accepts. It signs, writes the
+// file, then publishes the policy, so a published policy always names a body
+// whose signed file exists.
 func run(o options, confirm func(body string) (bool, error), readKey func() ([32]byte, error), publish func(ctx context.Context, url string, evt nostr.Event, sk [32]byte) error, stdout io.Writer) error {
+	if o.machine != "" {
+		p, err := machinePlan(o, stdout)
+		if err != nil {
+			return err
+		}
+		return signWriteAndPublish(p, o, confirm, readKey, publish, stdout)
+	}
 	raw, err := os.ReadFile(o.share)
 	if err != nil {
 		return err
@@ -140,7 +180,46 @@ func run(o options, confirm func(body string) (bool, error), readKey func() ([32
 	if err := printSummary(stdout, session, body, grants); err != nil {
 		return err
 	}
-	ok, err := confirm(body)
+	return signWriteAndPublish(signPlan{
+		body:       body,
+		policyName: o.name,
+		file:       "bundle",
+		sign: func(sk [32]byte) ([]byte, string, error) {
+			tags := make([]bundleTag, 0, len(grants))
+			for _, g := range grants {
+				tag, err := bodykey.SignAuthTag(sk, body, g.conditions)
+				if err != nil {
+					return nil, "", fmt.Errorf("kind %d: %w", g.kind, err)
+				}
+				tags = append(tags, bundleTag{Kind: g.kind, OwnerPubKey: tag.OwnerPubKey, Conditions: tag.Conditions, Sig: tag.SigHex()})
+			}
+			out, err := json.MarshalIndent(tags, "", "  ")
+			return out, tags[0].OwnerPubKey, err
+		},
+		wrote: fmt.Sprintf("wrote %d signed grants to", len(grants)),
+		next: func(abs string) string {
+			return fmt.Sprintf("amq-remote share --session %s --bundle %s --target <target> --relay %s", session, abs, o.relay)
+		},
+	}, o, confirm, readKey, publish, stdout)
+}
+
+// signPlan is what one mode signs: the body, the policy name, and how to
+// sign, name and follow up the file it writes.
+type signPlan struct {
+	body       string
+	policyName string
+	// file names the written file in the publish error: "bundle" or "grant".
+	file string
+	// sign returns the file content and the owner pubkey.
+	sign  func(sk [32]byte) ([]byte, string, error)
+	wrote string
+	next  func(abs string) string
+}
+
+// signWriteAndPublish is the sequence both modes share: confirm, read the
+// key, sign, write the file, then publish the policy.
+func signWriteAndPublish(p signPlan, o options, confirm func(body string) (bool, error), readKey func() ([32]byte, error), publish func(ctx context.Context, url string, evt nostr.Event, sk [32]byte) error, stdout io.Writer) error {
+	ok, err := confirm(p.body)
 	if err != nil {
 		return fmt.Errorf("confirm: %w", err)
 	}
@@ -153,24 +232,16 @@ func run(o options, confirm func(body string) (bool, error), readKey func() ([32
 	}
 	defer func() { sk = [32]byte{} }()
 
-	tags := make([]bundleTag, 0, len(grants))
-	for _, g := range grants {
-		tag, err := bodykey.SignAuthTag(sk, body, g.conditions)
-		if err != nil {
-			return fmt.Errorf("kind %d: %w", g.kind, err)
-		}
-		tags = append(tags, bundleTag{Kind: g.kind, OwnerPubKey: tag.OwnerPubKey, Conditions: tag.Conditions, Sig: tag.SigHex()})
+	out, owner, err := p.sign(sk)
+	if err != nil {
+		return err
 	}
-	_, _ = fmt.Fprintf(stdout, "owner pubkey: %s\n", tags[0].OwnerPubKey)
-	evt, err := policyEvent(sk, body, o.name)
+	_, _ = fmt.Fprintf(stdout, "owner pubkey: %s\n", owner)
+	evt, err := policyEvent(sk, p.body, p.policyName)
 	if err != nil {
 		return err
 	}
 
-	out, err := json.MarshalIndent(tags, "", "  ")
-	if err != nil {
-		return err
-	}
 	abs, err := filepath.Abs(o.out)
 	if err != nil {
 		return err
@@ -179,15 +250,62 @@ func run(o options, confirm func(body string) (bool, error), readKey func() ([32
 	if _, err := fsq.WriteFileAtomicFollowLinks(filepath.Dir(abs), filepath.Base(abs), out, 0o600); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(stdout, "wrote %d signed grants to %s\n", len(tags), abs)
+	_, _ = fmt.Fprintf(stdout, "%s %s\n", p.wrote, abs)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := publish(ctx, o.relay, evt, sk); err != nil {
-		return fmt.Errorf("the bundle is written to %s, but the kind 30177 policy was not published; run again with the same flags: %w", abs, err)
+		return fmt.Errorf("the %s is written to %s, but the kind 30177 policy was not published; run again with the same flags: %w", p.file, abs, err)
 	}
-	_, _ = fmt.Fprintf(stdout, "published kind 30177 policy %s\nnext: amq-remote share --session %s --bundle %s --target <target> --relay %s\n", evt.ID.Hex(), session, abs, o.relay)
+	_, _ = fmt.Fprintf(stdout, "published kind 30177 policy %s\nnext: %s\n", evt.ID.Hex(), p.next(abs))
 	return nil
+}
+
+// machinePlan reads a machine request, refuses a grant end that has passed
+// or is more than machinecred.MaxValidity away, and shows the owner what the
+// one grant allows.
+func machinePlan(o options, stdout io.Writer) (signPlan, error) {
+	raw, err := os.ReadFile(o.machine)
+	if err != nil {
+		return signPlan{}, err
+	}
+	name, body, conds, err := machinecred.ParseRequest(string(raw))
+	if err != nil {
+		return signPlan{}, fmt.Errorf("%s: %w", o.machine, err)
+	}
+	end, err := bodykey.AuthTag{Conditions: conds}.NotAfter()
+	if err != nil {
+		return signPlan{}, fmt.Errorf("%s: %w", o.machine, err)
+	}
+	until := time.Unix(end, 0).UTC().Format(time.RFC3339)
+	if end <= time.Now().Unix() {
+		return signPlan{}, fmt.Errorf("%s: the grant ends at %s, which has passed; run `amq-remote machine request` again", o.machine, until)
+	}
+	if end > time.Now().Add(machinecred.MaxValidity).Unix() {
+		return signPlan{}, fmt.Errorf("%s: the grant ends at %s, more than one year from now; run `amq-remote machine request` with a shorter --valid-for", o.machine, until)
+	}
+	policyName := o.name
+	if !o.nameSet {
+		policyName = name
+	}
+	_, _ = fmt.Fprintf(stdout, "You are about to sign one machine grant and publish a policy for this agent.\nagent:       %s\nbody pubkey: %s\nconditions:  %s\nThis lets the agent key act as your Buzz agent for EVERY event kind until %s.\n", name, body, conds, until)
+	return signPlan{
+		body:       body,
+		policyName: policyName,
+		file:       "grant",
+		sign: func(sk [32]byte) ([]byte, string, error) {
+			tag, err := bodykey.SignAuthTag(sk, body, conds)
+			if err != nil {
+				return nil, "", err
+			}
+			out, err := machinecred.EncodeGrant(body, o.relay, *tag)
+			return out, tag.OwnerPubKey, err
+		},
+		wrote: "wrote the machine grant to",
+		next: func(abs string) string {
+			return "amq-remote machine enroll --grant " + abs
+		},
+	}, nil
 }
 
 // printSummary shows the owner exactly what they are about to sign: the
@@ -211,15 +329,21 @@ func printSummary(w io.Writer, session, body string, grants []grant) error {
 }
 
 // confirmOnTerminal asks the owner, on the controlling terminal, to type the
-// first characters of the body pubkey. Any other answer, or no terminal,
-// declines.
-func confirmOnTerminal(body string) (bool, error) {
+// first characters of the body pubkey after checking it against source. Any
+// other answer, or no terminal, declines.
+func confirmOnTerminal(source string) func(body string) (bool, error) {
+	return func(body string) (bool, error) {
+		return confirmBody(source, body)
+	}
+}
+
+func confirmBody(source, body string) (bool, error) {
 	tty, err := os.Open("/dev/tty")
 	if err != nil {
 		return false, fmt.Errorf("a terminal is required to confirm: %w", err)
 	}
 	defer func() { _ = tty.Close() }()
-	_, _ = fmt.Fprintf(os.Stderr, "check the body pubkey against the share output, then type its first %d characters to sign: ", confirmPrefix)
+	_, _ = fmt.Fprintf(os.Stderr, "check the body pubkey against the %s, then type its first %d characters to sign: ", source, confirmPrefix)
 	line, err := bufio.NewReader(tty).ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
 		return false, err

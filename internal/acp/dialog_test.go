@@ -284,12 +284,12 @@ func TestFreeTextDialogTakesOnlyTheOwnersTypedAnswer(t *testing.T) {
 	}
 	other := signedBy(t, nostr.Generate(), "1", dm)
 	lr.Inject(other)
-	if _, a, ok := s.dialogReply(dm, other.ID.Hex(), buzzPrompt(dm, owner, "1")); ok {
+	if _, a, ok := s.dialogReplyOf(s.acpOwner(dm, other.ID.Hex(), buzzPrompt(dm, owner, "1"))); ok {
 		t.Fatalf("another signer answered: %+v", a)
 	}
 	answer := signedBy(t, ownerKey, "postgres\nyes", dm)
 	lr.Inject(answer)
-	_, a, ok := s.dialogReply(dm, answer.ID.Hex(), buzzPrompt(dm, owner, "postgres\nyes"))
+	_, a, ok := s.dialogReplyOf(s.acpOwner(dm, answer.ID.Hex(), buzzPrompt(dm, owner, "postgres\nyes")))
 	if !ok || a.Text != "postgres\nyes" {
 		t.Fatalf("owner answer = %+v, %v; want the two lines", a, ok)
 	}
@@ -355,7 +355,7 @@ func TestDialogAnswerIsTheVerifiedSignedEvent(t *testing.T) {
 				lr.Inject(evt)
 				id = evt.ID.Hex()
 			}
-			_, a, ok := s.dialogReply(dm, id, buzzPrompt(dm, owner, tc.body))
+			_, a, ok := s.dialogReplyOf(s.acpOwner(dm, id, buzzPrompt(dm, owner, tc.body)))
 			if ok != tc.wantOK || (ok && (a.Option == 2) != tc.wantDeny) {
 				t.Fatalf("dialogReply = %+v, %v; want ok=%v deny=%v", a, ok, tc.wantOK, tc.wantDeny)
 			}
@@ -392,7 +392,7 @@ func TestOwnerAnswerMustBeNewerThanItsDialogAndUnused(t *testing.T) {
 
 	used := signedBy(t, owner, "yes", dmChannel)
 	lr.Inject(used)
-	_, a, ok := s.dialogReply(dmChannel, used.ID.Hex(), buzzPrompt(dmChannel, s.id.Owner, "yes"))
+	_, a, ok := s.dialogReplyOf(s.acpOwner(dmChannel, used.ID.Hex(), buzzPrompt(dmChannel, s.id.Owner, "yes")))
 	if !ok {
 		t.Fatal("a fresh owner yes did not answer the only open dialog")
 	}
@@ -403,7 +403,7 @@ func TestOwnerAnswerMustBeNewerThanItsDialogAndUnused(t *testing.T) {
 		t.Fatal(err)
 	}
 	openPostedDialog(t, s, dir, "2")
-	if _, a, ok := s.dialogReply(dmChannel, used.ID.Hex(), buzzPrompt(dmChannel, s.id.Owner, "yes")); ok {
+	if _, a, ok := s.dialogReplyOf(s.acpOwner(dmChannel, used.ID.Hex(), buzzPrompt(dmChannel, s.id.Owner, "yes"))); ok {
 		t.Fatalf("the event that answered one dialog answered the next: %+v", a)
 	}
 }
@@ -429,7 +429,7 @@ func TestOwnerAnswerTargetsTheOneDialogItRepliesTo(t *testing.T) {
 			reqs := []dialog.Request{openPostedDialog(t, s, dir, "1"), openPostedDialog(t, s, dir, "2")}
 			evt := signedBy(t, owner, "yes", dmChannel, tc.tags...)
 			lr.Inject(evt)
-			_, a, ok := s.dialogReply(dmChannel, evt.ID.Hex(), buzzPrompt(dmChannel, s.id.Owner, "yes"))
+			_, a, ok := s.dialogReplyOf(s.acpOwner(dmChannel, evt.ID.Hex(), buzzPrompt(dmChannel, s.id.Owner, "yes")))
 			if tc.want == 0 && ok || tc.want != 0 && (!ok || a.ID != reqs[tc.want-1].ID) {
 				t.Fatalf("dialogReply = %+v, %v; want dialog %d", a, ok, tc.want)
 			}
@@ -458,7 +458,7 @@ func TestOldMirrorOnDoesNotUndoALaterOff(t *testing.T) {
 	if err := mirror.SetOff("alpha", true); err != nil {
 		t.Fatal(err)
 	}
-	if name, on, at, ok := s.mirrorSwitch(dmChannel, old.ID.Hex(), buzzPrompt(dmChannel, s.id.Owner, "mirror on")); ok {
+	if name, on, at, ok := s.mirrorSwitchOf(s.acpOwner(dmChannel, old.ID.Hex(), buzzPrompt(dmChannel, s.id.Owner, "mirror on"))); ok {
 		_, _ = s.answerMirrorSwitch("s", dmChannel, name, on, at, func(any) error { return nil })
 	}
 	if dir, err := mirror.DirFor("alpha"); err != nil || !mirror.Off(dir) {
@@ -524,7 +524,7 @@ func TestOldMirrorOnDoesNotUndoARecordlessOff(t *testing.T) {
 		t.Fatal(err)
 	}
 	lr.Inject(old)
-	if name, on, at, ok := s.mirrorSwitch(dmChannel, old.ID.Hex(), buzzPrompt(dmChannel, s.id.Owner, "mirror on")); ok {
+	if name, on, at, ok := s.mirrorSwitchOf(s.acpOwner(dmChannel, old.ID.Hex(), buzzPrompt(dmChannel, s.id.Owner, "mirror on"))); ok {
 		_, _ = s.answerMirrorSwitch("s", dmChannel, name, on, at, func(any) error { return nil })
 	}
 	if !mirror.Off(dir) {

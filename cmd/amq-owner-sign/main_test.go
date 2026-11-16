@@ -14,6 +14,7 @@ import (
 	"fiatjaf.com/nostr"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
+	"github.com/avivsinai/agent-message-queue/internal/remote/machinecred"
 )
 
 // 611.30: one run shows the body and grants, reads the key only after the
@@ -95,6 +96,59 @@ func TestSignsShareOutputIntoOneBundle(t *testing.T) {
 		}
 	}
 	if published.Kind != 30177 || published.Tags.GetD() != body.PublicKeyHex() || published.PubKey.Hex() != ownerHex || !published.VerifySignature() {
+		t.Fatalf("policy event = %+v", published)
+	}
+}
+
+// Machine mode signs the one grant a `machine request` printed: the written
+// grant verifies against the agent key and carries the request's conditions,
+// and the policy names the agent.
+func TestSignsMachineRequestIntoOneGrant(t *testing.T) {
+	dir := t.TempDir()
+	body, err := machinecred.Mint(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	notAfter := time.Now().Add(90 * 24 * time.Hour).Unix()
+	reqPath := filepath.Join(dir, "request.txt")
+	if err := os.WriteFile(reqPath, []byte(machinecred.Request(body, "AMQ Remote @ host", notAfter)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var owner [32]byte
+	owner[31] = 7
+	readKey := func() ([32]byte, error) { return owner, nil }
+	confirmed := ""
+	accept := func(b string) (bool, error) { confirmed = b; return true, nil }
+	var published nostr.Event
+	publish := func(_ context.Context, _ string, evt nostr.Event, _ [32]byte) error { published = evt; return nil }
+	grantPath := filepath.Join(dir, "grant.json")
+	o := options{machine: reqPath, out: grantPath, relay: "wss://relay.example", name: "AMQ session"}
+
+	var stdout bytes.Buffer
+	if err := run(o, accept, readKey, publish, &stdout); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("stdout:\n%s", stdout.String())
+	if confirmed != body {
+		t.Fatalf("confirmed %q, want the body %s", confirmed, body)
+	}
+
+	raw, err := os.ReadFile(grantPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var g machinecred.Grant
+	if err := json.Unmarshal(raw, &g); err != nil {
+		t.Fatal(err)
+	}
+	tag := bodykey.AuthTag{OwnerPubKey: g.OwnerPubKey, Conditions: g.Conditions}
+	if err := tag.SetSigHex(g.Sig); err != nil {
+		t.Fatal(err)
+	}
+	if g.Relay != "wss://relay.example" || g.BodyPubKey != body || g.Conditions != bodykey.MachineConditions(notAfter) || g.OwnerPubKey != nostr.GetPublicKey(owner).Hex() || tag.Verify(body) != nil {
+		t.Fatalf("grant = %s does not verify for the body with the request's conditions", raw)
+	}
+	if published.Kind != 30177 || published.Tags.GetD() != body || !bytes.Contains([]byte(published.Content), []byte(`"name":"AMQ Remote @ host"`)) {
 		t.Fatalf("policy event = %+v", published)
 	}
 }

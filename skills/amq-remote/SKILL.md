@@ -64,15 +64,24 @@ command's own message. Do not work around a refusal.
    machine agent, and, when the machine agent serves the session, `channel`,
    `channel_name`, and `channel_error` and `channel_retry` when the channel
    is uncertain or failed, and `approval_reviewer` when a Codex thread runs
-   Codex's automatic approvals reviewer. Attach already waited up to 15 s
+   Codex's automatic approvals reviewer. A machine agent that runs inside
+   `amq-remote serve` instead of Buzz Desktop adds `machine_host`
+   (`standalone`), `machine_refusal` while serve refuses it, and
+   `machine_line` while it does not serve. Attach already waited up to 15 s
    for the channel.
    Say "Connected: <label>." and then exactly one of, the first that applies:
    - `agent` is `running`: "DM **<agent_name>** in Buzz." Nothing else is
      needed.
    - `agent` is `idle`: "DM **<agent_name>** in Buzz; Buzz starts it on the
      next message."
+   - The JSON has `machine_line`: show it as it is (it says the machine agent
+     runs inside amq-remote serve and is not running, with the next step).
+     Never give a Buzz Desktop step when `machine_host` is `standalone`.
    - `machine` is `running` and `channel` is `active`: "Open the
      **<channel_name>** channel in Buzz." Nothing else is needed.
+   - `machine_host` is `standalone`, `machine` is `running` and `channel` is
+     `creating`: "AMQ Remote is making the channel; it appears in Buzz within
+     a minute."
    - `machine` is `running` and `channel` is `creating`: "Buzz is making the
      channel; it appears within a minute."
    - `machine` is not `missing` and the JSON has `unproven`: "The machine
@@ -91,11 +100,21 @@ command's own message. Do not work around a refusal.
    - `agent` is `offline` and `machine` is `missing`: "DM **<agent_name>**
      first; if it does not answer within a minute, start it in Buzz Desktop
      (Agents, the agent, Start)."
-   - `machine` is `missing`: this machine's one-time setup. Run
-     `amq-acp setup --machine --out "$HOME/Downloads/AMQ Remote machine.agent.json"`
-     once, and show its printed steps as they are (Buzz Desktop: Agents,
-     then + then Import, pick that file, then Start, and turn on
-     Auto-start). Every later session then gets its channel by itself.
+   - `machine` is `missing`: this machine's one-time setup (no machine key
+     is enrolled). Offer the two setups, one sentence each, and do the one
+     the user picks:
+     - Buzz Desktop: run
+       `amq-acp setup --machine --out "$HOME/Downloads/AMQ Remote machine.agent.json"`
+       once, and show its printed steps as they are (Buzz Desktop: Agents,
+       then + then Import, pick that file, then Start, and turn on
+       Auto-start).
+     - No Buzz Desktop: run `amq-remote machine request > request.txt`; the
+       owner runs `amq-owner-sign --machine request.txt --out grant.json
+       --relay <wss-url>` in their own terminal (only the owner runs this
+       step; never run it for them); then run
+       `amq-remote machine enroll --grant grant.json`, and `amq-remote up`
+       runs the agent.
+     Every later session then gets its channel by itself.
    - `machine` is `offline` or `idle`: "Start **<machine_name>** in Buzz
      Desktop (Agents, the agent, Start); it then makes this session's
      channel."
@@ -219,5 +238,9 @@ id: `amq-remote statusline --session <id>`.
 The Buzz agent's identity belongs to Buzz Desktop. Its grant has no kind limit
 and no expiry. Archiving the agent does not invalidate a copied key and
 grant; only removing the agent's relay access does that. Buzz "owner only"
-also admits the owner's other agents. See the
+also admits the owner's other agents. A standalone machine agent's key lives
+in `~/.amq/remote/machine/`; its grant has no kind limit and ends at the date
+the owner signed (see
+[Machine agent without Buzz Desktop](https://github.com/avivsinai/agent-message-queue/blob/main/cmd/amq-remote/README.md#machine-agent-without-buzz-desktop)).
+See the
 [amq-acp README](https://github.com/avivsinai/agent-message-queue/blob/main/cmd/amq-acp/README.md).

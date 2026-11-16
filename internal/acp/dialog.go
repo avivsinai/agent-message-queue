@@ -661,7 +661,8 @@ func reactionOption(req dialog.Request, rs []buzzop.Reaction, owner string) int 
 // postDialog claims req's post record, posts it and records the message. A
 // post proved not sent drops the claim so the next tick posts again; any
 // other failure leaves the outcome unknown, and the dialog is not posted
-// again.
+// again. An unknown post that names its event (the direct transport, which
+// replays it) keeps that event, so it is still read and edited.
 func (s *Server) postDialog(path string, t dialogTarget, req dialog.Request) {
 	label := t.label
 	if label == "" {
@@ -681,7 +682,7 @@ func (s *Server) postDialog(path string, t dialogTarget, req dialog.Request) {
 		_ = os.Remove(path)
 		return
 	}
-	if r.Outcome != buzzop.Accepted || r.EventID == "" {
+	if r.EventID == "" || (r.Outcome != buzzop.Accepted && r.Outcome != buzzop.Unknown) {
 		return
 	}
 	p.Event = r.EventID
@@ -746,7 +747,8 @@ func (s *Server) dialogEditBackOff(id string, now time.Time) {
 // DialogPosted reports whether the Buzz agent of binding name posted dialog
 // id and knows the posted message, so the owner can answer it in Buzz. It is
 // false while the dialog is unposted, while its post is in flight, and when
-// the post's outcome is unknown.
+// the post's outcome is unknown with no event named. An unknown post on the
+// direct transport names its event, which is replayed, so it counts.
 func DialogPosted(name, id string) bool {
 	stateDir, err := BindingStateDir()
 	if err != nil {
@@ -884,15 +886,100 @@ func (s *Server) dialogLead() bool {
 	return true
 }
 
-// dialogReply returns the answer that the owner's Buzz message in channel
-// gives to an open dialog posted there, and the dialog's directory. The
-// prompt text only selects a message that looks like an answer; the answer
-// itself is the verified owner event (ownerEvent): its content is the answer
-// and its e tags are its thread. A thread reply to a dialog's post answers
-// that dialog; any other message answers only when exactly one dialog is
-// open in channel. With no verified event the dialogs stay pending and the
-// channel is told why, once per open set.
-func (s *Server) dialogReply(channel, eventID, prompt string) (string, dialog.Answer, bool) {
+// ownerMsg is one message in a Buzz channel that may be an owner decision.
+// words is the text it shows the owner typed, with leading mentions
+// dropped; it only selects which messages are verified. verified returns
+// the owner's signed event that a decision reads, or why there is none.
+type ownerMsg struct {
+	channel, words string
+	verified       func() (nostr.Event, error)
+}
+
+// acpOwner is the owner message of an ACP prompt or steer: its words are
+// ownerWords of the prompt, and its event is fetched from the relay
+// (ownerEvent).
+func (s *Server) acpOwner(channel, eventID, prompt string) ownerMsg {
+	return ownerMsg{channel: channel, words: ownerWords(prompt), verified: func() (nostr.Event, error) {
+		return ownerEvent(s.id.Owner, eventID, prompt, channel)
+	}}
+}
+
+// The kinds of owner decision, as a claim records them.
+const (
+	decidedMirror  = "mirror"
+	decidedCommand = "command"
+	decidedDialog  = "dialog"
+)
+
+// decision is an owner message taken as a decision: a mirror switch, a
+// slash command, or a dialog answer. kind says which fields are set.
+type decision struct {
+	kind string
+	// A mirror switch of binding name, signed at at.
+	name string
+	on   bool
+	at   time.Time
+	// A slash command.
+	cmd ownerCommand
+	// An answer to a dialog in dir.
+	dir    string
+	answer dialog.Answer
+}
+
+// decideOwner reads m as a mirror switch, then a slash command, then a
+// dialog answer, and returns the first that applies. ok is false when m
+// is none of them: it is a message for the session.
+func (s *Server) decideOwner(m ownerMsg) (d decision, ok bool) {
+	if name, on, at, ok := s.mirrorSwitchOf(m); ok {
+		return decision{kind: decidedMirror, name: name, on: on, at: at}, true
+	}
+	// The owner's slash command is typed into the terminal; while a dialog
+	// is open it waits, so it is never taken as an answer.
+	if cmd, ok := s.ownerCommandOf(m); ok {
+		return decision{kind: decidedCommand, cmd: cmd}, true
+	}
+	if dir, answer, ok := s.dialogReplyOf(m); ok {
+		return decision{kind: decidedDialog, dir: dir, answer: answer}, true
+	}
+	return decision{}, false
+}
+
+// act carries out d in channel and returns the owner's acknowledgement;
+// err is set only when a dialog answer could not be recorded.
+func (s *Server) act(channel string, d decision) (string, error) {
+	switch d.kind {
+	case decidedMirror:
+		return setMirror(d.name, d.on, d.at), nil
+	case decidedCommand:
+		return s.commandReply(channel, d.cmd), nil
+	}
+	return writeAnswer(d.dir, d.answer)
+}
+
+// writeAnswer records a dialog answer and returns the owner's
+// acknowledgement: "Answered.", "Already answered." when another answer
+// won, or why it could not be recorded, with the error.
+func writeAnswer(dir string, a dialog.Answer) (string, error) {
+	won, err := dialog.WriteAnswer(dir, a)
+	switch {
+	case err != nil:
+		return "The answer could not be recorded: " + err.Error(), err
+	case !won:
+		return "Already answered.", nil
+	}
+	return "Answered.", nil
+}
+
+// dialogReplyOf returns the answer that the owner's Buzz message m gives
+// to an open dialog posted in its channel, and the dialog's directory. The
+// words only select a message that looks like an answer; the answer itself
+// is the verified owner event: its content is the answer and its e tags
+// are its thread. A thread reply to a dialog's post answers that dialog;
+// any other message answers only when exactly one dialog is open in the
+// channel. With no verified event the dialogs stay pending and the channel
+// is told why, once per open set.
+func (s *Server) dialogReplyOf(m ownerMsg) (string, dialog.Answer, bool) {
+	channel := m.channel
 	if channel == "" || s.id.Owner == "" {
 		return "", dialog.Answer{}, false
 	}
@@ -925,12 +1012,12 @@ func (s *Server) dialogReply(channel, eventID, prompt string) (string, dialog.An
 		open, openIDs, posted[req.ID] = append(open, req), append(openIDs, req.ID), p.Event
 	}
 	if len(open) == 0 || !slices.ContainsFunc(open, func(req dialog.Request) bool {
-		_, ok := dialog.ParseAnswer(req, ownerWords(prompt))
+		_, ok := dialog.ParseAnswer(req, m.words)
 		return ok
 	}) {
 		return "", dialog.Answer{}, false
 	}
-	evt, err := ownerEvent(s.id.Owner, eventID, prompt, channel)
+	evt, err := m.verified()
 	if err != nil {
 		s.tellUnverified(channel, "dialog:"+strings.Join(openIDs, ","), "Your reply was not taken as an answer", err)
 		return "", dialog.Answer{}, false
@@ -970,8 +1057,10 @@ func answerTarget(dir string, evt nostr.Event, open []dialog.Request, posted map
 }
 
 // ownerSkew bounds how far the clock that dates an owner's signed message
-// may be from this machine's.
+// may be from this machine's. OwnerSkew is the same bound for a frontend
+// that checks an owner message before Owner.
 const ownerSkew = 60 * time.Second
+const OwnerSkew = ownerSkew
 
 // signedWithin is the time rule of every owner decision: evt was signed no
 // earlier than floor and at most ownerSkew after now. A replayed message is
@@ -985,14 +1074,7 @@ func signedWithin(evt nostr.Event, floor, now time.Time) bool {
 // answerDialog writes a typed answer, tells the owner it was taken, and ends
 // the prompt without delivering it to the session.
 func (s *Server) answerDialog(sessionID, channel, dir string, a dialog.Answer, emit func(any) error) (any, *rpcError) {
-	text := "Answered."
-	won, err := dialog.WriteAnswer(dir, a)
-	switch {
-	case err != nil:
-		text = "The answer could not be recorded: " + err.Error()
-	case !won:
-		text = "Already answered."
-	}
+	text, _ := writeAnswer(dir, a)
 	meta := remoteMeta{State: "answered", Posted: s.publish(channel, text)}
 	if err := emitText(emit, sessionID, "agent_message_chunk", text); err != nil {
 		return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)

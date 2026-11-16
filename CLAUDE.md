@@ -112,7 +112,7 @@ cmd/amq-keepalive/            macOS wake supervisor companion
 cmd/amq-bridge/               Cross-host courier companion (apply-file + HTTPS, not Core)
 cmd/amq-acp/                  Preview ACP v2 stdio companion (not Core)
 cmd/amq-remote/               Remote-session companion (not Core)
-cmd/amq-owner-sign/           Owner signer for a strict relay share; the key stays in its process
+cmd/amq-owner-sign/           Owner signer for a relay share or the machine grant; the key stays in its process
 cmd/amq-board/                Read-only fleet board companion (not Core)
 internal/acp/                 ACP v2 sessions, steering, and prompt delivery
 internal/agentidentity/       Identity record an agent leaves in its mailbox

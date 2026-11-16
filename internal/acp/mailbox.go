@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"fiatjaf.com/nostr"
+
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -86,8 +88,12 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 	r := &remoteTurn{s: s, sessionID: sessionID, eventID: eventID, nostrID: nostrID, emit: emit, turn: turn, meta: remoteMeta{Target: b.Handle}}
 	// The relay round trip runs once per turn, before the cancel and budget
 	// checks and the publish lock, so nothing slow runs between the last
-	// check and the publish.
-	if nostrID != "" {
+	// check and the publish. A standalone turn already holds its verified
+	// event.
+	switch {
+	case turn.event != nil:
+		r.signed = eventContext(*turn.event)
+	case nostrID != "":
 		r.signed = signedEventContext(nostrID, turn.channel)
 	}
 	s.mu.Lock()
@@ -652,12 +658,19 @@ func publishOnce(b binding.Binding, threadID, id, nostrID string, signed map[str
 // logged and gives nil: the prompt is then delivered unverified, never held.
 func signedEventContext(eventID, channel string) map[string]any {
 	evt, err := buzzevent.Fetch(context.Background(), buzzRelay, eventID, channel)
-	var raw []byte
-	if err == nil {
-		raw, err = evt.MarshalJSON()
-	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "amq-acp: event %s is delivered without its signed event: %v\n", eventID, err)
+		return nil
+	}
+	return eventContext(evt)
+}
+
+// eventContext is the header context {"buzz": {"event": <evt>}} of a
+// verified event, or nil, logged, when it does not encode.
+func eventContext(evt nostr.Event) map[string]any {
+	raw, err := evt.MarshalJSON()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "amq-acp: event %s is delivered without its signed event: %v\n", evt.ID.Hex(), err)
 		return nil
 	}
 	return map[string]any{"buzz": map[string]any{"event": json.RawMessage(raw)}}

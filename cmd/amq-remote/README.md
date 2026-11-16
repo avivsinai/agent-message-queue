@@ -51,6 +51,8 @@ amq-remote cancel REQUEST_REF
 amq-remote requests
 amq-remote requests release REQUEST_REF [--yes]
 amq-remote share --session ID
+amq-remote machine request [--valid-for DURATION] [--name NAME] [--agent PUBKEY]
+amq-remote machine enroll --grant FILE
 amq-remote attach --self [--native | --link NAME]
 amq-remote detach --self | --name NAME | --all
 amq-remote bindings
@@ -89,6 +91,17 @@ the endpoint has no record yet. `requests` does not use that socket: it reads
 the local request store and the sender spool directly, including while the
 endpoint is down.
 `share` mints or enrolls a session body key and does not start the endpoint.
+`machine request` makes the machine agent's key under
+`~/.amq/remote/machine/<agent pubkey>/`, or reuses the one key there (pass
+`--agent` when there is more than one), and prints a grant request for
+`amq-owner-sign --machine FILE --out FILE --relay URL`, which the owner runs in
+their own terminal. `--valid-for` is 1h to 8760h (one year); the default is 2160h (90 days).
+`machine enroll --grant FILE` checks the signed grant against the agent key
+and stores it with the relay URL the owner named when signing; it prints the
+agent key, the owner key, the relay and the end date. The
+grant lets the agent key act as the owner's Buzz agent for every event kind,
+and it ends at the printed date. See [Machine agent without Buzz
+Desktop](#machine-agent-without-buzz-desktop).
 `version` prints `amq-remote <version>`. The `claude` commands install and
 remove the Claude Code hooks (see [Claude Code](#claude-code)); the usage
 banner does not list them.
@@ -411,6 +424,66 @@ connection reference](../../docs/amq-remote-relay.md#owner-dm-surface).
 Privacy: Buzz DM content is not end-to-end encrypted. The relay operator can
 read the prompts and the result rows. Do not share a session whose prompts or
 results the relay operator must not see.
+
+## Machine agent without Buzz Desktop
+
+The machine agent "AMQ Remote @ <machine>" can run inside `amq-remote serve`
+instead of Buzz Desktop. It is then a standalone agent: it has its own key on
+this machine and connects to the relay itself, so the owner needs only the
+Buzz phone app. For each session that attaches, it does what the Buzz Desktop
+machine agent does: it makes a private channel, adds the owner as an admin
+and mentions them, and posts the session's approval dialogs and its mirror
+there. An owner's message in the channel reaches the session, and until the
+session's answer is posted the channel shows the agent as working (a Buzz
+typing pulse every 3 seconds, for at most 30 minutes).
+
+Set it up once per machine:
+
+1. `amq-remote machine request > request.txt` makes the agent key and
+   prints the grant request.
+2. The owner runs `amq-owner-sign --machine request.txt --out grant.json
+   --relay URL` in their own terminal. The owner key never reaches
+   `amq-remote`.
+3. `amq-remote machine enroll --grant grant.json` stores the grant.
+
+`amq-remote up`, or the login service that `amq-remote service install`
+writes (see [Restart after a reboot](#restart-after-a-reboot)), then runs the
+agent: every `serve` follows the enrolled key while it runs and starts the
+agent when exactly one key with a valid grant is enrolled. When several
+`serve` processes run, one runs the agent and another takes over when it
+stops.
+
+The grant lets the agent key act as the owner's Buzz agent for every event
+kind until the date that `machine request --valid-for` asks for: 90 days by
+default, at most one year. To renew, run `amq-remote machine request` again
+(it reuses the key), have the owner sign it, and run `amq-remote machine
+enroll --grant FILE`. A running `serve` adopts a renewed grant for the same
+key, relay and owner with no restart.
+
+One machine agent serves a machine. While a Buzz Desktop machine agent runs
+or is idle here, `serve` refuses with `Buzz Desktop's machine agent <name>
+runs on this Mac; stop it in Buzz Desktop (Agents, <name>, Stop).`, and it
+starts the standalone agent by itself once that agent no longer runs. Two
+enrolled keys are refused too; remove the directory of the one you do not
+use.
+
+`serve` writes what the agent does to
+`~/.amq/remote/machine/<agent pubkey>/status.json`: `state` (`serving`,
+`waiting` or `refused`), the refusal `code` and its `line`, which ends with
+the next step, `relay_url`, `relay_state`, `relay_error`, `grant_not_after`,
+`not_authenticated_since` (present while the relay connection is not
+authenticated), `pid` and `updated` (when the file was last written). It is a snapshot that
+`attach`, `bindings` and `doctor` read, not a setting. The codes are
+`identity_ambiguous`, `no_authority`, `authority_expired`,
+`relay_self_unknown`, `relay_self_changed`, `auth_refused` and
+`other_machine_agent`.
+
+Limits:
+
+- An image in an owner's message is not downloaded: the session gets an
+  `[image not attached: ...]` line for it.
+- A channel the owner archives is not unarchived: when that session attaches
+  again, it gets a new channel.
 
 ## Link
 
@@ -763,7 +836,12 @@ first that applies:
 - the machine agent runs and the channel is active: open that channel in
   Buzz;
 - the machine agent runs and the channel is being made: it appears within a
-  minute;
+  minute (for a [standalone](#machine-agent-without-buzz-desktop) agent:
+  `AMQ Remote is making the channel; it appears in Buzz within a minute.`);
+- a standalone machine agent does not serve: `The machine agent runs inside
+  amq-remote serve and is not running: <line>`, where the line is its status
+  line, else `run amq-remote up.`; a standalone agent never gets a Buzz
+  Desktop step;
 - the session is not proven live and has no channel: the machine agent makes
   a channel only for a session proven live, with the liveness evidence (JSON
   `unproven`);
@@ -797,7 +875,10 @@ an agent, and `machine_name` whenever there is a machine agent. When the
 machine agent serves the session, it also reports `channel` (`active`,
 `creating`, `uncertain` or `failed`), `channel_name`, and, when uncertain or
 failed, `channel_error` and `channel_retry` (AMQ creates again by itself).
-For a Claude session it reports `approval_hook`, the AMQ approval hook in
+For a standalone machine agent it reports `machine_host` (`standalone`),
+`machine_refusal` (the status code while `serve` refuses it) and, while it
+does not serve, `machine_line` (the line above). An enrolled machine key with
+no marker yet reads `machine` `offline`. For a Claude session it reports `approval_hook`, the AMQ approval hook in
 the session's own settings file: `ok`, `missing`, `stale` (not the form the
 installer writes now), `disabled` (the file sets `disableAllHooks`) or
 `unreadable`. The binding records the session's Claude `config_dir`, so
@@ -814,7 +895,9 @@ Buzz.
 `amq-remote bindings` (`/amq-remote status`) prunes the sessions proven
 ended, then lists the machine agent and each binding with its label, `live`
 or `unknown`, its agent's state, its name and its channel, with `amq-remote
-detach --name <name>` for the unknown ones. It names, once, each per-session
+detach --name <name>` for the unknown ones. A standalone machine agent is
+listed as `Machine agent: <name> (running in amq-remote serve)`, or `(not
+running: <line>)` with its status line. It names, once, each per-session
 Buzz agent whose binding is removed, in one line: "Delete these in Buzz
 Desktop (Agents, the agent, Delete): ...". Archiving does not remove an agent
 from Desktop's list. The text output records them as named; `--json` lists
@@ -907,7 +990,14 @@ state directory:
   that sets `disableAllHooks` is a note.
 - The machine agent: its marker is fresh, it records a relay key, and Buzz
   Desktop starts it when it opens (`start_on_app_launch` in Buzz Desktop's
-  `agents/managed-agents.json`; when that file cannot be read, a note).
+  `agents/managed-agents.json`; when that file cannot be read, a note). A
+  standalone machine agent has no Buzz Desktop check: doctor reads its
+  enrolled key and status file, fails with the status line while `serve`
+  does not run it or refuses it, fails when its relay has not been
+  authenticated for more than a minute, and notes a grant that ends within
+  14 days, with the renew commands. Its `machine_agent` row adds `host`,
+  `agent` and `owner` (the first 8 characters of each key), `relay`,
+  `relay_state`, `grant_end` and `refusal`.
 - The channel of each binding the machine agent serves is `active`.
 - Each mailbox binding: its handle is registered, and `amq wake check`
   reports a live wake on the current image.
@@ -956,7 +1046,8 @@ step is idempotent: a second run changes nothing.
   installed binary unless it is the versioned target of the stable path it
   would write. The hooks run the `amq-remote` and `amq` on PATH when those
   are the installed binaries, so an upgrade keeps them working.
-- While this machine has no machine agent, it writes the import file
+- While this machine has no machine agent and no enrolled machine key, it
+  writes the import file
   `~/Downloads/AMQ Remote machine.agent.json` with `amq-acp setup --machine`
   (which also writes the AMQ Remote harness that file names). Then in Buzz
   Desktop: Agents, +, Import that file, Start, and turn on Auto-start.
@@ -971,7 +1062,7 @@ agent list.
 | Link | Fails when |
 | --- | --- |
 | `hooks` | A settings file lacks the approval hook or the wake dialog guard, holds one in a stale form, cannot be read, or its approval command does not reach amq-remote. It also fails without the Stop hook when a native binding or an endpoint manifest entry exists; on a mailbox-only machine that is a note. The subject is the settings file; the remedy names its `CLAUDE_CONFIG_DIR`. |
-| `machine_agent` | The machine agent is not running, records no relay key, or Buzz Desktop does not start it on launch. |
+| `machine_agent` | The machine agent is not running, records no relay key, or Buzz Desktop does not start it on launch; a standalone agent does not serve, or its relay has not been authenticated for more than a minute. |
 | `channel` | A binding's channel is `uncertain` or `failed`. |
 | `mailbox` | A mailbox binding's handle is unregistered, or its wake is not live or runs another image. |
 | `stale_harness` | A running amq-acp runs an executable that an upgrade deleted. |
