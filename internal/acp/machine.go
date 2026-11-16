@@ -24,11 +24,10 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 )
 
-// The machine agent ("AMQ Remote machine" in its system prompt) is one Buzz
-// agent per machine that serves every session. The worker that leads its
-// identity makes a private channel for each live named session that has no
-// running or idle agent of its own, adds the owner as an admin and welcomes
-// them with a mention. A prompt reaches a session only from that session's
+// The machine agent is one Buzz agent per machine that serves every
+// session. The worker that leads its identity makes a private channel for
+// each live named session, adds the owner as an admin and welcomes them
+// with a mention. A prompt reaches a session only from that session's
 // channel (machineBinding). The records live under
 // <state>/channels/<relay key>/<machine pubkey>/:
 //   - <name>.json, the record of the binding called name;
@@ -396,8 +395,7 @@ func recordDue(r channelRecord, uncertain time.Duration, now time.Time) (at time
 
 // awaitsThread reports whether b is a Codex app-server session that may
 // become live with no change on disk: its thread is not judged loaded or
-// ended yet, no record of this agent serves it, and it has no agent of its
-// own that runs or is idle.
+// ended yet, and no record of this agent serves it.
 func (s *Server) awaitsThread(b binding.Binding) bool {
 	if b.AppServer.Thread == "" || binding.ValidName(b.Name) != nil {
 		return false
@@ -407,11 +405,6 @@ func (s *Server) awaitsThread(b binding.Binding) bool {
 	}
 	if r, ok := s.snapshot().slot(b.Name); ok && r.State == channelActive {
 		return false
-	}
-	for _, m := range s.agentMarkers(b.Name) {
-		if state := m.state(time.Now()); state == AgentRunning || state == AgentIdle {
-			return false
-		}
 	}
 	return true
 }
@@ -524,23 +517,13 @@ func (s *Server) liveness(b binding.Binding) (binding.State, string) {
 }
 
 // provisionable reports whether the machine agent serves b: a named binding
-// whose session is proven live and that has no agent of its own that runs
-// or is idle. An offline marker, or one without an identity that is stale,
-// is what a deleted Desktop agent leaves, so it does not keep the channel
-// away.
+// whose session is proven live.
 func (s *Server) provisionable(b binding.Binding) bool {
 	if b.Name == binding.LegacyName || binding.ValidName(b.Name) != nil {
 		return false
 	}
-	if state, _ := s.liveness(b); state != binding.Live {
-		return false
-	}
-	for _, m := range s.agentMarkers(b.Name) {
-		if state := m.state(time.Now()); state == AgentRunning || state == AgentIdle {
-			return false
-		}
-	}
-	return true
+	state, _ := s.liveness(b)
+	return state == binding.Live
 }
 
 // provision moves b's record one or more steps toward active. A record that

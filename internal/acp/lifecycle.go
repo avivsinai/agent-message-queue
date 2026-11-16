@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/launch"
@@ -91,10 +90,6 @@ func AgentState(updated string, worker, parent launch.HolderIdentity, now time.T
 	return AgentOffline
 }
 
-func (m agentMarker) state(now time.Time) string {
-	return AgentState(m.Updated, m.Worker, m.Parent, now)
-}
-
 // workerIdentity is this worker process and its parent, set at start
 // (NewStandalone) and recorded in every marker it writes.
 var workerIdentity struct{ self, parent launch.HolderIdentity }
@@ -121,21 +116,6 @@ func readAgentMarker(path string) (agentMarker, bool) {
 		return agentMarker{}, false
 	}
 	return m, true
-}
-
-// agentMarkers returns the record of every identity pinned to pin.
-func (s *Server) agentMarkers(pin string) []agentMarker {
-	entries, _ := os.ReadDir(s.agentMarkerDir(pin))
-	var out []agentMarker
-	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		if m, ok := readAgentMarker(filepath.Join(s.agentMarkerDir(pin), e.Name())); ok {
-			out = append(out, m)
-		}
-	}
-	return out
 }
 
 // lead reports whether this worker leads the lifecycle of its Buzz identity
