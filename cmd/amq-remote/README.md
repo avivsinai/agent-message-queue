@@ -997,9 +997,10 @@ state directory:
   that prints nothing did not reach amq-remote (`probe` `closed`). A file
   that sets `disableAllHooks` is a note.
 - The machine agent: its marker is fresh and it records a relay key. When a
+  machine agent that does not run inside `amq-remote serve` is not running,
   doctor fails with its cause and the [one-time setup](#machine-agent).
-  For a machine agent inside `amq-remote serve`, doctor reads its
-  enrolled key and status file, fails with the status line while `serve`
+  For a machine agent inside `amq-remote serve`, doctor reads its enrolled key and
+  status file, fails with the status line while `serve`
   does not run it or refuses it, fails when its relay has not been
   authenticated for more than a minute, and notes a grant that ends within
   14 days, with the renew commands. Its `machine_agent` row adds `host`,
