@@ -47,7 +47,7 @@ func TestAttachReportsTheMachineChannel(t *testing.T) {
 	}
 	pub, relayKey := strings.Repeat("e", 64), strings.Repeat("f", 64)
 	writeMarker(t, dir, machineMarkerDir, map[string]any{"name": "_machine", "pubkey": pub, "display_name": "AMQ Remote @ box",
-		"relay_key": relayKey, "worker": self, "updated": time.Now().UTC().Format(time.RFC3339)})
+		"relay_key": relayKey, "host": hostStandalone, "worker": self, "updated": time.Now().UTC().Format(time.RFC3339)})
 	records := filepath.Join(dir, "remote", "acp", "channels", relayKey, pub)
 	if err := os.MkdirAll(records, 0o700); err != nil {
 		t.Fatal(err)
@@ -76,30 +76,10 @@ func TestAttachReportsTheMachineChannel(t *testing.T) {
 	// tries again, although no worker runs. Starting the agent comes first.
 	for _, ch := range []acp.MachineChannel{{State: "uncertain", Error: "relay timeout"}, {State: "failed", Error: "refused", Retry: true}} {
 		var text bytes.Buffer
-		connected(&text, attachView{name: "claude-p-session3", label: "claude · p/session3 @ box", agent: agentInfo{State: agentMissing},
-			machine: agentInfo{State: agentOffline, Display: "AMQ Remote @ box"}, served: true, channel: &ch})
-		if out := text.String(); !strings.Contains(out, "this session's channel") || !strings.Contains(out, machineSetupSteps) || strings.Contains(out, "keeps looking") || strings.Contains(out, "tries again") {
+		connected(&text, attachView{name: "claude-p-session3", label: "claude · p/session3 @ box",
+			machine: agentInfo{State: agentOffline, Display: "AMQ Remote @ box"}, channel: &ch})
+		if out := text.String(); !strings.Contains(out, "The machine agent runs inside amq-remote serve and is not running: ") || strings.Contains(out, "keeps looking") || strings.Contains(out, "tries again") {
 			t.Fatalf("%s channel with the machine agent offline: %q", ch.State, out)
 		}
-	}
-}
-
-// Regression (D2): buzz-acp tears an idle lazy agent's worker down after
-// 900 s, and its marker went stale, so status read the agent as offline and
-// told the owner to start it. A stale marker whose recorded parent buzz-acp
-// still runs is idle: a DM starts it.
-func TestStaleMarkerWithALiveParentReadsIdle(t *testing.T) {
-	dir := canonicalTempDir(t)
-	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
-	parent, err := launch.HolderOf(os.Getpid())
-	if err != nil {
-		t.Skip("no process identity on this platform")
-	}
-	worker := parent
-	worker.PID = 1 << 30 // no such process: the worker is gone
-	writeMarker(t, dir, "alpha", map[string]any{"name": "alpha", "pubkey": "ab", "worker": worker, "parent": parent,
-		"updated": time.Now().Add(-20 * time.Minute).UTC().Format(time.RFC3339)})
-	if got := agentOf("alpha", time.Now()).State; got != agentIdle {
-		t.Fatalf("agent = %s, want idle", got)
 	}
 }

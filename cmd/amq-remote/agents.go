@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
@@ -18,59 +17,47 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/machinecred"
 )
 
-// A session's Buzz agent is known from the markers amq-acp writes for it: a
-// pinned agent rewrites <binding dir>/acp/agents/<name>/<pubkey>.json on
-// every tick, the helper writes agents/_helper/<pubkey>.json, and the
-// machine agent agents/_machine/<pubkey>.json. Each marker records its
-// worker's and parent buzz-acp's process identity (acp.AgentState). AMQ
-// never reads Buzz Desktop's own state.
+// The machine agent runs inside amq-remote serve. It is known from its
+// enrolled credential and the marker it rewrites while it runs,
+// <binding dir>/acp/agents/_machine/<pubkey>.json with host "standalone",
+// which records its process identity (acp.AgentState). A marker with
+// another host is a file no agent writes, and is ignored.
 const (
 	agentRunning = acp.AgentRunning // the marker's worker runs
-	agentIdle    = acp.AgentIdle    // the worker is gone, its parent buzz-acp runs
-	agentOffline = acp.AgentOffline // markers exist, no process of theirs runs
-	agentMissing = "missing"        // no marker: the agent was never started
+	agentOffline = acp.AgentOffline // a marker or credential exists, no process of its runs
+	agentMissing = "missing"        // no marker and no enrolled credential
 
-	helperMarkerDir  = "_helper"
 	machineMarkerDir = "_machine"
 	maxMarkerBytes   = 64 * 1024
 )
 
-// agentInfo is what the markers say about one agent directory.
+// agentInfo is what the markers and the enrolled credential say about the
+// machine agent.
 type agentInfo struct {
 	State   string
 	Display string // the display name of the newest marker
-	// Ready is true for a running helper whose control channel is set up
-	// with the owner in it, so it can send Desktop a create draft.
-	Ready bool
-	// PubKey, RelayKey, Host and Path are those of the marker in the best
-	// state, the newest among equals: its file name (the agent's public key),
-	// the relay key and host it records, and its file.
-	PubKey, RelayKey, Host, Path string
-	// Status is a standalone machine agent's status file; nil when it has
-	// none or the agent is not standalone.
+	// PubKey, RelayKey and Path are those of the marker in the best state,
+	// the newest among equals: its file name (the agent's public key), the
+	// relay key it records, and its file. With no marker, PubKey is the
+	// enrolled credential's key.
+	PubKey, RelayKey, Path string
+	// Status is the agent's status file; nil when it has none.
 	Status *machineStatus
 }
 
 // hostStandalone is the marker host of a machine agent that runs inside
-// amq-remote serve, outside Buzz Desktop.
+// amq-remote serve.
 const hostStandalone = "standalone"
 
 // machineSetupSteps is the one-time setup of the machine agent, for a
 // machine that has none inside amq-remote serve.
 const machineSetupSteps = "run `amq-remote machine request > request.txt`; the owner signs it in their own terminal with `amq-owner-sign --machine request.txt --out grant.json --relay <wss-url>`; then run `amq-remote machine enroll --grant grant.json` and `amq-remote service install`"
 
-// helperOf reports this machine's helper agent.
-func helperOf(now time.Time) agentInfo { return agentOf(helperMarkerDir, now) }
-
 // machineOf reports this machine's machine agent. With no marker, an
-// enrolled machine credential is a standalone agent that has not run: it
-// reads offline, so nothing offers the Buzz Desktop setup for it. A
-// standalone agent carries its status file.
+// enrolled machine credential is an agent that has not run: it reads
+// offline. The agent carries its status file.
 func machineOf(now time.Time) agentInfo {
-	info := agentOf(machineMarkerDir, now)
-	if info.State != agentMissing && info.Host != hostStandalone {
-		return info
-	}
+	info := machineMarkerOf(now)
 	home, err := amqhome.Dir()
 	if err != nil {
 		return info
@@ -80,7 +67,7 @@ func machineOf(now time.Time) agentInfo {
 		if err != nil || len(agents) == 0 {
 			return info
 		}
-		info.State, info.Host, info.PubKey = agentOffline, hostStandalone, agents[0]
+		info.State, info.PubKey = agentOffline, agents[0]
 	}
 	raw, err := fsq.ReadRegularNoFollowBounded(filepath.Join(home, "remote", "machine", info.PubKey, machineStatusFile), maxMarkerBytes)
 	var st machineStatus
@@ -98,31 +85,25 @@ func statusOfDeadServe(st machineStatus) bool {
 	return state == launch.LeaseStale
 }
 
-// standalone reports a machine agent that runs inside amq-remote serve.
-func (a agentInfo) standalone() bool { return a.Host == hostStandalone }
-
 // serves reports whether the machine agent serves sessions now: its marker
-// reads running and, for a standalone agent, its status does not say it
-// waits or refused. A standalone marker reads running while its serve
-// process lives, even after the serve stopped the agent.
+// reads running and its status does not say it waits or refused. The
+// marker reads running while its serve process lives, even after the serve
+// stopped the agent.
 func (a agentInfo) serves() bool {
-	if a.State != agentRunning {
-		return false
-	}
-	return !a.standalone() || a.Status == nil || a.Status.State == "serving"
+	return a.State == agentRunning && (a.Status == nil || a.Status.State == "serving")
 }
 
-// refusal is the standalone agent's refusal code, or "".
+// refusal is the agent's refusal code, or "".
 func (a agentInfo) refusal() string {
-	if a.standalone() && a.Status != nil && a.Status.State == "refused" {
+	if a.Status != nil && a.Status.State == "refused" {
 		return a.Status.Code
 	}
 	return ""
 }
 
-// notServingLine says why a standalone agent does not serve and the user's
-// next step: its status line, else the grant's refusal when it does not
-// load, else to start the login service.
+// notServingLine says why the agent does not serve and the user's next
+// step: its status line, else the grant's refusal when it does not load,
+// else to start the login service.
 func (a agentInfo) notServingLine() string {
 	if a.Status != nil && a.Status.State != "serving" && a.Status.Line != "" {
 		return a.Status.Line
@@ -135,25 +116,22 @@ func (a agentInfo) notServingLine() string {
 	return "run amq-remote up."
 }
 
-// notServing is the line attach prints for a standalone agent that does
-// not serve.
+// notServing is the line attach prints for an agent that does not serve.
 func (a agentInfo) notServing() string {
 	return "The machine agent runs inside amq-remote serve and is not running: " + a.notServingLine()
 }
 
 // stateRank orders agent states: the best state of any marker wins.
-var stateRank = map[string]int{agentMissing: 0, agentOffline: 1, agentIdle: 2, agentRunning: 3}
+var stateRank = map[string]int{agentMissing: 0, agentOffline: 1, agentRunning: 2}
 
-// agentOf reports the Buzz agent pinned to the binding called name (or the
-// helper or machine agent, under its marker directory), as its markers read
-// at now.
-func agentOf(dirName string, now time.Time) agentInfo {
+// machineMarkerOf reports the machine agent as its markers read at now.
+func machineMarkerOf(now time.Time) agentInfo {
 	info := agentInfo{State: agentMissing}
 	path, err := binding.Path()
 	if err != nil {
 		return info
 	}
-	dir := filepath.Join(filepath.Dir(path), "acp", "agents", dirName)
+	dir := filepath.Join(filepath.Dir(path), "acp", "agents", machineMarkerDir)
 	entries, _ := os.ReadDir(dir)
 	var newest, bestAt time.Time
 	bestRank := -1
@@ -163,19 +141,14 @@ func agentOf(dirName string, now time.Time) agentInfo {
 		}
 		raw, err := fsq.ReadRegularNoFollowBounded(filepath.Join(dir, e.Name()), maxMarkerBytes)
 		var m struct {
-			DisplayName string `json:"display_name"`
-			Updated     string `json:"updated"`
-			Channel     string `json:"channel"`
-			// OwnerAdmin is the helper's control channel setup; an older
-			// helper wrote only OwnerAdded, and it drafts too.
-			OwnerAdmin bool                  `json:"owner_admin"`
-			OwnerAdded bool                  `json:"owner_added"`
-			Worker     launch.HolderIdentity `json:"worker"`
-			Parent     launch.HolderIdentity `json:"parent"`
-			RelayKey   string                `json:"relay_key"`
-			Host       string                `json:"host"`
+			DisplayName string                `json:"display_name"`
+			Updated     string                `json:"updated"`
+			Worker      launch.HolderIdentity `json:"worker"`
+			Parent      launch.HolderIdentity `json:"parent"`
+			RelayKey    string                `json:"relay_key"`
+			Host        string                `json:"host"`
 		}
-		if err != nil || json.Unmarshal(raw, &m) != nil {
+		if err != nil || json.Unmarshal(raw, &m) != nil || m.Host != hostStandalone {
 			continue
 		}
 		updated, err := time.Parse(time.RFC3339, m.Updated)
@@ -186,51 +159,28 @@ func agentOf(dirName string, now time.Time) agentInfo {
 		if stateRank[state] > stateRank[info.State] {
 			info.State = state
 		}
-		if state == agentRunning {
-			info.Ready = info.Ready || m.Channel != "" && (m.OwnerAdmin || m.OwnerAdded)
-		}
 		if updated.After(newest) {
 			newest, info.Display = updated, m.DisplayName
 		}
 		if rank := stateRank[state]; rank > bestRank || rank == bestRank && updated.After(bestAt) {
 			bestRank, bestAt = rank, updated
-			info.PubKey, info.RelayKey, info.Host = strings.TrimSuffix(e.Name(), ".json"), m.RelayKey, m.Host
+			info.PubKey, info.RelayKey = strings.TrimSuffix(e.Name(), ".json"), m.RelayKey
 			info.Path = filepath.Join(dir, e.Name())
 		}
 	}
 	return info
 }
 
-// agentDisplay is the name the session's agent shows in Buzz: its marker's,
-// else the name the helper drafts with (the label), else the name setup
-// gives it.
-func agentDisplay(agent agentInfo, label, name string) string {
-	return nonEmpty(agent.Display, nonEmpty(label, "AMQ: "+name))
-}
-
-// helperDrafts reports whether the helper will send Desktop a create draft
-// for b, by the helper's own rule: it is ready, and b's session is proven
-// live. Only a session with no agent is drafted.
-func helperDrafts(b binding.Binding, helper agentInfo) bool {
-	state, _ := b.Liveness()
-	return helper.Ready && state == binding.Live
-}
-
 // channelWait bounds how long attach waits for the machine agent to make
 // the session's channel.
 const channelWait = 15 * time.Second
 
-// attachView is what attach reports for one session: its own Buzz agent,
-// the helper, and the machine agent with the session's channel.
+// attachView is what attach reports for one session: the machine agent
+// and the session's channel.
 type attachView struct {
-	name, label            string
-	reused                 bool
-	agent, helper, machine agentInfo
-	// draft is whether the helper opens Desktop's create dialog for it.
-	draft bool
-	// served is whether the machine agent serves the session: no agent of
-	// its own runs or is idle.
-	served bool
+	name, label string
+	reused      bool
+	machine     agentInfo
 	// unproven is the liveness evidence of a session that is not proven
 	// live, which the machine agent makes no channel for; "" when it is.
 	unproven string
@@ -248,12 +198,7 @@ type attachView struct {
 // channel to leave creating.
 func viewOf(b binding.Binding, name string, reused bool) attachView {
 	now := time.Now()
-	v := attachView{name: name, label: b.Label, reused: reused, agent: agentOf(name, now), helper: helperOf(now), machine: machineOf(now)}
-	v.draft = helperDrafts(b, v.helper)
-	v.served = v.agent.State != agentRunning && v.agent.State != agentIdle
-	if !v.served {
-		return v
-	}
+	v := attachView{name: name, label: b.Label, reused: reused, machine: machineOf(now)}
 	if bound, err := binding.ReadNamed(name); err == nil {
 		b = bound
 	}
@@ -279,8 +224,6 @@ func viewOf(b binding.Binding, name string, reused bool) attachView {
 // record is written yet.
 func (v attachView) channelState() string {
 	switch {
-	case !v.served:
-		return ""
 	case v.channel != nil:
 		return v.channel.State
 	case v.machine.serves() && v.unproven == "":
@@ -290,65 +233,44 @@ func (v attachView) channelState() string {
 }
 
 // connected prints what attach did and the one thing the owner still has to
-// do: DM the session's own agent, open its channel, or set up the machine
-// agent inside amq-remote serve.
+// do: open the session's channel, start the machine agent, or set it up
+// inside amq-remote serve.
 func connected(w io.Writer, v attachView) {
 	say(w, "Connected: %s.", nonEmpty(v.label, v.name))
-	display := agentDisplay(v.agent, v.label, v.name)
 	machine := nonEmpty(v.machine.Display, "AMQ Remote @ "+nonEmpty(binding.Machine(), "this machine"))
 	serves := v.machine.serves()
 	switch state := v.channelState(); {
-	case v.agent.State == agentRunning:
-		say(w, "DM %q in Buzz.", display)
-	case v.agent.State == agentIdle:
-		say(w, "DM %q in Buzz; Buzz starts it on the next message.", display)
 	case state == "suspended":
 		say(w, "This session's channel %q is suspended: %s. Nothing is sent there until that changes in Buzz; for a new channel run amq-remote channel reset %s.", v.channel.Name, v.channel.Error, v.name)
 	case serves && state == "active":
 		say(w, "Open the %q channel in Buzz.", v.channel.Name)
-	case serves && state == "creating" && v.machine.standalone():
-		say(w, "AMQ Remote is making the channel; it appears in Buzz within a minute.")
 	case serves && state == "creating":
-		say(w, "Buzz is making the channel; it appears within a minute.")
-	case v.machine.standalone() && !serves:
+		say(w, "AMQ Remote is making the channel; it appears in Buzz within a minute.")
+	case v.machine.State != agentMissing && !serves:
 		// Nothing makes, looks for or retries a channel until serve runs it.
 		say(w, "%s", v.machine.notServing())
 	case v.machine.State != agentMissing && state == "" && v.unproven != "":
 		say(w, "%s makes a channel only for a session proven live, and this session is not (%s).", machine, v.unproven)
-	case !serves && v.machine.State != agentMissing && (state == "uncertain" || state == "failed"):
-		// No worker runs, so nothing looks for the channel or tries again
-		// until the machine agent is started.
-		say(w, "This machine's AMQ Remote agent is not running, so nothing is done about this session's channel (%s: %s). One-time setup of the agent inside amq-remote serve: %s.", state, v.channel.Error, machineSetupSteps)
 	case state == "uncertain":
 		say(w, "Buzz did not confirm the channel (%s). AMQ keeps looking for it and will not make a second one. If it never appears, run amq-remote channel reset %s.", v.channel.Error, v.name)
 	case state == "failed" && v.channel.Retry:
 		say(w, "Buzz refused the channel (%s). AMQ tries again in 10 minutes.", v.channel.Error)
 	case state == "failed":
 		say(w, "Buzz refused the channel (%s). Run amq-remote channel reset %s.", v.channel.Error, v.name)
-	case v.agent.State == agentOffline && v.machine.State == agentMissing:
-		say(w, "Its Buzz agent %q is offline, and this machine has no AMQ Remote agent. One-time setup: %s.", display, machineSetupSteps)
-	case v.machine.State == agentMissing:
-		say(w, "This machine has no AMQ Remote agent yet. One-time setup: %s. Each session then gets its own private channel.", machineSetupSteps)
 	default:
-		say(w, "This machine's AMQ Remote agent %q is not running. One-time setup of the agent inside amq-remote serve: %s.", machine, machineSetupSteps)
+		say(w, "This machine has no AMQ Remote agent yet. One-time setup: %s. Each session then gets its own private channel.", machineSetupSteps)
 	}
 	if v.reviewer != "" {
 		say(w, "%s.", launch.CodexReviewerLine(v.reviewer))
 	}
 }
 
-// connectedJSON adds the agent and channel fields to an attach result.
+// connectedJSON adds the machine agent and channel fields to an attach
+// result.
 func connectedJSON(out map[string]any, v attachView) map[string]any {
-	out["label"], out["reused"], out["agent"], out["helper"], out["draft"] = v.label, v.reused, v.agent.State, v.helper.State, v.draft
-	out["machine"] = v.machine.State
-	if v.agent.State != agentMissing {
-		out["agent_name"] = agentDisplay(v.agent, v.label, v.name)
-	}
+	out["label"], out["reused"], out["machine"] = v.label, v.reused, v.machine.State
 	if v.machine.State != agentMissing {
 		out["machine_name"] = nonEmpty(v.machine.Display, "AMQ Remote @ "+binding.Machine())
-	}
-	if v.machine.standalone() {
-		out["machine_host"] = hostStandalone
 		if code := v.machine.refusal(); code != "" {
 			out["machine_refusal"] = code
 		}
@@ -356,7 +278,7 @@ func connectedJSON(out map[string]any, v attachView) map[string]any {
 			out["machine_line"] = v.machine.notServing()
 		}
 	}
-	if v.served && v.channel == nil && v.unproven != "" {
+	if v.channel == nil && v.unproven != "" {
 		out["unproven"] = v.unproven
 	}
 	if v.reviewer != "" {
@@ -372,71 +294,6 @@ func connectedJSON(out map[string]any, v attachView) map[string]any {
 		}
 	}
 	return out
-}
-
-// legacyNoticeFile records the old agents bindings already named, so the
-// notice names each one once.
-const legacyNoticeFile = "legacy-agents.json"
-
-// legacyAgents returns the per-session Buzz agents whose bindings are now
-// removed and that no notice has named yet: each agent that left a marker
-// for the session, by its display name, and the agent of a binding made
-// before sessions had labels, which was made by hand and left none. With
-// record, it records them as named, so the printed notice names each once;
-// a JSON listing reports them without recording. Archiving does not remove
-// an agent from Buzz Desktop, so the owner deletes it there.
-func legacyAgents(record bool) []string {
-	tombs, err := binding.Tombstones()
-	if err != nil {
-		return nil
-	}
-	path, err := binding.Path()
-	if err != nil {
-		return nil
-	}
-	dir := filepath.Dir(path)
-	var named []string
-	if raw, err := os.ReadFile(filepath.Join(dir, legacyNoticeFile)); err == nil {
-		_ = json.Unmarshal(raw, &named)
-	}
-	var fresh, agents []string
-	now := time.Now()
-	for _, t := range tombs {
-		if slices.Contains(named, t.Name) {
-			continue
-		}
-		if _, err := binding.ReadNamed(t.Name); err == nil {
-			continue // bound again: its agent serves the session
-		}
-		switch agent := agentOf(t.Name, now); {
-		case agent.State != agentMissing:
-			fresh, agents = append(fresh, t.Name), append(agents, agentDisplay(agent, t.Label, t.Name))
-		case t.Label == "":
-			fresh, agents = append(fresh, t.Name), append(agents, "AMQ: "+t.Name)
-		}
-	}
-	if len(fresh) == 0 {
-		return nil
-	}
-	if !record {
-		return agents
-	}
-	raw, err := json.Marshal(append(named, fresh...))
-	if err != nil {
-		return nil
-	}
-	if _, err := fsq.WriteStateFile(filepath.Dir(dir), filepath.Join(filepath.Base(dir), legacyNoticeFile), append(raw, '\n'), 0o600); err != nil {
-		return nil
-	}
-	return agents
-}
-
-// sayLegacyAgents prints the one-time notice for old agents.
-func sayLegacyAgents(w io.Writer, agents []string) {
-	if len(agents) == 0 {
-		return
-	}
-	say(w, "Delete these in Buzz Desktop (Agents, the agent, Delete): %s.", strings.Join(agents, ", "))
 }
 
 // unknownHint names the command for sessions whose liveness is unknown.

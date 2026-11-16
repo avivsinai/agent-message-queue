@@ -859,7 +859,6 @@ type bindingRow struct {
 	Root     string        `json:"root"`
 	Handle   string        `json:"handle,omitempty"`
 	Target   string        `json:"target,omitempty"`
-	Agent    string        `json:"agent"`
 	// Channel and ChannelName are the machine agent's channel for the
 	// session, when it has a record of one.
 	Channel            string `json:"channel,omitempty"`
@@ -899,11 +898,10 @@ func openDialogs(name string) []dialogRow {
 	return rows
 }
 
-// bindings lists the bound sessions with their liveness and their Buzz
-// agents (/amq-remote status), after it prunes the ones proven ended. A
-// session whose liveness is unknown is listed and kept, with the command that
-// removes it. Agents of bindings made before sessions had labels are named
-// once, for the owner to delete.
+// bindings lists the machine agent and the bound sessions with their
+// liveness and channels (/amq-remote status), after it prunes the ones proven
+// ended. A session whose liveness is unknown is listed and kept, with the
+// command that removes it.
 func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error) {
 	fs := flag.NewFlagSet("bindings", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -923,15 +921,14 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
-	now := time.Now()
-	helper, machine := helperOf(now), machineOf(now)
+	machine := machineOf(time.Now())
 	rows := make([]bindingRow, 0, len(all))
 	var unknown []string
 	width := 0
 	for _, b := range all {
 		state, evidence := inspect(b)
 		row := bindingRow{Name: b.Name, Label: b.Label, State: state, Evidence: evidence, Root: b.Root, Handle: b.Handle, Target: b.Target,
-			Agent: agentOf(b.Name, now).State, Dialogs: openDialogs(b.Name)}
+			Dialogs: openDialogs(b.Name)}
 		if ch, ok := acp.MachineChannelOf(b); ok {
 			row.Channel, row.ChannelName = ch.State, ch.Name
 		}
@@ -948,36 +945,24 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 		}
 		width = max(width, len([]rune(nonEmpty(b.Label, b.Name))))
 	}
-	legacy := legacyAgents(!c.json)
 	if c.json {
 		if pruned == nil {
 			pruned = []string{}
 		}
-		if legacy == nil {
-			legacy = []string{}
-		}
-		emitJSON(stdout, map[string]any{"bindings": rows, "pruned": pruned, "helper": helper.State, "machine": machine.State, "legacy_agents": legacy})
+		emitJSON(stdout, map[string]any{"bindings": rows, "pruned": pruned, "machine": machine.State})
 		return 0, nil
 	}
 	switch name := nonEmpty(machine.Display, "AMQ Remote @ "+binding.Machine()); {
-	case machine.standalone() && machine.serves():
+	case machine.serves():
 		say(stdout, "Machine agent: %s (running in amq-remote serve)", name)
-	case machine.standalone():
-		say(stdout, "Machine agent: %s (not running: %s)", name, strings.TrimSuffix(machine.notServingLine(), "."))
 	case machine.State != agentMissing:
-		say(stdout, "Machine agent: %s (%s)", name, machine.State)
-	}
-	// An offline helper is shown only without a machine agent: one deleted
-	// in Desktop never rewrites its marker, and the machine agent serves
-	// every session anyway.
-	if helper.State != agentMissing && (helper.State != agentOffline || machine.State == agentMissing) {
-		say(stdout, "Helper: %s (%s)", nonEmpty(helper.Display, "AMQ Remote helper"), helper.State)
+		say(stdout, "Machine agent: %s (not running: %s)", name, strings.TrimSuffix(machine.notServingLine(), "."))
 	}
 	if len(rows) == 0 {
 		say(stdout, "No session is connected.")
 	}
 	for _, r := range rows {
-		line := fmt.Sprintf("%-*s  %-7s  agent %-7s  %s", width, nonEmpty(r.Label, r.Name), r.State, r.Agent, r.Name)
+		line := fmt.Sprintf("%-*s  %-7s  %s", width, nonEmpty(r.Label, r.Name), r.State, r.Name)
 		if r.State != binding.Live {
 			line += ": " + r.Evidence
 		}
@@ -995,7 +980,6 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 	if hint := unknownHint(unknown); hint != "" {
 		say(stdout, "%s", hint)
 	}
-	sayLegacyAgents(stdout, legacy)
 	return 0, nil
 }
 
@@ -1104,7 +1088,7 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		say(stdout, "Disconnected. The session keeps running; its channel stops taking messages now.")
 		return 0, nil
 	}
-	say(stdout, "Disconnected. The session keeps running; its Buzz agent archives itself and its DM answers \"Not connected\".")
+	say(stdout, "Disconnected. The session keeps running.")
 	return 0, nil
 }
 
