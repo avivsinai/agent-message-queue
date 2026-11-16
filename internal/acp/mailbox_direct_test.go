@@ -97,16 +97,6 @@ func (f *standaloneFixture) agentTexts(channel string) []string {
 	return out
 }
 
-// isOpen reports whether done has not closed.
-func isOpen(done <-chan struct{}) bool {
-	select {
-	case <-done:
-		return false
-	default:
-		return true
-	}
-}
-
 // offlinePosts is the direct transport with posts that are proved not sent
 // while down is set, as buzzdirect reports a send with no relay
 // connection. sending, when set, runs before each send that goes out.

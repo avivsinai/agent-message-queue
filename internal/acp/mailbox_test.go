@@ -240,7 +240,7 @@ func TestMailboxRedeliveryPublishesOnce(t *testing.T) {
 	first := f.s.Owner(in)
 	promptOf(t, b)
 	stop()
-	if _, decided := f.s.mailboxAnswered(eventID); !isOpen(first) || decided {
+	if _, decided := f.s.mailboxAnswered(eventID); closed(first) || decided {
 		t.Fatal("the first attempt ended or recorded an outcome; want delivered, then the client left")
 	}
 	f.machine(t)
@@ -1410,6 +1410,9 @@ func TestUnsentFinalAnswerIsPostedByTheNextSweep(t *testing.T) {
 	replyAs(t, root, prompt.Header.Thread, id, format.KindAnswer, "the answer")
 	waitClosed(t, done)
 	stop()
+	if posts := f.agentTexts(machineChanA); len(posts) != 0 {
+		t.Fatalf("posts with no connection: %q; want none", posts)
+	}
 	down.Store(false)
 	for range 2 {
 		s.sweepLateReplies(time.Now().Add(time.Hour))
