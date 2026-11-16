@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.151.0](https://github.com/avivsinai/agent-message-queue/compare/v0.150.0...v0.151.0) (2026-11-16)
+
+
+### Features
+
+* **remote:** a channel the owner archived or left is suspended ([#1528](https://github.com/avivsinai/agent-message-queue/issues/1528)) ([57ad3d4](https://github.com/avivsinai/agent-message-queue/commit/57ad3d451c73a1d0c9c07fb2fed10e20420f60c3))
+* **remote:** the machine agent prunes its outbox ([#1527](https://github.com/avivsinai/agent-message-queue/issues/1527)) ([65e1f54](https://github.com/avivsinai/agent-message-queue/commit/65e1f54ccc5b3ac9f85721b1ca6905ef55c0913c))
+
 ## [0.150.0](https://github.com/avivsinai/agent-message-queue/compare/v0.149.1...v0.150.0) (2026-11-16)
 
 
