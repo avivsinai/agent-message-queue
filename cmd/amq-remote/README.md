@@ -1161,6 +1161,12 @@ in this settings file; `install-stop-hook` and `doctor --fix` record the
 same for theirs, and the uninstall commands replace it with the owner's
 removal.
 
+Claude Code applies a PermissionRequest decision only when every
+PermissionRequest hook has ended. A hook of your own that allows or denies
+calls therefore has no effect while AMQ's hook waits for your answer;
+`amq-remote doctor` and the installer note such a hook. AMQ changes no hook
+that is not its own.
+
 The machine agent watches the settings file of each Claude session it
 serves (the `config_dir` its binding records); a file that did not change
 costs one stat per tick. It never writes the file: only the install

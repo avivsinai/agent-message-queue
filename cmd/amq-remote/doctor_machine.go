@@ -196,6 +196,9 @@ func doctorHooks(files []string, all []binding.Binding, native bool, machine age
 		default:
 			row.ApprovalForm, _ = claude.PermissionHookForm(home, path)
 			hookFormFinding(row.ApprovalForm, path, "approval (PermissionRequest)", fix("amq-remote claude install-approval-hook"), fail, note)
+			if others, err := claude.OtherPermissionHooks(path); err == nil && len(others) > 0 {
+				note("hooks", path, claude.OtherPermissionHookNote, "")
+			}
 			row.Probe, row.ProbeVersion = probeApprovalHook(path, probeGate(path, all, machine), fix("amq-remote claude install-approval-hook"), fail, note)
 		}
 		if row.Stop, err = claude.StopHookStateAt(path); err == nil && row.Stop == claude.HookMissing {

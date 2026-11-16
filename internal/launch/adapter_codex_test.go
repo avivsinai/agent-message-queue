@@ -1,6 +1,7 @@
 package launch
 
 import (
+	"reflect"
 	"testing"
 )
 
@@ -79,5 +80,53 @@ func TestValidateCodexConfigOverridesApprovalsReviewerSet(t *testing.T) {
 func TestCodexDaemonTicketGrammarReadsSandboxAndApproval(t *testing.T) {
 	if got := codexDaemonArgumentsReason([]string{"--sandbox", "workspace-write", "--ask-for-approval", "on-request"}); got != "" {
 		t.Fatalf("older daemon settings must still parse for inspection, got refusal %q", got)
+	}
+}
+
+// The terminal keeps its own options. Thread and daemon settings go in the
+// daemon request instead of the argv whose resume would refuse them.
+func TestCodexDaemonSettingsSplitIntoTerminalArgumentsAndPins(t *testing.T) {
+	terminal, pins, reason := splitCodexDaemonArgs([]string{
+		"--model", "m", "--sandbox", "read-only", "--ask-for-approval", "on-request",
+		"-c", `model_reasoning_effort="low"`, "-c", "approvals_reviewer=user",
+		"-c", "sandbox_workspace_write.network_access=false",
+		"-c", "sandbox_workspace_write.writable_roots=[]", "--no-alt-screen",
+	})
+	want := CodexDaemonPins{Sandbox: "read-only", ApprovalPolicy: "on-request",
+		ApprovalsReviewer: "user", ReasoningEffort: "low", NetworkAccess: "false", NoWritableRoots: true}
+	if reason != "" || reflect.DeepEqual(terminal, []string{"--model", "m", "--no-alt-screen"}) == false || pins != want {
+		t.Fatalf("split = %v, %+v, %q", terminal, pins, reason)
+	}
+	for _, tc := range []struct {
+		options []string
+		reason  string
+	}{
+		{[]string{"--search"}, "--search requires verified TUI resume equivalence"},
+		{[]string{"-c", `sandbox_workspace_write.writable_roots=["__AMQ_MAILBOXES__"]`}, "the mailbox writable root needs an embedded app-server"},
+	} {
+		if _, _, got := splitCodexDaemonArgs(tc.options); got != tc.reason {
+			t.Fatalf("split %v: reason %q; want %q", tc.options, got, tc.reason)
+		}
+	}
+	if got := codexDaemonArgumentsReason([]string{"--model", "read-only", "--sandbox", "read-only"}); got != "" {
+		t.Fatalf("a value two flags share = duplicate: %q", got)
+	}
+	if got := codexDaemonArgumentsReason([]string{"--no-alt-screen", "--no-alt-screen"}); got != "duplicate launch options require verified TUI resume equivalence" {
+		t.Fatalf("duplicate flag reason = %q", got)
+	}
+}
+
+// Execution resolves the thread slot in the original ticket, then starts
+// the terminal with the pinned settings left out of argv.
+func TestCodexDaemonTerminalArgvLeavesThePinsOut(t *testing.T) {
+	thread := "018f4e5a-1234-7abc-8def-0123456789ab"
+	argv := []string{"codex", "--remote", "unix:///tmp/codex.sock", "-c", CodexNoUpdatePromptOverride,
+		"resume", "-C", "/work", "--model", "m", "--sandbox", "read-only", "-c", "model_reasoning_effort=low", thread}
+	ticket := ExecutionTicket{TargetArgv: argv, ConversationID: thread,
+		DynamicArgv: []DynamicArg{{Index: len(argv) - 1, Kind: DynamicArgConversationID}}}
+	got := CodexDaemonTerminalArgv(ticket, argv)
+	want := []string{"codex", "--remote", "unix:///tmp/codex.sock", "-c", CodexNoUpdatePromptOverride, "resume", "-C", "/work", "--model", "m", thread}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("terminal argv = %#v; want %#v", got, want)
 	}
 }

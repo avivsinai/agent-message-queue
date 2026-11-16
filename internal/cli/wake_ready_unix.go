@@ -259,6 +259,9 @@ func validateWakeReadyLockAndTargetForInspectionAt(
 func validateWakeReadyAgainstLock(current wakeLockInspection, ready wakeReady) error {
 	confirmed := current.Status == wakeLockValid && current.IdentityConfirmed
 	if !confirmed && !currentWakeLockMatches(current.Lock) {
+		if current.Reason != "" {
+			return fmt.Errorf("wake lock is not a confirmed valid wake during readiness validation: %s", current.Reason)
+		}
 		return fmt.Errorf("wake lock is not a confirmed valid wake during readiness validation")
 	}
 	if current.Lock.Generation == "" || ready.Generation != current.Lock.Generation {

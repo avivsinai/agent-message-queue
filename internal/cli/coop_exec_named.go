@@ -448,7 +448,7 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 	notice := time.AfterFunc(codexDaemonNamingNotice, func() {
 		_ = writeStderr("naming %s on the Codex daemon; it is busy, this can take up to a minute\n", name)
 	})
-	id, err := codex.StartThread(ctx, sock, cwd, name, "")
+	id, err := codex.StartThread(ctx, sock, cwd, name, "", codex.ThreadSettings{})
 	notice.Stop()
 	if err != nil {
 		return report("Codex daemon: " + err.Error())

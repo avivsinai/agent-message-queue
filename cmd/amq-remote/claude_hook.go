@@ -77,6 +77,9 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 			return 1
 		}
 		say(stdout, "approval hook installed: the first tool dialog of each Claude Code session on this machine connects that session to its own Buzz channel (an AMQ session gets its own binding, the mailbox one /amq-remote writes; any other session a native binding, where chat needs /amq-remote --native), and every dialog appears there; the first answer, there or in the terminal, decides; /amq-remote off stops it for that session\n")
+		if others, err := claude.OtherPermissionHooks(claude.SettingsPath(home)); err == nil && len(others) > 0 {
+			say(stdout, "note: %s\n", claude.OtherPermissionHookNote)
+		}
 		return 0
 	case "uninstall-approval-hook":
 		if err := claude.OptOutHook(claude.SettingsPath(home), claude.HookApproval); err != nil {

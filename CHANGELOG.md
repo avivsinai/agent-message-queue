@@ -8,6 +8,33 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.149.0](https://github.com/avivsinai/agent-message-queue/compare/v0.148.0...v0.149.0) (2026-11-15)
+
+
+### Features
+
+* **launch:** a Codex seat with sandbox and approval pins runs on the daemon ([#1522](https://github.com/avivsinai/agent-message-queue/issues/1522)) ([2f9a59a](https://github.com/avivsinai/agent-message-queue/commit/2f9a59a3a0bacdcae0181f9a77acf4d8ba8a789e))
+
+
+### Bug Fixes
+
+* **remote:** doctor notes an approval hook that AMQ's hook holds back ([#1521](https://github.com/avivsinai/agent-message-queue/issues/1521)) ([cc9b752](https://github.com/avivsinai/agent-message-queue/commit/cc9b7521624926dd9b34db29acbfe205660a2e3e))
+
+## [0.148.0](https://github.com/avivsinai/agent-message-queue/compare/v0.147.1...v0.148.0) (2026-11-15)
+
+
+### Features
+
+* **remote:** a Claude question shows its choices in Buzz ([#1518](https://github.com/avivsinai/agent-message-queue/issues/1518)) ([84d045b](https://github.com/avivsinai/agent-message-queue/commit/84d045bc5e4f4b60ef20360b627335c310d75619))
+* **remote:** a link share comes back when its session returns ([87e2d2e](https://github.com/avivsinai/agent-message-queue/commit/87e2d2e900da0a576e976cf3c8c2b6e69810b584))
+* **remote:** a link share comes back when its session returns ([#1517](https://github.com/avivsinai/agent-message-queue/issues/1517)) ([87e2d2e](https://github.com/avivsinai/agent-message-queue/commit/87e2d2e900da0a576e976cf3c8c2b6e69810b584))
+
+
+### Bug Fixes
+
+* **wake:** a readiness refusal names why the wake lock is not confirmed ([#1520](https://github.com/avivsinai/agent-message-queue/issues/1520)) ([a3ed4c5](https://github.com/avivsinai/agent-message-queue/commit/a3ed4c5df6cda1cedbb185e8892214d8f55cb469))
+* **wake:** the claude-native injector works with a custom CLAUDE_CONFIG_DIR ([#1516](https://github.com/avivsinai/agent-message-queue/issues/1516)) ([c1c2985](https://github.com/avivsinai/agent-message-queue/commit/c1c29853f90b7f2274b554fe4cf85bfc065e2fc5))
+
 ## [0.147.1](https://github.com/avivsinai/agent-message-queue/compare/v0.147.0...v0.147.1) (2026-11-15)
 
 
