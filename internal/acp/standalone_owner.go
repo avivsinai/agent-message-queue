@@ -20,7 +20,7 @@ import (
 const routeSessionPrefix = "route/"
 
 // Owner takes one owner message of a standalone server. The message is
-// decided as the ACP path decides a prompt (decideOwner): a mirror switch,
+// decided first (decideOwner): a mirror switch,
 // a slash command or a dialog answer is carried out at once, never behind
 // a turn, and its acknowledgement is posted once per event (postOnce). Any
 // other message is a turn: it waits in its route's queue, and each route
@@ -230,8 +230,8 @@ func closed(quit <-chan struct{}) bool {
 	}
 }
 
-// runOwnerTurn runs evt as a turn of route ch's session, set up as an ACP
-// prompt of that channel is (beginPrompt), with no client to emit to. The
+// runOwnerTurn runs evt as a turn of route ch's session: its route and
+// reply channel are ch, and it has no client to emit to. The
 // route's worker is the only one that begins turns on its session, so the
 // turn is never refused. When quit closes, the turn is cut as a client
 // that left (turnDisconnected), which records nothing; cut reports that.
