@@ -95,8 +95,8 @@ type channelRecord struct {
 	Identity string `json:"identity"`
 	// Label is the channel's name in Buzz, fixed when the record is made.
 	Label string `json:"label"`
-	// Reg is made once per record and written into the channel's
-	// description, so an uncertain create can be found.
+	// Reg is made once per record. It keys the record's writes and is
+	// written into the channel's description.
 	Reg string `json:"reg"`
 	// Chosen is the channel id a create asks for, written before any create
 	// is signed, so the channel an uncertain create may have made is found
@@ -124,8 +124,8 @@ type channelRecord struct {
 	// restore unarchives a channel that may be archived although no archive
 	// was confirmed.
 	ArchiveSent bool `json:"archive_sent,omitempty"`
-	// Orphans are channels found for Reg that are not used: both of an
-	// ambiguous match. A retired record archives them.
+	// Orphans are channels found for Reg that are not used. A retired
+	// record archives them.
 	Orphans     []string `json:"orphans,omitempty"`
 	RetiredBy   string   `json:"retired_by,omitempty"`
 	RetiredFrom string   `json:"retired_from,omitempty"`

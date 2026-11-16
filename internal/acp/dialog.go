@@ -55,8 +55,8 @@ const (
 
 // reactionPollGap is the gap between reaction reads of a dialog open for
 // age: reactionPollInterval while it is fresh, then doubling every
-// reactionPollFresh up to reactionPollMax. Each read starts a process, and
-// a dialog left open for long is seldom answered from Buzz.
+// reactionPollFresh up to reactionPollMax. Each read is a relay round trip,
+// and a dialog left open for long is seldom answered from Buzz.
 func reactionPollGap(age time.Duration) time.Duration {
 	gap := reactionPollInterval
 	for n := age / reactionPollFresh; n > 0 && gap < reactionPollMax; n-- {
