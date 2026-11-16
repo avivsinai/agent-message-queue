@@ -1133,18 +1133,20 @@ func dropShares(l *manifest.Link, names map[string]bool) bool {
 }
 
 // removeDetachedLinkShares removes entries for names that were just
-// detached or confirmed ended. Each manifest is written only when it holds
-// one, so a root with no such share keeps its file untouched.
-func removeDetachedLinkShares(roots, names []string) error {
+// detached or confirmed ended and reports whether it removed one. Each
+// manifest is written only when it holds one, so a root with no such share
+// keeps its file untouched.
+func removeDetachedLinkShares(roots, names []string) (bool, error) {
 	gone := make(map[string]bool, len(names))
 	for _, name := range names {
 		gone[name] = true
 	}
+	removedAny := false
 	for _, root := range roots {
 		path := manifest.DefaultPath(filepath.Join(root, stateDirName))
 		mf, err := manifest.Load(path)
 		if err != nil {
-			return err
+			return false, err
 		}
 		changed := false
 		for i := range mf.Links {
@@ -1158,10 +1160,11 @@ func removeDetachedLinkShares(roots, names []string) error {
 				dropShares(&mf.Links[i], gone)
 			}
 		}); err != nil {
-			return err
+			return false, err
 		}
+		removedAny = true
 	}
-	return nil
+	return removedAny, nil
 }
 
 // linkShareState says whether the server sees a shared binding now. A share is
@@ -1178,7 +1181,7 @@ func linkShareState(root string, p *nativeProbe, name string) string {
 				return "ended: it comes back when the session resumes; in a new session run amq-remote attach --self --link"
 			}
 		}
-		return "no such binding: run amq-remote attach --self --link in the session to share"
+		return "no such binding: run amq-remote attach --self --link in the session to share, or amq-remote detach --name " + name + " to drop this entry"
 	case err != nil:
 		return "the binding cannot be read: " + err.Error()
 	case b.Mailbox():
