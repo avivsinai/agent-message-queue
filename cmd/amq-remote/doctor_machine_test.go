@@ -17,9 +17,13 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/machinecred"
+	"github.com/avivsinai/agent-message-queue/internal/remote/outbox"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
+
+	"fiatjaf.com/nostr"
 )
 
 // machineFixture is a machine with no endpoint state directory: a Claude
@@ -247,7 +251,8 @@ func TestDoctorMailboxesWarnsOfAWakeBeforeDialogEntries(t *testing.T) {
 // from the channels map (audit 2026-11-10).
 // A machine agent that serves inside amq-remote serve is checked from its
 // enrolled credential and status file, with no Buzz Desktop check.
-func TestDoctorChecksAStandaloneMachineAgent(t *testing.T) {
+func standaloneMachineAgentFixture(t *testing.T) (map[string]any, string, string, string) {
+	t.Helper()
 	machineFixture(t)
 	installHooks(t, true, true)
 	saved := runHookProbe
@@ -299,9 +304,16 @@ func TestDoctorChecksAStandaloneMachineAgent(t *testing.T) {
 	if err != nil || code != 0 {
 		t.Fatalf("doctor: code=%d err=%v failing=%v", code, err, out.(map[string]any)["failing"])
 	}
-	row := out.(map[string]any)["machine_agent"].(machineAgentRow)
+	return out.(map[string]any), agent, cred.Tag.OwnerPubKey, grantEnd(cred)
+}
+
+// The standalone doctor row has the enrolled host and authenticated relay,
+// without assuming a record in an empty outbox.
+func TestDoctorChecksAStandaloneMachineAgent(t *testing.T) {
+	out, agent, owner, grantEnd := standaloneMachineAgentFixture(t)
+	row := out["machine_agent"].(machineAgentRow)
 	want := machineAgentRow{State: agentRunning, Name: "AMQ Remote @ m", RelayKey: true, Host: hostStandalone, Agent: agent[:8],
-		Owner: tag.OwnerPubKey[:8], Relay: "wss://relay.example", RelayState: string(relay.StateAuthenticated), GrantEnd: grantEnd(cred)}
+		Owner: owner[:8], Relay: "wss://relay.example", RelayState: string(relay.StateAuthenticated), GrantEnd: grantEnd}
 	if row != want {
 		t.Fatalf("machine_agent row = %+v; want %+v", row, want)
 	}
@@ -316,4 +328,45 @@ func TestDoctorTextPrintsAFailingChannelOnce(t *testing.T) {
 	if strings.Contains(text.String(), "INFO channels") {
 		t.Fatalf("doctor text repeats the channel: %q", text.String())
 	}
+}
+
+// An unknown relay write is never forgotten. Doctor reads it without
+// owning the outbox and warns once it has been unknown for over a day.
+func TestDoctorNotesAnOldUnknownOutboxRecord(t *testing.T) {
+	_, agent, _, _ := standaloneMachineAgentFixture(t)
+	cred, err := machinecred.Load(filepath.Join(os.Getenv("HOME"), ".amq"), agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := machineOutboxDir(filepath.Join(filepath.Dir(os.Getenv(binding.EnvPath)), "acp"), buzzop.RelayKey(cred.Relay), agent)
+	o, err := outbox.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	when := time.Now().Add(-48 * time.Hour)
+	evt := nostr.Event{Kind: 9, Tags: nostr.Tags{{"h", "test-channel"}}, CreatedAt: nostr.Timestamp(when.Unix())}
+	if err := evt.Sign(nostr.MustSecretKeyFromHex("0000000000000000000000000000000000000000000000000000000000000002")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := o.Prepare("old", "reg", evt, when); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := o.BeginAttempt("old", when); err != nil {
+		t.Fatal(err)
+	}
+	out, code, err := doctor([]string{"--root", canonicalTempDir(t)})
+	if code != 0 || err != nil {
+		t.Fatalf("doctor = %d, %v", code, err)
+	}
+	row := out.(map[string]any)["machine_agent"].(machineAgentRow)
+	if row.OutboxRecords != 1 || row.OutboxOldestUnknown == "" {
+		t.Fatalf("outbox fields = %+v; want one old unknown record", row)
+	}
+	notes, _ := out.(map[string]any)["notes"].([]boundaryFailure)
+	for _, n := range notes {
+		if n.Boundary == "machine_agent" && strings.Contains(n.Detail, "no known outcome since") {
+			return
+		}
+	}
+	t.Fatalf("notes = %+v; want the old unknown outbox note", notes)
 }

@@ -36,6 +36,10 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 )
 
+//   - A record is removed only by Prune, and never while its outcome is
+//     unknown: only its own event can be sent again without a second
+//     delivery.
+//
 // OutcomeOf maps the result of relay.Conn.Publish to an outcome.
 func OutcomeOf(err error) buzzop.Outcome {
 	switch {
@@ -209,6 +213,73 @@ func (o *Outbox) Unsettled() ([]Record, error) {
 		}
 	}
 	return open, nil
+}
+
+// Prune removes every record whose outcome is not unknown and whose last
+// change (its settlement, or its preparation when it has none) is older
+// than keep, and returns how many it removed. The caller gives a keep
+// longer than any time after which a writer asks again for an accepted key.
+func (o *Outbox) Prune(now time.Time, keep time.Duration) (int, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	all, err := o.scan()
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for _, r := range all {
+		if r.Outcome == buzzop.Unknown || now.Sub(time.Unix(max(r.Prepared, r.Settled), 0)) <= keep {
+			continue
+		}
+		if err := os.Remove(filepath.Join(o.dir, keyFile(r.Key))); err != nil {
+			return removed, err
+		}
+		removed++
+	}
+	return removed, nil
+}
+
+// Stats is what a reader that does not own an outbox may know of it.
+type Stats struct {
+	Records int
+	// OldestUnknown is the last change, in Unix seconds, of the record with
+	// outcome unknown that changed longest ago; zero when there is none.
+	OldestUnknown int64
+}
+
+// Stat reads the records in dir and changes nothing. A directory that does
+// not exist has no record. A record that its owner removes during the read
+// is not counted.
+func Stat(dir string) (Stats, error) {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return Stats{}, nil
+	}
+	if err != nil {
+		return Stats{}, err
+	}
+	var stats Stats
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		r, err := read(filepath.Join(dir, name))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return Stats{}, err
+		}
+		stats.Records++
+		if r.Outcome == buzzop.Unknown {
+			t := max(r.Prepared, r.Settled)
+			if stats.OldestUnknown == 0 || t < stats.OldestUnknown {
+				stats.OldestUnknown = t
+			}
+		}
+	}
+	return stats, nil
 }
 
 // nextSeq returns the next sequence number. The records are its durable

@@ -21,6 +21,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/machinecred"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
+	"github.com/avivsinai/agent-message-queue/internal/remote/outbox"
 	"github.com/avivsinai/agent-message-queue/internal/roster"
 	"github.com/avivsinai/agent-message-queue/internal/route"
 )
@@ -327,20 +328,23 @@ type machineAgentRow struct {
 	// A standalone agent's host, the first 8 characters of its key and of
 	// the owner's key, its relay and relay state, its grant's end and its
 	// refusal code.
-	Host       string `json:"host,omitempty"`
-	Agent      string `json:"agent,omitempty"`
-	Owner      string `json:"owner,omitempty"`
-	Relay      string `json:"relay,omitempty"`
-	RelayState string `json:"relay_state,omitempty"`
-	GrantEnd   string `json:"grant_end,omitempty"`
-	Refusal    string `json:"refusal,omitempty"`
+	Host                string `json:"host,omitempty"`
+	Agent               string `json:"agent,omitempty"`
+	Owner               string `json:"owner,omitempty"`
+	Relay               string `json:"relay,omitempty"`
+	RelayState          string `json:"relay_state,omitempty"`
+	GrantEnd            string `json:"grant_end,omitempty"`
+	Refusal             string `json:"refusal,omitempty"`
+	OutboxRecords       int    `json:"outbox_records,omitempty"`
+	OutboxOldestUnknown string `json:"outbox_oldest_unknown,omitempty"`
 }
 
 // Doctor's bounds for a standalone machine agent: a relay not
 // authenticated for longer fails, and a grant that ends sooner is noted.
 const (
-	standaloneRelayGrace  = time.Minute
-	standaloneGrantNotice = 14 * 24 * time.Hour
+	standaloneRelayGrace    = time.Minute
+	standaloneGrantNotice   = 14 * 24 * time.Hour
+	standaloneUnknownNotice = 24 * time.Hour
 )
 
 // doctorMachineAgent checks that the machine agent runs (its marker is
@@ -395,12 +399,22 @@ func doctorStandalone(machine agentInfo, row machineAgentRow, now time.Time, fai
 	if st != nil {
 		row.Relay, row.RelayState, row.GrantEnd, row.Refusal = st.RelayURL, st.RelayState, st.GrantNotAfter, machine.refusal()
 	}
-	var end time.Time
+	var end, unknown time.Time
 	if home, err := amqhome.Dir(); err == nil {
 		if cred, err := machinecred.Load(home, machine.PubKey); err == nil {
 			row.Owner, row.Relay, row.GrantEnd = short(cred.Tag.OwnerPubKey), buzzop.NormalizeRelay(cred.Relay), grantEnd(cred)
 			if n, err := cred.Tag.NotAfter(); err == nil {
 				end = time.Unix(n, 0)
+			}
+			if path, err := binding.Path(); err == nil {
+				dir := machineOutboxDir(filepath.Join(filepath.Dir(path), "acp"), buzzop.RelayKey(cred.Relay), machine.PubKey)
+				if stats, err := outbox.Stat(dir); err == nil {
+					row.OutboxRecords = stats.Records
+					if stats.OldestUnknown != 0 {
+						unknown = time.Unix(stats.OldestUnknown, 0)
+						row.OutboxOldestUnknown = unknown.UTC().Format(time.RFC3339)
+					}
+				}
 			}
 		}
 	}
@@ -415,6 +429,9 @@ func doctorStandalone(machine agentInfo, row machineAgentRow, now time.Time, fai
 	if !end.IsZero() && end.After(now) && end.Sub(now) < standaloneGrantNotice {
 		note("machine_agent", row.Name, "the owner's grant for the machine agent ends "+row.GrantEnd,
 			"run `amq-remote machine request`, have the owner sign it with `amq-owner-sign --machine FILE --out FILE --relay "+row.Relay+"`, then run `amq-remote machine enroll --grant FILE`")
+	}
+	if !unknown.IsZero() && now.Sub(unknown) > standaloneUnknownNotice {
+		note("machine_agent", row.Name, "the machine agent's outbox holds a relay write with no known outcome since "+row.OutboxOldestUnknown+"; it stays until its outcome is known", "")
 	}
 	return row
 }
