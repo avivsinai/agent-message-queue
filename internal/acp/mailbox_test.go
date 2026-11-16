@@ -1348,7 +1348,9 @@ func TestStopConfirmsOnceInTheDM(t *testing.T) {
 // Regression (agent-message-queue-37o.7, finding 8): a damaged final marker
 // (truncated JSON, {}, a directory) was read as "the agent already
 // answered", so a prompt that was never delivered ended replied/end_turn.
-// It still blocks a new delivery, but the outcome is uncertain.
+// It still blocks a new delivery, but the outcome is uncertain. On the
+// direct transport the marker blocks the event's status post too, so the
+// channel shows nothing.
 func TestDamagedFinalMarkerIsNeverAReply(t *testing.T) {
 	cases := map[string]func(path string) error{
 		"truncated-json": func(p string) error { return os.WriteFile(p, []byte(`{"reply_id":"x`), 0o600) },
@@ -1357,21 +1359,23 @@ func TestDamagedFinalMarkerIsNeverAReply(t *testing.T) {
 	}
 	for name, plant := range cases {
 		t.Run(name, func(t *testing.T) {
-			s, root := mailboxServer(t)
-			event := strings.Repeat("8", 64)
+			f, b := mailboxRoute(t)
+			s, root := f.s, b.Root
+			in := f.ownerSays(t, machineChanA, "hello")
+			event := in.Event.ID.Hex()
 			if err := os.MkdirAll(s.eventDir(event), 0o700); err != nil {
 				t.Fatal(err)
 			}
 			if err := plant(filepath.Join(s.eventDir(event), event+".posted.final")); err != nil {
 				t.Fatal(err)
 			}
-			res, rpcErr := s.runRemote("s", "hello", event, newTurn(), func(any) error { return nil })
-			if rpcErr != nil {
-				t.Fatal(rpcErr)
+			f.machine(t)
+			waitClosed(t, s.Owner(in))
+			if out, decided := s.mailboxAnswered(event); !decided || out.damaged == nil || out.ReplyID != "" {
+				t.Fatalf("outcome=%+v decided=%v; want the damaged marker, never an answer", out, decided)
 			}
-			got := res.(remotePromptResult)
-			if got.StopReason == StopReasonEndTurn || got.Meta.Remote.State != remoteUncertain {
-				t.Fatalf("stop=%s state=%s; want an uncertain refusal", got.StopReason, got.Meta.Remote.State)
+			if posts := f.agentTexts(machineChanA); len(posts) != 0 {
+				t.Fatalf("a damaged marker posted %q", posts)
 			}
 			if n := len(inboxPrompts(t, root)); n != 0 {
 				t.Fatalf("a damaged marker let %d prompts through", n)
