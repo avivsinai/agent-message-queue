@@ -472,3 +472,80 @@ func signedBy(t *testing.T, key nostr.SecretKey, content, channel string, tags .
 	}
 	return evt
 }
+
+// writeTag is the value of evt's first tag called name, or "".
+func writeTag(evt nostr.Event, name string) string {
+	if tag := evt.Tags.Find(name); len(tag) > 1 {
+		return tag[1]
+	}
+	return ""
+}
+
+// relayState stores, for an accepted channel write of the agent, the
+// relay-signed state that the write changes, as a Buzz relay does: a create
+// makes the channel private with the agent as its creator and owner, an
+// add-member seats the member with its role, and an archive or unarchive
+// sets the archived flag. Each new state event is newer than the last one
+// of its kind for the channel.
+func (f *standaloneFixture) relayState(t *testing.T, evt nostr.Event) {
+	channel := writeTag(evt, "h")
+	if channel == "" {
+		return
+	}
+	latest := map[nostr.Kind]nostr.Event{}
+	for _, e := range f.relay.Events() {
+		if e.PubKey != f.relayKey.Public() || writeTag(e, "d") != channel {
+			continue
+		}
+		if cur, ok := latest[e.Kind]; !ok || e.CreatedAt > cur.CreatedAt || (e.CreatedAt == cur.CreatedAt && e.ID.Hex() < cur.ID.Hex()) {
+			latest[e.Kind] = e
+		}
+	}
+	// keep is the tags of the latest event of kind, without those drop names.
+	keep := func(kind nostr.Kind, drop func(nostr.Tag) bool) nostr.Tags {
+		tags := nostr.Tags{{"d", channel}}
+		for _, tag := range latest[kind].Tags {
+			if len(tag) > 0 && tag[0] != "d" && !drop(tag) {
+				tags = append(tags, tag)
+			}
+		}
+		return tags
+	}
+	store := func(kind nostr.Kind, tags nostr.Tags) {
+		at := nostr.Now()
+		if prev, ok := latest[kind]; ok && prev.CreatedAt >= at {
+			at = prev.CreatedAt + 1
+		}
+		state := nostr.Event{Kind: kind, Tags: tags, CreatedAt: at}
+		if err := state.Sign(f.relayKey); err != nil {
+			t.Error(err)
+			return
+		}
+		f.relay.Inject(state)
+	}
+	agent := f.s.id.Agent
+	switch evt.Kind {
+	case 9007:
+		store(39000, nostr.Tags{{"d", channel}, {"private"}, {"restricted"}, {"closed"}, {"t", "stream"}, {"P", agent}})
+		store(39001, nostr.Tags{{"d", channel}, {"t", "stream"}, {"P", agent}, {"p", agent, "owner"}})
+		store(39002, nostr.Tags{{"d", channel}, {"t", "stream"}, {"P", agent}, {"p", agent, "", "owner"}})
+	case 9000:
+		member, role := writeTag(evt, "p"), writeTag(evt, "role")
+		same := func(tag nostr.Tag) bool { return len(tag) > 1 && tag[0] == "p" && tag[1] == member }
+		store(39001, append(keep(39001, same), nostr.Tag{"p", member, role}))
+		store(39002, append(keep(39002, same), nostr.Tag{"p", member, "", role}))
+	case 9002:
+		tags := keep(39000, func(tag nostr.Tag) bool { return tag[0] == "archived" })
+		if writeTag(evt, "archived") == "true" {
+			tags = append(tags, nostr.Tag{"archived", "true"})
+		}
+		store(39000, tags)
+	}
+}
+
+// reconnectAll moves every operation of the agent, its channel lifecycle
+// too, to a new connection to the same relay and outbox.
+func (f *standaloneFixture) reconnectAll() {
+	next := f.reconnect()
+	f.s.buzz = directOps{s: f.s, t: next}
+}

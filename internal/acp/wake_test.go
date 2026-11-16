@@ -6,8 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -67,24 +65,13 @@ func within(t *testing.T, what string, cond func() bool) {
 // A settled machine agent's dialog worker posts a dialog its seam opens at
 // once, with no tick to wait for (bead agent-message-queue-udg).
 func TestDialogWorkerWakesOnANewDialog(t *testing.T) {
-	s, _ := machineServer(t)
+	s, rec := machineServer(t)
 	b := liveSession(t, "alpha")
 	activeChannel(t, s, b, machineChanA)
 	dir, err := dialog.DirFor("alpha")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var mu sync.Mutex
-	var posts []string
-	savedPost, savedRead := postAnswer, readReactions
-	t.Cleanup(func() { postAnswer, readReactions = savedPost, savedRead })
-	postAnswer = func(channel, content string, _ time.Duration) (string, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		posts = append(posts, channel)
-		return strings.Repeat("a", 64), nil
-	}
-	readReactions = func(string, time.Duration) ([]reaction, error) { return nil, nil }
 	passes := pacedPasses(t, s, newWakeup("dialog", 50*time.Millisecond, time.Hour), s.dialogTick)
 	settled(t, passes)
 
@@ -94,8 +81,12 @@ func TestDialogWorkerWakesOnANewDialog(t *testing.T) {
 		t.Fatal(err)
 	}
 	within(t, "the dialog post", func() bool {
-		mu.Lock()
-		defer mu.Unlock()
+		var posts []string
+		for _, evt := range rec.f.relay.Events() {
+			if evt.Kind == 9 && evt.PubKey.Hex() == s.id.Agent {
+				posts = append(posts, writeTag(evt, "h"))
+			}
+		}
 		return len(posts) == 1 && posts[0] == machineChanA
 	})
 }
@@ -103,7 +94,7 @@ func TestDialogWorkerWakesOnANewDialog(t *testing.T) {
 // A settled mirror worker posts a turn that ends in a watched transcript
 // at once, with no tick to wait for (bead agent-message-queue-udg).
 func TestMirrorWorkerWakesOnAFinishedTurn(t *testing.T) {
-	s, _ := machineServer(t)
+	s, rec := machineServer(t)
 	root := canonicalTempDir(t)
 	if err := fsq.EnsureAgentDirs(root, "agent"); err != nil {
 		t.Fatal(err)
@@ -122,23 +113,12 @@ func TestMirrorWorkerWakesOnAFinishedTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	activeChannel(t, s, b, machineChanA)
-	var mu sync.Mutex
-	var posts []string
-	savedPost := postAnswer
-	t.Cleanup(func() { postAnswer = savedPost })
-	postAnswer = func(_, content string, _ time.Duration) (string, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		posts = append(posts, content)
-		return strings.Repeat("a", 64), nil
-	}
 	passes := pacedPasses(t, s, newWakeup("mirror", 50*time.Millisecond, time.Hour), s.mirrorTick)
 	settled(t, passes)
 
 	f.add(f.userLine("o1", "p1", 0, "ship", nil), f.assistantLine("m1", 1, "end_turn", textBlock("Shipped.")))
 	within(t, "the turn post", func() bool {
-		mu.Lock()
-		defer mu.Unlock()
+		posts := agentPosts(rec)
 		return len(posts) == 1 && posts[0] == "▶ ship\n✓ 1s\nShipped."
 	})
 }
@@ -147,7 +127,7 @@ func TestMirrorWorkerWakesOnAFinishedTurn(t *testing.T) {
 // a settled mirror worker posts its first turn at once, with no tick to
 // wait for (bead agent-message-queue-udg).
 func TestMirrorWorkerWakesOnANewTranscript(t *testing.T) {
-	s, _ := machineServer(t)
+	s, rec := machineServer(t)
 	holder, err := launch.HolderOf(os.Getpid())
 	if err != nil {
 		t.Skip("no process identity on this platform")
@@ -180,16 +160,6 @@ func TestMirrorWorkerWakesOnANewTranscript(t *testing.T) {
 		t.Fatal(err)
 	}
 	activeChannel(t, s, b, machineChanA)
-	var mu sync.Mutex
-	var posts []string
-	savedPost := postAnswer
-	t.Cleanup(func() { postAnswer = savedPost })
-	postAnswer = func(_, content string, _ time.Duration) (string, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		posts = append(posts, content)
-		return strings.Repeat("a", 64), nil
-	}
 	passes := pacedPasses(t, s, newWakeup("mirror", 50*time.Millisecond, time.Hour), s.mirrorTick)
 	settled(t, passes)
 
@@ -200,10 +170,21 @@ func TestMirrorWorkerWakesOnANewTranscript(t *testing.T) {
 	}
 	f.add(f.userLine("o1", "p1", 0, "ship", nil), f.assistantLine("m1", 1, "end_turn", textBlock("Shipped.")))
 	within(t, "the new transcript's turn post", func() bool {
-		mu.Lock()
-		defer mu.Unlock()
+		posts := agentPosts(rec)
 		return len(posts) == 1 && posts[0] == "▶ ship\n✓ 1s\nShipped."
 	})
+}
+
+// agentPosts are the contents of the agent's messages on the relay, in
+// any channel, in stored order.
+func agentPosts(rec *machineCalls) []string {
+	var posts []string
+	for _, evt := range rec.f.relay.Events() {
+		if evt.Kind == 9 && evt.PubKey.Hex() == rec.f.s.id.Agent {
+			posts = append(posts, evt.Content)
+		}
+	}
+	return posts
 }
 
 // A settled machine worker provisions a session bound after it settled at

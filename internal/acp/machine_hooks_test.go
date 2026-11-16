@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -15,11 +14,13 @@ import (
 
 // hookWatchSession is a live mailbox session the machine agent serves,
 // whose binding records a Claude config dir holding the approval hook,
-// with the owner's opt-in when optIn is set. It returns the settings file
-// and the recorder of the agent's posts.
-func hookWatchSession(t *testing.T, optIn bool) (s *Server, settings string, posts func() []string) {
+// with the owner's opt-in when optIn is set. It returns the agent's
+// fixture, the settings file and the agent's posts on the relay, each as
+// its channel and text.
+func hookWatchSession(t *testing.T, optIn bool) (f *standaloneFixture, settings string, posts func() []string) {
 	t.Helper()
-	s, _ = machineServer(t)
+	s, rec := machineServer(t)
+	f = rec.f
 	home := canonicalTempDir(t)
 	t.Setenv("HOME", home)
 	b := liveSession(t, "watched")
@@ -39,20 +40,14 @@ func hookWatchSession(t *testing.T, optIn bool) (s *Server, settings string, pos
 	if err != nil {
 		t.Fatal(err)
 	}
-	var mu sync.Mutex
-	var sent []string
-	saved := postAnswer
-	t.Cleanup(func() { postAnswer = saved })
-	postAnswer = func(channel, text string, _ time.Duration) (string, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		sent = append(sent, channel+" "+text)
-		return strings.Repeat("f", 64), nil
-	}
-	return s, settings, func() []string {
-		mu.Lock()
-		defer mu.Unlock()
-		return append([]string(nil), sent...)
+	return f, settings, func() []string {
+		var sent []string
+		for _, evt := range f.relay.Events() {
+			if evt.Kind == 9 && evt.PubKey.Hex() == f.s.id.Agent {
+				sent = append(sent, writeTag(evt, "h")+" "+evt.Content)
+			}
+		}
+		return sent
 	}
 }
 
@@ -74,7 +69,8 @@ func dropHook(t *testing.T, settings string) {
 // the file as the other writer saved it and says once in the session's
 // channel that approvals stay in the terminal (audit 2026-11-10).
 func TestMachineAgentReportsARemovedApprovalHookAndLeavesTheFile(t *testing.T) {
-	s, settings, posts := hookWatchSession(t, true)
+	f, settings, posts := hookWatchSession(t, true)
+	s := f.s
 	tick(s, time.Now())
 	if got := posts(); len(got) != 0 {
 		t.Fatalf("posts with the hook in place = %q", got)
@@ -94,7 +90,8 @@ func TestMachineAgentReportsARemovedApprovalHookAndLeavesTheFile(t *testing.T) {
 // Without the owner's opt-in the machine agent leaves the file alone and
 // says once that the session's approvals stay in the terminal.
 func TestMachineAgentOnlyWarnsWithoutTheOptIn(t *testing.T) {
-	s, settings, posts := hookWatchSession(t, false)
+	f, settings, posts := hookWatchSession(t, false)
+	s := f.s
 	tick(s, time.Now())
 	dropHook(t, settings)
 	tick(s, time.Now())
@@ -109,7 +106,7 @@ func TestMachineAgentOnlyWarnsWithoutTheOptIn(t *testing.T) {
 	// Review of the machine agent's warning: a restart (Buzz Desktop, or
 	// another leader) repeated it for the same file.
 	s.resign()
-	tick(newMachineServer(t, s.cfg.StateDir), time.Now())
+	tick(newMachineServer(t, f), time.Now())
 	if got := posts(); len(got) != 1 {
 		t.Fatalf("posts after a restart = %q; want the one warning only", got)
 	}
@@ -118,7 +115,8 @@ func TestMachineAgentOnlyWarnsWithoutTheOptIn(t *testing.T) {
 // Review of the machine agent's warning: an owner who removed the hook
 // with uninstall-approval-hook was warned about it on every restart.
 func TestMachineAgentNeverWarnsAfterTheOwnerRemovedTheHook(t *testing.T) {
-	s, settings, posts := hookWatchSession(t, true)
+	f, settings, posts := hookWatchSession(t, true)
+	s := f.s
 	tick(s, time.Now())
 	if err := claude.OptOutHook(settings, claude.HookApproval); err != nil {
 		t.Fatal(err)
@@ -133,7 +131,8 @@ func TestMachineAgentNeverWarnsAfterTheOwnerRemovedTheHook(t *testing.T) {
 // recorded an opt-in the owner never gave. With no opt-in it only says,
 // once, that doctor --fix upgrades the hook.
 func TestMachineAgentOnlyReportsAnOldFormHookWithoutTheOptIn(t *testing.T) {
-	s, settings, posts := hookWatchSession(t, false)
+	f, settings, posts := hookWatchSession(t, false)
+	s := f.s
 	tick(s, time.Now())
 	raw, err := os.ReadFile(settings)
 	if err != nil {
