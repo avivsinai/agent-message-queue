@@ -24,7 +24,7 @@ machine runs inside `amq-remote serve` with an owner-signed grant.
 That is all a Claude desktop-app user needs. Every Claude Code session on the
 machine (terminal, desktop app Code tab, IDE) then mirrors its dialogs to
 Buzz, with no `/amq-remote`. Each session posts in its own channel, as a
-connected session does, or in its DM for a pinned agent. A session that was
+connected session does. A session that was
 never connected gets its channel at its first dialog: the hook binds the
 session as `/amq-remote` does, and the machine agent makes its channel,
 named like the session, and archives it when the session ends. An AMQ
