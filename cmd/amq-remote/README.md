@@ -20,7 +20,8 @@ asset.
 A running endpoint runs the binary it started with. After an upgrade, stop
 its `amq-remote up` (Ctrl-C, or SIGTERM to its pid) and run `amq-remote up`
 again. A command that needs the upgraded endpoint, such as `link add`, says
-"restart amq-remote up first".
+"restart amq-remote up first". `amq-remote doctor` notes an endpoint that runs
+another version than the installed binary, with the command that restarts it.
 
 `make build` also produces a local `amq-remote` and `amq-owner-sign` next to
 `amq`.
@@ -586,7 +587,11 @@ its process runs now. `amq-remote service uninstall` stops the service and
 removes its unit; when the stop fails (no login session to reach), it still
 removes the unit and says that the running endpoint stops at logout. Neither
 command changes a unit it did not write. `doctor` names `service install` when
-the root has a link and no current service for it.
+the root has a link and no current service for it. It also notes a running
+endpoint that reports another version than the installed binary (or none), with
+`service install` as the command that restarts it when a login service runs
+this root, and a restart of `amq-remote up` otherwise. `--fix` does not restart
+the endpoint.
 
 A link lives in exactly one root, normally the machine root; its state is
 never copied or moved. One link name in two roots is refused. The state

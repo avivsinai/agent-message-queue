@@ -179,6 +179,9 @@ type ErrorBody struct {
 type Features struct {
 	// Link: this endpoint serves links and keeps a manifest's links block.
 	Link bool `json:"link"`
+	// Version is the endpoint's own version; empty from an endpoint that
+	// does not report it.
+	Version string `json:"version,omitempty"`
 }
 
 // EndpointFeatures asks the endpoint at stateDir which features it serves.
@@ -221,6 +224,7 @@ type Server struct {
 	registrar Registrar
 	link      LinkHandler
 	activity  ActivityHandler
+	version   string
 }
 
 // SetActivityHandler installs the activity stream handler. Call it before
@@ -229,6 +233,9 @@ func (s *Server) SetActivityHandler(h ActivityHandler) { s.activity = h }
 
 // SetLinkHandler installs the link.v1 handler. Call it before Serve.
 func (s *Server) SetLinkHandler(h LinkHandler) { s.link = h }
+
+// SetVersion sets the version the endpoint reports. Call it before Serve.
+func (s *Server) SetVersion(v string) { s.version = v }
 
 // SetRegistrar installs the live registration handler. Call it before Serve.
 func (s *Server) SetRegistrar(r Registrar) { s.registrar = r }
@@ -361,7 +368,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		}
 		writeRecord(conn, Response{Reply: reply})
 	case req.Features:
-		writeRecord(conn, Response{Reply: mustJSON(Features{Link: true})})
+		writeRecord(conn, Response{Reply: mustJSON(Features{Link: true, Version: s.version})})
 	case req.Activity != nil:
 		s.streamActivity(ctx, conn, req)
 	case req.Register != nil:
