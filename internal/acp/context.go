@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
-	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/sessionguard"
 )
@@ -35,11 +34,6 @@ const (
 	EnvRemoteNative      = "AMQ_ACP_REMOTE_NATIVE_SESSION"
 	EnvRemote            = "AMQ_ACP_REMOTE"
 )
-
-// RemoteModeBinding makes every prompt read the per-user binding that
-// `amq-remote attach --self` writes, so one Buzz agent follows the session
-// the owner bound, with no root, target or pin in its environment.
-const RemoteModeBinding = "binding"
 
 const (
 	defaultTurnTimeout       = 10 * time.Minute
@@ -67,31 +61,20 @@ type Config struct {
 	// RemoteNative is the native session the owner shared. A target attached
 	// to any other session is refused.
 	RemoteNative string
-	// RemoteBinding reads root, target and native pin from the binding file
-	// on each prompt (AMQ_ACP_REMOTE=binding).
+	// RemoteBinding reads root, target and native pin from a binding file on
+	// each turn. Only NewStandalone sets it.
 	RemoteBinding bool
-	// Pin is the binding this Buzz agent serves in binding mode, named by its
-	// system prompt or its model (lifecycle.go). Empty means unpinned: the
-	// agent drives the only binding and refuses when several exist.
-	Pin string
-	// Helper marks the per-machine helper (system prompt line "AMQ Remote
-	// helper"). It serves no session and never delivers.
-	Helper bool
-	// Machine marks the machine agent (system prompt line "AMQ Remote
-	// machine"). It routes each prompt by the private channel it came from
-	// and never by a pin, a selected model or the only binding.
-	Machine bool
-	// PinErr refuses every prompt: the pin sources or role lines disagree,
-	// or the name is not a binding name.
-	PinErr            error
+	// Machine marks the machine agent. It routes each owner message by the
+	// private channel it came from. Only NewStandalone sets it.
+	Machine           bool
 	StateDir          string
 	TurnTimeout       time.Duration
 	PollInterval      time.Duration
 	HeartbeatInterval time.Duration
 	// PostTimeout bounds one Buzz post (default 30 s).
 	PostTimeout time.Duration
-	// Identity is the managed agent's Buzz identity (PrepareWorkerEnv);
-	// zero outside Buzz. NewServer fixes it for the server's life.
+	// Identity is the machine agent's Buzz identity (NewStandalone); zero
+	// for the ACP stdio server. NewServer fixes it for the server's life.
 	Identity buzzop.Identity
 }
 
@@ -99,11 +82,9 @@ type Config struct {
 // an unusable handle, or a session pin that cannot be authenticated all refuse;
 // there is no fallback to a guessed root.
 func LoadConfig() (Config, error) {
+	// No value of EnvRemote selects a mode.
 	if mode := strings.TrimSpace(os.Getenv(EnvRemote)); mode != "" {
-		if mode != RemoteModeBinding {
-			return Config{}, contextError("invalid %s=%q (allowed: %s)", EnvRemote, mode, RemoteModeBinding)
-		}
-		return loadBindingConfig()
+		return Config{}, contextError("invalid %s=%q: no value is allowed; set %s or %s", EnvRemote, mode, EnvTo, EnvRemoteTarget)
 	}
 	root := strings.TrimSpace(os.Getenv(EnvRoot))
 	if root == "" {
@@ -168,32 +149,6 @@ func LoadConfig() (Config, error) {
 		PollInterval:      pollInterval,
 		HeartbeatInterval: heartbeatInterval,
 	}, nil
-}
-
-// loadBindingConfig is binding mode: the root comes from the binding on each
-// prompt, so the environment names no root, recipient, target or pin.
-func loadBindingConfig() (Config, error) {
-	for _, name := range []string{EnvTo, EnvRemoteTarget, EnvRemoteNative} {
-		if strings.TrimSpace(os.Getenv(name)) != "" {
-			return Config{}, contextError("%s=%s takes no %s; the binding names the session", EnvRemote, RemoteModeBinding, name)
-		}
-	}
-	path, err := binding.Path()
-	if err != nil {
-		return Config{}, contextError("%v", err)
-	}
-	cfg := Config{RemoteBinding: true, StateDir: filepath.Join(filepath.Dir(path), "acp")}
-	cfg.Pin, cfg.Helper, cfg.Machine, cfg.PinErr = sessionPin(buzzAgent.systemPrompt, buzzAgent.model)
-	if cfg.TurnTimeout, err = durationEnv(EnvTurnTimeout, defaultTurnTimeout); err != nil {
-		return Config{}, err
-	}
-	if cfg.PollInterval, err = durationEnv(EnvPollInterval, defaultPollInterval); err != nil {
-		return Config{}, err
-	}
-	if cfg.HeartbeatInterval, err = durationEnv(EnvHeartbeatInterval, defaultHeartbeatInterval); err != nil {
-		return Config{}, err
-	}
-	return cfg, nil
 }
 
 func resolveStateDir(root string) (string, error) {

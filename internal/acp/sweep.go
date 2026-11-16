@@ -16,7 +16,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
 )
 
-// lateReplyInterval is how often an open ACP stream sweeps for late replies.
+// lateReplyInterval is how often the sweep worker sweeps for late replies.
 const lateReplyInterval = 30 * time.Second
 
 // lateReplyHorizon bounds the sweep to recent mailbox claims, so it never
@@ -110,18 +110,13 @@ func (s *Server) startLateReplySweep() (stop func()) {
 	} else {
 		close(machineDone)
 	}
-	// The dialogs of a machine agent or a pinned agent are posted in a
-	// worker of their own, so a dialog never waits behind the sweep or the
-	// machine lifecycle, and neither waits behind a dialog. A pinned agent's
-	// worker passes every machineScanInterval.
+	// The dialogs of a machine agent are posted in a worker of their own, so
+	// a dialog never waits behind the sweep or the machine lifecycle, and
+	// neither waits behind a dialog.
 	dialogDone := make(chan struct{})
-	if s.dialogPin() != "" {
+	if s.cfg.Machine {
 		s.dialogs.quit = quit
-		wake := polling("dialog", machineScanInterval)
-		if s.cfg.Machine {
-			wake = newWakeup("dialog", machineScanInterval, idlePoll)
-		}
-		go s.paced(quit, dialogDone, wake, func(now time.Time) pace {
+		go s.paced(quit, dialogDone, newWakeup("dialog", machineScanInterval, idlePoll), func(now time.Time) pace {
 			// With no relay connection nothing is posted or read.
 			if !s.dialogLead() || s.offline() {
 				return pace{next: now.Add(machineScanInterval)}
@@ -153,9 +148,6 @@ func (s *Server) startLateReplySweep() (stop func()) {
 		defer close(done)
 		tick := time.NewTicker(lateReplyInterval)
 		defer tick.Stop()
-		// The same worker keeps a pinned agent archived or not; it starts
-		// with a tick, so a restarted agent catches up at once.
-		s.lifecycleTick(time.Now())
 		for {
 			select {
 			case <-quit:
@@ -164,7 +156,6 @@ func (s *Server) startLateReplySweep() (stop func()) {
 			case <-kick:
 			}
 			s.sweepLateReplies(time.Now())
-			s.lifecycleTick(time.Now())
 		}
 	}()
 	return func() {

@@ -1488,11 +1488,10 @@ func (s *Server) channelRoute(channel string) (channelRecord, bool) {
 // a session identity that the binding no longer has.
 var errChannelNotConnected = errors.New("this channel's session is not connected")
 
-// machineBinding is the binding a machine agent's ACP session drives: the
+// machineBinding is the binding a machine agent's session drives: the
 // session named by the active record of the channel the session's first
-// prompt came from. The current prompt must carry that same channel. It
-// never uses a pin, a selected model or the only binding; anything that does
-// not resolve gets the directory.
+// turn came from. The current turn must carry that same channel. Anything
+// that does not resolve gets the directory.
 func (s *Server) machineBinding(sessionID string) (binding.Binding, error) {
 	s.mu.Lock()
 	route, current := "", ""
@@ -1504,11 +1503,11 @@ func (s *Server) machineBinding(sessionID string) (binding.Binding, error) {
 	}
 	s.mu.Unlock()
 	if route == "" || current != route {
-		return binding.Binding{}, &unpinnedError{machine: true}
+		return binding.Binding{}, &unpinnedError{}
 	}
 	r, ok := s.channelRoute(route)
 	if !ok {
-		return binding.Binding{}, &unpinnedError{machine: true}
+		return binding.Binding{}, &unpinnedError{}
 	}
 	return routeBinding(r)
 }

@@ -28,10 +28,10 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 )
 
-// The Buzz agent mirrors every harness dialog of the sessions it serves.
+// The machine agent mirrors every harness dialog of the sessions it serves.
 // A harness seam opens a request under the binding's dialogs directory
 // (package dialog); the worker that leads this agent posts it once into the
-// session's channel (machine agent) or DM (pinned agent), turns the owner's
+// session's channel, turns the owner's
 // ✅ or ❌ reaction or typed reply into the answer file, and edits the post
 // with the outcome once the dialog is resolved, by Buzz or in the terminal.
 // The first answer wins: answers and resolutions are create-exclusive.
@@ -198,7 +198,7 @@ type dialogState struct {
 	quiet map[string]dialogQuiet
 	// quit closes when the dialog worker stops; nil outside it.
 	quit <-chan struct{}
-	// release drops a pinned agent's dialog lead; nil when not held.
+	// release drops the dialog lead; nil when not held.
 	release func()
 }
 
@@ -427,37 +427,12 @@ func (s *Server) machineTargets() []dialogTarget {
 }
 
 // dialogTargets are the bindings this worker posts dialogs for: a machine
-// agent's live channels, or a pinned agent's live binding and its latest DM.
+// agent's live channels.
 func (s *Server) dialogTargets() []dialogTarget {
-	if s.id.Agent == "" {
+	if !s.cfg.Machine || s.id.Agent == "" || s.id.RelayKey == "" || s.id.Owner == "" {
 		return nil
 	}
-	if s.cfg.Machine {
-		if s.id.RelayKey == "" || s.id.Owner == "" {
-			return nil
-		}
-		return s.machineTargets()
-	}
-	if s.cfg.Helper || s.cfg.Pin == "" || s.cfg.PinErr != nil {
-		return nil
-	}
-	b, err := binding.ReadNamed(s.cfg.Pin)
-	if err != nil || !s.live(b) {
-		return nil
-	}
-	channel := ""
-	if raw, err := readSmallRegular(filepath.Join(s.agentMarkerDir(s.cfg.Pin), s.id.Agent+".dm")); err == nil {
-		channel = strings.TrimSpace(string(raw))
-	}
-	if channel == "" {
-		s.mu.Lock()
-		channel = s.lastChannel
-		s.mu.Unlock()
-	}
-	if channel == "" {
-		return nil
-	}
-	return []dialogTarget{{name: s.cfg.Pin, channel: channel, label: sessionAgentName(b), binding: b}}
+	return s.machineTargets()
 }
 
 // live reports whether b's session may still run: it is not proven ended.
@@ -471,10 +446,8 @@ func (s *Server) live(b binding.Binding) bool {
 // ended, except the bindings this tick served (judged live at most
 // machineScanInterval ago, so one that just ended is dropped a tick later),
 // edits their posts, and removes the binding's dialogs once their
-// seams left (seamsLeft). A machine
-// agent does this for every binding, a pinned agent for its own. waiting
-// reports whether a gone binding's dialogs stay for a seam that may still
-// read them.
+// seams left (seamsLeft). waiting reports whether a gone binding's dialogs
+// stay for a seam that may still read them.
 func (s *Server) dropGoneDialogs(served map[string]bool, now time.Time) (waiting bool) {
 	root, err := dialog.Root()
 	if err != nil {
@@ -488,8 +461,6 @@ func (s *Server) dropGoneDialogs(served map[string]bool, now time.Time) (waiting
 				names = append(names, e.Name())
 			}
 		}
-	} else if s.cfg.Pin != "" {
-		names = []string{s.cfg.Pin}
 	}
 	snap := s.snapshot()
 	for _, name := range names {
@@ -859,21 +830,8 @@ func outcomeLine(r dialog.Resolved) string {
 	return "→ " + label + " (Buzz)"
 }
 
-// dialogPin is the marker directory name whose dialog lock elects the
-// worker that posts dialogs: the machine agent's, or a pinned agent's pin;
-// "" when this agent posts none.
-func (s *Server) dialogPin() string {
-	switch {
-	case s.cfg.Machine:
-		return machineName
-	case !s.cfg.Helper && s.cfg.Pin != "" && s.cfg.PinErr == nil:
-		return s.cfg.Pin
-	}
-	return ""
-}
-
 // dialogLead reports whether this worker posts its agent's dialogs: the
-// worker that holds <dialogPin>/<self>.dialog.lock.
+// worker that holds _machine/<self>.dialog.lock.
 func (s *Server) dialogLead() bool {
 	if s.dialogs.release != nil || !lock.AdvisoryLockAvailable() {
 		return true
@@ -881,7 +839,7 @@ func (s *Server) dialogLead() bool {
 	if s.id.Agent == "" {
 		return false
 	}
-	dir := s.agentMarkerDir(s.dialogPin())
+	dir := s.agentMarkerDir(machineName)
 	if os.MkdirAll(dir, 0o700) != nil {
 		return false
 	}
@@ -900,15 +858,6 @@ func (s *Server) dialogLead() bool {
 type ownerMsg struct {
 	channel, words string
 	verified       func() (nostr.Event, error)
-}
-
-// acpOwner is the owner message of an ACP prompt or steer: its words are
-// ownerWords of the prompt, and its event is fetched from the relay
-// (ownerEvent).
-func (s *Server) acpOwner(channel, eventID, prompt string) ownerMsg {
-	return ownerMsg{channel: channel, words: ownerWords(prompt), verified: func() (nostr.Event, error) {
-		return ownerEvent(s.id.Owner, eventID, prompt, channel)
-	}}
 }
 
 // The kinds of owner decision, as a claim records them.
@@ -990,16 +939,14 @@ func (s *Server) dialogReplyOf(m ownerMsg) (string, dialog.Answer, bool) {
 	if channel == "" || s.id.Owner == "" {
 		return "", dialog.Answer{}, false
 	}
-	name := s.cfg.Pin
-	if s.cfg.Machine {
-		r, ok := s.channelRoute(channel)
-		if !ok {
-			return "", dialog.Answer{}, false
-		}
-		name = r.Name
-	} else if s.cfg.Helper || name == "" || s.cfg.PinErr != nil {
+	if !s.cfg.Machine {
 		return "", dialog.Answer{}, false
 	}
+	r, ok := s.channelRoute(channel)
+	if !ok {
+		return "", dialog.Answer{}, false
+	}
+	name := r.Name
 	dir, err := dialog.DirFor(name)
 	if err != nil {
 		return "", dialog.Answer{}, false
@@ -1076,17 +1023,6 @@ const OwnerSkew = ownerSkew
 func signedWithin(evt nostr.Event, floor, now time.Time) bool {
 	at := evt.CreatedAt.Time()
 	return !at.Before(floor) && !at.After(now.Add(ownerSkew))
-}
-
-// answerDialog writes a typed answer, tells the owner it was taken, and ends
-// the prompt without delivering it to the session.
-func (s *Server) answerDialog(sessionID, channel, dir string, a dialog.Answer, emit func(any) error) (any, *rpcError) {
-	text, _ := writeAnswer(dir, a)
-	meta := remoteMeta{State: "answered", Posted: s.publish(channel, text)}
-	if err := emitText(emit, sessionID, "agent_message_chunk", text); err != nil {
-		return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
-	}
-	return remotePromptResult{StopReason: StopReasonEndTurn, Meta: remotePromptMeta{Remote: meta}}, nil
 }
 
 // buzzEvent returns the one <buzz-event> block of a buzz-acp prompt, or "".
