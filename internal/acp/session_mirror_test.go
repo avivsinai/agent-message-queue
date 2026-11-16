@@ -629,8 +629,8 @@ func TestMirrorNeverPostsAnOffPeriodTurnAfterLostProgress(t *testing.T) {
 	}
 }
 
-// A turn that ended while its route was suspended was not an off-signal:
-// returning does not post it; a later turn gets its usual post.
+// A turn that ended while its route was suspended is not posted when the
+// route returns; a turn that ends after the return is.
 func TestMirrorPostsNoTurnThatEndedWhileItsRouteWasSuspended(t *testing.T) {
 	f := newMirrorFixture(t)
 	after, err := time.Parse(time.RFC3339Nano, f.ts(60))
