@@ -468,75 +468,63 @@ func TestRemoteCancelWhileQueuedSubmitsNothing(t *testing.T) {
 	}
 }
 
-// In binding mode a prompt answers "Not
-// connected" until a session is bound, then runs in the bound session.
+// A channel's owner message answers that the channel's session is not
+// connected until that session is bound, then runs in the bound session.
+// The turns run with no machine workers: they retire a record whose
+// session has no binding.
 func TestBindingModeFollowsTheBoundSession(t *testing.T) {
-	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	f := standalone(t)
 	rt := fake.New("fake", "e_1")
-	bound := remoteServer(t, rt, nil)
-	s := NewServer(Config{RemoteBinding: true, StateDir: t.TempDir(), HeartbeatInterval: 10 * time.Millisecond, TurnTimeout: time.Second, Identity: testAgent}, "test")
+	b := directNative(remoteServer(t, rt, nil).cfg.Root, "fake")
+	activeChannel(t, f.s, b, machineChanA)
+	directTiming(f, time.Second)
 
-	var said []string
-	emit := func(v any) error {
-		if note := v.(sessionUpdateNotification); note.Params.Update.SessionUpdate == "agent_message_chunk" {
-			said = append(said, note.Params.Update.Content.Text)
-		}
-		return nil
-	}
-	result, rpcErr := s.runRemote("s", "hello", "", newTurn(), emit)
-	if rpcErr != nil || len(said) != 1 || !strings.HasPrefix(said[0], "Not connected") {
-		t.Fatalf("unbound: result=%+v said=%q err=%v", result, said, rpcErr)
+	f.s.runOwnerTurn(machineChanA, f.ownerSays(t, machineChanA, "hello").Event, nil)
+	const notConnected = "This channel's session is not connected. Run /amq-remote in that session to connect it again."
+	if said := directContents(f.agentMessages(machineChanA)); len(said) != 1 || said[0] != notConnected {
+		t.Fatalf("unbound: said=%q", said)
 	}
 
-	if err := binding.WriteNamed(binding.Binding{Root: bound.cfg.Root, Target: "fake", NativeSession: "fake", Name: "fake"}); err != nil {
+	if err := binding.WriteNamed(b); err != nil {
 		t.Fatal(err)
 	}
-	eventID := strings.Repeat("9", 64)
-	id, _ := remoteRequestID(eventID)
-	result, rpcErr = s.runRemote("s", "hello", eventID, newTurn(), func(any) error { rt.Complete(id, "from the bound session"); return nil })
-	if rpcErr != nil {
-		t.Fatal(rpcErr)
-	}
-	if got := result.(remotePromptResult); got.StopReason != StopReasonEndTurn || got.Meta.Remote.Target != "fake" {
-		t.Fatalf("bound: %+v", got)
+	evt := f.ownerSays(t, machineChanA, "hello again").Event
+	id, _ := remoteRequestID(evt.ID.Hex())
+	directComplete(t, rt, id, "from the bound session")
+	f.s.runOwnerTurn(machineChanA, evt, nil)
+	if !rt.HasRun(id) || f.posts(machineChanA, "from the bound session") != 1 {
+		t.Fatalf("bound: ran=%v said=%q; want the bound session's answer", rt.HasRun(id), directContents(f.agentMessages(machineChanA)))
 	}
 }
 
 // Regression: #885, a redelivered event followed the current binding, so a
 // rebind between deliveries ran it again in the new session.
+// A final answer is posted once per event, so the first delivery ends on
+// its turn timeout with A's work still running, and the redelivery brings
+// the answer.
 func TestRedeliveryAfterRebindStaysOnTheFirstSession(t *testing.T) {
-	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	f := standalone(t)
 	a, b := fake.New("fake", "e_1"), fake.New("fake", "e_1")
-	serverA, serverB := remoteServer(t, a, nil), remoteServer(t, b, nil)
-	s := NewServer(Config{RemoteBinding: true, StateDir: t.TempDir(), TurnTimeout: time.Second, HeartbeatInterval: 10 * time.Millisecond, Identity: testAgent}, "test")
-	eventID := strings.Repeat("a", 64)
-	id, _ := remoteRequestID(eventID)
-	run := func(rt *fake.Runtime, label string) string {
-		t.Helper()
-		out := ""
-		if _, rpcErr := s.runRemote("s", "hello", eventID, newTurn(), func(v any) error {
-			note := v.(sessionUpdateNotification)
-			if note.Params.Update.SessionUpdate == "agent_thought_chunk" {
-				rt.Complete(id, "result from "+label)
-			}
-			if note.Params.Update.SessionUpdate == "agent_message_chunk" {
-				out += note.Params.Update.Content.Text
-			}
-			return nil
-		}); rpcErr != nil {
-			t.Fatal(rpcErr)
-		}
-		return out
-	}
-	if err := binding.WriteNamed(binding.Binding{Root: serverA.cfg.Root, Target: "fake", NativeSession: "fake", Name: "fake"}); err != nil {
+	bindA, bindB := directNative(remoteServer(t, a, nil).cfg.Root, "fake"), directNative(remoteServer(t, b, nil).cfg.Root, "fake")
+	if err := binding.WriteNamed(bindA); err != nil {
 		t.Fatal(err)
 	}
-	first := run(a, "A")
-	if err := binding.WriteNamed(binding.Binding{Root: serverB.cfg.Root, Target: "fake", NativeSession: "fake", Name: "fake"}); err != nil {
+	activeChannel(t, f.s, bindA, machineChanA)
+	directTiming(f, 200*time.Millisecond)
+	f.startMachine(t)
+	in := f.ownerSays(t, machineChanA, "hello")
+	id, _ := remoteRequestID(in.Event.ID.Hex())
+	waitClosed(t, f.s.Owner(in))
+	if !a.Complete(id, "result from A") {
+		t.Fatal("the first delivery did not run in session A")
+	}
+	if err := binding.WriteNamed(bindB); err != nil {
 		t.Fatal(err)
 	}
-	if second := run(b, "B"); first != "result from A" || second != first {
-		t.Fatalf("first=%q second=%q; the redelivery must return the first session's result", first, second)
+	directComplete(t, b, id, "result from B")
+	waitClosed(t, f.s.Owner(in))
+	if f.posts(machineChanA, "result from A") != 1 || f.posts(machineChanA, "result from B") != 0 || b.HasRun(id) {
+		t.Fatalf("posts=%q ranInB=%v; the redelivery must return the first session's result", directContents(f.agentMessages(machineChanA)), b.HasRun(id))
 	}
 }
 
@@ -555,19 +543,25 @@ func (k *keyRecorder) Submit(req core.BoundRequest) (core.Admission, error) {
 // message's client_id. The carrier must record the clientUserMessageId the
 // Codex attachment sends for the request the endpoint admitted.
 func TestCodexCarrierRecordsTheClientUserMessageID(t *testing.T) {
-	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	f := standalone(t)
 	rt := &keyRecorder{Runtime: fake.New("fake", "e_1"), keys: make(chan requests.Key, 1)}
-	bound := remoteServer(t, rt, nil)
-	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: t.TempDir(), HeartbeatInterval: 10 * time.Millisecond, TurnTimeout: time.Second, Identity: testAgent}, "test")
-	if err := binding.WriteNamed(binding.Binding{Name: "alpha", Root: bound.cfg.Root, Target: "fake", NativeSession: "fake", Harness: "codex"}); err != nil {
+	b := directNative(remoteServer(t, rt, nil).cfg.Root, "alpha")
+	b.Harness = "codex"
+	if err := binding.WriteNamed(b); err != nil {
 		t.Fatal(err)
 	}
-	eventID := strings.Repeat("7", 64)
-	id, _ := remoteRequestID(eventID)
-	if _, rpcErr := s.runRemote("s", "hello", eventID, newTurn(), func(any) error { rt.Complete(id, "done"); return nil }); rpcErr != nil {
-		t.Fatal(rpcErr)
+	activeChannel(t, f.s, b, machineChanA)
+	directTiming(f, time.Second)
+	evt := f.ownerSays(t, machineChanA, "hello").Event
+	id, _ := remoteRequestID(evt.ID.Hex())
+	directComplete(t, rt.Runtime, id, "done")
+	f.s.runOwnerTurn(machineChanA, evt, nil)
+	var key requests.Key
+	select {
+	case key = <-rt.keys:
+	default:
+		t.Fatal("the turn submitted nothing")
 	}
-	key := <-rt.keys
 	dir, err := mirror.DirFor("alpha")
 	if err != nil {
 		t.Fatal(err)
@@ -591,18 +585,19 @@ func canonicalTempDir(t *testing.T) string {
 // Regression: #885, a concurrent first delivery that lost the event claim
 // used its own captured binding. The loser must follow the winner.
 func TestEventClaimLoserFollowsTheWinner(t *testing.T) {
-	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
-	s := NewServer(Config{RemoteBinding: true, Pin: "winner", StateDir: canonicalTempDir(t)}, "test")
+	f := standalone(t)
 	eventID := strings.Repeat("b", 64)
 	winner := binding.Binding{Root: "/winner", Target: "claude:1", NativeSession: "s-winner"}
-	raw, _ := json.Marshal(eventClaim{Binding: winner, Name: "winner"})
-	if won, err := createExclusive(filepath.Join(s.cfg.StateDir, "remote-events", eventID+".json"), raw); err != nil || !won {
+	raw, _ := json.Marshal(eventClaim{Binding: winner, Name: "winner", Agent: f.s.id.Agent})
+	if won, err := createExclusive(filepath.Join(f.s.eventDir(eventID), eventID+".json"), raw); err != nil || !won {
 		t.Fatalf("seed claim: won=%v err=%v", won, err)
 	}
-	if err := binding.WriteNamed(binding.Binding{Root: "/loser", Target: "claude:2", NativeSession: "s-loser", Name: "loser"}); err != nil {
+	loser := binding.Binding{Root: "/loser", Target: "claude:2", NativeSession: "s-loser", Name: "loser"}
+	if err := binding.WriteNamed(loser); err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.turnBinding("s", eventID)
+	activeChannel(t, f.s, loser, machineChanA)
+	got, err := f.s.turnBinding(routeSessionPrefix+machineChanA, eventID)
 	if err != nil || !got.Same(winner) {
 		t.Fatalf("turn binding = %+v %v; want the winner's", got, err)
 	}
@@ -611,10 +606,10 @@ func TestEventClaimLoserFollowsTheWinner(t *testing.T) {
 // Regression: #885, a reader used a visible claim before its directory entry
 // was durable. Every returned claim is synced first.
 func TestExistingEventClaimIsMadeDurableBeforeUse(t *testing.T) {
-	s := NewServer(Config{RemoteBinding: true, Pin: "r", StateDir: canonicalTempDir(t)}, "test")
+	f := standalone(t)
 	eventID := strings.Repeat("c", 64)
-	claimDir := filepath.Join(s.cfg.StateDir, "remote-events")
-	raw, _ := json.Marshal(eventClaim{Binding: binding.Binding{Root: "/r", Target: "claude:1", NativeSession: "s"}, Name: "r"})
+	claimDir := f.s.eventDir(eventID)
+	raw, _ := json.Marshal(eventClaim{Binding: binding.Binding{Root: "/r", Target: "claude:1", NativeSession: "s"}, Name: "r", Agent: f.s.id.Agent})
 	if won, err := createExclusive(filepath.Join(claimDir, eventID+".json"), raw); err != nil || !won {
 		t.Fatalf("seed claim: %v %v", won, err)
 	}
@@ -626,7 +621,7 @@ func TestExistingEventClaimIsMadeDurableBeforeUse(t *testing.T) {
 		return nil
 	})
 	defer restore()
-	if _, err := s.turnBinding("s", eventID); err != nil {
+	if _, err := f.s.turnBinding(routeSessionPrefix+machineChanA, eventID); err != nil {
 		t.Fatal(err)
 	}
 	if !synced {
@@ -728,51 +723,41 @@ func TestDeferredRefusalReasonReachesTheDM(t *testing.T) {
 // let a timeout notice suppress the answer a later delivery brought, and a
 // "Not connected" turn carried no event id, so it posted on every delivery.
 func TestRedeliveryPostsEachKindOnce(t *testing.T) {
-	prompt := "<context>\nScope: dm\nChannel: DM (#6eff60e4-32ab-48ec-bd3d-f4c97872f370)\n</context>\nhi"
-	record := func(t *testing.T) *[]string {
-		var posts []string
-		saved := postAnswer
-		t.Cleanup(func() { postAnswer = saved })
-		postAnswer = func(_, content string, _ time.Duration) (string, error) {
-			posts = append(posts, content)
-			return "", nil
-		}
-		return &posts
-	}
-	deliver := func(t *testing.T, s *Server, eventID string, emit func(any) error) {
-		turn := newTurn()
-		turn.channel = buzzChannel(prompt)
-		if _, rpcErr := s.runRemote("s", prompt, eventID, turn, emit); rpcErr != nil {
-			t.Fatal(rpcErr)
-		}
-	}
 	t.Run("native timeout, then the answer", func(t *testing.T) {
+		f := standalone(t)
 		rt := fake.New("fake", "e_1")
-		s := remoteServer(t, rt, nil)
-		s.cfg.TurnTimeout = 100 * time.Millisecond
-		posts := record(t)
-		eventID := strings.Repeat("d", 64)
-		id, _ := remoteRequestID(eventID)
-		deliver(t, s, eventID, func(any) error { return nil })
+		b := directNative(remoteServer(t, rt, nil).cfg.Root, "fake")
+		if err := binding.WriteNamed(b); err != nil {
+			t.Fatal(err)
+		}
+		activeChannel(t, f.s, b, machineChanA)
+		directTiming(f, 100*time.Millisecond)
+		f.startMachine(t)
+		in := f.ownerSays(t, machineChanA, "hi")
+		id, _ := remoteRequestID(in.Event.ID.Hex())
+		waitClosed(t, f.s.Owner(in))
 		if !rt.Complete(id, "native answer") {
 			t.Fatal("request was not running after the timeout")
 		}
 		for range 2 {
-			deliver(t, s, eventID, func(any) error { return nil })
+			waitClosed(t, f.s.Owner(in))
 		}
-		if got := strings.Count(strings.Join(*posts, "|"), "native answer"); got != 1 || len(*posts) != 2 {
-			t.Fatalf("posts=%q; want the timeout notice and the answer once each", *posts)
+		posts := directContents(f.agentMessages(machineChanA))
+		if got := strings.Count(strings.Join(posts, "|"), "native answer"); got != 1 || len(posts) != 2 {
+			t.Fatalf("posts=%q; want the timeout notice and the answer once each", posts)
 		}
 	})
+	// The turns run with no machine workers: they retire a record whose
+	// session has no binding.
 	t.Run("not connected", func(t *testing.T) {
-		t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
-		s := NewServer(Config{RemoteBinding: true, StateDir: canonicalTempDir(t), TurnTimeout: time.Second}, "test")
-		posts := record(t)
+		f := standalone(t)
+		activeChannel(t, f.s, directNative(canonicalTempDir(t), "fake"), machineChanA)
+		evt := f.ownerSays(t, machineChanA, "hi").Event
 		for range 2 {
-			deliver(t, s, strings.Repeat("e", 64), func(any) error { return nil })
+			f.s.runOwnerTurn(machineChanA, evt, nil)
 		}
-		if len(*posts) != 1 {
-			t.Fatalf("posts=%q; want one Not connected", *posts)
+		if posts := directContents(f.agentMessages(machineChanA)); len(posts) != 1 {
+			t.Fatalf("posts=%q; want one not connected", posts)
 		}
 	})
 }
@@ -781,18 +766,11 @@ func TestRedeliveryPostsEachKindOnce(t *testing.T) {
 // posted its notice as the final answer, so the answer it later resolved to
 // was suppressed on the next delivery.
 func TestUncertainNoticeDoesNotHideTheAnswer(t *testing.T) {
-	var posts []string
-	saved := postAnswer
-	t.Cleanup(func() { postAnswer = saved })
-	postAnswer = func(_, content string, _ time.Duration) (string, error) {
-		posts = append(posts, content)
-		return "", nil
-	}
-	s := NewServer(Config{StateDir: canonicalTempDir(t)}, "test")
+	f := standalone(t)
 	deliver := func(snap protocol.Snapshot) {
 		turn := newTurn()
-		turn.channel = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
-		r := &remoteTurn{s: s, eventID: strings.Repeat("f", 64), emit: func(any) error { return nil }, turn: turn, meta: remoteMeta{Target: "fake"}}
+		turn.channel = machineChanA
+		r := &remoteTurn{s: f.s, eventID: strings.Repeat("f", 64), emit: func(any) error { return nil }, turn: turn, meta: remoteMeta{Target: "fake"}}
 		if _, rpcErr := r.settled("replied", snap); rpcErr != nil {
 			t.Fatal(rpcErr)
 		}
@@ -801,7 +779,7 @@ func TestUncertainNoticeDoesNotHideTheAnswer(t *testing.T) {
 	for range 2 {
 		deliver(protocol.Snapshot{State: protocol.StateCompleted, RequestRef: "ref", Result: &protocol.Result{Text: "the answer"}})
 	}
-	if len(posts) != 2 || posts[1] != "the answer" {
+	if posts := directContents(f.agentMessages(machineChanA)); len(posts) != 2 || posts[1] != "the answer" {
 		t.Fatalf("posts=%q; want one uncertainty notice and one answer", posts)
 	}
 }
@@ -822,44 +800,53 @@ func TestRecoveredBusyRefusalDoesNotHideTheAnswer(t *testing.T) {
 		}
 		return nil
 	})
-	s.cfg.StateDir = canonicalTempDir(t)
-	s.cfg.TurnTimeout = 4 * time.Second
-	var posts []string
-	saved := postAnswer
-	t.Cleanup(func() { postAnswer = saved })
-	postAnswer = func(_, content string, _ time.Duration) (string, error) {
-		posts = append(posts, content)
-		return "", nil
+	f := standalone(t)
+	b := directNative(s.cfg.Root, "fake")
+	if err := binding.WriteNamed(b); err != nil {
+		t.Fatal(err)
 	}
+	activeChannel(t, f.s, b, machineChanA)
+	directTiming(f, 4*time.Second)
+	f.startMachine(t)
+	dir := filepath.Join(s.cfg.Root, remoteStateDir)
 	busyID := "d2c80e1d-feb7-4c10-959e-23456789abcf"
-	resp, err := ipc.Call(filepath.Join(s.cfg.Root, remoteStateDir), ipc.Request{Command: &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit, RequestID: busyID, TargetID: "fake", Epoch: "e_1", NotAfter: protocol.FormatTime(time.Now().Add(time.Minute)), Input: &protocol.SubmitInput{Text: "occupy", Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn}}})
+	resp, err := ipc.Call(dir, ipc.Request{Command: &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit, RequestID: busyID, TargetID: "fake", Epoch: "e_1", NotAfter: protocol.FormatTime(time.Now().Add(time.Minute)), Input: &protocol.SubmitInput{Text: "occupy", Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn}}})
 	if err != nil || resp.AsError() != nil {
 		t.Fatal(err, resp.AsError())
 	}
-	eventID := strings.Repeat("b", 64)
-	id, _ := remoteRequestID(eventID)
-	emit := func(v any) error {
-		text := v.(sessionUpdateNotification).Params.Update.Content.Text
-		switch {
-		case strings.HasPrefix(text, "Queued:"):
-			// The session frees up, and the reply to the next submit is lost.
-			rt.Complete(busyID, "occupied")
-			loseReply.Lock()
-			lose = true
-			loseReply.Unlock()
-		case strings.HasPrefix(text, "Submitted to"):
-			rt.Complete(id, "the answer")
+	in := f.ownerSays(t, machineChanA, "hello")
+	id, _ := remoteRequestID(in.Event.ID.Hex())
+	ref := protocol.EncodeRef(ipc.LocalHost, "fake", id)
+	stop, done := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() { close(stop); <-done })
+	go func() {
+		defer close(done)
+		freed := false
+		for {
+			// Once the first submit is refused busy, the session frees up
+			// within the turn's busy pause, and the reply to the next submit
+			// is lost. Then the admitted run completes.
+			if !freed && directBusy(dir, ref) {
+				rt.Complete(busyID, "occupied")
+				loseReply.Lock()
+				lose = true
+				loseReply.Unlock()
+				freed = true
+			}
+			if freed && rt.Complete(id, "the answer") {
+				return
+			}
+			select {
+			case <-stop:
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
 		}
-		return nil
-	}
+	}()
 	for range 3 {
-		turn := newTurn()
-		turn.channel = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
-		if _, rpcErr := s.runRemote("s", "hello", eventID, turn, emit); rpcErr != nil {
-			t.Fatal(rpcErr)
-		}
+		waitClosed(t, f.s.Owner(in))
 	}
-	if got := strings.Count(strings.Join(posts, "|"), "the answer"); got != 1 {
+	if posts := directContents(f.agentMessages(machineChanA)); strings.Count(strings.Join(posts, "|"), "the answer") != 1 {
 		t.Fatalf("posts=%q; want the answer once", posts)
 	}
 }
