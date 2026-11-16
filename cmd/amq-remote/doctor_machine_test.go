@@ -379,7 +379,7 @@ func TestDoctorNotesASuspendedChannel(t *testing.T) {
 	}
 	pub, relayKey := strings.Repeat("e", 64), strings.Repeat("f", 64)
 	writeMarker(t, dir, machineMarkerDir, map[string]any{"name": "_machine", "pubkey": pub, "display_name": "AMQ Remote @ box",
-		"relay_key": relayKey, "updated": time.Now().UTC().Format(time.RFC3339)})
+		"relay_key": relayKey, "host": hostStandalone, "updated": time.Now().UTC().Format(time.RFC3339)})
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "claude", Name: "claude-p-session3"}
 	if err := binding.WriteNamed(b); err != nil {
 		t.Fatal(err)

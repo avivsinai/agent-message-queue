@@ -251,7 +251,7 @@ func nativeBinding(root, stateDir string, cand registry.Candidate, native, displ
 		Harness: h.Kind, Holder: h.holder(), Label: binding.SessionLabel(h.Kind, place, machine), Machine: machine, AppServer: h.AppServer,
 		Transcript: h.Transcript, ConfigDir: sessionConfigDir(h.Kind), Cwd: h.Cwd}
 	// The session identity is the harness, root and working directory, so the
-	// same session coming back gets its name and agent back. A link
+	// same session coming back gets its name and channel back. A link
 	// share keeps its target-derived identity: the share names its binding,
 	// and another process must never take that name over. That holds for a
 	// plain attach of a session a link already shares too: it keeps the
@@ -340,8 +340,9 @@ func checkToolProfile(pin linkio.Pin, link, tools string) error {
 	return protocol.Refuse(protocol.CodeInvalid, "link %s's server grants tool profiles %s; --tools %s is not one of them", link, strings.Join(*pin.ToolProfiles, ", "), tools)
 }
 
-// attachMailbox binds the Buzz agent to this session's AMQ handle.
-// Each DM becomes an AMQ message to the handle; no endpoint, hook, or wake is
+// attachMailbox binds this session's AMQ handle for the machine agent.
+// Each owner message in the session's channel becomes an AMQ message to the
+// handle; no endpoint, hook, or wake is
 // required, because noticing the message is
 // the handle owner's business.
 func attachMailbox(root, handle, name string, asJSON bool, stdout, stderr io.Writer) (int, error) {
@@ -509,7 +510,7 @@ func writeBinding(b binding.Binding, explicitName, followLink bool, inspect bind
 }
 
 // heldBySession reports whether b's session already held the name b.Name,
-// as a binding or a tombstone, so its agent comes back. It is a report read
+// as a binding or a tombstone, so its channel comes back. It is a report read
 // before the write, not a lock.
 func heldBySession(b binding.Binding) bool {
 	ours := func(o binding.Binding) bool {
@@ -869,7 +870,7 @@ type bindingRow struct {
 }
 
 // dialogRow is one unresolved dialog: open, or answered and waiting for the
-// session to apply the answer. Posted is true once the Buzz agent posted it.
+// session to apply the answer. Posted is true once the machine agent posted it.
 type dialogRow struct {
 	ID       string       `json:"id"`
 	Tool     string       `json:"tool"`

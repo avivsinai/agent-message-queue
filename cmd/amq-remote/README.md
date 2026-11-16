@@ -1102,7 +1102,7 @@ reads `uncertain`.
 ### Approvals from the Buzz DM
 
 Every dialog a connected session raises in its terminal also shows in the
-session's Buzz channel or DM: a command, a file edit, a network or permission
+session's Buzz channel: a command, a file edit, a network or permission
 grant, an MCP call, a question. The message carries the dialog text and its
 options as the harness shows them, so the owner reads what the terminal
 shows. ✅ takes the first option, ❌ the deny option, a reply `1`, `2`, ...

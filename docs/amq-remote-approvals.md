@@ -152,7 +152,7 @@ owner's signed event, at most 5 minutes old; a `/` line that is not verified
 as the owner's goes to the session as an ordinary message, and only in the
 channel made for that session. The queued request carries the signed
 message, and the wake verifies it again before it types: the session it was
-taken for, the owner key and channel that the Buzz agent recorded for the
+taken for, the owner key and channel that the machine agent recorded for the
 share, and the exact command line. While a dialog is open the command
 waits, oldest first, and Buzz gets "Queued"; it is typed when the dialog
 closes, and Buzz is told again. A command still waiting 10 minutes after
