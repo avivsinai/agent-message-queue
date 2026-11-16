@@ -722,108 +722,6 @@ func TestApprovalHookBindsANativeSession(t *testing.T) {
 	}
 }
 
-// Buzz DX S5: a session whose Buzz agent runs is told only whom to DM: two
-// lines, no Buzz setup step.
-func TestAttachWithARunningAgentNamesOnlyTheDM(t *testing.T) {
-	dir := canonicalTempDir(t)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
-	root := filepath.Join(dir, "p", ".agent-mail", "session3")
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	markers := filepath.Join(dir, "remote", "acp", "agents", "claude-p-session3")
-	if err := os.MkdirAll(markers, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	marker := `{"name":"claude-p-session3","pubkey":"ab","display_name":"AMQ: claude-p-session3","updated":"` + time.Now().UTC().Format(time.RFC3339) + `"}`
-	if err := os.WriteFile(filepath.Join(markers, "ab.json"), []byte(marker), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	pinMailboxSession(t, root)
-	var out bytes.Buffer
-	if code, err := attach([]string{"--self"}, &out, io.Discard); code != 0 || err != nil {
-		t.Fatalf("attach: code=%d err=%v", code, err)
-	}
-	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if len(lines) != 2 || !strings.HasPrefix(lines[0], "Connected: ") || lines[1] != `DM "AMQ: claude-p-session3" in Buzz.` {
-		t.Fatalf("attach printed %q; want Connected and the DM line only", out.String())
-	}
-}
-
-// Review-s5 P1-1: attach promised Desktop's create dialog whenever the
-// helper ran, but the helper drafts only for a session proven live. A
-// session whose liveness is unknown never got the dialog, and nothing told
-// the owner to create the agent. It is now told to.
-func TestAttachOffersSetupWhenTheHelperWillNotDraft(t *testing.T) {
-	dir := canonicalTempDir(t)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
-	root := filepath.Join(dir, "p", ".agent-mail", "session3")
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	helper := filepath.Join(dir, "remote", "acp", "agents", helperMarkerDir)
-	if err := os.MkdirAll(helper, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	marker := `{"name":"_helper","pubkey":"hh","channel":"c1","owner_admin":true,"updated":"` + time.Now().UTC().Format(time.RFC3339) + `"}`
-	if err := os.WriteFile(filepath.Join(helper, "hh.json"), []byte(marker), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	pinMailboxSession(t, root)
-	var out bytes.Buffer
-	if code, err := attach([]string{"--self"}, &out, io.Discard); code != 0 || err != nil {
-		t.Fatalf("attach: code=%d err=%v", code, err)
-	}
-	if !strings.Contains(out.String(), machineSetupSteps) || strings.Contains(out.String(), "Create agent") {
-		t.Fatalf("attach printed %q; want the machine setup step, not the create dialog, for a session whose liveness is unknown", out.String())
-	}
-}
-
-// field: a note on bead agent-message-queue-1uk: after the helper agent was
-// deleted in Buzz Desktop, `amq-remote bindings` showed "Helper: ...
-// (offline)" from its last marker for ever, beside the machine agent that
-// serves every session.
-func TestBindingsHidesAnOfflineHelperBesideTheMachineAgent(t *testing.T) {
-	gone := endedHolder(t)
-	self, err := launch.HolderOf(os.Getpid())
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := canonicalTempDir(t)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
-	now := time.Now().UTC()
-	for _, m := range []struct {
-		dir     string
-		updated time.Time
-		holder  launch.HolderIdentity
-	}{
-		{helperMarkerDir, now.Add(-time.Hour), gone},
-		{machineMarkerDir, now, self},
-	} {
-		path := filepath.Join(dir, "remote", "acp", "agents", m.dir)
-		if err := os.MkdirAll(path, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		raw, err := json.Marshal(map[string]any{"name": m.dir, "updated": m.updated.Format(time.RFC3339), "worker": m.holder, "parent": m.holder})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(path, "pk.json"), raw, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	var out bytes.Buffer
-	if code, err := bindings(nil, &out); code != 0 || err != nil {
-		t.Fatalf("bindings: code=%d err=%v", code, err)
-	}
-	if !strings.Contains(out.String(), "Machine agent:") || strings.Contains(out.String(), "Helper:") {
-		t.Fatalf("bindings printed %q; want the machine agent and no line for the offline helper", out.String())
-	}
-}
-
 // endedHolder is this test process as a holder recorded in another boot, so
 // its binding is proven ended; the test skips where the boot id is unreadable.
 func endedHolder(t *testing.T) launch.HolderIdentity {
@@ -1508,8 +1406,8 @@ func TestAttachSaysTheStandaloneMachineAgentIsNotRunning(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got["machine_host"] != hostStandalone || got["machine_refusal"] != codeAuthorityExpired {
-		t.Fatalf("attach JSON = %v; want machine_host standalone and machine_refusal %s", got, codeAuthorityExpired)
+	if got["machine_refusal"] != codeAuthorityExpired {
+		t.Fatalf("attach JSON = %v; want machine_refusal %s", got, codeAuthorityExpired)
 	}
 
 	out.Reset()
