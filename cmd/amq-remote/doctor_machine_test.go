@@ -251,7 +251,7 @@ func TestDoctorMailboxesWarnsOfAWakeBeforeDialogEntries(t *testing.T) {
 // from the channels map (audit 2026-11-10).
 // A machine agent that serves inside amq-remote serve is checked from its
 // enrolled credential and status file, with no Buzz Desktop check.
-func standaloneMachineAgentFixture(t *testing.T) (map[string]any, string, string, string) {
+func standaloneMachineAgentFixture(t *testing.T) (map[string]any, string, string, string, string) {
 	t.Helper()
 	machineFixture(t)
 	installHooks(t, true, true)
@@ -304,13 +304,13 @@ func standaloneMachineAgentFixture(t *testing.T) (map[string]any, string, string
 	if err != nil || code != 0 {
 		t.Fatalf("doctor: code=%d err=%v failing=%v", code, err, out.(map[string]any)["failing"])
 	}
-	return out.(map[string]any), agent, cred.Tag.OwnerPubKey, grantEnd(cred)
+	return out.(map[string]any), agent, cred.Tag.OwnerPubKey, grantEnd(cred), cred.Relay
 }
 
 // The standalone doctor row has the enrolled host and authenticated relay,
 // without assuming a record in an empty outbox.
 func TestDoctorChecksAStandaloneMachineAgent(t *testing.T) {
-	out, agent, owner, grantEnd := standaloneMachineAgentFixture(t)
+	out, agent, owner, grantEnd, _ := standaloneMachineAgentFixture(t)
 	row := out["machine_agent"].(machineAgentRow)
 	want := machineAgentRow{State: agentRunning, Name: "AMQ Remote @ m", RelayKey: true, Host: hostStandalone, Agent: agent[:8],
 		Owner: owner[:8], Relay: "wss://relay.example", RelayState: string(relay.StateAuthenticated), GrantEnd: grantEnd}
@@ -333,12 +333,12 @@ func TestDoctorTextPrintsAFailingChannelOnce(t *testing.T) {
 // An unknown relay write is never forgotten. Doctor reads it without
 // owning the outbox and warns once it has been unknown for over a day.
 func TestDoctorNotesAnOldUnknownOutboxRecord(t *testing.T) {
-	_, agent, _, _ := standaloneMachineAgentFixture(t)
-	cred, err := machinecred.Load(filepath.Join(os.Getenv("HOME"), ".amq"), agent)
+	_, agent, _, _, relay := standaloneMachineAgentFixture(t)
+	stateDir, err := binding.Path()
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir := machineOutboxDir(filepath.Join(filepath.Dir(os.Getenv(binding.EnvPath)), "acp"), buzzop.RelayKey(cred.Relay), agent)
+	dir := machineOutboxDir(filepath.Join(filepath.Dir(stateDir), "acp"), buzzop.RelayKey(relay), agent)
 	o, err := outbox.Open(dir)
 	if err != nil {
 		t.Fatal(err)

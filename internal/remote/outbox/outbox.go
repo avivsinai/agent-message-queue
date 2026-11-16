@@ -8,6 +8,9 @@
 //   - The outcome moves to unknown, durably, before the caller sends the
 //     event.
 //   - Accepted is terminal.
+//   - A record is removed only by Prune, and never while its outcome is
+//     unknown: only its own event can be sent again without a second
+//     delivery.
 //   - An unreadable record is an error, never treated as absent.
 //
 // One process owns a directory at a time; the caller holds the lock that
@@ -36,10 +39,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 )
 
-//   - A record is removed only by Prune, and never while its outcome is
-//     unknown: only its own event can be sent again without a second
-//     delivery.
-//
 // OutcomeOf maps the result of relay.Conn.Publish to an outcome.
 func OutcomeOf(err error) buzzop.Outcome {
 	switch {
