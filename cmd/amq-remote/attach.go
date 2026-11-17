@@ -1098,10 +1098,11 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 }
 
 // removeDetachedAdapters removes the adapter entry of each native session in
-// names that the owner detached from its root's manifest, so serve does not
-// attach it again at its next start. An entry whose target a current binding
-// of the same root names stays. An entry that a relay share names stays too,
-// with a note on stderr.
+// names from its root's manifest, so serve does not attach it again at its
+// next start. names are the sessions this detach turned off and the name the
+// user gave, whose tombstone can record an end or no reason. An entry whose
+// target a current binding of the same root names stays. An entry that a
+// relay share names stays too, with a note on stderr.
 func removeDetachedAdapters(names []string, stderr io.Writer) error {
 	tombs, err := binding.Tombstones()
 	if err != nil {
@@ -1112,7 +1113,7 @@ func removeDetachedAdapters(names []string, stderr io.Writer) error {
 		return err
 	}
 	for _, t := range tombs {
-		if !slices.Contains(names, t.Name) || t.Mailbox() || t.Target == "" || t.Removed != binding.RemovedDetached {
+		if !slices.Contains(names, t.Name) || t.Mailbox() || t.Target == "" {
 			continue
 		}
 		if slices.ContainsFunc(all, func(b binding.Binding) bool {
