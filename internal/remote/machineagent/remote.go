@@ -110,7 +110,7 @@ func (s *Agent) ownsClaim(c eventClaim) bool {
 // remote-events/<agent pubkey>/. Each Buzz agent keeps its own, because one
 // Buzz event can reach several agents, and each handles it for itself.
 func (s *Agent) eventDir() string {
-	return filepath.Join(s.cfg.StateDir, "remote-events", s.id.Agent)
+	return filepath.Join(s.stateDir, "remote-events", s.id.Agent)
 }
 
 // createExclusive publishes raw at path only if nothing is there yet. The

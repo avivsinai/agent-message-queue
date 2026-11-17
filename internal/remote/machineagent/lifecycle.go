@@ -96,7 +96,7 @@ func newerWorker(a, b launch.HolderIdentity) bool {
 // agentMarkerDir is <state>/agents/_machine: the machine agent's marker and
 // its lead, dialog and mirror locks.
 func (s *Agent) agentMarkerDir() string {
-	return filepath.Join(s.cfg.StateDir, "agents", machineName)
+	return filepath.Join(s.stateDir, "agents", machineName)
 }
 
 func readAgentMarker(path string) (agentMarker, bool) {

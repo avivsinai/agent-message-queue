@@ -28,7 +28,7 @@ func TestOwnerTurnReadsTurnTimeoutFromSettingsFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, settingsFile), []byte(`{"turn_timeout":"2s"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f.s.cfg.TurnTimeout = time.Nanosecond
+	f.s.startup.Timeout = time.Nanosecond
 	f.machine(t)
 	in := f.ownerSays(t, machineChanA, "hi")
 	done := f.s.Owner(in)

@@ -173,7 +173,7 @@ func (s *Agent) warnOnce(path, kind string, info os.FileInfo) bool {
 		return false
 	}
 	sum := sha256.Sum256([]byte(path))
-	file := filepath.Join(s.cfg.StateDir, "hook-warnings", hex.EncodeToString(sum[:12])+".json")
+	file := filepath.Join(s.stateDir, "hook-warnings", hex.EncodeToString(sum[:12])+".json")
 	warned := map[string]string{}
 	if raw, err := readSmallRegular(file); err == nil {
 		_ = json.Unmarshal(raw, &warned)

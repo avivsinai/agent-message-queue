@@ -22,7 +22,7 @@ func TestMailboxExpiredReplayDoesNotDenyDelivery(t *testing.T) {
 	s.Owner(in)
 	promptOf(t, b)
 	stop()
-	s.cfg.TurnTimeout = time.Nanosecond
+	s.startup.Timeout = time.Nanosecond
 	turn := newTurn()
 	turn.event = in.Event
 	got, err := s.runBound(routeSessionPrefix+machineChanA, in.Event.Content, event, turn)

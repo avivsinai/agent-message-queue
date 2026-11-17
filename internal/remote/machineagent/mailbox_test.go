@@ -463,7 +463,7 @@ func TestMailboxCancelWhilePublishLockHeldPublishesNothing(t *testing.T) {
 func TestMailboxExpiredBudgetPublishesNothing(t *testing.T) {
 	f, b := mailboxRoute(t)
 	root := b.Root
-	f.s.cfg.TurnTimeout = time.Nanosecond
+	f.s.startup.Timeout = time.Nanosecond
 	f.machine(t)
 	waitClosed(t, f.s.Owner(f.ownerSays(t, machineChanA, "hello")))
 	if ids := inboxPrompts(t, root); len(ids) != 0 {
@@ -512,7 +512,7 @@ func TestRedeliveredEventPostsOnce(t *testing.T) {
 func TestLateReplyIsPostedOnceAfterTheTurn(t *testing.T) {
 	f, b := mailboxRoute(t)
 	s, root := f.s, b.Root
-	s.cfg.TurnTimeout = 300 * time.Millisecond
+	s.startup.Timeout = 300 * time.Millisecond
 	stop := f.machine(t)
 	in := f.ownerSays(t, machineChanA, "hi")
 	eventID := in.Event.ID.Hex()

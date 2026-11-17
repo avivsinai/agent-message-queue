@@ -249,7 +249,7 @@ func (s *Agent) sweepLateReplies(now time.Time) {
 			if posts == lateReplyPosts {
 				break
 			}
-			w := &mailboxWatch{stateDir: s.cfg.StateDir, b: c.b, threadID: c.claim.Thread, promptID: promptID, created: c.created, adopt: true}
+			w := &mailboxWatch{stateDir: s.stateDir, b: c.b, threadID: c.claim.Thread, promptID: promptID, created: c.created, adopt: true}
 			replyID, text, _, err := w.forward(newHits[promptID], curHits[promptID])
 			if err != nil || text == "" {
 				continue
@@ -367,7 +367,7 @@ func (s *Agent) loadLateClaim(eventID string, now time.Time) (*lateClaim, bool) 
 		return nil, false
 	}
 	c.created = created
-	turnEnds := created.Add(s.cfg.TurnTimeout)
+	turnEnds := created.Add(s.startup.Timeout)
 	if d, err := time.Parse(time.RFC3339Nano, c.claim.Deadline); err == nil {
 		turnEnds = d
 	}

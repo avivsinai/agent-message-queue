@@ -22,7 +22,7 @@ func directNative(root, name string) binding.Binding {
 // directTiming sets the turn durations of f's server. Call it before the
 // machine workers start: they read the configuration.
 func directTiming(f *standaloneFixture, turnTimeout time.Duration) {
-	f.s.cfg.TurnTimeout, f.s.cfg.PollInterval, f.s.cfg.HeartbeatInterval = turnTimeout, 5*time.Millisecond, 10*time.Millisecond
+	f.s.startup.Timeout, f.s.startup.Poll, f.s.startup.Heartbeat = turnTimeout, 5*time.Millisecond, 10*time.Millisecond
 }
 
 // directComplete completes the run of requestID with text once rt has

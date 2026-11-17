@@ -24,7 +24,7 @@ func mailboxRoute(t *testing.T, opts ...func(*relaytest.Relay)) (*standaloneFixt
 	f := standalone(t, opts...)
 	b := liveSession(t, "alpha")
 	activeChannel(t, f.s, b, machineChanA)
-	f.s.cfg.TurnTimeout, f.s.cfg.PollInterval, f.s.cfg.HeartbeatInterval = 2*time.Second, 5*time.Millisecond, 20*time.Millisecond
+	f.s.startup.Timeout, f.s.startup.Poll, f.s.startup.Heartbeat = 2*time.Second, 5*time.Millisecond, 20*time.Millisecond
 	return f, b
 }
 

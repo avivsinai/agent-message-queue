@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
@@ -48,14 +47,6 @@ type Config struct {
 	// StateDir is the agent's state directory; empty means
 	// BindingStateDir, beside the binding file.
 	StateDir string
-	// PostTimeout bounds one Buzz post (default 30 s).
-	PostTimeout time.Duration
-	// TurnTimeout, PollInterval and HeartbeatInterval are a turn's startup
-	// durations (default 10 min, 100 ms and 15 s); ~/.amq/acp.settings
-	// overrides them for each turn that starts.
-	TurnTimeout       time.Duration
-	PollInterval      time.Duration
-	HeartbeatInterval time.Duration
 }
 
 // New builds a machine agent on cfg.Transport. The marker it writes
@@ -69,23 +60,13 @@ func New(cfg Config) *Agent {
 	if cfg.StateDir == "" {
 		cfg.StateDir = filepath.Join("meta", "acp")
 	}
-	if cfg.TurnTimeout <= 0 {
-		cfg.TurnTimeout = defaultTurnTimeout
-	}
-	if cfg.PollInterval <= 0 {
-		cfg.PollInterval = defaultPollInterval
-	}
-	if cfg.HeartbeatInterval <= 0 {
-		cfg.HeartbeatInterval = defaultHeartbeatInterval
-	}
-	if cfg.PostTimeout <= 0 {
-		cfg.PostTimeout = defaultPostTimeout
-	}
 	s := &Agent{
-		timings:  remoteturn.NewTimings("machine agent"),
-		cfg:      cfg,
-		id:       cfg.Identity,
-		sessions: make(map[string]*sessionState),
+		timings:     remoteturn.NewTimings("machine agent"),
+		startup:     remoteturn.Timing{Timeout: defaultTurnTimeout, Poll: defaultPollInterval, Heartbeat: defaultHeartbeatInterval},
+		postTimeout: defaultPostTimeout,
+		stateDir:    cfg.StateDir,
+		id:          cfg.Identity,
+		sessions:    make(map[string]*sessionState),
 	}
 	s.buzz = directOps{s: s, t: cfg.Transport}
 	s.posts = boundedPosts{s: s, t: cfg.Transport}
@@ -124,7 +105,7 @@ func (s *Agent) bound(ctx context.Context) (context.Context, context.CancelFunc)
 	if _, ok := ctx.Deadline(); ok {
 		return ctx, func() {}
 	}
-	return context.WithTimeout(ctx, s.cfg.PostTimeout)
+	return context.WithTimeout(ctx, s.postTimeout)
 }
 
 // boundedPosts are posts on the transport, each bounded by bound.

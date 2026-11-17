@@ -17,7 +17,7 @@ import (
 	remoteturn "github.com/avivsinai/agent-message-queue/internal/remote/turn"
 )
 
-// The startup turn durations, used when Config leaves them zero.
+// A turn's durations when acp.settings sets none.
 const (
 	defaultTurnTimeout       = 10 * time.Minute
 	defaultPollInterval      = 100 * time.Millisecond
@@ -28,8 +28,13 @@ const (
 // turns, dialogs and session mirrors it serves.
 type Agent struct {
 	// timings reads acp.settings for each turn that starts.
-	timings  *remoteturn.Timings
-	cfg      Config
+	timings *remoteturn.Timings
+	// startup is a turn's durations when acp.settings sets none, and
+	// postTimeout bounds one Buzz post.
+	startup     remoteturn.Timing
+	postTimeout time.Duration
+	// stateDir is the agent's state directory.
+	stateDir string
 	mu       sync.Mutex
 	sessions map[string]*sessionState
 	// late is the late-reply sweep state.
@@ -148,10 +153,10 @@ func (s *Agent) settler(turn *turnState) func(turnOutcome) turnOutcome {
 func (s *Agent) beginTurnLocked(sessionID string) (*sessionState, *turnState, error) {
 	session, ok := s.sessions[sessionID]
 	if !ok {
-		return nil, nil, fmt.Errorf("unknown sessionId %q; call session/new first", sessionID)
+		return nil, nil, fmt.Errorf("no session %q", sessionID)
 	}
 	if session.turn != nil {
-		return nil, nil, fmt.Errorf("sessionId %q already has an in-flight prompt", sessionID)
+		return nil, nil, fmt.Errorf("session %q has a turn in flight", sessionID)
 	}
 	session.turn = &turnState{done: make(chan struct{})}
 	return session, session.turn, nil
@@ -171,7 +176,7 @@ func (s *Agent) finishTurn(session *sessionState, turn *turnState) {
 // owner's settings file (remoteturn.Timings); the configured durations are
 // its startup values.
 func (s *Agent) loadTurnTiming() remoteturn.Timing {
-	return s.timings.Load(remoteturn.Timing{Timeout: s.cfg.TurnTimeout, Poll: s.cfg.PollInterval, Heartbeat: s.cfg.HeartbeatInterval})
+	return s.timings.Load(s.startup)
 }
 
 // timing is the turn's durations: those fixed at turn start, or the startup
@@ -180,5 +185,5 @@ func (s *Agent) timing(turn *turnState) remoteturn.Timing {
 	if turn != nil && turn.timing != nil {
 		return *turn.timing
 	}
-	return remoteturn.Timing{Timeout: s.cfg.TurnTimeout, Poll: s.cfg.PollInterval, Heartbeat: s.cfg.HeartbeatInterval}
+	return s.startup
 }

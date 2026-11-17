@@ -506,7 +506,7 @@ type mailboxWatch struct {
 
 func (s *Agent) watchMailbox(b binding.Binding, threadID, promptID string, created time.Time) *mailboxWatch {
 	return &mailboxWatch{
-		stateDir: s.cfg.StateDir, b: b, threadID: threadID, promptID: promptID, created: created,
+		stateDir: s.stateDir, b: b, threadID: threadID, promptID: promptID, created: created,
 		inboxNew: mailprompt.NewScan(fsq.AgentInboxNew(b.Root, mailboxSender)),
 		inboxCur: mailprompt.NewScan(fsq.AgentInboxCur(b.Root, mailboxSender)),
 	}

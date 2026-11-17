@@ -486,7 +486,7 @@ func notExist(path string) bool {
 }
 
 func (s *Agent) dialogPostDir(name string) string {
-	return filepath.Join(s.cfg.StateDir, "dialogs", name)
+	return filepath.Join(s.stateDir, "dialogs", name)
 }
 
 // dialogStep posts req once, then reads the owner's reactions on the post

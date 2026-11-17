@@ -150,7 +150,7 @@ func channelDirFor(stateDir, relayKey, machine string) string {
 	return filepath.Join(stateDir, "channels", relayKey, machine)
 }
 
-func (s *Agent) channelDir() string { return channelDirFor(s.cfg.StateDir, s.id.RelayKey, s.id.Agent) }
+func (s *Agent) channelDir() string { return channelDirFor(s.stateDir, s.id.RelayKey, s.id.Agent) }
 
 func (s *Agent) retiredDir() string { return filepath.Join(s.channelDir(), "retired") }
 
@@ -221,7 +221,7 @@ func (s *Agent) save(r *channelRecord, now time.Time) error {
 func (s *Agent) writeState(path string, raw []byte) error {
 	// The state dir is the operator's choice (it may be a
 	// link); everything AMQ creates below it is checked.
-	anchor := s.cfg.StateDir
+	anchor := s.stateDir
 	rel, err := filepath.Rel(anchor, path)
 	if err != nil {
 		return err
