@@ -1382,8 +1382,6 @@ func (s *Server) machineDirectory() string {
 			fmt.Fprintf(&b, "\n- %s: its channel %q is suspended (%s)", label, r.Label, r.Suspended)
 		case ok && r.State == channelActive && r.Identity == bd.SessionIdentity():
 			fmt.Fprintf(&b, "\n- %s: write in the %q channel", label, r.Label)
-		case !s.provisionable(bd):
-			fmt.Fprintf(&b, "\n- %s: DM its own agent", label)
 		case ok:
 			fmt.Fprintf(&b, "\n- %s: its channel is %s", label, r.State)
 		default:

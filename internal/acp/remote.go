@@ -134,7 +134,7 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 		b, err := s.turnBinding(sessionID, eventID)
 		if err != nil {
 			r := &remoteTurn{s: s, sessionID: sessionID, eventID: eventID, emit: emit, turn: turn, meta: remoteMeta{State: "not_connected", Reason: err.Error()}}
-			text := "Not connected. Run /amq-remote in a Claude Code or Codex session."
+			text := "Not connected: " + err.Error()
 			var unpinned *unpinnedError
 			switch {
 			case errors.As(err, &unpinned):
@@ -142,8 +142,6 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 				text = s.machineDirectory()
 			case errors.Is(err, errChannelNotConnected):
 				text = "This channel's session is not connected. Run /amq-remote in that session to connect it again."
-			case !errors.Is(err, binding.ErrNone):
-				text = "Not connected: " + err.Error()
 			}
 			return r.say(postStatus, r.settle(turnReplied), StopReasonRefusal, text)
 		}
