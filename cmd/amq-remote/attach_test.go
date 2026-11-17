@@ -1497,11 +1497,10 @@ func TestDetachByNameDropsAShareEntryWithNoBinding(t *testing.T) {
 // Detach left the adapter entry of the session it detached, so every serve
 // start attached it again or refused it (agent-message-queue-vosl.11).
 func TestDetachByNameRemovesTheSessionsManifestEntry(t *testing.T) {
-	for _, row := range []struct {
-		name            string
-		alreadyDetached bool
-	}{{"bound", false}, {"detached earlier", true}} {
-		t.Run(row.name, func(t *testing.T) {
+	// The last row is a tombstone that records no reason, as an older
+	// amq-remote left it: doctor named its detach, and the entry stayed.
+	for _, row := range []string{"bound", "detached earlier", "tombstone with no reason"} {
+		t.Run(row, func(t *testing.T) {
 			root := canonicalTempDir(t)
 			t.Setenv(binding.EnvPath, filepath.Join(root, "binding.json"))
 			path := manifest.DefaultPath(filepath.Join(root, stateDirName))
@@ -1511,10 +1510,19 @@ func TestDetachByNameRemovesTheSessionsManifestEntry(t *testing.T) {
 			}}); err != nil {
 				t.Fatal(err)
 			}
-			if err := binding.WriteNamed(binding.Binding{Root: root, Target: "claude:7", NativeSession: "session-7", Name: "claude-7"}); err != nil {
+			if row == "tombstone with no reason" {
+				raw, _ := json.Marshal(map[string]string{"root": root, "target": "claude:7", "native_session": "session-7"})
+				dir := filepath.Join(root, "bindings")
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "claude-7"+binding.TombstoneSuffix), raw, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := binding.WriteNamed(binding.Binding{Root: root, Target: "claude:7", NativeSession: "session-7", Name: "claude-7"}); err != nil {
 				t.Fatal(err)
 			}
-			if row.alreadyDetached {
+			if row == "detached earlier" {
 				if _, _, err := binding.Detach(func(b binding.Binding) bool { return b.Name == "claude-7" }, nil); err != nil {
 					t.Fatal(err)
 				}
