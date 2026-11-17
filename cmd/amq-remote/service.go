@@ -19,6 +19,7 @@ import (
 	karegistry "github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
+	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/loginservice"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -468,6 +469,32 @@ func stableExecutable() (exe, warning string, err error) {
 		warning = "the service " + warning
 	}
 	return exe, warning, nil
+}
+
+// noteEndpointVersion notes an endpoint for root that runs another version
+// than this binary: it started before an upgrade and runs the binary it
+// started with.
+func noteEndpointVersion(note func(boundary, subject, detail, remedy string), root, stateDir string) {
+	f, running, err := ipc.EndpointFeatures(stateDir)
+	if err != nil || !running || f.Version == version {
+		return
+	}
+	runs := "amq-remote " + f.Version
+	if f.Version == "" {
+		runs = "an amq-remote that does not report its version"
+	}
+	remedy := "stop `amq-remote up` for this root and start it again"
+	if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
+		if path, err := loginservice.Path(); err == nil {
+			if canonical, err := karegistry.CanonicalRoot(root); err == nil {
+				root = canonical
+			}
+			if st, err := inspectService(root, path); err == nil && st.State != "missing" && st.State != "other_root" {
+				remedy = "run `amq-remote service install --root " + shQuote(root) + "` again; it restarts the endpoint"
+			}
+		}
+	}
+	note("service", "", "the endpoint for this root runs "+runs+"; this amq-remote is "+version+", so the endpoint does not have its changes", remedy)
 }
 
 // noteNoService advises the login service when the root has a link and no
