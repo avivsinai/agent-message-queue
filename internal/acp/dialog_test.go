@@ -1,9 +1,8 @@
 package acp
 
 import (
+	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +12,7 @@ import (
 	"fiatjaf.com/nostr"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/relay/relaytest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
@@ -21,41 +21,18 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/mirror"
 )
 
-// A pinned agent posts each open dialog of its session into its DM once.
+// The machine agent posts each open dialog of its session into its channel once.
 // The owner's ✅ answers option 1, and the resolution edits the post. A
 // typed "3" answers the next dialog and never reaches the session.
 func TestDialogTickPostsReactsEdits(t *testing.T) {
-	const dm = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
-	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
-	root := canonicalTempDir(t)
-	if err := fsq.EnsureAgentDirs(root, "agent"); err != nil {
+	f := standalone(t)
+	b := liveSession(t, "alpha")
+	b.Label = "Claude Code · proj @ mac"
+	if err := binding.WriteNamed(b); err != nil {
 		t.Fatal(err)
 	}
-	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent", Name: "alpha", Label: "Claude Code · proj @ mac"}); err != nil {
-		t.Fatal(err)
-	}
-	lr := agentRelayForTest(t)
-	ownerKey := nostr.Generate()
-	owner := ownerKey.Public().Hex()
-	savedRead, savedEdit := readReactions, editMessage
-	t.Cleanup(func() { readReactions, editMessage = savedRead, savedEdit })
-	var posts, edits []string
-	savedPost := postAnswer
-	t.Cleanup(func() { postAnswer = savedPost })
-	postAnswer = func(channel, content string, _ time.Duration) (string, error) {
-		posts = append(posts, channel+": "+content)
-		return fmt.Sprintf("%064x", len(posts)), nil
-	}
-	readReactions = func(string, time.Duration) ([]reaction, error) {
-		return []reaction{{Emoji: "✅", PubKeys: []string{owner}}}, nil
-	}
-	editMessage = func(event, content string, _ time.Duration) error {
-		edits = append(edits, event+": "+content)
-		return nil
-	}
-	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t), Identity: buzzop.Identity{Agent: testAgent.Agent, Owner: owner}}, "test")
-	s.ready, s.lastChannel = true, dm
-
+	activeChannel(t, f.s, b, machineChanA)
+	f.groupState(t, machineChanA)
 	dir, err := dialog.DirFor("alpha")
 	if err != nil {
 		t.Fatal(err)
@@ -66,73 +43,44 @@ func TestDialogTickPostsReactsEdits(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now()
-	s.dialogTick(now) // posts
-	s.dialogTick(now) // reads the ✅
-	want := dm + ": Claude Code · proj @ mac wants to run Bash:\n$ ls /tmp\n\n1. Allow once\n2. Allow this session\n3. Deny\n\nReact ✅ = 1, ❌ = Deny, or reply a number / yes / no."
-	if len(posts) != 1 || posts[0] != want {
-		t.Fatalf("posts = %q; want the dialog once", posts)
+	f.s.dialogTick(now)
+	msgs := f.agentMessages(machineChanA)
+	want := "Claude Code · proj @ mac wants to run Bash:\n$ ls /tmp\n\n1. Allow once\n2. Allow this session\n3. Deny\n\nReact ✅ = 1, ❌ = Deny, or reply a number / yes / no."
+	if len(msgs) != 1 || msgs[0].Content != want {
+		t.Fatalf("posts = %+v; want the dialog once", msgs)
 	}
+	f.ownerReacts(t, machineChanA, msgs[0].ID, "✅")
+	f.s.dialogTick(now)
 	if _, _, a, _, _ := dialog.Lookup(dir, first.ID); a == nil || a.Option != 1 {
 		t.Fatalf("answer = %+v; want option 1", a)
 	}
 	if _, err := dialog.Resolve(dir, dialog.Resolved{ID: first.ID, Outcome: dialog.OutcomeAllowed, Label: "Allow once", By: dialog.ByBuzz, At: now}); err != nil {
 		t.Fatal(err)
 	}
-	s.dialogTick(now)
-	s.dialogTick(now)
-	if len(edits) != 1 || edits[0] != fmt.Sprintf("%064x", 1)+": "+strings.TrimPrefix(want, dm+": ")+"\n\n→ Allow once (Buzz)" {
-		t.Fatalf("edits = %q; want the post edited once with the outcome", edits)
+	f.s.dialogTick(now)
+	f.s.dialogTick(now)
+	if edits := f.agentEdits(machineChanA, msgs[0].ID); len(edits) != 1 || edits[0].Content != want+"\n\n→ Allow once (Buzz)" {
+		t.Fatalf("edits = %+v; want the resolution once", edits)
 	}
 
 	second := dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Edit", Text: "main.go", Options: options, OpenedAt: time.Now()}
 	if err := dialog.Open(dir, second); err != nil {
 		t.Fatal(err)
 	}
-	readReactions = func(string, time.Duration) ([]reaction, error) { return nil, nil }
-	s.dialogTick(now)
-	answer := signedBy(t, ownerKey, "3", dm)
-	lr.Inject(answer)
-	params, _ := json.Marshal(promptParams{SessionID: "s", Prompt: []contentBlock{{Type: "text", Text: buzzPrompt(dm, owner, "3")}}, Meta: eventMeta(answer)})
-	run, _, rpcErr := s.beginPrompt(params)
-	if rpcErr != nil || run == nil {
-		t.Fatalf("beginPrompt = %v", rpcErr)
-	}
-	if _, rpcErr := run(func(any) error { return nil }); rpcErr != nil {
-		t.Fatal(rpcErr)
-	}
+	f.s.dialogTick(now)
+	f.startMachine(t)
+	waitClosed(t, f.s.Owner(f.ownerSays(t, machineChanA, "3")))
 	if _, _, a, _, _ := dialog.Lookup(dir, second.ID); a == nil || a.Option != 3 {
 		t.Fatalf("answer = %+v; want option 3", a)
 	}
-	if got := inboxPrompts(t, root); len(got) != 0 {
+	if got := inboxPrompts(t, b.Root); len(got) != 0 {
 		t.Fatalf("the answer reached the session: %v", got)
 	}
-	if last := posts[len(posts)-1]; last != dm+": Answered." {
-		t.Fatalf("posts = %q; want the answer acknowledged", posts)
+	if last := f.lastAgentPost(machineChanA); last != "Answered." {
+		t.Fatalf("posts end with %q; want the answer acknowledged", last)
 	}
 }
 
-// signedBy is a plaintext message with content in channel, signed by key.
-func signedBy(t *testing.T, key nostr.SecretKey, content, channel string, tags ...nostr.Tag) nostr.Event {
-	t.Helper()
-	evt := nostr.Event{CreatedAt: nostr.Now(), Kind: 9, Content: content, Tags: append(nostr.Tags{{"h", channel}}, tags...)}
-	if err := evt.Sign(key); err != nil {
-		t.Fatal(err)
-	}
-	return evt
-}
-
-// eventMeta is the ACP _meta with which buzz-acp names a prompt's event.
-func eventMeta(evt nostr.Event) json.RawMessage {
-	raw, _ := json.Marshal(map[string]any{"nostr": map[string]string{"eventId": evt.ID.Hex()}})
-	return raw
-}
-
-// Regression (idle profile of a machine agent): every open dialog, hours
-// old or new, read its reactions every 3 s, oldest first, so stale dialogs
-// spawned a process each and delayed a new one. An old dialog backs off; a
-// fresh one is read at 3 s, and first.
-// A Claude subagent's dialog that the hook closes early says why in Buzz;
-// a plain expiry stays plain (stale Buzz dialog open 20 h, 2026-11-11).
 func TestOutcomeLineShowsWhyADialogExpired(t *testing.T) {
 	for _, row := range []struct{ label, want string }{
 		{"the asking agent ended", "→ Expired: the asking agent ended"},
@@ -144,54 +92,57 @@ func TestOutcomeLineShowsWhyADialogExpired(t *testing.T) {
 	}
 }
 
+// Regression (idle profile of a machine agent): every open dialog, hours
+// old or new, read its reactions every 3 s, oldest first, so stale dialogs
+// spawned a process each and delayed a new one. An old dialog backs off; a
+// fresh one is read at 3 s, and first.
 func TestDialogReactionReadsBackOffByAgeNewestFirst(t *testing.T) {
-	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
-	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha"}); err != nil {
-		t.Fatal(err)
-	}
-	savedRead, savedPost := readReactions, postAnswer
-	t.Cleanup(func() { readReactions, postAnswer = savedRead, savedPost })
-	events := map[string]string{} // posted event -> dialog text
-	postAnswer = func(_, content string, _ time.Duration) (string, error) {
-		id := fmt.Sprintf("%064x", len(events)+1)
-		events[id] = content
-		return id, nil
-	}
 	var reads []string
-	readReactions = func(event string, _ time.Duration) ([]reaction, error) {
-		reads = append(reads, strings.Fields(strings.SplitN(events[event], "\n", 2)[1])[1])
-		return nil, nil
-	}
-	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t), Identity: buzzop.Identity{Agent: testAgent.Agent, Owner: strings.Repeat("0b", 32)}}, "test")
-	s.ready, s.lastChannel = true, "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
+	var f *standaloneFixture
+	f = standalone(t, func(r *relaytest.Relay) {
+		r.BeforeReq = func(filters []nostr.Filter) {
+			for _, filter := range filters {
+				for _, id := range filter.Tags["e"] {
+					for _, post := range f.agentMessages(machineChanA) {
+						if post.ID.Hex() == id {
+							reads = append(reads, strings.Fields(strings.SplitN(post.Content, "\n", 2)[1])[1])
+							return
+						}
+					}
+				}
+			}
+		}
+	})
+	b := liveSession(t, "alpha")
+	activeChannel(t, f.s, b, machineChanA)
+	f.groupState(t, machineChanA)
 	dir, err := dialog.DirFor("alpha")
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now()
-	options := []dialog.Option{{N: 1, Label: "Allow once", Value: "allow"}}
 	for _, d := range []struct {
 		text string
 		age  time.Duration
 	}{{"$ old", 30 * time.Minute}, {"$ new", 0}} {
-		if err := dialog.Open(dir, dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", Text: d.text, Options: options, OpenedAt: now.Add(-d.age)}); err != nil {
+		if err := dialog.Open(dir, dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", Text: d.text, Options: []dialog.Option{{N: 1, Label: "Allow once", Value: "allow"}}, OpenedAt: now.Add(-d.age)}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	s.dialogTick(now) // posts both
-	s.dialogTick(now)
+	f.s.dialogTick(now)
+	f.s.dialogTick(now)
 	if strings.Join(reads, ",") != "new,old" {
-		t.Fatalf("first reads = %v; want both, the newest first", reads)
+		t.Fatalf("first reads = %v", reads)
 	}
 	reads = nil
-	s.dialogTick(now.Add(reactionPollInterval))
+	f.s.dialogTick(now.Add(reactionPollInterval))
 	if strings.Join(reads, ",") != "new" {
-		t.Fatalf("reads after %v = %v; want only the fresh dialog", reactionPollInterval, reads)
+		t.Fatalf("reads after %v = %v; want only new", reactionPollInterval, reads)
 	}
 	reads = nil
-	s.dialogTick(now.Add(reactionPollMax))
+	f.s.dialogTick(now.Add(reactionPollMax))
 	if strings.Join(reads, ",") != "new,old" {
-		t.Fatalf("reads after %v = %v; want the old dialog read again at its cap", reactionPollMax, reads)
+		t.Fatalf("reads after %v = %v; want new,old at cap", reactionPollMax, reads)
 	}
 }
 
@@ -199,200 +150,69 @@ func TestDialogReactionReadsBackOffByAgeNewestFirst(t *testing.T) {
 // was tried again on every 2 s tick, one buzz process each, for about 20
 // minutes. A failed edit now waits 4 s, then 8 s; the first is immediate.
 func TestDialogFailedEditBacksOff(t *testing.T) {
-	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
-	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha"}); err != nil {
-		t.Fatal(err)
-	}
-	savedEdit, savedPost := editMessage, postAnswer
-	t.Cleanup(func() { editMessage, postAnswer = savedEdit, savedPost })
-	postAnswer = func(string, string, time.Duration) (string, error) { return strings.Repeat("e", 64), nil }
-	edits := 0
-	editMessage = func(string, string, time.Duration) error {
-		edits++
-		return errors.New("relay refused the edit")
-	}
-	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t), Identity: buzzop.Identity{Agent: testAgent.Agent, Owner: strings.Repeat("0b", 32)}}, "test")
-	s.ready, s.lastChannel = true, "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
+	f := standalone(t, func(r *relaytest.Relay) { r.RejectKind.Store(40003) })
+	b := liveSession(t, "alpha")
+	activeChannel(t, f.s, b, machineChanA)
+	f.groupState(t, machineChanA)
 	dir, err := dialog.DirFor("alpha")
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now()
-	req := dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", Text: "$ ls", Options: []dialog.Option{{N: 1, Label: "Allow once", Value: "allow"}}, OpenedAt: now}
-	if err := dialog.Open(dir, req); err != nil {
-		t.Fatal(err)
+	openPostedDialog(t, f.s, dir, "1")
+	requests, err := dialog.Requests(dir)
+	if err != nil || len(requests) != 1 {
+		t.Fatalf("requests = %+v, %v", requests, err)
 	}
-	s.dialogTick(now) // posts
+	req := requests[0]
 	if _, err := dialog.Resolve(dir, dialog.Resolved{ID: req.ID, Outcome: dialog.OutcomeTerminal, By: dialog.ByTerminal, At: now}); err != nil {
 		t.Fatal(err)
 	}
 	for _, step := range []struct {
 		after time.Duration
-		edits int
+		edits int32
 	}{{0, 1}, {2 * time.Second, 1}, {dialogEditBackoffMin, 2}, {dialogEditBackoffMin + 2*time.Second, 2}, {3 * dialogEditBackoffMin, 3}} {
-		s.dialogTick(now.Add(step.after))
-		if edits != step.edits {
-			t.Fatalf("edits after %v = %d; want %d", step.after, edits, step.edits)
+		f.s.dialogTick(now.Add(step.after))
+		if got := f.relay.Rejected.Load(); got != step.edits {
+			t.Fatalf("publisher attempts after %v = %d; want %d", step.after, got, step.edits)
 		}
 	}
 }
 
-// buzzPrompt is a buzz-acp DM prompt in dm whose event from sender (a hex
-// pubkey, or "" for no From line) carries content.
-func buzzPrompt(dm, sender, content string) string {
-	from := ""
-	if sender != "" {
-		from = "From: Someone (npub: npub1x, hex: " + sender + ")\n"
-	}
-	return "<context>\nScope: dm\nChannel: DM (#" + dm + ")\n</context>\n<buzz-event type=\"@mention\">\nEvent ID: " + strings.Repeat("a", 64) +
-		"\n" + from + "Content: " + content + "\nTags: [[\"h\",\"" + dm + "\"]]\n</buzz-event>"
-}
-
-// Regression (review of the dialog poster): a ✅ reaction became the literal
-// answer of a free-text dialog, a reply with no known sender answered it, and
-// a two-line answer to a two-question dialog reached it as one line. Only the
-// owner's typed reply answers a free-text dialog, with its line breaks.
+// A free-text dialog takes only the owner's typed answer, with all of its
+// line breaks; a reaction answers nothing.
 func TestFreeTextDialogTakesOnlyTheOwnersTypedAnswer(t *testing.T) {
-	const dm = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
-	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
-	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha"}); err != nil {
-		t.Fatal(err)
-	}
-	lr := agentRelayForTest(t)
-	ownerKey := nostr.Generate()
-	owner := ownerKey.Public().Hex()
-	savedRead, savedPost := readReactions, postAnswer
-	t.Cleanup(func() { readReactions, postAnswer = savedRead, savedPost })
-	postAnswer = func(string, string, time.Duration) (string, error) { return strings.Repeat("f", 64), nil }
-	readReactions = func(string, time.Duration) ([]reaction, error) {
-		return []reaction{{Emoji: "✅", PubKeys: []string{owner}}, {Emoji: "❌", PubKeys: []string{owner}}}, nil
-	}
-	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t), Identity: buzzop.Identity{Agent: testAgent.Agent, Owner: owner}}, "test")
-	s.lastChannel = dm
-	dir, err := dialog.DirFor("alpha")
-	if err != nil {
-		t.Fatal(err)
-	}
+	f, dir := ownerDialogServer(t)
 	req := dialog.Request{ID: dialog.NewID(), Harness: "codex", Text: "Which database?\nMigrate now?", FreeText: true, OpenedAt: time.Now()}
 	if err := dialog.Open(dir, req); err != nil {
 		t.Fatal(err)
 	}
-	s.dialogTick(time.Now()) // posts
-	s.dialogTick(time.Now()) // reads the reactions
+	f.s.dialogTick(time.Now())
+	msgs := f.agentMessages(machineChanA)
+	f.ownerReacts(t, machineChanA, msgs[len(msgs)-1].ID, "✅")
+	f.ownerReacts(t, machineChanA, msgs[len(msgs)-1].ID, "❌")
+	f.s.dialogTick(time.Now())
 	if _, _, a, _, _ := dialog.Lookup(dir, req.ID); a != nil {
 		t.Fatalf("a reaction answered a free-text dialog: %+v", a)
 	}
-	other := signedBy(t, nostr.Generate(), "1", dm)
-	lr.Inject(other)
-	if _, a, ok := s.dialogReplyOf(s.acpOwner(dm, other.ID.Hex(), buzzPrompt(dm, owner, "1"))); ok {
-		t.Fatalf("another signer answered: %+v", a)
-	}
-	answer := signedBy(t, ownerKey, "postgres\nyes", dm)
-	lr.Inject(answer)
-	_, a, ok := s.dialogReplyOf(s.acpOwner(dm, answer.ID.Hex(), buzzPrompt(dm, owner, "postgres\nyes")))
-	if !ok || a.Text != "postgres\nyes" {
-		t.Fatalf("owner answer = %+v, %v; want the two lines", a, ok)
+	f.startMachine(t)
+	waitClosed(t, f.s.Owner(f.ownerSays(t, machineChanA, "postgres\nyes")))
+	if _, _, a, _, _ := dialog.Lookup(dir, req.ID); a == nil || a.Text != "postgres\nyes" || a.Event == "" {
+		t.Fatalf("owner answer = %+v; want the two lines bound to their event", a)
 	}
 }
 
-// Review of the owner checks: a dialog took its answer and its sender from
-// the prompt text buzz-acp wrote. Only the signed event decides: with no
-// verified event the dialog stays pending, and its signed content wins over
-// the text.
-func TestDialogAnswerIsTheVerifiedSignedEvent(t *testing.T) {
-	const dm = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
-	cases := []struct {
-		name     string
-		body     string // what the prompt text says the owner wrote
-		signed   string // the signed content; "" for no event on the relay
-		wantOK   bool
-		wantDeny bool
-	}{
-		{name: "no verified event", body: "1"},
-		{name: "signed deny, text allow", body: "1", signed: "no", wantOK: true, wantDeny: true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
-			if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha"}); err != nil {
-				t.Fatal(err)
-			}
-			lr := agentRelayForTest(t)
-			ownerKey := nostr.Generate()
-			owner := ownerKey.Public().Hex()
-			savedRead, savedPost := readReactions, postAnswer
-			t.Cleanup(func() { readReactions, postAnswer = savedRead, savedPost })
-			// The not-taken notice posts from its own goroutine; the case
-			// waits for it so the cleanup never restores postAnswer while
-			// that goroutine reads it (audit 2026-11-10).
-			notice := make(chan struct{}, 1)
-			postAnswer = func(_, text string, _ time.Duration) (string, error) {
-				if strings.HasPrefix(text, "Your reply was not taken as an answer") {
-					select {
-					case notice <- struct{}{}:
-					default:
-					}
-				}
-				return strings.Repeat("f", 64), nil
-			}
-			readReactions = func(string, time.Duration) ([]reaction, error) { return nil, nil }
-			s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t), Identity: buzzop.Identity{Agent: testAgent.Agent, Owner: owner}}, "test")
-			s.lastChannel = dm
-			dir, err := dialog.DirFor("alpha")
-			if err != nil {
-				t.Fatal(err)
-			}
-			req := dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", OpenedAt: time.Now(),
-				Options: []dialog.Option{{N: 1, Label: "Allow once"}, {N: 2, Label: "Deny", Deny: true}}}
-			if err := dialog.Open(dir, req); err != nil {
-				t.Fatal(err)
-			}
-			s.dialogTick(time.Now()) // posts
-
-			id := strings.Repeat("d", 64)
-			if tc.signed != "" {
-				evt := signedBy(t, ownerKey, tc.signed, dm)
-				lr.Inject(evt)
-				id = evt.ID.Hex()
-			}
-			_, a, ok := s.dialogReplyOf(s.acpOwner(dm, id, buzzPrompt(dm, owner, tc.body)))
-			if ok != tc.wantOK || (ok && (a.Option == 2) != tc.wantDeny) {
-				t.Fatalf("dialogReply = %+v, %v; want ok=%v deny=%v", a, ok, tc.wantOK, tc.wantDeny)
-			}
-			if !tc.wantOK {
-				select {
-				case <-notice:
-				case <-time.After(5 * time.Second):
-					t.Fatal("no not-taken notice was posted")
-				}
-			}
-		})
-	}
-}
-
-// Review of the verified owner gate: a signed owner "yes" from before a
-// dialog opened, or one that had already answered another dialog, answered
-// the new dialog. A signature says who wrote it, not what it answers.
+// An owner event before its dialog never answers it. One fresh answered
+// event stays bound: it cannot answer the dialog that follows.
 func TestOwnerAnswerMustBeNewerThanItsDialogAndUnused(t *testing.T) {
-	s, dir, owner, lr := ownerDialogServer(t)
-	old := nostr.Event{CreatedAt: nostr.Timestamp(time.Now().Add(-time.Hour).Unix()), Kind: 9, Content: "yes", Tags: nostr.Tags{{"h", dmChannel}}}
-	if err := old.Sign(owner); err != nil {
-		t.Fatal(err)
+	f, dir := ownerDialogServer(t)
+	old := f.ownerSignedAt(t, machineChanA, "yes", time.Now().Add(-time.Hour))
+	first := openPostedDialog(t, f.s, dir, "1")
+	if _, a, ok := f.s.dialogReplyOf(f.ownerMsg(machineChanA, old)); ok {
+		t.Fatalf("an hour-old owner event answered a new dialog: %+v", a)
 	}
-	lr.Inject(old)
-	first := openPostedDialog(t, s, dir, "1")
-	params, _ := json.Marshal(promptParams{SessionID: "s", Meta: eventMeta(old),
-		Prompt: []contentBlock{{Type: "text", Text: buzzPrompt(dmChannel, s.id.Owner, "yes")}}})
-	if run, _, rpcErr := s.beginPrompt(params); rpcErr == nil && run != nil {
-		_, _ = run(func(any) error { return nil })
-	}
-	if _, _, a, _, _ := dialog.Lookup(dir, first.ID); a != nil {
-		t.Fatalf("an owner event signed an hour before the dialog opened answered it: %+v", a)
-	}
-
-	used := signedBy(t, owner, "yes", dmChannel)
-	lr.Inject(used)
-	_, a, ok := s.dialogReplyOf(s.acpOwner(dmChannel, used.ID.Hex(), buzzPrompt(dmChannel, s.id.Owner, "yes")))
+	used := f.ownerSignedAt(t, machineChanA, "yes", time.Now())
+	_, a, ok := f.s.dialogReplyOf(f.ownerMsg(machineChanA, used))
 	if !ok {
 		t.Fatal("a fresh owner yes did not answer the only open dialog")
 	}
@@ -402,34 +222,37 @@ func TestOwnerAnswerMustBeNewerThanItsDialogAndUnused(t *testing.T) {
 	if _, err := dialog.Resolve(dir, dialog.Resolved{ID: first.ID, Outcome: dialog.OutcomeAllowed, By: dialog.ByBuzz, At: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	openPostedDialog(t, s, dir, "2")
-	if _, a, ok := s.dialogReplyOf(s.acpOwner(dmChannel, used.ID.Hex(), buzzPrompt(dmChannel, s.id.Owner, "yes"))); ok {
+	openPostedDialog(t, f.s, dir, "2")
+	if _, a, ok := f.s.dialogReplyOf(f.ownerMsg(machineChanA, used)); ok {
 		t.Fatalf("the event that answered one dialog answered the next: %+v", a)
 	}
 }
 
-// Review of the verified owner gate: an e tag that only mentions a dialog's
-// post answered that dialog, and a reply naming two open dialogs answered the
-// older one. Only a NIP-10 root or reply names the target, and it must name
-// exactly one open dialog.
+// Only a NIP-10 root or reply names the dialog it answers, consistently
+// with actual relay events. A mere mention or two parent tags picks none.
 func TestOwnerAnswerTargetsTheOneDialogItRepliesTo(t *testing.T) {
-	first, second, other := strings.Repeat("1", 64), strings.Repeat("2", 64), strings.Repeat("3", 64)
 	cases := []struct {
 		name string
-		tags []nostr.Tag
-		want int // 0: no answer; n: the dialog posted as the nth
+		tags func([]nostr.Event) []nostr.Tag
+		want int
 	}{
-		{name: "mention", tags: []nostr.Tag{{"e", other, "", "root"}, {"e", other, "", "reply"}, {"e", first, "", "mention"}}},
-		{name: "both dialogs", tags: []nostr.Tag{{"e", first, "", "root"}, {"e", second, "", "reply"}}},
-		{name: "reply to the second", tags: []nostr.Tag{{"e", second, "", "root"}, {"e", second, "", "reply"}}, want: 2},
+		{name: "mention", tags: func(posts []nostr.Event) []nostr.Tag {
+			unrelated := strings.Repeat("3", 64)
+			return []nostr.Tag{{"e", unrelated, "", "root"}, {"e", unrelated, "", "reply"}, {"e", posts[0].ID.Hex(), "", "mention"}}
+		}},
+		{name: "both dialogs", tags: func(posts []nostr.Event) []nostr.Tag {
+			return []nostr.Tag{{"e", posts[0].ID.Hex(), "", "root"}, {"e", posts[1].ID.Hex(), "", "reply"}}
+		}},
+		{name: "reply to the second", tags: func(posts []nostr.Event) []nostr.Tag {
+			return []nostr.Tag{{"e", posts[1].ID.Hex(), "", "root"}, {"e", posts[1].ID.Hex(), "", "reply"}}
+		}, want: 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			s, dir, owner, lr := ownerDialogServer(t)
-			reqs := []dialog.Request{openPostedDialog(t, s, dir, "1"), openPostedDialog(t, s, dir, "2")}
-			evt := signedBy(t, owner, "yes", dmChannel, tc.tags...)
-			lr.Inject(evt)
-			_, a, ok := s.dialogReplyOf(s.acpOwner(dmChannel, evt.ID.Hex(), buzzPrompt(dmChannel, s.id.Owner, "yes")))
+			f, dir := ownerDialogServer(t)
+			reqs := []dialog.Request{openPostedDialog(t, f.s, dir, "1"), openPostedDialog(t, f.s, dir, "2")}
+			evt := f.ownerSignedAt(t, machineChanA, "yes", time.Now(), tc.tags(f.agentMessages(machineChanA))...)
+			_, a, ok := f.s.dialogReplyOf(f.ownerMsg(machineChanA, evt))
 			if tc.want == 0 && ok || tc.want != 0 && (!ok || a.ID != reqs[tc.want-1].ID) {
 				t.Fatalf("dialogReply = %+v, %v; want dialog %d", a, ok, tc.want)
 			}
@@ -437,133 +260,85 @@ func TestOwnerAnswerTargetsTheOneDialogItRepliesTo(t *testing.T) {
 	}
 }
 
-// Review of the verified owner gate: an hour-old signed "mirror on" turned
-// the mirror on again after the owner had switched it off.
+// An hour-old signed "mirror on" did not undo the later off: a Claude
+// binding that serves that channel is the fixture's real evidence.
 func TestOldMirrorOnDoesNotUndoALaterOff(t *testing.T) {
-	s, _ := machineServer(t)
-	b := liveSession(t, "alpha")
-	b.Harness = "claude"
-	if err := binding.WriteNamed(b); err != nil {
-		t.Fatal(err)
-	}
-	activeChannel(t, s, b, dmChannel)
-	lr := agentRelayForTest(t)
-	owner := nostr.Generate()
-	s.id.Owner = owner.Public().Hex()
-	old := nostr.Event{CreatedAt: nostr.Timestamp(time.Now().Add(-time.Hour).Unix()), Kind: 9, Content: "mirror on", Tags: nostr.Tags{{"h", dmChannel}}}
-	if err := old.Sign(owner); err != nil {
-		t.Fatal(err)
-	}
-	lr.Inject(old)
+	f, dir := ownerDialogServer(t)
+	old := f.ownerSignedAt(t, machineChanA, "mirror on", time.Now().Add(-time.Hour))
 	if err := mirror.SetOff("alpha", true); err != nil {
 		t.Fatal(err)
 	}
-	if name, on, at, ok := s.mirrorSwitchOf(s.acpOwner(dmChannel, old.ID.Hex(), buzzPrompt(dmChannel, s.id.Owner, "mirror on"))); ok {
-		_, _ = s.answerMirrorSwitch("s", dmChannel, name, on, at, func(any) error { return nil })
-	}
-	if dir, err := mirror.DirFor("alpha"); err != nil || !mirror.Off(dir) {
-		t.Fatalf("an hour-old mirror on undid the later mirror off (err %v)", err)
+	f.startMachine(t)
+	waitClosed(t, f.s.Owner(buzzop.Inbound{Channel: machineChanA, Event: old}))
+	if off, err := mirror.DirFor("alpha"); err != nil || !mirror.Off(off) {
+		t.Fatalf("an hour-old mirror on undid the later mirror off: dir=%s err=%v", dir, err)
 	}
 }
 
-// Review of the verified owner gate (recut): a prompt chose its dialog but
-// wrote the answer later; when the terminal closed that dialog first, a
-// steer of the same signed event answered the next dialog.
+// The direct event claim preserves the old pending-prompt safety rule: after
+// this event was chosen, replaying it does not make another dialog answer.
 func TestPendingPromptEventDoesNotMoveToTheNextDialog(t *testing.T) {
-	s, dir, owner, lr := ownerDialogServer(t)
-	first := openPostedDialog(t, s, dir, "1")
-	evt := signedBy(t, owner, "yes", dmChannel)
-	lr.Inject(evt)
-	text := buzzPrompt(dmChannel, s.id.Owner, "yes")
-	params, _ := json.Marshal(promptParams{SessionID: "s", Meta: eventMeta(evt), Prompt: []contentBlock{{Type: "text", Text: text}}})
-	run, _, rpcErr := s.beginPrompt(params)
-	if rpcErr != nil || run == nil {
-		t.Fatalf("the prompt did not choose its dialog: %v", rpcErr)
+	f, dir := ownerDialogServer(t)
+	first := openPostedDialog(t, f.s, dir, "1")
+	evt := f.ownerSignedAt(t, machineChanA, "yes", time.Now())
+	if _, a, ok := f.s.dialogReplyOf(f.ownerMsg(machineChanA, evt)); !ok {
+		t.Fatal("the prompt did not choose its dialog")
+	} else if _, err := dialog.WriteAnswer(dir, a); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := dialog.Resolve(dir, dialog.Resolved{ID: first.ID, Outcome: dialog.OutcomeDenied, By: dialog.ByTerminal, At: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	second := openPostedDialog(t, s, dir, "2")
-	prompt, _ := json.Marshal([]contentBlock{{Type: "text", Text: text}})
-	steer, _ := json.Marshal(steeringParams{SessionID: "s", Meta: eventMeta(evt), Prompt: prompt})
-	s.steeringDialogReply(steer)
-	if _, err := run(func(any) error { return nil }); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, a, _, err := dialog.Lookup(dir, second.ID); err != nil || a != nil {
-		t.Fatalf("the event chosen for the first dialog answered the second: %+v (err %v)", a, err)
+	second := openPostedDialog(t, f.s, dir, "2")
+	if _, a, ok := f.s.dialogReplyOf(f.ownerMsg(machineChanA, evt)); ok {
+		t.Fatalf("the event chosen for the first dialog answered the second: %+v (dialog %v)", a, second.ID)
 	}
 }
 
-// Review of the verified owner gate (recut): a mirror switched off before
-// the switch time was recorded has only its off marker; an hour-old signed
-// "mirror on" turned it on again.
+// A recordless off marker still wins over an hour-old "mirror on".
 func TestOldMirrorOnDoesNotUndoARecordlessOff(t *testing.T) {
-	s, _ := machineServer(t)
-	b := liveSession(t, "alpha")
-	b.Harness = "claude"
-	if err := binding.WriteNamed(b); err != nil {
-		t.Fatal(err)
-	}
-	activeChannel(t, s, b, dmChannel)
-	lr := agentRelayForTest(t)
-	owner := nostr.Generate()
-	s.id.Owner = owner.Public().Hex()
-	dir, err := mirror.DirFor("alpha")
-	if err != nil {
-		t.Fatal(err)
-	}
+	f, dir := ownerDialogServer(t)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "off"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	old := nostr.Event{CreatedAt: nostr.Timestamp(time.Now().Add(-time.Hour).Unix()), Kind: 9, Content: "mirror on", Tags: nostr.Tags{{"h", dmChannel}}}
-	if err := old.Sign(owner); err != nil {
-		t.Fatal(err)
-	}
-	lr.Inject(old)
-	if name, on, at, ok := s.mirrorSwitchOf(s.acpOwner(dmChannel, old.ID.Hex(), buzzPrompt(dmChannel, s.id.Owner, "mirror on"))); ok {
-		_, _ = s.answerMirrorSwitch("s", dmChannel, name, on, at, func(any) error { return nil })
-	}
+	old := f.ownerSignedAt(t, machineChanA, "mirror on", time.Now().Add(-time.Hour))
+	f.startMachine(t)
+	waitClosed(t, f.s.Owner(buzzop.Inbound{Channel: machineChanA, Event: old}))
 	if !mirror.Off(dir) {
 		t.Fatal("an hour-old mirror on undid an off marker with no recorded switch time")
 	}
 }
 
-// ownerDialogServer is a pinned agent of binding alpha whose owner is owner,
-// with a local relay that serves the events a test injects.
-func ownerDialogServer(t *testing.T) (*Server, string, nostr.SecretKey, *relaytest.Relay) {
-	t.Helper()
-	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
-	lr := agentRelayForTest(t)
-	owner := nostr.Generate()
-	savedPost := postAnswer
-	t.Cleanup(func() { postAnswer = savedPost })
-	postAnswer = func(string, string, time.Duration) (string, error) { return strings.Repeat("f", 64), nil }
-	s := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: canonicalTempDir(t), Identity: buzzop.Identity{Agent: testAgent.Agent, Owner: owner.Public().Hex()}}, "test")
-	s.ready = true
-	s.sessions["s"] = &sessionState{}
+// ownerDialogServer makes the direct channel one dialog of alpha can
+// answer. The fixture feeds real relay state and owner signatures.
+func ownerDialogServer(t *testing.T) (*standaloneFixture, string) {
+	f := standalone(t)
+	b := liveSession(t, "alpha")
+	b.Harness = harness.Claude
+	if err := binding.WriteNamed(b); err != nil {
+		t.Fatal(err)
+	}
+	activeChannel(t, f.s, b, machineChanA)
+	f.groupState(t, machineChanA)
 	dir, err := dialog.DirFor("alpha")
 	if err != nil {
 		t.Fatal(err)
 	}
-	return s, dir, owner, lr
+	return f, dir
 }
 
-// openPostedDialog opens a two-option dialog now and records its post in
-// dmChannel as the event whose id repeats digit.
-func openPostedDialog(t *testing.T, s *Server, dir, digit string) dialog.Request {
-	t.Helper()
-	req := dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", OpenedAt: time.Now(),
+// openPostedDialog opens a two-option dialog now and asks the direct relay
+// to give it its genuine, unpredictable event id before readbacks.
+func openPostedDialog(t *testing.T, s *Server, dir, text string) dialog.Request {
+	req := dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", Text: text, OpenedAt: time.Now(),
 		Options: []dialog.Option{{N: 1, Label: "Allow once"}, {N: 2, Label: "Deny", Deny: true}}}
 	if err := dialog.Open(dir, req); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.writeDialogPost(filepath.Join(s.dialogPostDir("alpha"), req.ID+".json"), dialogPost{Channel: dmChannel, Event: strings.Repeat(digit, 64)}); err != nil {
-		t.Fatal(err)
-	}
+	s.dialogTick(time.Now())
 	return req
 }
 
@@ -572,7 +347,7 @@ func openPostedDialog(t *testing.T, s *Server, dir, digit string) dialog.Request
 // its resolution. The directory stays while the seam runs, for seamGrace.
 func TestGoneBindingKeepsDialogsUntilTheSeamLeaves(t *testing.T) {
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
-	s := NewServer(Config{RemoteBinding: true, Pin: "gone", StateDir: canonicalTempDir(t)}, "test")
+	s := standalone(t).s
 	dir, err := dialog.DirFor("gone")
 	if err != nil {
 		t.Fatal(err)
@@ -601,8 +376,7 @@ func TestGoneBindingKeepsDialogsUntilTheSeamLeaves(t *testing.T) {
 // attached again during aaa's edit, and its open dialog was expired as the
 // dialog of an ended session.
 func TestDropGoneDialogsKeepsTheDialogOfASessionThatAttachedAgain(t *testing.T) {
-	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
-	s := NewServer(Config{RemoteBinding: true, Machine: true, StateDir: canonicalTempDir(t)}, "test")
+	var attached bool
 	liveRoot := canonicalTempDir(t)
 	if err := fsq.EnsureAgentDirs(liveRoot, "agent"); err != nil {
 		t.Fatal(err)
@@ -611,12 +385,23 @@ func TestDropGoneDialogsKeepsTheDialogOfASessionThatAttachedAgain(t *testing.T) 
 	if err != nil {
 		t.Skip("no process identity on this platform")
 	}
-	// bbb: old binding, ended (root gone).
 	old := binding.Binding{Carrier: binding.CarrierMailbox, Root: filepath.Join(liveRoot, "gone"), Handle: "agent", Holder: holder, Name: "bbb", Label: "old"}
-	if err := binding.WriteNamed(old); err != nil {
-		t.Fatal(err)
-	}
-	// aaa: no binding, one resolved dialog with a post, so dialogClose edits it.
+	f := standalone(t, func(r *relaytest.Relay) {
+		r.BeforePublish = func(evt nostr.Event) {
+			if attached || evt.Kind != 40003 {
+				return
+			}
+			attached = true
+			nb := old
+			nb.Root = liveRoot
+			if err := binding.WriteNamed(nb); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	s := f.s
+	activeChannel(t, s, old, machineChanA)
+	f.groupState(t, machineChanA)
 	aDir, _ := dialog.DirFor("aaa")
 	aReq := dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", OpenedAt: time.Now()}
 	if err := dialog.Open(aDir, aReq); err != nil {
@@ -625,29 +410,25 @@ func TestDropGoneDialogsKeepsTheDialogOfASessionThatAttachedAgain(t *testing.T) 
 	if _, err := dialog.Resolve(aDir, dialog.Resolved{ID: aReq.ID, Outcome: dialog.OutcomeExpired, By: dialog.ByTimeout, At: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	raw, _ := json.Marshal(dialogPost{Channel: "c", Event: "ev", Text: "t"})
+	res := s.direct.Send(context.Background(), buzzop.Message{Key: "direct/dialog-post/aaa", Channel: machineChanA, Content: "t"})
+	if res.EventID == "" {
+		t.Fatalf("direct post outcome = %s", res.Outcome)
+	}
+	postID := nostr.MustIDFromHex(res.EventID)
+	raw, _ := json.Marshal(dialogPost{Channel: machineChanA, Event: postID.Hex(), Text: "t"})
 	if _, err := fsq.WriteFileAtomicFollowLinks(s.dialogPostDir("aaa"), aReq.ID+".json", raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// bbb: open dialog.
 	bDir, _ := dialog.DirFor("bbb")
 	bReq := dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", OpenedAt: time.Now(), PID: os.Getpid()}
 	if err := dialog.Open(bDir, bReq); err != nil {
 		t.Fatal(err)
 	}
-	saved := editMessage
-	t.Cleanup(func() { editMessage = saved })
-	editMessage = func(string, string, time.Duration) error {
-		// During aaa's relay call, bbb re-attaches: a live binding.
-		nb := old
-		nb.Root = liveRoot
-		if err := binding.WriteNamed(nb); err != nil {
-			t.Fatal(err)
-		}
-		return nil
-	}
 	s.dropGoneDialogs(nil, time.Now())
 	if res, ok, _ := dialog.ReadResolved(bDir, bReq.ID); ok {
 		t.Fatalf("the open dialog of live session bbb was resolved: %+v", res)
+	}
+	if !attached {
+		t.Fatal("the real closing edit was not published")
 	}
 }

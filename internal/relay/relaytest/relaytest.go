@@ -37,6 +37,22 @@ type Relay struct {
 	// DropOnce closes the first authenticated connection, to exercise
 	// reconnect.
 	DropOnce atomic.Bool
+	// RejectKind, when non-zero, refuses events of this kind instead of
+	// storing them. Rejected counts their refused publishes.
+	RejectKind atomic.Uint64
+	// DropKind, when non-zero, closes a connection after the next publish of
+	// that event kind, before an OK or the event is stored, so the outcome is
+	// unknown.
+	DropKind atomic.Uint64
+	Rejected atomic.Int32
+	// BeforePublish, when set before the first connection, sees every
+	// publish the relay receives, also one that the relay then drops, before
+	// it answers.
+	BeforePublish func(nostr.Event)
+	// Accepted, when set before the first connection, runs on each publish
+	// the relay accepts, before its OK is sent, so a test can store the
+	// group state the event changes as a relay does.
+	Accepted func(nostr.Event)
 	// BeforeReq, when set before the first connection, runs on each REQ
 	// before its stored events are sent, so a test can store an event
 	// between two reads.
@@ -45,9 +61,10 @@ type Relay struct {
 	// key (hex) that its NIP-11 document names.
 	Self string
 
-	mu     sync.Mutex
-	stored []nostr.Event
-	live   map[*liveSub]struct{}
+	mu        sync.Mutex
+	stored    []nostr.Event
+	attempted []nostr.Event
+	live      map[*liveSub]struct{}
 }
 
 type liveSub struct {
@@ -60,6 +77,14 @@ type liveSub struct {
 // checking it, so tests can deliver a forged event and see the client
 // refuse it.
 func (r *Relay) Inject(evt nostr.Event) { r.store(evt) }
+
+// Attempts returns every publish the relay received so far, in order,
+// also those it refused or dropped. A resend of one event is in it again.
+func (r *Relay) Attempts() []nostr.Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]nostr.Event(nil), r.attempted...)
+}
 
 // Events returns the events accepted so far.
 func (r *Relay) Events() []nostr.Event {
@@ -136,11 +161,26 @@ func (r *Relay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 				}
 			}
 		case *nostr.EventEnvelope:
+			r.mu.Lock()
+			r.attempted = append(r.attempted, e.Event)
+			r.mu.Unlock()
+			if r.BeforePublish != nil {
+				r.BeforePublish(e.Event)
+			}
+			if drop := r.DropKind.Load(); drop != 0 && drop == uint64(e.Kind) && r.DropKind.CompareAndSwap(drop, 0) {
+				return
+			}
 			reason := ""
 			if !authed {
 				reason = "auth-required: authenticate first"
 			} else if !e.VerifySignature() {
 				reason = "invalid: bad signature"
+			} else if r.RejectKind.Load() != 0 && uint64(e.Kind) == r.RejectKind.Load() {
+				r.Rejected.Add(1)
+				reason = "blocked: test relay refused the event kind"
+			}
+			if reason == "" && r.Accepted != nil {
+				r.Accepted(e.Event)
 			}
 			ok, _ := nostr.OKEnvelope{EventID: e.Event.ID, OK: reason == "", Reason: reason}.MarshalJSON()
 			send(ok)

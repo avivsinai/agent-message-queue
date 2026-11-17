@@ -154,7 +154,7 @@ func (s *Server) checkHooks(path string, info os.FileInfo, readers []hookReader)
 			continue
 		}
 		// One warning per session, hook and version of the file: the key
-		// that names it on the direct transport.
+		// of its post.
 		version := settingsVersion(info)
 		for _, r := range to {
 			_ = s.posts.Send(context.Background(), buzzop.Message{Key: buzzop.Key("hook/" + r.name + "/" + h.kind + "/" + version),

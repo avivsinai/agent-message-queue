@@ -42,39 +42,25 @@ type ownerCommand struct {
 // ownerCommandOf reads the owner's message m whose verified content is one
 // line that starts with "/", and queues it for the wake of the channel's
 // mailbox seat, which types it into the terminal like Remote Control. ok is
-// false for any other message, including a "/" line that is not verified
-// as the owner's: that goes to the session as an ordinary message.
+// false for any other message: that goes to the session as an ordinary
+// message.
 func (s *Server) ownerCommandOf(m ownerMsg) (cmd ownerCommand, ok bool) {
 	channel := m.channel
 	if channel == "" || s.id.Owner == "" || !strings.HasPrefix(m.words, "/") {
 		return cmd, false
 	}
-	name := s.cfg.Pin
-	var b binding.Binding
-	var err error
-	switch {
-	case s.cfg.Machine:
-		r, found := s.channelRoute(channel)
-		if !found {
-			return cmd, false
-		}
-		// The channel commands only the session it was made for, never a
-		// later binding of the same name.
-		name = r.Name
-		if b, err = binding.ReadNamed(name); err != nil || !s.serves(r, b) {
-			return cmd, false
-		}
-	case s.cfg.Helper || name == "" || s.cfg.PinErr != nil:
-		return cmd, false
-	default:
-		if b, err = binding.ReadNamed(name); err != nil || !s.live(b) {
-			return cmd, false
-		}
-	}
-	evt, err := m.verified()
-	if err != nil {
+	r, found := s.channelRoute(channel)
+	if !found {
 		return cmd, false
 	}
+	// The channel commands only the session it was made for, never a
+	// later binding of the same name.
+	name := r.Name
+	b, err := binding.ReadNamed(name)
+	if err != nil || !s.serves(r, b) {
+		return cmd, false
+	}
+	evt := m.event
 	cmd.text = dropMentions(evt.Content)
 	if !strings.HasPrefix(cmd.text, "/") {
 		return cmd, false
@@ -178,15 +164,4 @@ func (s *Server) awaitCommand(cmd ownerCommand, wait time.Duration, skip string)
 		}
 		time.Sleep(commandPoll)
 	}
-}
-
-// answerCommand tells the owner what became of a command and ends the
-// prompt without delivering it to the session as a message.
-func (s *Server) answerCommand(sessionID, channel string, cmd ownerCommand, emit func(any) error) (any, *rpcError) {
-	text := s.commandReply(channel, cmd)
-	meta := remoteMeta{State: "answered", Posted: s.publish(channel, text)}
-	if err := emitText(emit, sessionID, "agent_message_chunk", text); err != nil {
-		return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
-	}
-	return remotePromptResult{StopReason: StopReasonEndTurn, Meta: remotePromptMeta{Remote: meta}}, nil
 }

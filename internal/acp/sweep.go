@@ -13,18 +13,17 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
-	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
 )
 
-// lateReplyInterval is how often an open ACP stream sweeps for late replies.
+// lateReplyInterval is how often the sweep worker sweeps for late replies.
 const lateReplyInterval = 30 * time.Second
 
 // lateReplyHorizon bounds the sweep to recent mailbox claims, so it never
 // scans unbounded history.
 const lateReplyHorizon = 24 * time.Hour
 
-// lateReplyBudget is how many remote-events entries one sweep lists to
-// discover claims this process did not make.
+// lateReplyBudget is how many entries of the agent's event directory one
+// sweep lists to discover claims this process did not make.
 const lateReplyBudget = 512
 
 // lateReplyPosts caps the posts of one sweep; the rest wait for the next.
@@ -35,7 +34,8 @@ const lateReplyPosts = 8
 // one sweep waits behind a running one.
 //
 // One sweep costs: one listing read of at most lateReplyBudget entries of
-// remote-events, a few small state reads per pending claim, one listing of
+// the agent's event directory, a few small state reads per pending claim,
+// one listing of
 // buzz inbox/new and inbox/cur per queue root with an eligible claim, the
 // headers of names not seen before, one pass over each root's cached
 // headers, and at most lateReplyPosts posts. Pending claims are the ones
@@ -50,10 +50,9 @@ type lateReplySweep struct {
 	pending   map[string]struct{}
 
 	// Owned by the worker (or a test calling sweepLateReplies). The cursor
-	// lists claimDirs()[cursorDir].
-	cursor    *os.File
-	cursorDir int
-	scans     map[string][2]*inboxScan
+	// lists the agent's event directory.
+	cursor *os.File
+	scans  map[string][2]*inboxScan
 	// inDoubt holds the events whose final post was seen sending,
 	// already logged. Such events are rare and the set is not pruned.
 	inDoubt map[string]struct{}
@@ -61,9 +60,6 @@ type lateReplySweep struct {
 
 // add records a mailbox event this process claimed.
 func (l *lateReplySweep) add(eventID string) {
-	if eventID == "" {
-		return
-	}
 	l.pendingMu.Lock()
 	defer l.pendingMu.Unlock()
 	if l.pending == nil {
@@ -88,8 +84,9 @@ func (l *lateReplySweep) pendingIDs() []string {
 	return ids
 }
 
-// startLateReplySweep runs the sweep worker until the returned stop is
-// called; stop waits for a running sweep, so a post is never cut off.
+// startLateReplySweep runs the machine agent's sweep, machine, dialog and
+// mirror workers and its owner turns until the returned stop is called;
+// stop waits for a running sweep, so a post is never cut off.
 func (s *Server) startLateReplySweep() (stop func()) {
 	kick := make(chan struct{}, 1)
 	s.mu.Lock()
@@ -103,59 +100,37 @@ func (s *Server) startLateReplySweep() (stop func()) {
 	// unknown outcome), and no new step starts.
 	machineDone := make(chan struct{})
 	machineCtx, cancelMachine := context.WithCancel(context.Background())
-	if s.cfg.Machine {
-		go s.paced(quit, machineDone, newWakeup("machine", machineScanInterval, machineIdlePoll), func(now time.Time) pace {
-			return s.machineTick(machineCtx, now)
-		})
-	} else {
-		close(machineDone)
-	}
-	// The dialogs of a machine agent or a pinned agent are posted in a
-	// worker of their own, so a dialog never waits behind the sweep or the
-	// machine lifecycle, and neither waits behind a dialog. A pinned agent's
-	// worker passes every machineScanInterval.
+	go s.paced(quit, machineDone, newWakeup("machine", machineScanInterval, machineIdlePoll), func(now time.Time) pace {
+		return s.machineTick(machineCtx, now)
+	})
+	// The dialogs of a machine agent are posted in a worker of their own, so
+	// a dialog never waits behind the sweep or the machine lifecycle, and
+	// neither waits behind a dialog.
 	dialogDone := make(chan struct{})
-	if s.dialogPin() != "" {
-		s.dialogs.quit = quit
-		wake := polling("dialog", machineScanInterval)
-		if s.cfg.Machine {
-			wake = newWakeup("dialog", machineScanInterval, idlePoll)
+	s.dialogs.quit = quit
+	go s.paced(quit, dialogDone, newWakeup("dialog", machineScanInterval, idlePoll), func(now time.Time) pace {
+		// With no relay connection nothing is posted or read.
+		if !s.dialogLead() || s.offline() {
+			return pace{next: now.Add(machineScanInterval)}
 		}
-		go s.paced(quit, dialogDone, wake, func(now time.Time) pace {
-			// With no relay connection nothing is posted or read.
-			if !s.dialogLead() || s.offline() {
-				return pace{next: now.Add(machineScanInterval)}
-			}
-			return s.dialogTick(now)
-		})
-	} else {
-		close(dialogDone)
-	}
+		return s.dialogTick(now)
+	})
 	// A machine agent mirrors its sessions' finished turns in a worker of
 	// its own, so a slow post never delays a dialog.
 	mirrorDone := make(chan struct{})
-	if s.cfg.Machine {
-		s.mirrors.quit = quit
-		go s.paced(quit, mirrorDone, newWakeup("mirror", mirrorInterval, idlePoll), func(now time.Time) pace {
-			if !s.mirrorLead() || s.offline() {
-				return pace{next: now.Add(mirrorInterval)}
-			}
-			return s.mirrorTick(now)
-		})
-	} else {
-		close(mirrorDone)
-	}
-	// A standalone server's owner turns run until the same quit.
-	if s.direct != nil {
-		s.owners.start(quit)
-	}
+	s.mirrors.quit = quit
+	go s.paced(quit, mirrorDone, newWakeup("mirror", mirrorInterval, idlePoll), func(now time.Time) pace {
+		if !s.mirrorLead() || s.offline() {
+			return pace{next: now.Add(mirrorInterval)}
+		}
+		return s.mirrorTick(now)
+	})
+	// The owner turns run until the same quit.
+	s.owners.start(quit)
 	go func() {
 		defer close(done)
 		tick := time.NewTicker(lateReplyInterval)
 		defer tick.Stop()
-		// The same worker keeps a pinned agent archived or not; it starts
-		// with a tick, so a restarted agent catches up at once.
-		s.lifecycleTick(time.Now())
 		for {
 			select {
 			case <-quit:
@@ -164,7 +139,6 @@ func (s *Server) startLateReplySweep() (stop func()) {
 			case <-kick:
 			}
 			s.sweepLateReplies(time.Now())
-			s.lifecycleTick(time.Now())
 		}
 	}()
 	return func() {
@@ -225,11 +199,10 @@ func (s *Server) requestSweep() {
 
 // sweepLateReplies posts the final reply of each recent mailbox event whose
 // turn ended without one, for example on a timeout or a client that left.
-// An event waits while its turn can still be open (younger
-// than the turn timeout) or while it has no DM channel, and leaves the
-// sweep once it has an outcome or passes the horizon. The post and a cancel
-// both decide the event's outcome through one exclusive record, so exactly
-// one of them happens and each reply is posted at most once.
+// An event waits while its turn can still be open (younger than the turn
+// timeout), and leaves the sweep once it has an outcome or passes the
+// horizon. A turn's post and the sweep's both decide the event's outcome
+// through one exclusive record, so each reply is posted at most once.
 func (s *Server) sweepLateReplies(now time.Time) {
 	l := &s.late
 	s.discoverClaims(now)
@@ -281,12 +254,12 @@ func (s *Server) sweepLateReplies(now time.Time) {
 				continue
 			}
 			posts++
-			final, won, err := s.decideOutcome(c.eventID, mailboxOutcome{ReplyID: replyID})
+			_, won, err := s.decideOutcome(c.eventID, mailboxOutcome{ReplyID: replyID})
 			if err != nil {
 				continue
 			}
-			if won && !final.Cancelled {
-				_ = s.publishFinal(c.eventID, c.channel, text)
+			if won {
+				_ = s.publishFinal(c.eventID, c.claim.Channel, text)
 			}
 			l.drop(c.eventID)
 		}
@@ -319,17 +292,14 @@ func matchClaims(sc *inboxScan, index map[string]*lateClaim) map[string][]replyH
 }
 
 // discoverClaims lists the next lateReplyBudget entries of this agent's
-// claim directories and adds the recent mailbox claims among them. The
-// listing resumes where the last sweep stopped and moves to the next
-// directory after the end of one.
+// event directory and adds the recent mailbox claims among them. The
+// listing resumes where the last sweep stopped and starts again after the
+// end.
 func (s *Server) discoverClaims(now time.Time) {
 	l := &s.late
 	if l.cursor == nil {
-		dirs := s.claimDirs()
-		l.cursorDir %= len(dirs)
-		f, err := os.Open(dirs[l.cursorDir])
+		f, err := os.Open(s.eventDir())
 		if err != nil {
-			l.cursorDir++
 			return
 		}
 		l.cursor = f
@@ -347,25 +317,15 @@ func (s *Server) discoverClaims(now time.Time) {
 	if err != nil || len(entries) < lateReplyBudget {
 		_ = l.cursor.Close()
 		l.cursor = nil
-		l.cursorDir++
 	}
-}
-
-// claimDirs are the directories that hold this agent's claims: its own, then
-// remote-events for claims written before per-agent directories.
-func (s *Server) claimDirs() []string {
-	if s.id.Agent == "" {
-		return []string{s.eventsDir()}
-	}
-	return []string{filepath.Join(s.eventsDir(), s.id.Agent), s.eventsDir()}
 }
 
 // lateClaim is one mailbox event the sweep may post for.
 type lateClaim struct {
-	eventID, channel string
-	claim            mailboxClaim
-	created          time.Time
-	b                binding.Binding
+	eventID string
+	claim   mailboxClaim
+	created time.Time
+	b       binding.Binding
 	// unsentReply is the reply id of an answer that is the event's outcome
 	// but was never posted (finalUnsent).
 	unsentReply string
@@ -382,7 +342,7 @@ func (s *Server) loadLateClaim(eventID string, now time.Time) (*lateClaim, bool)
 					s.late.inDoubt = map[string]struct{}{}
 				}
 				s.late.inDoubt[eventID] = struct{}{}
-				fmt.Fprintf(os.Stderr, "amq-acp: final post of event %s is in doubt (sending, or crashed while sending); not retried\n", eventID)
+				fmt.Fprintf(os.Stderr, "machine agent: final post of event %s is in doubt (sending, or crashed while sending); not retried\n", eventID)
 			}
 			return nil, false
 		}
@@ -391,10 +351,10 @@ func (s *Server) loadLateClaim(eventID string, now time.Time) (*lateClaim, bool)
 		}
 		c.unsentReply = out.ReplyID
 	}
-	dir := s.eventDir(eventID)
+	dir := s.eventDir()
 	// Only this agent's own claim: another agent posts its own replies.
 	var rec eventClaim
-	if raw, err := readSmallRegular(filepath.Join(dir, eventID+".json")); err != nil || json.Unmarshal(raw, &rec) != nil || rec.Valid() != nil || !rec.Mailbox() || !s.ownsClaim(rec, "") {
+	if raw, err := readSmallRegular(filepath.Join(dir, eventID+".json")); err != nil || json.Unmarshal(raw, &rec) != nil || rec.Valid() != nil || !rec.Mailbox() || !s.ownsClaim(rec) {
 		return nil, false
 	}
 	c.b = rec.binding()
@@ -413,17 +373,13 @@ func (s *Server) loadLateClaim(eventID string, now time.Time) (*lateClaim, bool)
 	if now.Before(turnEnds) && c.unsentReply == "" {
 		return nil, true // its turn can still be open
 	}
-	// No delivery named a channel yet: a later one may record it.
-	if c.channel = s.eventChannel(eventID, c.claim.Channel, ""); c.channel == "" {
-		return nil, true
-	}
 	return &c, true
 }
 
 // resendFinal posts an answer that is its event's outcome but was never
 // posted. Under the event's post lock it renames the unsent marker to
 // sending before the post, so a crash during the post leaves the answer
-// uncertain, never unsent. Only a post proved not started renames it back
+// uncertain, never unsent. Only a post proved not sent renames it back
 // for the next sweep.
 func (s *Server) resendFinal(c *lateClaim) {
 	text := ""
@@ -447,8 +403,8 @@ func (s *Server) resendFinal(c *lateClaim) {
 		if err := fsq.SyncDir(filepath.Dir(sending)); err != nil {
 			return err
 		}
-		result, err := s.post(finalKey(c.eventID), c.channel, text)
-		if buzzcli.NeverSent(err) || notSent(err) {
+		result, err := s.post(finalKey(c.eventID), c.claim.Channel, text)
+		if notSent(err) {
 			if err := os.Rename(sending, unsent); err != nil {
 				return err
 			}

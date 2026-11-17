@@ -81,6 +81,7 @@ func TestMachineReattachesASessionResumedInANewProcess(t *testing.T) {
 			}
 			b.Name, b.Identity = name, b.SessionIdentity()
 			activeChannel(t, s, b, machineChanA)
+			rec.f.groupState(t, machineChanA)
 			if tc.prune {
 				if _, err := binding.PruneEnded(binding.Binding.Liveness); err != nil {
 					t.Fatal(err)

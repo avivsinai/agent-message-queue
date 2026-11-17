@@ -16,8 +16,8 @@ const (
 
 var nostrEventIDRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-// The event record is a claim, not a receipt: like the mailbox steer claim
-// it fixes only what a replay must not re-decide (message id, created time,
+// The event record is a claim, not a receipt: it fixes only what a replay
+// must not re-decide (message id, created time,
 // destination, thread). It records no delivery outcome — what was delivered
 // is what the recipient inbox proves at replay time, never what the first
 // attempt wrote here.
@@ -93,25 +93,4 @@ func resolveEventID(meta json.RawMessage) (string, *rpcError) {
 
 func eventJournalPath(me, eventID string) string {
 	return filepath.Join("agents", me, "outbox", "acp-events", eventID+".json")
-}
-
-// lookupEventID is the id of the Buzz event that triggered a prompt, to
-// fetch it from the relay by: the Nostr id buzz-acp named in the prompt's
-// _meta (eventID), else the Event ID of the prompt's one <buzz-event> block,
-// which is the triggering event buzz-acp writes into the prompt text. It is
-// a lookup key only: buzzevent.Fetch proves the event. "" when the prompt
-// names none.
-func lookupEventID(eventID, prompt string) string {
-	if nostrEventIDRe.MatchString(eventID) {
-		return eventID
-	}
-	for line := range strings.SplitSeq(buzzEvent(prompt), "\n") {
-		if id, ok := strings.CutPrefix(line, "Event ID: "); ok {
-			if id = strings.TrimSpace(id); nostrEventIDRe.MatchString(id) {
-				return id
-			}
-			return ""
-		}
-	}
-	return ""
 }

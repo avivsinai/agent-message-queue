@@ -84,7 +84,7 @@ func polling(name string, every time.Duration) *wakeup {
 func newWakeup(name string, every, idle time.Duration) *wakeup {
 	w, err := newWatcher()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "amq-acp: the %s worker cannot watch files (%v); it polls every %s\n", name, err, every)
+		fmt.Fprintf(os.Stderr, "machine agent: the %s worker cannot watch files (%v); it polls every %s\n", name, err, every)
 		return polling(name, every)
 	}
 	u := &wakeup{name: name, every: every, idle: idle, w: w, kick: make(chan struct{}, 1), lost: make(chan struct{})}
@@ -99,7 +99,7 @@ func (u *wakeup) forward() {
 	defer close(u.lost)
 	defer func() {
 		if !u.closing.Load() {
-			fmt.Fprintf(os.Stderr, "amq-acp: the %s worker's file watch stopped; it polls every %s\n", u.name, u.every)
+			fmt.Fprintf(os.Stderr, "machine agent: the %s worker's file watch stopped; it polls every %s\n", u.name, u.every)
 		}
 	}()
 	for {
@@ -175,7 +175,7 @@ func (u *wakeup) watch(paths []string) (grew bool) {
 			u.partial = true
 			if !u.warned {
 				u.warned = true
-				fmt.Fprintf(os.Stderr, "amq-acp: the %s worker cannot watch %s (%v); it polls every %s while a path cannot be watched\n", u.name, p, err, u.every)
+				fmt.Fprintf(os.Stderr, "machine agent: the %s worker cannot watch %s (%v); it polls every %s while a path cannot be watched\n", u.name, p, err, u.every)
 			}
 		}
 	}

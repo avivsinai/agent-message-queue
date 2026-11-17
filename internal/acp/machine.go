@@ -7,10 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,16 +19,14 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
-	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 )
 
-// The machine agent ("AMQ Remote machine" in its system prompt) is one Buzz
-// agent per machine that serves every session. The worker that leads its
-// identity makes a private channel for each live named session that has no
-// running or idle agent of its own, adds the owner as an admin and welcomes
-// them with a mention. A prompt reaches a session only from that session's
+// The machine agent is one Buzz agent per machine that serves every
+// session. The worker that leads its identity makes a private channel for
+// each live named session, adds the owner as an admin and welcomes them
+// with a mention. A prompt reaches a session only from that session's
 // channel (machineBinding). The records live under
 // <state>/channels/<relay key>/<machine pubkey>/:
 //   - <name>.json, the record of the binding called name;
@@ -41,11 +37,10 @@ import (
 //
 // Only the leader writes records, under its lock, one step at a time: each
 // outcome is written before the next step, and each step first re-reads the
-// record. The buzz CLI makes a fresh channel id on every create and takes no
-// idempotency key, so a create whose outcome is unknown, including one whose
-// worker stopped before it wrote the result, is never sent again for that
-// record; the leader looks for the channel it may have made instead. A
-// record that exists but cannot be read stops all work on its name.
+// record. A create whose outcome is unknown, including one whose worker
+// stopped before it wrote the result, is resolved by the channel id the
+// record chose (lookupChosen). A record that exists but cannot be read stops
+// all work on its name.
 
 // machineName is the machine agent's marker directory under agents/. It is
 // not a valid binding name, so it never meets a session's.
@@ -99,13 +94,12 @@ type channelRecord struct {
 	Identity string `json:"identity"`
 	// Label is the channel's name in Buzz, fixed when the record is made.
 	Label string `json:"label"`
-	// Reg is made once per record and written into the channel's
-	// description, so an uncertain create can be found.
+	// Reg is made once per record. It keys the record's writes and is
+	// written into the channel's description.
 	Reg string `json:"reg"`
-	// Chosen is the channel id a create on the direct transport asks for,
-	// written before any create is signed, so the channel an uncertain
-	// create may have made is found by its id. Empty on the buzz CLI, which
-	// chooses the id itself.
+	// Chosen is the channel id a create asks for, written before any create
+	// is signed, so the channel an uncertain create may have made is found
+	// by its id.
 	Chosen     string `json:"chosen_id,omitempty"`
 	State      string `json:"state"`
 	Archived   bool   `json:"archived"`
@@ -128,12 +122,9 @@ type channelRecord struct {
 	// ArchiveSent is written before the channel's archive is sent, so a
 	// restore unarchives a channel that may be archived although no archive
 	// was confirmed.
-	ArchiveSent bool `json:"archive_sent,omitempty"`
-	// Orphans are channels found for Reg that are not used: both of an
-	// ambiguous match. A retired record archives them.
-	Orphans     []string `json:"orphans,omitempty"`
-	RetiredBy   string   `json:"retired_by,omitempty"`
-	RetiredFrom string   `json:"retired_from,omitempty"`
+	ArchiveSent bool   `json:"archive_sent,omitempty"`
+	RetiredBy   string `json:"retired_by,omitempty"`
+	RetiredFrom string `json:"retired_from,omitempty"`
 	// RetiredAt is when the record left its active slot, set once then;
 	// empty in a record retired before it was recorded.
 	RetiredAt string `json:"retired_at,omitempty"`
@@ -146,13 +137,13 @@ type channelRecord struct {
 // inDoubt reports whether a create of r may have made a channel that is not
 // known yet.
 func (r channelRecord) inDoubt() bool {
-	return (r.Doubted || r.Pending) && r.ChannelID == "" && len(r.Orphans) == 0
+	return (r.Doubted || r.Pending) && r.ChannelID == ""
 }
 
-// prunable reports whether a retired record may be removed: every channel it
+// prunable reports whether a retired record may be removed: the channel it
 // made is archived, or it made none and no create is in doubt.
 func (r channelRecord) prunable() bool {
-	return r.Archived || (r.ChannelID == "" && len(r.Orphans) == 0 && !r.inDoubt())
+	return r.Archived || (r.ChannelID == "" && !r.inDoubt())
 }
 
 func channelDirFor(stateDir, relayKey, machine string) string {
@@ -170,9 +161,7 @@ func loadChannelRecord(path string) (r channelRecord, found bool, err error) {
 		r, found, err := decodeChannelRecord(path)
 		return cachedRecord{r, found}, err
 	})
-	r = c.r
-	r.Orphans = slices.Clone(r.Orphans)
-	return r, c.found || err != nil, err
+	return c.r, c.found || err != nil, err
 }
 
 type cachedRecord struct {
@@ -288,26 +277,6 @@ func (s *Server) lifeCtx() context.Context {
 	return context.Background()
 }
 
-// call runs one buzz command for the machine lifecycle. A call cut off by
-// the worker's stop fails like a timeout: its outcome is unknown.
-func (s *Server) call(args ...string) ([]byte, error) {
-	ctx := s.lifeCtx()
-	if ctx.Err() != nil {
-		return nil, &buzzcli.NotSentError{Err: errMachineStopped}
-	}
-	return machineCall(ctx, s.cfg.PostTimeout, args...)
-}
-
-// lifecycleExec is the Exec of s.buzz: it runs one invocation through call,
-// so the worker's context bounds it whatever ctx the operation got. The
-// lifecycle sends no stdin; an invocation with stdin is not sent.
-func (s *Server) lifecycleExec(_ context.Context, stdin io.Reader, args ...string) ([]byte, error) {
-	if stdin != nil {
-		return nil, &buzzcli.NotSentError{Err: errors.New("the machine lifecycle sends no stdin")}
-	}
-	return s.call(args...)
-}
-
 // retiredKey names an intention of the retired record r: what, r's reg, and
 // when r left its slot in Unix seconds, 0 when RetiredAt is empty or
 // unreadable.
@@ -334,17 +303,12 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) (p pace) {
 	gone := s.machine.goneDaemons
 	s.machine.goneDaemons = nil
 	s.appServers.Store(nil)
-	if !s.cfg.Machine || s.id.Agent == "" || s.stopped() || !s.lead(machineName) {
+	if !s.cfg.Machine || s.id.Agent == "" || s.stopped() || !s.lead() {
 		return pace{next: now.Add(machineScanInterval)}
 	}
 	if due(s.machine.marked, lateReplyInterval, now) {
-		dir := s.agentMarkerDir(machineName)
-		m, _ := readAgentMarker(filepath.Join(dir, s.id.Agent+".json"))
-		m.Name, m.DisplayName, m.RelayKey = machineName, s.id.DisplayName, s.id.RelayKey
-		if s.direct != nil {
-			m.Host = "standalone"
-		}
-		s.writeAgentMarker(dir, m, now)
+		m := agentMarker{Name: machineName, DisplayName: s.id.DisplayName, RelayKey: s.id.RelayKey, Host: "standalone"}
+		s.writeAgentMarker(s.agentMarkerDir(), m, now)
 		s.machine.marked = now.UTC().Format(time.RFC3339)
 	}
 	if s.id.RelayKey == "" || s.id.Owner == "" {
@@ -385,33 +349,23 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) (p pace) {
 		s.machine.swept = now.UTC().Format(time.RFC3339)
 		s.sweepRetired(now)
 	}
-	if !s.stopped() && s.direct != nil && due(s.machine.judged, routeJudgeInterval, now) {
+	if !s.stopped() && due(s.machine.judged, routeJudgeInterval, now) {
 		s.machine.judged = now.UTC().Format(time.RFC3339)
 		s.judgeRoutes(now)
 	}
 	for _, r := range s.snapshot().records {
-		if at, ok := recordDue(r, s.uncertainGap(), now); ok {
+		if at, ok := recordDue(r, now); ok {
 			p.due(at)
 		}
 	}
 	return p
 }
 
-// uncertainGap separates the lookups of an uncertain create: on the direct
-// transport an observation by the chosen id is cheap and exact, so it runs
-// at channelStepGap; on the buzz CLI at channelRetryGap.
-func (s *Server) uncertainGap() time.Duration {
-	if s.direct != nil {
-		return channelStepGap
-	}
-	return channelRetryGap
-}
-
 // recordDue is when the slot record r needs its next step: at once while
 // it is set up or retired, at its retry time while it waits on one (an
-// uncertain create waits uncertain); ok is false for an active record and
-// one that is never tried again.
-func recordDue(r channelRecord, uncertain time.Duration, now time.Time) (at time.Time, ok bool) {
+// uncertain create waits channelStepGap); ok is false for an active record
+// and one that is never tried again.
+func recordDue(r channelRecord, now time.Time) (at time.Time, ok bool) {
 	switch {
 	case r.Pending:
 	case r.State == channelActive:
@@ -421,7 +375,7 @@ func recordDue(r channelRecord, uncertain time.Duration, now time.Time) (at time
 	case r.State == channelFailed, r.State == channelUncertain:
 		gap := channelRetryGap
 		if r.State == channelUncertain {
-			gap = uncertain
+			gap = channelStepGap
 		}
 		if last, err := time.Parse(time.RFC3339, r.LastTry); err == nil {
 			return last.Add(gap), true
@@ -432,8 +386,7 @@ func recordDue(r channelRecord, uncertain time.Duration, now time.Time) (at time
 
 // awaitsThread reports whether b is a Codex app-server session that may
 // become live with no change on disk: its thread is not judged loaded or
-// ended yet, no record of this agent serves it, and it has no agent of its
-// own that runs or is idle.
+// ended yet, and no record of this agent serves it.
 func (s *Server) awaitsThread(b binding.Binding) bool {
 	if b.AppServer.Thread == "" || binding.ValidName(b.Name) != nil {
 		return false
@@ -443,11 +396,6 @@ func (s *Server) awaitsThread(b binding.Binding) bool {
 	}
 	if r, ok := s.snapshot().slot(b.Name); ok && r.State == channelActive {
 		return false
-	}
-	for _, m := range s.agentMarkers(b.Name) {
-		if state := m.state(time.Now()); state == AgentRunning || state == AgentIdle {
-			return false
-		}
 	}
 	return true
 }
@@ -537,7 +485,7 @@ func daemonGone(view *codex.View, b binding.Binding) bool {
 // has ended when the daemon it was bound in, still running, no longer has
 // it loaded, or when that daemon was gone, with the thread loaded nowhere,
 // on two ticks in a row. Any other binding's liveness is its holder's, as
-// it is in a worker that runs no machine tick.
+// every binding's is before the first machine tick.
 func (s *Server) liveness(b binding.Binding) (binding.State, string) {
 	j := s.appServers.Load()
 	if j == nil {
@@ -560,23 +508,13 @@ func (s *Server) liveness(b binding.Binding) (binding.State, string) {
 }
 
 // provisionable reports whether the machine agent serves b: a named binding
-// whose session is proven live and that has no agent of its own that runs
-// or is idle. An offline marker, or one without an identity that is stale,
-// is what a deleted Desktop agent leaves, so it does not keep the channel
-// away.
+// whose session is proven live.
 func (s *Server) provisionable(b binding.Binding) bool {
 	if b.Name == binding.LegacyName || binding.ValidName(b.Name) != nil {
 		return false
 	}
-	if state, _ := s.liveness(b); state != binding.Live {
-		return false
-	}
-	for _, m := range s.agentMarkers(b.Name) {
-		if state := m.state(time.Now()); state == AgentRunning || state == AgentIdle {
-			return false
-		}
-	}
-	return true
+	state, _ := s.liveness(b)
+	return state == binding.Live
 }
 
 // provision moves b's record one or more steps toward active. A record that
@@ -609,10 +547,8 @@ func (s *Server) provision(b binding.Binding, now time.Time) {
 		}
 		r = channelRecord{Relay: s.id.RelayURL, Machine: s.id.Agent, Name: b.Name, Identity: b.SessionIdentity(),
 			Label: sessionAgentName(b), Reg: reg, State: channelCreating}
-		if s.direct != nil {
-			if r.Chosen, err = newChannelID(); err != nil {
-				return
-			}
+		if r.Chosen, err = newChannelID(); err != nil {
+			return
 		}
 		if s.save(&r, now) != nil {
 			return
@@ -640,7 +576,7 @@ func (s *Server) advance(r *channelRecord, now time.Time) {
 			return
 		}
 	case channelUncertain:
-		if !due(r.LastTry, s.uncertainGap(), now) || !s.lookup(r, now) {
+		if !due(r.LastTry, channelStepGap, now) || !s.lookup(r, now) {
 			return
 		}
 	default:
@@ -734,10 +670,10 @@ func (s *Server) judgeRoutes(now time.Time) {
 // anything else may have made one, so the record is in doubt. It reports
 // whether a channel id is known.
 //
-// On the direct transport the create asks for r.Chosen under the key
-// create/<reg>, so every attempt of r sends one signed event. An attempt
-// made with no relay connection sent nothing and leaves r to be created on
-// a later pass without using up a try.
+// The create asks for r.Chosen under the key create/<reg>, so every attempt
+// of r sends one signed event. An attempt made with no relay connection
+// sent nothing and leaves r to be created on a later pass without using up
+// a try.
 func (s *Server) create(r *channelRecord, now time.Time) bool {
 	if r.Doubted || r.Creates >= channelCreateTries || !s.stillServes(*r, now) {
 		return false
@@ -750,7 +686,7 @@ func (s *Server) create(r *channelRecord, now time.Time) bool {
 	c := s.buzz.CreateChannel(s.lifeCtx(), s.createSpec(*r))
 	r.Pending = false
 	switch {
-	case s.direct != nil && c.Reason == buzzop.ReasonNoConnection && (c.Outcome == buzzop.NotSent || c.Outcome == buzzop.Rejected):
+	case c.Reason == buzzop.ReasonNoConnection && (c.Outcome == buzzop.NotSent || c.Outcome == buzzop.Rejected):
 		// Nothing was sent: the outcome is what an earlier attempt left,
 		// and that attempt was counted when it was made.
 		r.Creates--
@@ -768,115 +704,34 @@ func (s *Server) create(r *channelRecord, now time.Time) bool {
 	return c.Outcome == buzzop.Accepted
 }
 
-// createSpec is the create of r: one key per registration, and on the
-// direct transport the chosen id.
+// createSpec is the create of r: one key per registration, and the chosen
+// id.
 func (s *Server) createSpec(r channelRecord) buzzop.ChannelSpec {
 	spec := buzzop.ChannelSpec{Key: buzzop.Key("create/" + r.Reg), Name: r.Label, About: "amq-remote " + r.Reg}
-	if s.direct != nil {
-		spec.ID = r.Chosen
-	}
+	spec.ID = r.Chosen
 	return spec
 }
 
-// lookup looks for the channel an uncertain create of r may have made, and
-// adopts it when there is exactly one. Two are both refused. It reports
-// whether r now has a channel to set up. On the direct transport it is
-// lookupChosen.
+// lookup looks for the channel an uncertain create of r may have made
+// (lookupChosen). It reports whether r now has a channel to set up.
 func (s *Server) lookup(r *channelRecord, now time.Time) bool {
 	if !s.stillServes(*r, now) {
 		return false
 	}
 	r.LastTry = now.UTC().Format(time.RFC3339)
-	if s.direct != nil {
-		s.lookupChosen(r)
-		return s.save(r, now) == nil && r.ChannelID != ""
-	}
-	ids, ok := s.findChannels(*r)
-	switch {
-	case !ok:
-	case len(ids) == 1:
-		r.ChannelID, r.State, r.LastError = ids[0], channelCreating, ""
-	case len(ids) > 1:
-		r.State, r.Orphans = channelFailed, ids
-		r.LastError = "several channels carry this registration (" + strings.Join(ids, ", ") + "); none is used"
-	}
+	s.lookupChosen(r)
 	return s.save(r, now) == nil && r.ChannelID != ""
-}
-
-// findChannels lists the private channels the machine agent belongs to and
-// returns those named r.Label that it owns and whose description holds
-// r.Reg. The list does not promise a description, so each candidate is read
-// with channels get. ok is false when any read failed, which proves nothing.
-//
-// The members of a candidate are read only once its description holds
-// r.Reg, so a channel of another registration never makes the answer
-// unknown.
-func (s *Server) findChannels(r channelRecord) (ids []string, ok bool) {
-	listed, err := s.buzz.FindChannels(s.lifeCtx(), r.Label)
-	if err != nil {
-		return nil, false
-	}
-	for _, id := range listed {
-		out, err := s.call("channels", "get", "--channel", id)
-		var got struct {
-			Description string `json:"description"`
-		}
-		if err != nil || json.Unmarshal(out, &got) != nil {
-			return nil, false
-		}
-		if !strings.Contains(got.Description, r.Reg) {
-			continue
-		}
-		owner, known := s.ownerOf(s.call("channels", "members", "--channel", id))
-		if !known {
-			return nil, false
-		}
-		if owner {
-			ids = append(ids, strings.ToLower(id))
-		}
-	}
-	return ids, true
-}
-
-// acceptedFor reports whether the CLI write named by args succeeded. The
-// subcommand selects the shape, by what that command prints (block/buzz
-// f3b127e buzz-cli):
-//
-//   - write response {event_id, accepted, message}: messages send, messages
-//     edit, channels create, channels archive, channels unarchive, channels
-//     add-member, users set-status, agents draft-create.
-//   - ok response: agents archive, agents unarchive.
-//
-// A subcommand outside this table is an error: its output is not known
-// here, so success is not assumed.
-func acceptedFor(args []string, out []byte, err error) error {
-	if err != nil {
-		return err
-	}
-	if len(args) >= 2 {
-		switch args[0] + " " + args[1] {
-		case "messages send", "messages edit",
-			"channels create", "channels archive", "channels unarchive", "channels add-member",
-			"users set-status",
-			"agents draft-create":
-			return buzzcli.WriteError(buzzcli.ShapeAccepted, out, nil)
-		case "agents archive", "agents unarchive":
-			return buzzcli.WriteError(buzzcli.ShapeOK, out, nil)
-		}
-	}
-	return fmt.Errorf("buzz %s: response shape unknown to acceptedFor: %s",
-		strings.Join(args[:min(len(args), 2)], " "), strings.TrimSpace(string(out)))
 }
 
 // finishSetup adds the owner, welcomes them with a mention so the phone
 // pushes, and activates the channel. Each step's outcome is written before
 // the next; a failed step is retried after channelStepGap.
 //
-// On the direct transport the relay-signed state decides: the owner is
-// added only while it does not show them as an admin or the owner, and the
-// channel becomes active only once it shows a route (routeReady). A state
-// that cannot be read, or does not show that yet, changes nothing and is
-// read again after channelStepGap.
+// The relay-signed state decides: the owner is added only while it does
+// not show them as an admin or the owner, and the channel becomes active
+// only once it shows a route (routeReady). A state that cannot be read, or
+// does not show that yet, changes nothing and is read again after
+// channelStepGap.
 func (s *Server) finishSetup(r *channelRecord, now time.Time) {
 	if r.State != channelCreating || r.ChannelID == "" {
 		return
@@ -902,14 +757,12 @@ func (s *Server) finishSetup(r *channelRecord, now time.Time) {
 	}
 	ctx := s.lifeCtx()
 	if !step(&r.OwnerAdded, func() buzzop.Result {
-		if s.direct != nil {
-			f, err := s.observe(r.ChannelID)
-			switch {
-			case err != nil:
-				return buzzop.Result{Outcome: buzzop.NotSent, Reason: unreadableState + ": " + err.Error()}
-			case ownerSeated(f, s.id):
-				return buzzop.Result{Outcome: buzzop.Accepted}
-			}
+		f, err := s.observe(r.ChannelID)
+		switch {
+		case err != nil:
+			return buzzop.Result{Outcome: buzzop.NotSent, Reason: unreadableState + ": " + err.Error()}
+		case ownerSeated(f, s.id):
+			return buzzop.Result{Outcome: buzzop.Accepted}
 		}
 		return s.buzz.AddMember(ctx, buzzop.Key("member/"+r.Reg+"/"+s.id.Owner), r.ChannelID, s.id.Owner, "admin")
 	}) {
@@ -922,18 +775,16 @@ func (s *Server) finishSetup(r *channelRecord, now time.Time) {
 	}) {
 		return
 	}
-	if s.direct != nil {
-		f, err := s.observe(r.ChannelID)
-		if err != nil || !routeReady(f, s.id) {
-			r.LastTry, r.LastError = now.UTC().Format(time.RFC3339), waitingForState
-			if err != nil {
-				r.LastError = unreadableState + ": " + err.Error()
-			}
-			_ = s.save(r, now)
-			return
+	f, err := s.observe(r.ChannelID)
+	if err != nil || !routeReady(f, s.id) {
+		r.LastTry, r.LastError = now.UTC().Format(time.RFC3339), waitingForState
+		if err != nil {
+			r.LastError = unreadableState + ": " + err.Error()
 		}
-		r.LastError = ""
+		_ = s.save(r, now)
+		return
 	}
+	r.LastError = ""
 	if !s.stillServes(*r, now) {
 		return
 	}
@@ -1122,22 +973,21 @@ func (s *Server) retiredRecords() []channelRecord {
 
 // cleanRetired works on one retired record: it finds a channel an uncertain
 // or unfinished create made, says "Session ended" in a channel that was
-// active for a session that ended, and archives every channel the record
+// active for a session that ended, and archives the channel the record
 // made. archived is written only after the archive is confirmed; a failure
 // is retried after channelRetryGap without limit. A retired record never
 // gets add-member, a welcome or activation.
 //
-// On the direct transport the uncertain create is looked for by its chosen
-// id, and the channel's relay-signed state is read before anything is
-// sent: a channel it shows archived is recorded archived with no post and
-// no archive, and a state that cannot be read, or that has no metadata
-// event, sends nothing. The archive is keyed by the state it changes
-// (stateKey).
+// The uncertain create is looked for by its chosen id, and the channel's
+// relay-signed state is read before anything is sent: a channel it shows
+// archived is recorded archived with no post and no archive, and a state
+// that cannot be read, or that has no metadata event, sends nothing. The
+// archive is keyed by the state it changes (stateKey).
 func (s *Server) cleanRetired(r channelRecord, now time.Time) {
 	if r.Archived || s.stopped() || (r.LastTry != "" && r.LastError != "" && !due(r.LastTry, channelRetryGap, now)) {
 		return
 	}
-	if r.ChannelID == "" && len(r.Orphans) == 0 && !r.inDoubt() {
+	if r.ChannelID == "" && !r.inDoubt() {
 		return
 	}
 	if !s.unchanged(r) {
@@ -1150,27 +1000,23 @@ func (s *Server) cleanRetired(r channelRecord, now time.Time) {
 	}
 	ctx := s.lifeCtx()
 	if r.inDoubt() {
-		find := s.findChannels
-		if s.direct != nil {
-			find = s.findChosen
-		}
-		ids, ok := find(r)
+		id, ok := s.findChosen(r)
 		if !ok {
 			fail("could not look for the channel of an uncertain create")
 			return
 		}
-		if len(ids) == 0 {
+		if id == "" {
 			r.LastError = "no channel found yet for an uncertain create"
 			_ = s.save(&r, now)
 			return
 		}
-		r.ChannelID, r.Orphans, r.Pending, r.Doubted = ids[0], ids[1:], false, true
+		r.ChannelID, r.Pending, r.Doubted = id, false, true
 		if s.save(&r, now) != nil {
 			return
 		}
 	}
 	archiveKey := retiredKey("archive", r)
-	if s.direct != nil && r.ChannelID != "" {
+	if r.ChannelID != "" {
 		f, err := s.observe(r.ChannelID)
 		switch {
 		case err != nil:
@@ -1196,20 +1042,6 @@ func (s *Server) cleanRetired(r channelRecord, now time.Time) {
 			text = "Disconnected: " + r.Label + ". This channel no longer reaches it until the session connects again."
 		}
 		_ = s.buzz.Send(ctx, buzzop.Message{Key: retiredKey("ended", r), Channel: r.ChannelID, Content: text})
-	}
-	for len(r.Orphans) > 0 {
-		if s.stopped() {
-			return
-		}
-		key := buzzop.Key("archive-orphan/" + r.Reg + "/" + r.Orphans[0])
-		if res := s.buzz.SetArchived(ctx, key, r.Orphans[0], true); res.Outcome != buzzop.Accepted {
-			fail(res.Reason)
-			return
-		}
-		r.Orphans = r.Orphans[1:]
-		if s.save(&r, now) != nil {
-			return
-		}
 	}
 	if r.ChannelID != "" {
 		if s.stopped() {
@@ -1287,18 +1119,15 @@ func (s *Server) restorable(b binding.Binding, r channelRecord) bool {
 
 // restore brings back the channel of the same session attaching again: the
 // newest retired record of b's name and identity that was active and ended
-// with its session. A channel whose archive was sent is unarchived first,
-// and only a confirmed unarchive, or the relay's refusal that the channel is
-// not archived, lets it become active. It reports whether such a record
-// exists, so no new channel is made while it is being brought back. On the
-// direct transport only an observation that the channel is not archived
-// lets it become active (unarchived), and a record whose channel the
-// owner archived (Archived without ArchiveSent) is never brought back: the
-// session gets a new channel.
+// with its session. It reports whether such a record exists, so no new
+// channel is made while it is being brought back. Only an observation that
+// the channel is not archived lets it become active (unarchived), and a
+// record whose channel the owner archived (Archived without ArchiveSent) is
+// never brought back: the session gets a new channel.
 func (s *Server) restore(b binding.Binding, now time.Time) bool {
 	var found *channelRecord
 	for _, r := range s.retiredRecords() {
-		if s.direct != nil && r.Archived && !r.ArchiveSent {
+		if r.Archived && !r.ArchiveSent {
 			continue
 		}
 		if r.Name == b.Name && r.Identity == b.SessionIdentity() && left(r) &&
@@ -1313,32 +1142,14 @@ func (s *Server) restore(b binding.Binding, now time.Time) bool {
 	if !s.restorable(b, r) {
 		return true
 	}
-	if s.direct != nil {
-		switch s.unarchived(&r, now) {
-		case restoreWaits:
-			return true
-		case restoreOwnerArchived:
-			return false
-		}
-		if !s.restorable(b, r) {
-			return true
-		}
-	} else if r.Archived || r.ArchiveSent {
-		if r.LastError != "" && !due(r.LastTry, channelStepGap, now) {
-			return true
-		}
-		r.LastTry = now.UTC().Format(time.RFC3339)
-		if res := s.buzz.SetArchived(s.lifeCtx(), retiredKey("unarchive", r), r.ChannelID, false); res.Outcome != buzzop.Accepted && !notArchived(res) {
-			r.LastError = res.Reason
-			_ = s.save(&r, now)
-			return true
-		}
-		// The channel is unarchived now; if the session left meanwhile, the
-		// retired record archives it again.
-		r.Archived, r.ArchiveSent, r.LastError = false, false, ""
-		if s.save(&r, now) != nil || !s.restorable(b, r) {
-			return true
-		}
+	switch s.unarchived(&r, now) {
+	case restoreWaits:
+		return true
+	case restoreOwnerArchived:
+		return false
+	}
+	if !s.restorable(b, r) {
+		return true
 	}
 	retiredPath := s.recordPath(r)
 	r.State, r.RetiredBy, r.RetiredFrom, r.SaidEnded, r.LastError = channelActive, "", "", false, ""
@@ -1354,7 +1165,7 @@ func (s *Server) restore(b binding.Binding, now time.Time) bool {
 	return true
 }
 
-// restoreStep is what a restore on the direct transport may do next.
+// restoreStep is what a restore may do next.
 type restoreStep int
 
 const (
@@ -1421,15 +1232,6 @@ func stateKey(what string, r channelRecord, f buzzop.ChannelFacts) buzzop.Key {
 	return buzzop.Key(what + "/" + r.Reg + "/" + f.MetaEvent)
 }
 
-// notArchived reports whether the relay refused an unarchive because the
-// channel is not archived. That refusal proves the state a restore needs: an
-// archive recorded as sent never reached the relay, or the channel was
-// unarchived since. A failure that proves nothing, such as a timeout, is not
-// one.
-func notArchived(res buzzop.Result) bool {
-	return res.Outcome != buzzop.Accepted && strings.Contains(strings.ToLower(res.Reason), "channel is not archived")
-}
-
 // resetRequest asks the leader to retire the record with Reg and make a
 // new one. It is written by amq-remote channel reset beside the record.
 type resetRequest struct {
@@ -1439,7 +1241,7 @@ type resetRequest struct {
 // applyResets retires each record named by a reset request whose reg still
 // matches it, and reports whether a request stays. The next provisioning makes a new record with a new reg; the
 // retired one keeps being reconciled and archived, so a late channel of an
-// uncertain create is archived as an orphan. A request is dropped once it is
+// uncertain create is still found and archived. A request is dropped once it is
 // applied or names no current record; one whose request or record cannot be
 // read, or whose retirement failed, stays for the next scan.
 func (s *Server) applyResets(now time.Time) (left bool) {
@@ -1488,11 +1290,10 @@ func (s *Server) channelRoute(channel string) (channelRecord, bool) {
 // a session identity that the binding no longer has.
 var errChannelNotConnected = errors.New("this channel's session is not connected")
 
-// machineBinding is the binding a machine agent's ACP session drives: the
+// machineBinding is the binding a machine agent's session drives: the
 // session named by the active record of the channel the session's first
-// prompt came from. The current prompt must carry that same channel. It
-// never uses a pin, a selected model or the only binding; anything that does
-// not resolve gets the directory.
+// turn came from. The current turn must carry that same channel. Anything
+// that does not resolve gets the directory.
 func (s *Server) machineBinding(sessionID string) (binding.Binding, error) {
 	s.mu.Lock()
 	route, current := "", ""
@@ -1504,11 +1305,11 @@ func (s *Server) machineBinding(sessionID string) (binding.Binding, error) {
 	}
 	s.mu.Unlock()
 	if route == "" || current != route {
-		return binding.Binding{}, &unpinnedError{machine: true}
+		return binding.Binding{}, &unpinnedError{}
 	}
 	r, ok := s.channelRoute(route)
 	if !ok {
-		return binding.Binding{}, &unpinnedError{machine: true}
+		return binding.Binding{}, &unpinnedError{}
 	}
 	return routeBinding(r)
 }
@@ -1558,8 +1359,6 @@ func (s *Server) machineDirectory() string {
 			fmt.Fprintf(&b, "\n- %s: its channel %q is suspended (%s)", label, r.Label, r.Suspended)
 		case ok && r.State == channelActive && r.Identity == bd.SessionIdentity():
 			fmt.Fprintf(&b, "\n- %s: write in the %q channel", label, r.Label)
-		case !s.provisionable(bd):
-			fmt.Fprintf(&b, "\n- %s: DM its own agent", label)
 		case ok:
 			fmt.Fprintf(&b, "\n- %s: its channel is %s", label, r.State)
 		default:
@@ -1591,7 +1390,7 @@ type MachineChannel struct {
 	identity string
 }
 
-// BindingStateDir is amq-acp's state directory in binding mode, beside the
+// BindingStateDir is the machine agent's state directory, beside the
 // binding file.
 func BindingStateDir() (string, error) {
 	path, err := binding.Path()

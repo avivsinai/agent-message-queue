@@ -57,7 +57,7 @@ func inspectStaleACP(t *testing.T) []staleProbe {
 
 // bbn: after `brew upgrade amq`, a Buzz agent can keep running the old
 // amq-acp, which answers "Not connected" with no hint. Doctor must name that
-// exact process and say to Stop and Start the agent in Buzz Desktop.
+// exact process and say to restart it.
 func TestDoctorNamesAStaleACP(t *testing.T) {
 	fakeACPList(t, testInstalled)
 

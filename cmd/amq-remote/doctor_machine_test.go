@@ -51,7 +51,7 @@ func machineFixture(t *testing.T) (settings, root string) {
 	write(filepath.Join(root, "meta", "config.json"), `{"version":1,"created_utc":"2026-11-06T00:00:00Z","agents":["claude"]}`+"\n")
 	key := strings.Repeat("ab", 32)
 	marker, _ := json.Marshal(map[string]any{"name": "machine", "display_name": "AMQ Remote @ m", "relay_key": "rk",
-		"updated": time.Now().UTC().Format(time.RFC3339)})
+		"host": hostStandalone, "updated": time.Now().UTC().Format(time.RFC3339)})
 	write(filepath.Join(dir, "remote", "acp", "agents", "_machine", key+".json"), string(marker))
 	savedWake, savedList := doctorWakeCheck, listACPProcesses
 	t.Cleanup(func() { doctorWakeCheck, listACPProcesses = savedWake, savedList })
@@ -303,12 +303,12 @@ func standaloneMachineAgentFixture(t *testing.T) (map[string]any, string, string
 	return out.(map[string]any), agent, cred.Tag.OwnerPubKey, grantEnd(cred), cred.Relay
 }
 
-// The standalone doctor row has the enrolled host and authenticated relay,
+// The standalone doctor row has the enrolled keys and authenticated relay,
 // without assuming a record in an empty outbox.
 func TestDoctorChecksAStandaloneMachineAgent(t *testing.T) {
 	out, agent, owner, grantEnd, _ := standaloneMachineAgentFixture(t)
 	row := out["machine_agent"].(machineAgentRow)
-	want := machineAgentRow{State: agentRunning, Name: "AMQ Remote @ m", RelayKey: true, Host: hostStandalone, Agent: agent[:8],
+	want := machineAgentRow{State: agentRunning, Name: "AMQ Remote @ m", Agent: agent[:8],
 		Owner: owner[:8], Relay: "wss://relay.example", RelayState: string(relay.StateAuthenticated), GrantEnd: grantEnd}
 	if row != want {
 		t.Fatalf("machine_agent row = %+v; want %+v", row, want)
@@ -379,7 +379,7 @@ func TestDoctorNotesASuspendedChannel(t *testing.T) {
 	}
 	pub, relayKey := strings.Repeat("e", 64), strings.Repeat("f", 64)
 	writeMarker(t, dir, machineMarkerDir, map[string]any{"name": "_machine", "pubkey": pub, "display_name": "AMQ Remote @ box",
-		"relay_key": relayKey, "updated": time.Now().UTC().Format(time.RFC3339)})
+		"relay_key": relayKey, "host": hostStandalone, "updated": time.Now().UTC().Format(time.RFC3339)})
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "claude", Name: "claude-p-session3"}
 	if err := binding.WriteNamed(b); err != nil {
 		t.Fatal(err)

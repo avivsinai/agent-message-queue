@@ -87,7 +87,6 @@ const (
 	codeRelaySelfUnknown  = "relay_self_unknown"
 	codeRelaySelfChanged  = "relay_self_changed"
 	codeAuthRefused       = "auth_refused"
-	codeOtherMachineAgent = "other_machine_agent"
 )
 
 // machineStatus is <amq home>/remote/machine/<agent>/status.json: what the
@@ -224,10 +223,6 @@ func (ms *machineSet) reconcile(now time.Time) (st machineStatus, agents []strin
 		ms.drop()
 		return st.refused(codeAuthorityExpired, line), agents, true
 	}
-	if other := otherMachineAgent(agent, now); other != "" {
-		ms.drop()
-		return st.refused(codeOtherMachineAgent, otherMachineLine(other)), agents, true
-	}
 	ms.readSelf(url, now)
 	switch {
 	case ms.selfMoved:
@@ -270,8 +265,7 @@ func (ms *machineSet) reconcile(now time.Time) (st machineStatus, agents []strin
 }
 
 // keep reports the running agent's status, or ok false when it must stop:
-// its credential is gone, another machine agent runs here, or the relay's
-// self key changed. A credential changed in any other way keeps the agent
+// its credential is gone or does not load, or the relay's self key changed. A credential changed in any other way keeps the agent
 // as it started; a restart adopts the change.
 func (ms *machineSet) keep(agents []string, now time.Time) (st machineStatus, ok bool) {
 	run := ms.run
@@ -280,7 +274,7 @@ func (ms *machineSet) keep(agents []string, now time.Time) (st machineStatus, ok
 		return st, false
 	}
 	cred, err := machinecred.Load(ms.home, agent)
-	if err != nil || otherMachineAgent(agent, now) != "" {
+	if err != nil {
 		return st, false
 	}
 	ms.readSelf(run.id.RelayURL, now)
@@ -464,8 +458,8 @@ func machineOutboxDir(state, relayKey, agent string) string {
 	return filepath.Join(state, "ops", relayKey, agent)
 }
 
-// newMachineRun builds the agent's server. Its state is the binding mode
-// state directory, as the engine's; the outbox is <state>/ops/<relay
+// newMachineRun builds the agent's server. Its state is <binding dir>/acp,
+// the engine's state directory; the outbox is <state>/ops/<relay
 // key>/<agent>.
 func newMachineRun(home, agent string, cred machinecred.Credential, self string, stderr io.Writer) (*machineRun, error) {
 	path, err := binding.Path()
@@ -1036,12 +1030,13 @@ func (h *portHolder) Working(ctx context.Context, channel string) error {
 // machineMarker is what serve reads of one machine agent marker
 // (agents/_machine/<pubkey>.json).
 type machineMarker struct {
-	key, display, host string
-	worker             launch.HolderIdentity
-	state              string
+	key    string
+	worker launch.HolderIdentity
+	state  string
 }
 
-// machineMarkers reads every machine agent marker as it reads at now.
+// machineMarkers reads every marker of a machine agent inside amq-remote
+// serve as it reads at now; a marker with another host is ignored.
 func machineMarkers(now time.Time) []machineMarker {
 	path, err := binding.Path()
 	if err != nil {
@@ -1057,36 +1052,16 @@ func machineMarkers(now time.Time) []machineMarker {
 		}
 		raw, err := fsq.ReadRegularNoFollowBounded(filepath.Join(dir, e.Name()), maxMarkerBytes)
 		var m struct {
-			DisplayName string                `json:"display_name"`
-			Host        string                `json:"host"`
-			Updated     string                `json:"updated"`
-			Worker      launch.HolderIdentity `json:"worker"`
-			Parent      launch.HolderIdentity `json:"parent"`
+			Host    string                `json:"host"`
+			Updated string                `json:"updated"`
+			Worker  launch.HolderIdentity `json:"worker"`
 		}
-		if err != nil || json.Unmarshal(raw, &m) != nil {
+		if err != nil || json.Unmarshal(raw, &m) != nil || m.Host != hostStandalone {
 			continue
 		}
-		out = append(out, machineMarker{key: key, display: m.DisplayName, host: m.Host, worker: m.Worker,
-			state: acp.AgentState(m.Updated, m.Worker, m.Parent, now)})
+		out = append(out, machineMarker{key: key, worker: m.Worker, state: acp.AgentState(m.Updated, m.Worker, now)})
 	}
 	return out
-}
-
-// otherMachineAgent names a Buzz Desktop machine agent of another key whose
-// marker reads running or idle, or returns "". A standalone marker of
-// another key is an agent a serve here ran before its credential changed,
-// since one AMQ home enrolls one key at a time: its serve outlives it and
-// keeps the marker reading running.
-func otherMachineAgent(agent string, now time.Time) string {
-	for _, m := range machineMarkers(now) {
-		if m.key == agent || m.host == "standalone" {
-			continue
-		}
-		if m.state == agentRunning || m.state == agentIdle {
-			return nonEmpty(m.display, short(m.key))
-		}
-	}
-	return ""
 }
 
 // anotherServeLine says that another serve runs the agent, naming its
@@ -1098,10 +1073,6 @@ func anotherServeLine(agent string, now time.Time) string {
 		}
 	}
 	return short(agent) + " runs in another amq-remote serve; this serve takes over when that one stops."
-}
-
-func otherMachineLine(name string) string {
-	return fmt.Sprintf("Buzz Desktop's machine agent %s runs on this Mac; stop it in Buzz Desktop (Agents, %s, Stop).", name, name)
 }
 
 func noAuthorityLine(agent string, err error) string {

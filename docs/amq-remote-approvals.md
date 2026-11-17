@@ -24,7 +24,7 @@ machine runs inside `amq-remote serve` with an owner-signed grant.
 That is all a Claude desktop-app user needs. Every Claude Code session on the
 machine (terminal, desktop app Code tab, IDE) then mirrors its dialogs to
 Buzz, with no `/amq-remote`. Each session posts in its own channel, as a
-connected session does, or in its DM for a pinned agent. A session that was
+connected session does. A session that was
 never connected gets its channel at its first dialog: the hook binds the
 session as `/amq-remote` does, and the machine agent makes its channel,
 named like the session, and archives it when the session ends. An AMQ
@@ -152,7 +152,7 @@ owner's signed event, at most 5 minutes old; a `/` line that is not verified
 as the owner's goes to the session as an ordinary message, and only in the
 channel made for that session. The queued request carries the signed
 message, and the wake verifies it again before it types: the session it was
-taken for, the owner key and channel that the Buzz agent recorded for the
+taken for, the owner key and channel that the machine agent recorded for the
 share, and the exact command line. While a dialog is open the command
 waits, oldest first, and Buzz gets "Queued"; it is typed when the dialog
 closes, and Buzz is told again. A command still waiting 10 minutes after
@@ -203,5 +203,5 @@ the owner's reaction or reply into `answers/<id>.json`; the waiting seam
 applies it. The first create-exclusive write of `resolved/<id>.json` decides
 how the dialog ended. See [the compatibility manifest](remote-compat.md) for
 the harness seams and
-[the amq-remote reference](../cmd/amq-remote/README.md#approvals-from-the-buzz-dm)
+[the amq-remote reference](../cmd/amq-remote/README.md#approvals-from-the-buzz-channel)
 for commands.

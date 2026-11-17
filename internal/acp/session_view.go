@@ -101,17 +101,11 @@ func (v *sessionSnapshot) list() ([]binding.Binding, error) {
 
 // activeRecords is the good records in the name slots as of the snapshot.
 func (v *sessionSnapshot) activeRecords() []channelRecord {
-	out := make([]channelRecord, len(v.records))
-	for i, r := range v.records {
-		r.Orphans = slices.Clone(r.Orphans)
-		out[i] = r
-	}
-	return out
+	return slices.Clone(v.records)
 }
 
 // slot is the good record in name's slot as of the snapshot.
 func (v *sessionSnapshot) slot(name string) (channelRecord, bool) {
 	r, ok := v.slots[name]
-	r.Orphans = slices.Clone(r.Orphans)
 	return r, ok
 }

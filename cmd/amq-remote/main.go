@@ -73,8 +73,9 @@ Commands:
                            its grant request for amq-owner-sign --machine
   machine enroll --grant FILE
                            Enroll the owner-signed machine grant
-  attach --self            Bind your AMQ Remote Buzz agent to the session this
-                           runs in (starts the endpoint when none runs)
+  attach --self            Give the session this runs in its Buzz channel
+                           through the machine agent (--native starts the
+                           endpoint when none runs)
   detach --self|--name N|--all
                            Unbind; the session keeps running
   bindings                 Bound sessions: live, unknown, or ended (pruned)
@@ -91,8 +92,8 @@ Commands:
                            root) at login: launchd on macOS, systemd on Linux
 ` + linkUsage + `  pi bridge-path           Write this version's pi extension to
                            ~/.amq/pi/amq-bridge.ts and print its path
-  doctor [--fix]           Check every link to the owner; --fix repairs hooks,
-                           the machine agent's import file and the login service
+  doctor [--fix]           Check every link to the owner; --fix repairs hooks
+                           and the login service
   version                  Print the version
 
 Common options:

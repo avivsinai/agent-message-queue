@@ -33,9 +33,13 @@ type standaloneFixture struct {
 	relay    *relaytest.Relay
 	relayKey nostr.SecretKey // signs the relay's group state
 	owner    nostr.SecretKey
+	out      *outbox.Outbox
+	// reconnect uses a new transport for the same relay and outbox, as a
+	// client that comes back after a connection drops.
+	reconnect func() Transport
 }
 
-func standalone(t *testing.T) *standaloneFixture {
+func standalone(t *testing.T, opts ...func(*relaytest.Relay)) *standaloneFixture {
 	t.Helper()
 	if !lock.AdvisoryLockAvailable() {
 		t.Skip("no advisory lock on this platform")
@@ -58,6 +62,9 @@ func standalone(t *testing.T) *standaloneFixture {
 	authTag := []string{"auth", grant.OwnerPubKey, grant.Conditions, grant.SigHex()}
 	lr, srv, url := relaytest.Start(body.PublicKeyHex(), authTag)
 	t.Cleanup(srv.Close)
+	for _, opt := range opts {
+		opt(lr)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	conn, err := relay.Connect(ctx, relay.Config{URL: url, Secret: body.Secret(), AuthTag: authTag})
@@ -69,7 +76,7 @@ func standalone(t *testing.T) *standaloneFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &standaloneFixture{relay: lr, relayKey: nostr.Generate(), owner: nostr.Generate()}
+	f := &standaloneFixture{relay: lr, relayKey: nostr.Generate(), owner: nostr.Generate(), out: out}
 	id := buzzop.Identity{Agent: body.PublicKeyHex(), Owner: f.owner.Public().Hex(), RelaySelf: f.relayKey.Public().Hex(),
 		RelayURL: buzzop.NormalizeRelay(url), RelayKey: buzzop.RelayKey(url)}
 	port, err := buzzdirect.New(buzzdirect.Config{Identity: id, Secret: body.Secret(),
@@ -78,6 +85,22 @@ func standalone(t *testing.T) *standaloneFixture {
 		t.Fatal(err)
 	}
 	f.s = NewStandalone(Standalone{Identity: id, Transport: port}, "test")
+	f.reconnect = func() Transport {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		next, err := relay.Connect(ctx, relay.Config{URL: id.RelayURL, Secret: body.Secret(), AuthTag: authTag})
+		t.Cleanup(next.Close)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nextPort, err := buzzdirect.New(buzzdirect.Config{Identity: id, Secret: body.Secret(),
+			Conn: func() buzzdirect.Conn { return next }, Outbox: out, ReadTimeout: 5 * time.Second})
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.s.direct, f.s.posts = nextPort, nextPort
+		return nextPort
+	}
 	t.Cleanup(f.s.resign)
 	return f
 }
@@ -358,4 +381,165 @@ func TestOwnerArchiveSuspendsTheRouteAndUnarchiveReturnsIt(t *testing.T) {
 	if got := f.s.Routes(); !slices.Equal(got, []string{machineChanA}) {
 		t.Fatalf("routes after unarchive = %v", got)
 	}
+}
+
+// ownerSignedAt signs text as the owner at at, with optional thread tags.
+func (f *standaloneFixture) ownerSignedAt(t *testing.T, channel, content string, at time.Time, tags ...nostr.Tag) nostr.Event {
+	t.Helper()
+	evt := nostr.Event{Kind: 9, Tags: append(nostr.Tags{{"h", channel}}, tags...), Content: content,
+		CreatedAt: nostr.Timestamp(at.Unix())}
+	if err := evt.Sign(f.owner); err != nil {
+		t.Fatal(err)
+	}
+	return evt
+}
+
+// ownerReacts injects an owner-signed reaction of emoji on eventID.
+func (f *standaloneFixture) ownerReacts(t *testing.T, channel string, eventID nostr.ID, emoji string) {
+	t.Helper()
+	evt := nostr.Event{Kind: 7, Tags: nostr.Tags{{"h", channel}, {"e", eventID.Hex()}}, Content: emoji, CreatedAt: nostr.Now()}
+	if err := evt.Sign(f.owner); err != nil {
+		t.Fatal(err)
+	}
+	f.relay.Inject(evt)
+}
+
+// agentMessages are the agent's ordinary channel messages in stored order.
+func (f *standaloneFixture) agentMessages(channel string) []nostr.Event {
+	var out []nostr.Event
+	for _, evt := range f.relay.Events() {
+		if evt.Kind == 9 && evt.PubKey.Hex() == f.s.id.Agent {
+			if h := evt.Tags.Find("h"); len(h) > 1 && h[1] == channel {
+				out = append(out, evt)
+			}
+		}
+	}
+	return out
+}
+
+// agentEdits are the agent's edits of eventID in stored order.
+func (f *standaloneFixture) agentEdits(channel string, eventID nostr.ID) []nostr.Event {
+	var out []nostr.Event
+	for _, evt := range f.relay.Events() {
+		if evt.Kind != 40003 || evt.PubKey.Hex() != f.s.id.Agent {
+			continue
+		}
+		if h, e := evt.Tags.Find("h"), evt.Tags.Find("e"); len(h) > 1 && h[1] == channel && len(e) > 1 && e[1] == eventID.Hex() {
+			out = append(out, evt)
+		}
+	}
+	return out
+}
+
+// lastAgentPost is the content of the agent's last channel message.
+func (f *standaloneFixture) lastAgentPost(channel string) string {
+	messages := f.agentMessages(channel)
+	if len(messages) == 0 {
+		return ""
+	}
+	return messages[len(messages)-1].Content
+}
+
+// startMachine starts this fixture's workers and stops them on cleanup.
+func (f *standaloneFixture) startMachine(t *testing.T) {
+	t.Helper()
+	stop, ok := f.s.StartMachine()
+	if !ok {
+		t.Fatal("the machine agent did not start")
+	}
+	t.Cleanup(stop)
+}
+
+// ownerMsg is the owner message of the signed event evt, built the way
+// Owner builds it: its words are the event's content.
+func (f *standaloneFixture) ownerMsg(channel string, evt nostr.Event) ownerMsg {
+	return ownerMsg{channel: channel, words: dropMentions(evt.Content), event: evt}
+}
+
+// signedBy is a plaintext channel message with any tags a test gives it.
+// eventMeta on the direct path supplies bytes through the relay, not text.
+func signedBy(t *testing.T, key nostr.SecretKey, content, channel string, tags ...nostr.Tag) nostr.Event {
+	t.Helper()
+	evt := nostr.Event{CreatedAt: nostr.Now(), Kind: 9, Content: content, Tags: append(nostr.Tags{{"h", channel}}, tags...)}
+	if err := evt.Sign(key); err != nil {
+		t.Fatal(err)
+	}
+	return evt
+}
+
+// writeTag is the value of evt's first tag called name, or "".
+func writeTag(evt nostr.Event, name string) string {
+	if tag := evt.Tags.Find(name); len(tag) > 1 {
+		return tag[1]
+	}
+	return ""
+}
+
+// relayState stores, for an accepted channel write of the agent, the
+// relay-signed state that the write changes, as a Buzz relay does: a create
+// makes the channel private with the agent as its creator and owner, an
+// add-member seats the member with its role, and an archive or unarchive
+// sets the archived flag. Each new state event is newer than the last one
+// of its kind for the channel.
+func (f *standaloneFixture) relayState(t *testing.T, evt nostr.Event) {
+	channel := writeTag(evt, "h")
+	if channel == "" {
+		return
+	}
+	latest := map[nostr.Kind]nostr.Event{}
+	for _, e := range f.relay.Events() {
+		if e.PubKey != f.relayKey.Public() || writeTag(e, "d") != channel {
+			continue
+		}
+		if cur, ok := latest[e.Kind]; !ok || e.CreatedAt > cur.CreatedAt || (e.CreatedAt == cur.CreatedAt && e.ID.Hex() < cur.ID.Hex()) {
+			latest[e.Kind] = e
+		}
+	}
+	// keep is the tags of the latest event of kind, without those drop names.
+	keep := func(kind nostr.Kind, drop func(nostr.Tag) bool) nostr.Tags {
+		tags := nostr.Tags{{"d", channel}}
+		for _, tag := range latest[kind].Tags {
+			if len(tag) > 0 && tag[0] != "d" && !drop(tag) {
+				tags = append(tags, tag)
+			}
+		}
+		return tags
+	}
+	store := func(kind nostr.Kind, tags nostr.Tags) {
+		at := nostr.Now()
+		if prev, ok := latest[kind]; ok && prev.CreatedAt >= at {
+			at = prev.CreatedAt + 1
+		}
+		state := nostr.Event{Kind: kind, Tags: tags, CreatedAt: at}
+		if err := state.Sign(f.relayKey); err != nil {
+			t.Error(err)
+			return
+		}
+		f.relay.Inject(state)
+	}
+	agent := f.s.id.Agent
+	switch evt.Kind {
+	case 9007:
+		store(39000, nostr.Tags{{"d", channel}, {"private"}, {"restricted"}, {"closed"}, {"t", "stream"}, {"P", agent}})
+		store(39001, nostr.Tags{{"d", channel}, {"t", "stream"}, {"P", agent}, {"p", agent, "owner"}})
+		store(39002, nostr.Tags{{"d", channel}, {"t", "stream"}, {"P", agent}, {"p", agent, "", "owner"}})
+	case 9000:
+		member, role := writeTag(evt, "p"), writeTag(evt, "role")
+		same := func(tag nostr.Tag) bool { return len(tag) > 1 && tag[0] == "p" && tag[1] == member }
+		store(39001, append(keep(39001, same), nostr.Tag{"p", member, role}))
+		store(39002, append(keep(39002, same), nostr.Tag{"p", member, "", role}))
+	case 9002:
+		tags := keep(39000, func(tag nostr.Tag) bool { return tag[0] == "archived" })
+		if writeTag(evt, "archived") == "true" {
+			tags = append(tags, nostr.Tag{"archived", "true"})
+		}
+		store(39000, tags)
+	}
+}
+
+// reconnectAll moves every operation of the agent, its channel lifecycle
+// too, to a new connection to the same relay and outbox.
+func (f *standaloneFixture) reconnectAll() {
+	next := f.reconnect()
+	f.s.buzz = directOps{s: f.s, t: next}
 }

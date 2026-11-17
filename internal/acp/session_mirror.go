@@ -233,7 +233,7 @@ func (s *Server) mirrorLead() bool {
 	if s.id.Agent == "" {
 		return false
 	}
-	dir := s.agentMarkerDir(machineName)
+	dir := s.agentMarkerDir()
 	if os.MkdirAll(dir, 0o700) != nil {
 		return false
 	}
@@ -342,7 +342,7 @@ func (s *Server) dropGoneMirrors(served map[string]bool, now time.Time) (done bo
 func (s *Server) mirrorBinding(t dialogTarget, b binding.Binding, now time.Time, ended bool) (sent bool) {
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Fprintf(os.Stderr, "amq-acp: session mirror %s: %v\n", t.name, r)
+			fmt.Fprintf(os.Stderr, "machine agent: session mirror %s: %v\n", t.name, r)
 			s.mirrorBackOff(t.name, now)
 			sent = false
 		}
@@ -819,8 +819,8 @@ func mirrorKey(name, what string, turn mirror.Turn, shown string) buzzop.Key {
 
 // mirrorPost claims turn's post, posts it and records its event id. A turn
 // already claimed is not posted. It returns the event id the claim holds.
-// An unknown post that names its event (the direct transport, which replays
-// it) is recorded as posted, so it is still edited.
+// An unknown post that names its event, which the transport replays, is
+// recorded as posted, so it is still edited.
 func (s *Server) mirrorPost(claim string, t dialogTarget, b binding.Binding, turn mirror.Turn, now time.Time) (string, error) {
 	p := mirrorClaim{dialogPost: dialogPost{Channel: t.channel}, EditedAt: now.UnixMilli()}
 	s.mirrorFacts(&p, t.name, b, &turn)
@@ -845,7 +845,7 @@ func (s *Server) mirrorPost(claim string, t dialogTarget, b binding.Binding, tur
 		return "", resultError(r)
 	}
 	if r.EventID == "" {
-		return "", errors.New("buzz messages send gave no event id")
+		return "", errors.New("the post gave no event id")
 	}
 	p.Event = r.EventID
 	return r.EventID, writeMirrorClaim(claim, p)
@@ -1107,12 +1107,10 @@ func mirrorWord(text string) (on bool, ok bool) {
 // mirrorSwitchOf reads the owner's message m in a machine agent's channel
 // whose verified content is exactly "mirror off" or "mirror on". It returns
 // the channel's binding, the switch, and when the owner signed it
-// (signedWithin). The words only select which messages are verified;
-// without a verified owner event the switch does not apply and the channel
-// is told why.
+// (signedWithin).
 func (s *Server) mirrorSwitchOf(m ownerMsg) (name string, on bool, at time.Time, ok bool) {
 	channel := m.channel
-	if !s.cfg.Machine || channel == "" || s.id.Owner == "" {
+	if channel == "" || s.id.Owner == "" {
 		return "", false, time.Time{}, false
 	}
 	if _, ok := mirrorWord(m.words); !ok {
@@ -1127,11 +1125,7 @@ func (s *Server) mirrorSwitchOf(m ownerMsg) (name string, on bool, at time.Time,
 	if b, err := binding.ReadNamed(r.Name); err != nil || mirror.SourceFor(b.Harness) == nil || b.SessionIdentity() != r.Identity || !s.live(b) {
 		return "", false, time.Time{}, false
 	}
-	evt, err := m.verified()
-	if err != nil {
-		s.tellUnverified(channel, "mirror:"+channel, "The mirror was not switched", err)
-		return "", false, time.Time{}, false
-	}
+	evt := m.event
 	if on, ok = mirrorWord(dropMentions(evt.Content)); !ok || !signedWithin(evt, time.Time{}, time.Now()) {
 		return "", false, time.Time{}, false
 	}
@@ -1152,15 +1146,4 @@ func setMirror(name string, on bool, at time.Time) string {
 		return mirrorOnReply
 	}
 	return mirrorOffReply
-}
-
-// answerMirrorSwitch switches the mirror, tells the owner, and ends the
-// prompt without delivering it to the session.
-func (s *Server) answerMirrorSwitch(sessionID, channel, name string, on bool, at time.Time, emit func(any) error) (any, *rpcError) {
-	text := setMirror(name, on, at)
-	meta := remoteMeta{State: "answered", Posted: s.publish(channel, text)}
-	if err := emitText(emit, sessionID, "agent_message_chunk", text); err != nil {
-		return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
-	}
-	return remotePromptResult{StopReason: StopReasonEndTurn, Meta: remotePromptMeta{Remote: meta}}, nil
 }

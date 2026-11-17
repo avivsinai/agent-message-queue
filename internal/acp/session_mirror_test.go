@@ -1,8 +1,8 @@
 package acp
 
 import (
+	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,68 +16,55 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
+	"github.com/avivsinai/agent-message-queue/internal/relay/relaytest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
-	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/mirror"
 )
 
-// The mirror posts a finished turn once. A post proved not sent keeps the
-// turn queued while the cursor moves past its lines, the next tick after the
-// backoff posts it, and a tick over the same file posts nothing more.
+// A direct post that the relay rejects stays the same outbox
+// event and unchanged queue entry, then publishes once after retryGap.
 func TestMirrorTickPostsEachTurnOnce(t *testing.T) {
-	const channel = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
-	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
-	transcript := filepath.Join(canonicalTempDir(t), "session.jsonl")
-	if err := os.WriteFile(transcript, []byte(`{"type":"user","uuid":"o0","promptId":"p0","timestamp":"2026-11-04T09:00:00Z","message":{"content":"earlier"}}`+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha", Harness: "claude", Transcript: transcript}
-	var posts []string
-	sendErr := error(&buzzcli.NotSentError{Err: errors.New("no buzz CLI")})
-	savedPost := postAnswer
-	t.Cleanup(func() { postAnswer = savedPost })
-	postAnswer = func(ch, content string, _ time.Duration) (string, error) {
-		posts = append(posts, ch+": "+content)
-		if sendErr != nil {
-			return "", sendErr
-		}
-		return strings.Repeat("a", 64), nil
-	}
-	s := NewServer(Config{RemoteBinding: true, Machine: true, StateDir: canonicalTempDir(t)}, "test")
-	target := dialogTarget{name: "alpha", channel: channel}
-	now := time.Now()
-
-	s.mirrorBinding(target, b, now, false) // first sight: starts at the end
-	f, err := os.OpenFile(transcript, os.O_APPEND|os.O_WRONLY, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = f.WriteString(`{"type":"user","uuid":"o1","promptId":"p1","timestamp":"2026-11-04T09:01:00Z","message":{"content":"run the tests"}}` + "\n" +
-		`{"type":"assistant","uuid":"a1","timestamp":"2026-11-04T09:01:02Z","message":{"id":"m1","stop_reason":"end_turn","content":[{"type":"text","text":"All pass."}]}}` + "\n")
-	_ = f.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	size := fileSize(t, transcript)
-
-	s.mirrorBinding(target, b, now, false)
+	f := newMirrorFixture(t, func(r *relaytest.Relay) { r.DropKind.Store(9) })
+	f.add(f.userLine("o1", "p1", 0, "run the tests", nil), f.assistantLine("m1", 1, "end_turn", textBlock("All pass.")))
+	f.tick(2)
 	dir, _ := mirror.DirFor("alpha")
 	st, _, _ := readMirrorFile(dir)
-	if len(posts) != 1 || len(st.Queue) != 1 || st.Offset != size {
-		t.Fatalf("after a post not sent: posts %q, queue %d, offset %d of %d; want one try, the turn queued, the offset at the end", posts, len(st.Queue), st.Offset, size)
+	if st.Offset != fileSize(t, f.transcript) {
+		t.Fatalf("cursor after unknown write = %d; want the full transcript read", st.Offset)
 	}
-	if _, err := os.Lstat(filepath.Join(dir, "posted", "o1.json")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("claim of a post not sent: %v; want it removed", err)
+	claim, found := readMirrorClaim(filepath.Join(dir, "posted", "o1.json"))
+	if !found || claim.Event == "" {
+		t.Fatalf("unknown direct outcome has no retained event: %+v, %v", claim, found)
 	}
-
-	sendErr = nil
-	later := now.Add(mirrorBackoffMin + time.Second)
-	s.mirrorBinding(target, b, later, false)
-	s.mirrorBinding(target, b, later.Add(mirrorInterval), false)
-	want := channel + ": ▶ run the tests\n✓ 2s\nAll pass."
-	if !slices.Equal(posts[1:], []string{want}) {
-		t.Fatalf("posts = %q; want the turn posted once: %q", posts[1:], want)
+	// Mirror the relay's replay boundary, without writing another event.
+	start := time.Date(2026, 11, 4, 9, 1, 0, 0, time.UTC).UnixMilli()
+	key := mirrorKey("alpha", "post", mirror.Turn{ID: "o1", StartTS: start, LastTS: start + 1000}, claim.Shown)
+	record, found, err := f.f.out.Get(string(key))
+	if err != nil || !found {
+		t.Fatalf("the once-only outbox record was not at its mirror key: found=%v err=%v", found, err)
 	}
+	if record.EventID != claim.Event {
+		t.Fatalf("outbox event id %s differs from mirror claim's %s", record.EventID, claim.Event)
+	}
+	// The unknown attempt died with its connection. A fixture reconnect uses
+	// the same relay key and outbox for the next attempt, not a new event.
+	proofPort := f.f.reconnect()
+	proof := proofPort.Replay(context.Background(), key)
+	if proof.Outcome != buzzop.Accepted {
+		t.Fatalf("direct outbox replay was refused: %+v, claim=%+v", proof, claim)
+	}
+	seen := map[string]int{}
+	for _, event := range f.f.relay.Events() {
+		if event.Kind == 9 && event.ID.Hex() == claim.Event {
+			seen[event.ID.Hex()]++
+		}
+	}
+	if len(seen) != 1 || seen[claim.Event] != 1 {
+		t.Fatalf("stored duplicate event(s): %v", seen)
+	}
+	_ = st
 }
 
 // A Claude turn is posted when its first assistant line arrives, shown as
@@ -90,19 +77,15 @@ func TestMirrorTickPostsEachTurnOnce(t *testing.T) {
 // turn is continued by a Stop hook 20 times in 60 s and is edited once per
 // gap, ending with its last answer (review: 21 stored events).
 func TestMirrorTickShowsARunningTurnLive(t *testing.T) {
-	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
-	transcript := filepath.Join(canonicalTempDir(t), "session.jsonl")
-	if err := os.WriteFile(transcript, []byte(`{"type":"user","uuid":"o0","promptId":"p0","timestamp":"2026-11-04T09:00:00Z","message":{"content":"earlier"}}`+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	f := newMirrorFixture(t)
 	appendLines := func(lines ...string) {
 		t.Helper()
-		f, err := os.OpenFile(transcript, os.O_APPEND|os.O_WRONLY, 0)
+		file, err := os.OpenFile(f.transcript, os.O_APPEND|os.O_WRONLY, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = f.WriteString(strings.Join(lines, "\n") + "\n")
-		_ = f.Close()
+		_, err = file.WriteString(strings.Join(lines, "\n") + "\n")
+		_ = file.Close()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -123,23 +106,6 @@ func TestMirrorTickShowsARunningTurnLive(t *testing.T) {
 	say := func(id string, sec int, stop, text string) string {
 		return assistant(id, sec, stop, `{"type":"text","text":"`+text+`"}`)
 	}
-	var sent []string
-	savedPost, savedEdit := postAnswer, editMessage
-	t.Cleanup(func() { postAnswer, editMessage = savedPost, savedEdit })
-	postAnswer = func(_, content string, _ time.Duration) (string, error) {
-		sent = append(sent, "post: "+content)
-		return strings.Repeat("a", 64), nil
-	}
-	editMessage = func(_, content string, _ time.Duration) error {
-		sent = append(sent, "edit: "+content)
-		return nil
-	}
-	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha", Harness: "claude", Transcript: transcript}
-	s := NewServer(Config{RemoteBinding: true, Machine: true, StateDir: canonicalTempDir(t)}, "test")
-	target := dialogTarget{name: "alpha", channel: "6eff60e4-32ab-48ec-bd3d-f4c97872f370"}
-	now := time.Now()
-	s.mirrorBinding(target, b, now, false) // first sight: starts at the end
-
 	dir, _ := mirror.DirFor("alpha")
 	type step struct {
 		lines []string
@@ -196,9 +162,8 @@ func TestMirrorTickShowsARunningTurnLive(t *testing.T) {
 		if step.lines != nil {
 			appendLines(step.lines...)
 		}
-		sent = nil
 		saved, _, _ := readMirrorFile(dir)
-		s.mirrorBinding(target, b, now.Add(time.Duration(step.after)*time.Second), false)
+		sent := f.tick(step.after)
 		if step.crash {
 			if err := writeMirrorFile(dir, &saved, false); err != nil {
 				t.Fatal(err)
@@ -210,39 +175,64 @@ func TestMirrorTickShowsARunningTurnLive(t *testing.T) {
 	}
 }
 
-// mirrorFixture is a mailbox binding whose transcript the test appends to,
-// mirrored into a channel by a server that records each post and edit.
+// mirrorFixture writes an actual conversation transcript and reads the
+// agent's post and edit events from the direct in-process relay. Each case
+// is the same kind of observable output: initial post, or edit of that post.
 type mirrorFixture struct {
 	t          *testing.T
+	f          *standaloneFixture
 	s          *Server
 	b          binding.Binding
 	target     dialogTarget
 	transcript string
 	now        time.Time
 	sent       []string
+	read       int
 }
 
-func newMirrorFixture(t *testing.T) *mirrorFixture {
-	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
-	f := &mirrorFixture{t: t, transcript: filepath.Join(canonicalTempDir(t), "session.jsonl"), now: time.Now()}
+func newMirrorFixture(t *testing.T, opts ...func(*relaytest.Relay)) *mirrorFixture {
+	d := standalone(t, opts...)
+	root := canonicalTempDir(t)
+	f := &mirrorFixture{t: t, f: d, transcript: filepath.Join(root, "session.jsonl"), now: time.Now()}
+	if err := fsq.EnsureAgentDirs(root, "agent"); err != nil {
+		t.Fatal(err)
+	}
+	f.b = binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent", Name: "alpha", Harness: "claude", Transcript: f.transcript}
+	f.b.Holder, _ = launch.HolderOf(os.Getpid())
+	if err := binding.WriteNamed(f.b); err != nil {
+		t.Fatal(err)
+	}
+	activeChannel(t, d.s, f.b, machineChanA)
+	d.groupState(t, machineChanA)
+	f.s = d.s
+	f.target = dialogTarget{name: "alpha", channel: machineChanA}
 	if err := os.WriteFile(f.transcript, []byte(`{"type":"user","uuid":"o0","promptId":"p0","timestamp":"2026-11-04T09:00:00Z","message":{"content":"earlier"}}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	savedPost, savedEdit := postAnswer, editMessage
-	t.Cleanup(func() { postAnswer, editMessage = savedPost, savedEdit })
-	postAnswer = func(_, content string, _ time.Duration) (string, error) {
-		f.sent = append(f.sent, "post: "+content)
-		return strings.Repeat("a", 64), nil
-	}
-	editMessage = func(_, content string, _ time.Duration) error {
-		f.sent = append(f.sent, "edit: "+content)
-		return nil
-	}
-	f.b = binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha", Harness: "claude", Transcript: f.transcript}
-	f.s = NewServer(Config{RemoteBinding: true, Machine: true, StateDir: canonicalTempDir(t)}, "test")
-	f.target = dialogTarget{name: "alpha", channel: "6eff60e4-32ab-48ec-bd3d-f4c97872f370"}
-	f.s.mirrorBinding(f.target, f.b, f.now, false) // first sight: starts at the end
+	f.s.mirrorBinding(f.target, f.b, f.now, false) // first sight: at transcript end
+	f.read = len(d.relay.Events())
 	return f
+}
+
+// tick advances the transcript's mirror and records what it actually wrote.
+func (f *mirrorFixture) tick(sec int) []string {
+	f.s.mirrorBinding(f.target, f.b, f.now.Add(time.Duration(sec)*time.Second), false)
+	f.sent = nil
+	for _, evt := range f.f.relay.Events()[f.read:] {
+		if evt.PubKey.Hex() != f.s.id.Agent || (evt.Kind != 9 && evt.Kind != 40003) {
+			continue
+		}
+		if h := evt.Tags.Find("h"); len(h) < 2 || h[1] != f.target.channel {
+			continue
+		}
+		kind := "post: "
+		if evt.Kind == 40003 {
+			kind = "edit: "
+		}
+		f.sent = append(f.sent, kind+evt.Content)
+	}
+	f.read = len(f.f.relay.Events())
+	return append([]string(nil), f.sent...)
 }
 
 // ts is sec seconds after 09:01:00.
@@ -271,13 +261,6 @@ func (f *mirrorFixture) add(lines ...map[string]any) {
 	if err != nil {
 		f.t.Fatal(err)
 	}
-}
-
-// tick runs one mirror tick after seconds and returns what it sent.
-func (f *mirrorFixture) tick(after int) []string {
-	f.sent = nil
-	f.s.mirrorBinding(f.target, f.b, f.now.Add(time.Duration(after)*time.Second), false)
-	return f.sent
 }
 
 func (f *mirrorFixture) userLine(uuid, promptID string, sec float64, text string, extra map[string]any) map[string]any {
@@ -480,11 +463,10 @@ func TestMirrorRunningPostEndsAfterABacklog(t *testing.T) {
 	f := newMirrorFixture(t)
 	f.add(f.userLine("o1", "p1", 0, "ship", nil), f.assistantLine("m1", 1, "tool_use", toolBlock("Bash")))
 	f.tick(1)
-	edit := editMessage
-	editMessage = func(string, string, time.Duration) error { return &buzzcli.NotSentError{Err: errors.New("relay down")} }
+	f.f.relay.RejectKind.Store(40003)
 	f.add(f.assistantLine("m2", 35, "tool_use", toolBlock("Read")))
 	f.tick(35) // the progress edit is not sent: the binding backs off
-	editMessage = edit
+	f.f.relay.RejectKind.Store(0)
 	f.add(f.assistantLine("m3", 40, "end_turn", textBlock("Shipped.")))
 	for i := 2; i <= 7; i++ {
 		n := strconv.Itoa(i)
@@ -537,7 +519,9 @@ func TestMirrorEditKeepsEarlierNote(t *testing.T) {
 	if _, err := f.s.mirrorEdit(claim, f.target, f.b, mirror.Event{Kind: mirror.Continued, Turn: turn}, f.now.Add(mirrorEditGap)); err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"post: ▶ ship\n✓\nShipped.\n(+3 earlier turns not shown)", "edit: ▶ ship\n✓\nShipped and tagged.\n(+3 earlier turns not shown)"}; !slices.Equal(f.sent, want) {
+	got := f.tick(int(mirrorEditGap/time.Second) + 1)
+	want := []string{"post: ▶ ship\n✓\nShipped.\n(+3 earlier turns not shown)", "edit: ▶ ship\n✓\nShipped and tagged.\n(+3 earlier turns not shown)"}
+	if !slices.Equal(got, want) {
 		t.Fatalf("sent %q; want %q", f.sent, want)
 	}
 }
@@ -545,20 +529,19 @@ func TestMirrorEditKeepsEarlierNote(t *testing.T) {
 // agent-message-queue-6r9 review: a /resume to an older session after the
 // mirror first saw an empty transcript posted that session's old turns.
 func TestMirrorResumeToOlderSessionPostsNoOldTurn(t *testing.T) {
-	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
 	cfg := canonicalTempDir(t)
+	t.Setenv("CLAUDE_CONFIG_DIR", cfg)
+	f := newMirrorFixture(t)
 	proj := filepath.Join(cfg, "projects", "-work-proj")
-	for _, d := range []string{proj, filepath.Join(cfg, "sessions")} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.MkdirAll(proj, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cfg, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
 	}
 	old := `{"type":"user","uuid":"h1","promptId":"hp1","timestamp":"2026-11-04T08:00:00Z","origin":{"kind":"human"},"message":{"content":"old prompt"}}` + "\n" +
 		`{"type":"assistant","uuid":"ha1","timestamp":"2026-11-04T08:00:02Z","message":{"id":"hm1","stop_reason":"end_turn","content":[{"type":"text","text":"old answer"}]}}` + "\n"
 	if err := os.WriteFile(filepath.Join(proj, "old.jsonl"), []byte(old), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(proj, "cur.jsonl"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	pid := os.Getpid()
@@ -568,25 +551,11 @@ func TestMirrorResumeToOlderSessionPostsNoOldTurn(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	var posts []string
-	savedPost := postAnswer
-	t.Cleanup(func() { postAnswer = savedPost })
-	postAnswer = func(_, content string, _ time.Duration) (string, error) {
-		posts = append(posts, content)
-		return strings.Repeat("a", 64), nil
-	}
-	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha", Harness: "claude", Transcript: filepath.Join(proj, "cur.jsonl")}
-	b.Holder.PID = pid
-	s := NewServer(Config{RemoteBinding: true, Machine: true, StateDir: canonicalTempDir(t)}, "test")
-	target := dialogTarget{name: "alpha", channel: "6eff60e4-32ab-48ec-bd3d-f4c97872f370"}
-	now := time.Now()
-
 	session("cur")
-	s.mirrorBinding(target, b, now, false)
+	f.tick(0)
 	session("old")
-	s.mirrorBinding(target, b, now.Add(time.Minute), false)
-	if len(posts) != 0 {
-		t.Fatalf("posts = %q; want none: the resumed session's turns are from before first sight", posts)
+	if sent := f.tick(60); len(sent) != 0 {
+		t.Fatalf("old turns posted after resume: %q", sent)
 	}
 }
 
@@ -623,7 +592,7 @@ func TestMirrorNeverPostsAnOffPeriodTurnAfterLostProgress(t *testing.T) {
 	if err := mirror.SetOff("alpha", false); err != nil {
 		t.Fatal(err)
 	}
-	f.s = NewServer(f.s.cfg, "restart")
+	f.s = NewStandalone(Standalone{Identity: f.s.id, Transport: f.s.direct}, "restart")
 	if sent := f.tick(4); len(sent) != 0 {
 		t.Fatalf("off-period turn posted after the progress was lost: %q", sent)
 	}

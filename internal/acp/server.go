@@ -20,7 +20,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
-	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 )
 
@@ -99,11 +98,8 @@ type sessionState struct {
 	Thread    string
 	// turn is the in-flight prompt turn, nil while idle.
 	turn *turnState
-	// binding is the named binding this session's model selected ("" means
-	// none selected); binding mode only.
-	binding string
-	// route is the channel of the first prompt of a machine agent's session
-	// that carried a host context; every later prompt must carry the same.
+	// route is the channel of a machine agent's session (Owner); every turn
+	// of the session carries the same.
 	route string
 }
 
@@ -131,22 +127,13 @@ type turnState struct {
 	ready chan struct{}
 	// outcome is turnOpen until settled.
 	outcome turnOutcome
-	// channel is the Buzz channel the prompt came from ("" when it did not
-	// come from Buzz); the owner-facing text is posted there.
+	// channel is the Buzz channel the owner's message came from ("" for an
+	// ACP prompt); the owner-facing text is posted there.
 	channel string
-	// mailboxEvent is the event id of a binding-mode turn, registered when
-	// the prompt is accepted and cleared once the turn routes to a native
-	// binding. A cancel decides that event's durable outcome before it
-	// settles the turn, so a mailbox Stop is never acknowledged before it is
-	// recorded.
-	mailboxEvent string
-	// mailboxSteer is set once a mailbox turn's prompt is published; a
-	// follow-up DM steers the turn only then.
-	mailboxSteer *mailboxSteerTarget
-	// route is the channel this prompt's host context names (machine agent
-	// only; "" when it has none).
+	// route is the channel of a machine agent's turn ("" for an ACP
+	// prompt).
 	route string
-	// event is the owner's verified message of a standalone turn (Owner),
+	// event is the owner's signed message of a machine agent's turn (Owner),
 	// set before the turn runs; nil for an ACP prompt.
 	event *nostr.Event
 }
@@ -198,50 +185,40 @@ type Server struct {
 	// begins after this point never had a connected client, so it refuses
 	// immediately instead of waiting out the bounded timeout.
 	streamClosed bool
-	// late is the late-reply sweep state (binding mode only).
+	// late is the late-reply sweep state (machine agent only).
 	late lateReplySweep
-	// id is the managed agent's Buzz identity (Config.Identity), fixed at
+	// id is the machine agent's Buzz identity (Config.Identity), fixed at
 	// construction. Its owner is the only key whose reactions and messages
 	// answer a dialog.
 	id buzzop.Identity
-	// lastChannel is the DM channel of the latest DM prompt in this
-	// process. Each DM is also written for the lifecycle leader (recordDM);
-	// the leader falls back to its own value when that file is unreadable.
-	lastChannel string
 	// leader releases the lifecycle lead of this worker's Buzz identity, or
-	// is nil. Only the sweep worker sets it (the machine worker for a machine
-	// agent); its stop releases it.
+	// is nil. StartMachine and the machine worker set it; the workers' stop
+	// releases it.
 	leader func()
 	// machine is the machine leader's pacing, used only by the machine
 	// worker.
 	machine machineState
-	// buzz are the machine lifecycle's Buzz operations: the buzz CLI, each
-	// run through call, or the direct transport (NewStandalone).
-	buzz lifecycle
-	// posts are the Buzz writes and reads of dialogs, the session mirror
-	// and the hook warnings.
-	posts posts
-	// direct is the relay transport of a standalone server, nil on the buzz
-	// CLI. A step that only the relay can serve (a chosen channel id, an
-	// observation of relay-signed state, a keyed post) runs only when it is
-	// set.
+	// buzz are the machine lifecycle's Buzz operations, posts the Buzz
+	// writes and reads of dialogs, the session mirror and the hook warnings,
+	// and direct the relay transport that serves both. Only NewStandalone
+	// sets them: an ACP stdio server has none, and nothing it runs reaches
+	// them.
+	buzz   lifecycle
+	posts  posts
 	direct Transport
 	// working holds each route's working indication (*working);
 	// workingFailed says the first failed pulse once.
 	working       sync.Map
 	workingFailed sync.Once
-	// online reports whether the direct transport has a relay connection;
-	// nil means it is not known, and the machine tick runs.
+	// online reports whether the transport has a relay connection; nil
+	// means it is not known, and the machine tick runs.
 	online func() bool
-	// owners are a standalone server's owner turns (Owner), run while its
+	// owners are a machine agent's owner turns (Owner), run while its
 	// machine workers run.
 	owners ownerTurns
 	// dialogs is the dialog poster's state, used only by the worker that
 	// runs dialogTick.
 	dialogs dialogState
-	// notices limits the lines that say why an owner decision was not
-	// taken.
-	notices noticeLimit
 	// mirrors is the session mirror's state, used only by the worker that
 	// runs mirrorTick.
 	mirrors mirrorState
@@ -252,7 +229,7 @@ type Server struct {
 	// mirror workers.
 	targets targetCache
 	// appServers judges Codex app-server threads for the current machine
-	// tick, or is nil before the first one and in a worker that runs none.
+	// tick, or is nil before the first one.
 	appServers atomic.Pointer[appServerJudge]
 }
 
@@ -278,16 +255,13 @@ func NewServer(cfg Config, version string) *Server {
 	if cfg.PostTimeout <= 0 {
 		cfg.PostTimeout = defaultPostTimeout
 	}
-	s := &Server{
+	return &Server{
 		cfg:      cfg,
 		id:       cfg.Identity,
 		version:  version,
 		sessions: make(map[string]*sessionState),
 		store:    newSessionStore(cfg),
 	}
-	s.buzz = buzzcli.Ops{Exec: s.lifecycleExec}
-	s.posts = cliPosts{s: s}
-	return s
 }
 
 // responseWriter serializes JSON-RPC writes. Prompt turns respond from
@@ -321,9 +295,6 @@ func (s *Server) Serve(in io.Reader, out io.Writer) error {
 	s.mu.Lock()
 	s.streamClosed = false
 	s.mu.Unlock()
-	if s.cfg.RemoteBinding {
-		defer s.startLateReplySweep()()
-	}
 	scanner := bufio.NewScanner(in)
 	scanner.Buffer(make([]byte, 0, 64*1024), format.MaxMessageSize+1024)
 	writer := newResponseWriter(out)
@@ -341,37 +312,13 @@ func (s *Server) Serve(in io.Reader, out io.Writer) error {
 		errMu.Unlock()
 	}
 
-	// steerTail closes when the last mailbox steer handed off the reader is
-	// done, so steers keep their arrival order.
-	var steerTail chan struct{}
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
 		if len(line) == 0 {
 			continue
 		}
 		lineCopy := append([]byte(nil), line...)
-		method := requestMethod(lineCopy)
-		if s.cfg.RemoteBinding && method == "_session/steering" {
-			// A mailbox steer waits on its event's post lock, which a status
-			// post holds across its Buzz call: it runs apart from the reader,
-			// one steer at a time, so later lines such as session/cancel are
-			// still read.
-			prev, done := steerTail, make(chan struct{})
-			steerTail = done
-			pending.Add(1)
-			go func() {
-				defer pending.Done()
-				defer close(done)
-				if prev != nil {
-					<-prev
-				}
-				if resp, ok := s.handle(lineCopy); ok {
-					recordWriteErr(writer.write(resp))
-				}
-			}()
-			continue
-		}
-		if method == "session/prompt" {
+		if requestMethod(lineCopy) == "session/prompt" {
 			// Validate and reserve the turn here, on the reader, before any
 			// later line is handled; only delivery and the wait run apart.
 			resp, run, ok := s.beginPromptLine(lineCopy)
@@ -491,14 +438,6 @@ func (s *Server) dispatchWithNotify(method string, params json.RawMessage, emit 
 	case "session/set_model":
 		return s.setModel(params)
 	case "_session/steering":
-		// A mailbox-binding turn takes follow-up DMs; every other remote turn
-		// refuses. The owner's answer to an open dialog goes to the dialog.
-		if s.cfg.RemoteBinding {
-			if result, ok := s.steeringDialogReply(params); ok {
-				return result, nil
-			}
-			return s.mailboxSteering(params)
-		}
 		if s.remote() {
 			return nil, newRPCError(codeMethodNotFound, "steering is not supported in amq-remote mode")
 		}
@@ -580,10 +519,7 @@ func (s *Server) initialize(params json.RawMessage) (any, *rpcError) {
 			Version: s.version,
 		},
 		AuthMethods: []any{},
-		// Binding mode advertises steering before any binding is chosen: a
-		// mailbox turn (the default carrier) takes it, and a native-binding
-		// turn refuses it at call time.
-		Meta: initializeMeta{Steering: steeringCapability{Supported: !s.remote() || s.cfg.RemoteBinding}},
+		Meta:        initializeMeta{Steering: steeringCapability{Supported: !s.remote()}},
 	}, nil
 }
 
@@ -599,9 +535,8 @@ type newSessionResult struct {
 	Models    sessionModels   `json:"models"`
 }
 
-// sessionModels is the ACP session model state. Buzz Desktop requires at
-// least one model before it saves an agent. This bridge runs no model, so it
-// advertises exactly one: its fixed destination.
+// sessionModels is the ACP session model state. This bridge runs no model,
+// so it advertises exactly one: its fixed destination.
 type sessionModels struct {
 	CurrentModelID  string      `json:"currentModelId"`
 	AvailableModels []modelInfo `json:"availableModels"`
@@ -613,44 +548,12 @@ type modelInfo struct {
 	Description string `json:"description"`
 }
 
-// remote reports whether prompts drive an amq-remote target, pinned in the
-// environment or read from the binding on each prompt.
-func (s *Server) remote() bool { return s.cfg.RemoteTarget != "" || s.cfg.RemoteBinding }
-
-// bindingModelPrefix names a binding as an ACP model: amq-remote:<name>.
-const bindingModelPrefix = "amq-remote:"
-
-// models lists the destinations this process can serve. In binding mode the
-// plain "amq-remote" model comes first, then one model per named binding, so
-// an existing agent's configured model still picks its own session. The plain
-// model selects nothing: the agent's pin decides, and an unpinned agent
-// drives the only binding or refuses.
-func (s *Server) models() []modelInfo {
-	// A machine agent routes by channel, so it offers no per-session model.
-	if !s.cfg.RemoteBinding || s.cfg.Machine {
-		return []modelInfo{s.model()}
-	}
-	out := []modelInfo{s.model()}
-	all, _ := binding.List()
-	for _, b := range all {
-		out = append(out, modelInfo{
-			ModelID:     bindingModelPrefix + b.Name,
-			Name:        "Session " + b.Name,
-			Description: "Runs in the session bound as " + b.Name + " by /amq-remote, with that session's own model.",
-		})
-	}
-	return out
-}
+// remote reports whether turns drive the amq-remote target pinned in the
+// environment.
+func (s *Server) remote() bool { return s.cfg.RemoteTarget != "" }
 
 // model is the one destination this process delivers to.
 func (s *Server) model() modelInfo {
-	if s.cfg.RemoteBinding {
-		return modelInfo{
-			ModelID:     "amq-remote",
-			Name:        "AMQ Remote (bound session)",
-			Description: "Runs in the session bound by /amq-remote, with that session's own model.",
-		}
-	}
 	if s.cfg.RemoteTarget != "" {
 		return modelInfo{
 			ModelID:     "amq-remote:" + s.cfg.RemoteTarget,
@@ -684,30 +587,8 @@ func (s *Server) setModel(params json.RawMessage) (any, *rpcError) {
 	if !ok {
 		return nil, newRPCError(codeInvalidParams, "unknown sessionId %q", parsed.SessionID)
 	}
-	for _, m := range s.models() {
-		if m.ModelID != parsed.ModelID {
-			continue
-		}
-		name := strings.TrimPrefix(m.ModelID, bindingModelPrefix)
-		if name == m.ModelID {
-			name = ""
-		}
-		s.mu.Lock()
-		if session, ok := s.sessions[parsed.SessionID]; ok {
-			session.binding = name
-		}
-		s.mu.Unlock()
+	if parsed.ModelID == s.model().ModelID {
 		return struct{}{}, nil
-	}
-	// A named model that matches nothing still pins the session to that name,
-	// so a prompt reads it, finds no binding and says Not connected instead
-	// of falling back to the only binding left.
-	if name := strings.TrimPrefix(parsed.ModelID, bindingModelPrefix); name != parsed.ModelID && name != "" {
-		s.mu.Lock()
-		if session, ok := s.sessions[parsed.SessionID]; ok {
-			session.binding = name
-		}
-		s.mu.Unlock()
 	}
 	return nil, newRPCError(codeInvalidParams, "model %q is not available here", parsed.ModelID)
 }
@@ -736,7 +617,7 @@ func (s *Server) newSession(params json.RawMessage) (any, *rpcError) {
 	if err != nil {
 		return nil, newRPCError(codeInternalError, "generate session id: %v", err)
 	}
-	// Buzz sends no channel id, so each session gets a fresh synthetic one.
+	// A session whose client sends no channel id gets a fresh synthetic one.
 	// It can never be looked up again, so it is not persisted: persisting it
 	// grew the state file by one entry per session until load refused it.
 	synthetic := channelID == ""
@@ -744,8 +625,7 @@ func (s *Server) newSession(params json.RawMessage) (any, *rpcError) {
 		channelID = syntheticChannelPrefix + id
 	}
 	now := time.Now()
-	models := s.models()
-	current := models[0].ModelID
+	model := s.model()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -768,8 +648,6 @@ func (s *Server) newSession(params json.RawMessage) (any, *rpcError) {
 			return nil, newRPCError(codeInternalError, "persist ACP session mapping: %v", err)
 		}
 	}
-	// The advertised default is the plain model, which selects no binding:
-	// the first binding in sort order never becomes the session's by default.
 	s.sessions[id] = &sessionState{
 		ID:        id,
 		ChannelID: channelID,
@@ -778,7 +656,7 @@ func (s *Server) newSession(params json.RawMessage) (any, *rpcError) {
 	return newSessionResult{
 		SessionID: id,
 		Meta:      sessionMetaInfo{ChannelID: channelID, Thread: threadID},
-		Models:    sessionModels{CurrentModelID: current, AvailableModels: models},
+		Models:    sessionModels{CurrentModelID: model.ModelID, AvailableModels: []modelInfo{model}},
 	}, nil
 }
 
@@ -819,9 +697,6 @@ type amqDelivery struct {
 	Completed bool   `json:"completed"`
 	Egress    string `json:"egress"`
 	Duplicate bool   `json:"duplicate,omitempty"`
-	// Posted is "posted" when the reply was published into the Buzz
-	// channel, or the post error.
-	Posted string `json:"posted,omitempty"`
 }
 
 func (s *Server) prompt(params json.RawMessage, emit func(any) error) (any, *rpcError) {
@@ -857,58 +732,13 @@ func (s *Server) beginPrompt(params json.RawMessage) (func(emit func(any) error)
 	if rpcErr != nil {
 		return nil, nil, rpcErr
 	}
-	// The owner's answer to an open dialog goes to the dialog, never to the
-	// session.
-	if s.cfg.RemoteBinding {
-		channel := buzzChannel(text)
-		if s.cfg.Machine {
-			channel = hostContext(parsed.Prompt)
-		}
-		if d, ok := s.decideOwner(s.acpOwner(channel, eventID, text)); ok {
-			return func(emit func(any) error) (any, *rpcError) {
-				switch d.kind {
-				case decidedMirror:
-					return s.answerMirrorSwitch(parsed.SessionID, channel, d.name, d.on, d.at, emit)
-				case decidedCommand:
-					return s.answerCommand(parsed.SessionID, channel, d.cmd, emit)
-				}
-				return s.answerDialog(parsed.SessionID, channel, d.dir, d.answer, emit)
-			}, nil, nil
-		}
-	}
-
-	var dm string
 	s.mu.Lock()
 	if s.streamClosed {
 		s.mu.Unlock()
 		return nil, disconnectedRefusal(), nil
 	}
 	session, turn, rpcErr := s.beginTurnLocked(parsed.SessionID)
-	if turn != nil && s.cfg.Machine {
-		// A machine agent reads its channel from the host context block
-		// alone: it is the route (machineBinding) and the reply destination.
-		// The first prompt that carries one fixes the session's route.
-		turn.route = hostContext(parsed.Prompt)
-		turn.channel = turn.route
-		if session.route == "" {
-			session.route = turn.route
-		}
-	} else if turn != nil {
-		turn.channel = buzzChannel(text)
-	}
-	if turn != nil {
-		if s.cfg.RemoteBinding {
-			turn.mailboxEvent = eventID
-		}
-		if buzzDM(text) {
-			s.lastChannel = turn.channel
-			dm = turn.channel
-		}
-	}
 	s.mu.Unlock()
-	if dm != "" {
-		s.recordDM(dm)
-	}
 	if rpcErr != nil {
 		return nil, nil, rpcErr
 	}
@@ -1008,9 +838,7 @@ func (s *Server) waitForReply(sessionID string, delivery Delivery, turn *turnSta
 			if err := emitText(emit, sessionID, "agent_message_chunk", reply); err != nil {
 				return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
 			}
-			result := turnResult(delivery, turnReplied, reply)
-			result.Meta.AMQ.Posted = s.publish(turn.channel, reply)
-			return result, nil
+			return turnResult(delivery, turnReplied, reply), nil
 		}
 
 		select {
@@ -1130,30 +958,12 @@ func (s *Server) cancel(params json.RawMessage) (any, *rpcError) {
 		return nil, err
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	session, ok := s.sessions[parsed.SessionID]
 	if !ok {
-		s.mu.Unlock()
 		return nil, newRPCError(codeInvalidParams, "unknown sessionId %q", parsed.SessionID)
 	}
-	t, event := session.turn, ""
-	if t != nil && t.outcome == turnOpen {
-		event = t.mailboxEvent
-	}
-	s.mu.Unlock()
-	// A mailbox cancel is accepted only once it is the event's durable
-	// outcome; if a reply already is, the turn returns that reply.
-	if event != "" {
-		final, _, err := s.decideOutcome(event, mailboxOutcome{Cancelled: true})
-		if err != nil {
-			return nil, newRPCError(codeInternalError, "record cancel: %v", err)
-		}
-		if !final.Cancelled {
-			return struct{}{}, nil
-		}
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if t != nil && session.turn == t && t.settleLocked(turnCancelled) {
+	if t := session.turn; t != nil && t.settleLocked(turnCancelled) {
 		close(t.done)
 	}
 	return struct{}{}, nil
@@ -1224,9 +1034,6 @@ const (
 	// SteeringDuplicate is a redelivered steer event: the original message
 	// (its id is in _meta.amq) stands, and nothing new was delivered.
 	SteeringDuplicate = "duplicate"
-	// SteeringAnswered is a steer that answered an open dialog: nothing was
-	// delivered to the session.
-	SteeringAnswered = "answered"
 )
 
 // steerPromptWait bounds how long a steer waits for an in-flight prompt's
@@ -1299,51 +1106,6 @@ func (s *Server) steering(params json.RawMessage) (any, *rpcError) {
 		outcome = SteeringInjected
 	}
 	return newSteeringResult(outcome, delivery), nil
-}
-
-// steeringDialogReply answers an open dialog with a steer that the owner
-// typed as its answer. The steer's channel is its own context block's, else
-// the session's. The acknowledgement is posted apart from the reader.
-func (s *Server) steeringDialogReply(params json.RawMessage) (any, bool) {
-	var parsed steeringParams
-	if decodeParams(params, &parsed, false) != nil {
-		return nil, false
-	}
-	text, rpcErr := steeringText(parsed.Prompt)
-	if rpcErr != nil {
-		return nil, false
-	}
-	channel := buzzChannel(text)
-	s.mu.Lock()
-	if session, ok := s.sessions[parsed.SessionID]; ok {
-		switch {
-		case s.cfg.Machine:
-			channel = session.route
-		case channel == "" && session.turn != nil:
-			channel = session.turn.channel
-		}
-	}
-	s.mu.Unlock()
-	// A steer whose event id is unreadable verifies nothing.
-	eventID, _ := resolveEventID(parsed.Meta)
-	d, ok := s.decideOwner(s.acpOwner(channel, eventID, text))
-	switch {
-	case !ok:
-		return nil, false
-	case d.kind != decidedDialog:
-		go func() {
-			ack, _ := s.act(channel, d)
-			s.publish(channel, ack)
-		}()
-		return steeringResult{Outcome: SteeringAnswered}, true
-	}
-	// An answer that cannot be recorded leaves the steer to the session.
-	ack, err := writeAnswer(d.dir, d.answer)
-	if err != nil {
-		return nil, false
-	}
-	go s.publish(channel, ack)
-	return steeringResult{Outcome: SteeringAnswered}, true
 }
 
 func newSteeringResult(outcome string, delivery Delivery) steeringResult {

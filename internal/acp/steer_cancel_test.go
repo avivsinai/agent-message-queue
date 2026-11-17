@@ -59,6 +59,13 @@ func TestSteeringWhileIdleStartsNewTurn(t *testing.T) {
 	if steer.Header.Thread != threadID || steer.Header.Priority != format.PriorityNormal || slices.Contains(steer.Header.Labels, "buzz-steer") {
 		t.Fatalf("steering header = %+v, want normal priority without buzz-steer", steer.Header)
 	}
+	// A steering prompt is a string or, like session/prompt, a content
+	// block array.
+	live.send(fmt.Sprintf(`{"jsonrpc":"2.0","id":4,"method":"_session/steering","params":{"sessionId":%q,"prompt":[{"type":"text","text":"and the changelog"}]}}`, sessionID))
+	reply := live.readUntilResult()
+	if result, _ := reply["result"].(map[string]any); result["outcome"] != SteeringStartedNewTurn {
+		t.Fatalf("steering with content blocks = %v, want outcome %s", reply, SteeringStartedNewTurn)
+	}
 }
 
 // ebo PR2: session/cancel (an ACP notification) ends the in-flight turn

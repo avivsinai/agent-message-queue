@@ -20,7 +20,7 @@ import (
 const routeSessionPrefix = "route/"
 
 // Owner takes one owner message of a standalone server. The message is
-// decided as the ACP path decides a prompt (decideOwner): a mirror switch,
+// decided first (decideOwner): a mirror switch,
 // a slash command or a dialog answer is carried out at once, never behind
 // a turn, and its acknowledgement is posted once per event (postOnce). Any
 // other message is a turn: it waits in its route's queue, and each route
@@ -45,14 +45,9 @@ const routeSessionPrefix = "route/"
 // for every decision in flight, so nothing is posted after it. A message
 // that arrives outside them, a turn cut by their stop, or one still queued
 // at the stop is not handled: its channel stays open, and a later delivery
-// handles it (a turn's claim lets it run again). On a server
-// that is not standalone, Owner does nothing and returns a closed channel.
+// handles it (a turn's claim lets it run again).
 func (s *Server) Owner(in buzzop.Inbound) <-chan struct{} {
 	done := make(chan struct{})
-	if s.direct == nil {
-		close(done)
-		return done
-	}
 	r, routed := s.channelRoute(in.Channel)
 	if !routed {
 		close(done)
@@ -62,21 +57,21 @@ func (s *Server) Owner(in buzzop.Inbound) <-chan struct{} {
 		return done
 	}
 	evt, ch, id := in.Event, in.Channel, in.Event.ID.Hex()
-	path := filepath.Join(s.eventDir(id), id+".json")
+	path := filepath.Join(s.eventDir(), id+".json")
 	if c, found := readClaim(path); found {
-		if c == nil || c.Decided != "" || !s.ownsClaim(*c, "") {
+		if c == nil || c.Decided != "" || !s.ownsClaim(*c) {
 			close(done)
 			return done
 		}
 		s.owners.queue(s, ch, ownerTurn{evt: evt, done: done})
 		return done
 	}
-	m := ownerMsg{channel: ch, words: dropMentions(evt.Content), verified: func() (nostr.Event, error) { return evt, nil }}
+	m := ownerMsg{channel: ch, words: dropMentions(evt.Content), event: evt}
 	if d, ok := s.decideOwner(m); ok {
 		won, err := writeClaim(path, eventClaim{Name: r.Name, Agent: s.id.Agent, Decided: d.kind})
 		switch {
 		case err != nil:
-			fmt.Fprintf(os.Stderr, "amq-acp: the owner's %s in %s was not taken: %v\n", d.kind, ch, err)
+			fmt.Fprintf(os.Stderr, "machine agent: the owner's %s in %s was not taken: %v\n", d.kind, ch, err)
 			close(done)
 			return done
 		case !won:
@@ -90,7 +85,7 @@ func (s *Server) Owner(in buzzop.Inbound) <-chan struct{} {
 		if !started {
 			// The workers stopped after the claim was written: the decision
 			// is not carried out, and its claim keeps a replay from doing it.
-			fmt.Fprintf(os.Stderr, "amq-acp: the owner's %s in %s was not carried out: the machine agent stopped\n", d.kind, ch)
+			fmt.Fprintf(os.Stderr, "machine agent: the owner's %s in %s was not carried out: the machine agent stopped\n", d.kind, ch)
 			close(done)
 		}
 		return done
@@ -235,8 +230,8 @@ func closed(quit <-chan struct{}) bool {
 	}
 }
 
-// runOwnerTurn runs evt as a turn of route ch's session, set up as an ACP
-// prompt of that channel is (beginPrompt), with no client to emit to. The
+// runOwnerTurn runs evt as a turn of route ch's session: its route and
+// reply channel are ch, and it has no client to emit to. The
 // route's worker is the only one that begins turns on its session, so the
 // turn is never refused. When quit closes, the turn is cut as a client
 // that left (turnDisconnected), which records nothing; cut reports that.
@@ -247,7 +242,7 @@ func (s *Server) runOwnerTurn(ch string, evt nostr.Event, quit <-chan struct{}) 
 		s.sessions[sid] = &sessionState{ID: sid, ChannelID: ch, Thread: cockpitThread(sid), route: ch}
 	}
 	session, turn, _ := s.beginTurnLocked(sid)
-	turn.route, turn.channel, turn.mailboxEvent, turn.event = ch, ch, id, &evt
+	turn.route, turn.channel, turn.event = ch, ch, &evt
 	s.mu.Unlock()
 	defer s.finishTurn(session, turn)
 	defer s.showWorking(ch)()
@@ -316,7 +311,7 @@ func (s *Server) showWorking(ch string) (stop func()) {
 			cancel()
 			if err != nil {
 				s.workingFailed.Do(func() {
-					fmt.Fprintf(os.Stderr, "amq-acp: the working indication is not shown in %s: %v\n", ch, err)
+					fmt.Fprintf(os.Stderr, "machine agent: the working indication is not shown in %s: %v\n", ch, err)
 				})
 			}
 			select {

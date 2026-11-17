@@ -40,8 +40,9 @@ import (
 // attachReadyTimeout bounds the wait for an endpoint that attach started.
 const attachReadyTimeout = 20 * time.Second
 
-// attach binds the per-user Buzz agent to the session the owner is typing
-// in. Typing the command is the sharing choice, so the invoking session is
+// attach binds the session the owner is typing in for the machine agent,
+// which gives it a Buzz channel. Typing the command is the sharing choice,
+// so the invoking session is
 // found exactly, never guessed from a
 // discovery list: Claude by its process ancestry, Codex by CODEX_THREAD_ID.
 // The machine agent may later restore that share for the same identity and
@@ -53,7 +54,7 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	self := fs.Bool("self", false, "bind the session this command runs in")
 	nativeMode := fs.Bool("native", false, "drive the exact native session through amq-remote, not the AMQ mailbox")
 	me := fs.String("me", os.Getenv("AM_ME"), "AMQ handle of this session (default AM_ME)")
-	name := fs.String("name", "", "binding name, which names this session's Buzz agent (default <handle>-<project>-<session>, or the native target)")
+	name := fs.String("name", "", "binding name (default <handle>-<project>-<session>, or the native target)")
 	linkName := fs.String("link", "", "share this session with the linked server of that name (implies --native)")
 	consent := fs.String("consent", "passkey", "with --link: passkey, or local to also confirm each task on this machine")
 	tools := fs.String("tools", "read", "with --link: the server tool profile agents in this session may call; empty for none")
@@ -251,7 +252,7 @@ func nativeBinding(root, stateDir string, cand registry.Candidate, native, displ
 		Harness: h.Kind, Holder: h.holder(), Label: binding.SessionLabel(h.Kind, place, machine), Machine: machine, AppServer: h.AppServer,
 		Transcript: h.Transcript, ConfigDir: sessionConfigDir(h.Kind), Cwd: h.Cwd}
 	// The session identity is the harness, root and working directory, so the
-	// same session coming back gets its name and agent back. A link
+	// same session coming back gets its name and channel back. A link
 	// share keeps its target-derived identity: the share names its binding,
 	// and another process must never take that name over. That holds for a
 	// plain attach of a session a link already shares too: it keeps the
@@ -340,8 +341,9 @@ func checkToolProfile(pin linkio.Pin, link, tools string) error {
 	return protocol.Refuse(protocol.CodeInvalid, "link %s's server grants tool profiles %s; --tools %s is not one of them", link, strings.Join(*pin.ToolProfiles, ", "), tools)
 }
 
-// attachMailbox binds the Buzz agent to this session's AMQ handle.
-// Each DM becomes an AMQ message to the handle; no endpoint, hook, or wake is
+// attachMailbox binds this session's AMQ handle for the machine agent.
+// Each owner message in the session's channel becomes an AMQ message to the
+// handle; no endpoint, hook, or wake is
 // required, because noticing the message is
 // the handle owner's business.
 func attachMailbox(root, handle, name string, asJSON bool, stdout, stderr io.Writer) (int, error) {
@@ -509,7 +511,7 @@ func writeBinding(b binding.Binding, explicitName, followLink bool, inspect bind
 }
 
 // heldBySession reports whether b's session already held the name b.Name,
-// as a binding or a tombstone, so its agent comes back. It is a report read
+// as a binding or a tombstone, so its channel comes back. It is a report read
 // before the write, not a lock.
 func heldBySession(b binding.Binding) bool {
 	ours := func(o binding.Binding) bool {
@@ -859,7 +861,6 @@ type bindingRow struct {
 	Root     string        `json:"root"`
 	Handle   string        `json:"handle,omitempty"`
 	Target   string        `json:"target,omitempty"`
-	Agent    string        `json:"agent"`
 	// Channel and ChannelName are the machine agent's channel for the
 	// session, when it has a record of one.
 	Channel            string `json:"channel,omitempty"`
@@ -870,7 +871,7 @@ type bindingRow struct {
 }
 
 // dialogRow is one unresolved dialog: open, or answered and waiting for the
-// session to apply the answer. Posted is true once the Buzz agent posted it.
+// session to apply the answer. Posted is true once the machine agent posted it.
 type dialogRow struct {
 	ID       string       `json:"id"`
 	Tool     string       `json:"tool"`
@@ -899,11 +900,10 @@ func openDialogs(name string) []dialogRow {
 	return rows
 }
 
-// bindings lists the bound sessions with their liveness and their Buzz
-// agents (/amq-remote status), after it prunes the ones proven ended. A
-// session whose liveness is unknown is listed and kept, with the command that
-// removes it. Agents of bindings made before sessions had labels are named
-// once, for the owner to delete.
+// bindings lists the machine agent and the bound sessions with their
+// liveness and channels (/amq-remote status), after it prunes the ones proven
+// ended. A session whose liveness is unknown is listed and kept, with the
+// command that removes it.
 func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error) {
 	fs := flag.NewFlagSet("bindings", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -923,15 +923,14 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
-	now := time.Now()
-	helper, machine := helperOf(now), machineOf(now)
+	machine := machineOf(time.Now())
 	rows := make([]bindingRow, 0, len(all))
 	var unknown []string
 	width := 0
 	for _, b := range all {
 		state, evidence := inspect(b)
 		row := bindingRow{Name: b.Name, Label: b.Label, State: state, Evidence: evidence, Root: b.Root, Handle: b.Handle, Target: b.Target,
-			Agent: agentOf(b.Name, now).State, Dialogs: openDialogs(b.Name)}
+			Dialogs: openDialogs(b.Name)}
 		if ch, ok := acp.MachineChannelOf(b); ok {
 			row.Channel, row.ChannelName = ch.State, ch.Name
 		}
@@ -948,36 +947,24 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 		}
 		width = max(width, len([]rune(nonEmpty(b.Label, b.Name))))
 	}
-	legacy := legacyAgents(!c.json)
 	if c.json {
 		if pruned == nil {
 			pruned = []string{}
 		}
-		if legacy == nil {
-			legacy = []string{}
-		}
-		emitJSON(stdout, map[string]any{"bindings": rows, "pruned": pruned, "helper": helper.State, "machine": machine.State, "legacy_agents": legacy})
+		emitJSON(stdout, map[string]any{"bindings": rows, "pruned": pruned, "machine": machine.State})
 		return 0, nil
 	}
 	switch name := nonEmpty(machine.Display, "AMQ Remote @ "+binding.Machine()); {
-	case machine.standalone() && machine.serves():
+	case machine.serves():
 		say(stdout, "Machine agent: %s (running in amq-remote serve)", name)
-	case machine.standalone():
-		say(stdout, "Machine agent: %s (not running: %s)", name, strings.TrimSuffix(machine.notServingLine(), "."))
 	case machine.State != agentMissing:
-		say(stdout, "Machine agent: %s (%s)", name, machine.State)
-	}
-	// An offline helper is shown only without a machine agent: one deleted
-	// in Desktop never rewrites its marker, and the machine agent serves
-	// every session anyway.
-	if helper.State != agentMissing && (helper.State != agentOffline || machine.State == agentMissing) {
-		say(stdout, "Helper: %s (%s)", nonEmpty(helper.Display, "AMQ Remote helper"), helper.State)
+		say(stdout, "Machine agent: %s (not running: %s)", name, strings.TrimSuffix(machine.notServingLine(), "."))
 	}
 	if len(rows) == 0 {
 		say(stdout, "No session is connected.")
 	}
 	for _, r := range rows {
-		line := fmt.Sprintf("%-*s  %-7s  agent %-7s  %s", width, nonEmpty(r.Label, r.Name), r.State, r.Agent, r.Name)
+		line := fmt.Sprintf("%-*s  %-7s  %s", width, nonEmpty(r.Label, r.Name), r.State, r.Name)
 		if r.State != binding.Live {
 			line += ": " + r.Evidence
 		}
@@ -995,7 +982,6 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 	if hint := unknownHint(unknown); hint != "" {
 		say(stdout, "%s", hint)
 	}
-	sayLegacyAgents(stdout, legacy)
 	return 0, nil
 }
 
@@ -1104,7 +1090,7 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		say(stdout, "Disconnected. The session keeps running; its channel stops taking messages now.")
 		return 0, nil
 	}
-	say(stdout, "Disconnected. The session keeps running; its Buzz agent archives itself and its DM answers \"Not connected\".")
+	say(stdout, "Disconnected. The session keeps running.")
 	return 0, nil
 }
 

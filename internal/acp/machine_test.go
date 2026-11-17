@@ -9,46 +9,79 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"fiatjaf.com/nostr"
+
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
-	"github.com/avivsinai/agent-message-queue/internal/lock"
+	"github.com/avivsinai/agent-message-queue/internal/relay/relaytest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
-	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
-	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 )
 
 const (
 	machineChanA = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
 	machineChanB = "0b2c39a1-6f1e-4d0a-9b3a-5c1d2e3f4a5b"
-	// refusedWrite is what the buzz CLI prints for a write the relay
-	// refused: the event id is kept, and only accepted says it failed.
-	refusedWrite = `{"event_id":"x","accepted":false}`
 )
 
-// machineCalls records the machine agent's buzz calls and answers each
-// from reply.
+// machineCalls reads the machine agent's channel writes from the relay of
+// its fixture f.
 type machineCalls struct {
-	mu    sync.Mutex
-	calls []string
-	reply func(args []string) ([]byte, error)
+	f *standaloneFixture
+	// from is the number of publishes the relay had at the last reset.
+	from int
 }
 
+// list is each channel write of the agent that reached the relay since the
+// last reset, a resend again, also one the relay refused or dropped, in the
+// words of the buzz command that makes the same change.
 func (c *machineCalls) list() []string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return append([]string(nil), c.calls...)
+	var out []string
+	for _, evt := range c.f.relay.Attempts()[c.from:] {
+		if evt.PubKey.Hex() != c.f.s.id.Agent {
+			continue
+		}
+		h := writeTag(evt, "h")
+		switch evt.Kind {
+		case 9007:
+			out = append(out, "channels create --name "+writeTag(evt, "name")+" --type "+writeTag(evt, "channel_type")+
+				" --visibility "+writeTag(evt, "visibility")+" --description "+writeTag(evt, "about"))
+		case 9000:
+			out = append(out, "channels add-member --channel "+h+" --pubkey "+writeTag(evt, "p")+" --role "+writeTag(evt, "role"))
+		case 9:
+			call := "messages send --channel " + h + " --content " + evt.Content
+			if p := writeTag(evt, "p"); p != "" {
+				call += " --mention " + p
+			}
+			out = append(out, call)
+		case 9002:
+			verb := "unarchive"
+			if writeTag(evt, "archived") == "true" {
+				verb = "archive"
+			}
+			out = append(out, "channels "+verb+" --channel "+h)
+		}
+	}
+	return out
 }
 
-func (c *machineCalls) reset() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.calls = nil
+// creates are the distinct create events of the agent that reached the
+// relay, refused or dropped ones too, in the order first received.
+func (c *machineCalls) creates() []nostr.Event {
+	var out []nostr.Event
+	for _, evt := range c.f.relay.Attempts() {
+		if evt.Kind == 9007 && evt.PubKey.Hex() == c.f.s.id.Agent &&
+			!slices.ContainsFunc(out, func(e nostr.Event) bool { return e.ID == evt.ID }) {
+			out = append(out, evt)
+		}
+	}
+	return out
 }
+
+func (c *machineCalls) reset() { c.from = len(c.f.relay.Attempts()) }
 
 func (c *machineCalls) count(prefix string) int {
 	n := 0
@@ -60,38 +93,28 @@ func (c *machineCalls) count(prefix string) int {
 	return n
 }
 
-// machineServer is a machine agent with a Buzz key, an owner and a relay.
-// Each buzz call goes to the recorder; nothing reaches a relay.
-func machineServer(t *testing.T) (*Server, *machineCalls) {
+// machineServer is a standalone machine agent on the in-process relay,
+// which stores the group state each accepted channel write changes
+// (relayState). opts set the relay up before its first connection.
+func machineServer(t *testing.T, opts ...func(*relaytest.Relay)) (*Server, *machineCalls) {
 	t.Helper()
-	if !lock.AdvisoryLockAvailable() {
-		t.Skip("no advisory lock on this platform")
-	}
-	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
-	savedCall := machineCall
-	t.Cleanup(func() { machineCall = savedCall })
-	rec := &machineCalls{reply: func([]string) ([]byte, error) { return []byte(`{"accepted":true,"event_id":"ev"}`), nil }}
-	machineCall = func(_ context.Context, _ time.Duration, args ...string) ([]byte, error) {
-		rec.mu.Lock()
-		rec.calls = append(rec.calls, strings.Join(args, " "))
-		reply := rec.reply
-		rec.mu.Unlock()
-		return reply(args)
-	}
-	return newMachineServer(t, canonicalTempDir(t)), rec
+	var self atomic.Pointer[standaloneFixture]
+	f := standalone(t, append(opts, func(r *relaytest.Relay) {
+		r.Accepted = func(evt nostr.Event) {
+			if f := self.Load(); f != nil {
+				f.relayState(t, evt)
+			}
+		}
+	})...)
+	self.Store(f)
+	return f.s, &machineCalls{f: f}
 }
 
-// machineIdentity is the machine agent's Buzz key, owner and relay.
-var machineIdentity = buzzop.Identity{Agent: strings.Repeat("e", 64), Owner: strings.Repeat("0", 64),
-	RelayURL: buzzop.NormalizeRelay("wss://relay.example/"), RelayKey: buzzop.RelayKey("wss://relay.example/")}
-
-// newMachineServer is one machine worker on stateDir; a second one on the
-// same directory is the worker after a restart.
-func newMachineServer(t *testing.T, stateDir string) *Server {
+// newMachineServer is a second machine worker on the transport and state
+// directory of f: the worker after a restart.
+func newMachineServer(t *testing.T, f *standaloneFixture) *Server {
 	t.Helper()
-	s := NewServer(Config{RemoteBinding: true, Machine: true, StateDir: stateDir,
-		TurnTimeout: 100 * time.Millisecond, PollInterval: 5 * time.Millisecond, HeartbeatInterval: 20 * time.Millisecond,
-		Identity: machineIdentity}, "test")
+	s := NewStandalone(Standalone{Identity: f.s.id, Transport: f.s.direct}, "test")
 	t.Cleanup(s.resign)
 	return s
 }
@@ -145,39 +168,6 @@ func onlyRetired(t *testing.T, s *Server) channelRecord {
 		t.Fatalf("retired records = %+v", retired)
 	}
 	return retired[0]
-}
-
-// channelPrompt sends one prompt whose host context names channel and
-// returns the text the agent said.
-func channelPrompt(t *testing.T, s *Server, channel string) string {
-	t.Helper()
-	// Without an owner the served worker's machine tick provisions
-	// nothing, so routing sees exactly the records the test wrote.
-	cfg := s.cfg
-	cfg.Identity.Owner = ""
-	live := startServer(t, cfg)
-	live.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":2}}`)
-	live.read()
-	live.send(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/"}}`)
-	sid := live.read()["result"].(map[string]any)["sessionId"].(string)
-	blocks, _ := json.Marshal([]contentBlock{
-		{Type: "text", Text: "<context>\nScope: channel\nSession scope: channel\nChannel: some channel (#" + channel + ")\n</context>"},
-		{Type: "text", Text: "<buzz-event>\nhello\n</buzz-event>"},
-	})
-	live.send(fmt.Sprintf(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":%q,"prompt":%s}}`, sid, blocks))
-	said := ""
-	for {
-		value := live.read()
-		if _, ok := value["result"]; ok {
-			return said
-		}
-		if value["error"] != nil {
-			t.Fatalf("prompt: %v", value)
-		}
-		if update, ok := value["params"].(map[string]any)["update"].(map[string]any); ok && update["sessionUpdate"] == "agent_message_chunk" {
-			said += update["content"].(map[string]any)["text"].(string)
-		}
-	}
 }
 
 // The workers keep one read of the bindings and records while their files
@@ -234,37 +224,27 @@ func TestMachineProvisionsAChannelForALiveSession(t *testing.T) {
 	if err := os.WriteFile(s.slotPath("beta"), corrupt, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	addMembers := 0
-	rec.reply = func(args []string) ([]byte, error) {
-		switch args[0] + " " + args[1] {
-		case "channels create":
-			return []byte(`{"accepted":true,"channel_id":"` + machineChanA + `"}`), nil
-		case "channels add-member":
-			if addMembers++; addMembers == 1 {
-				return []byte(refusedWrite), nil
-			}
-		}
-		return []byte(`{"accepted":true,"event_id":"ev"}`), nil
-	}
+	rec.f.relay.RejectKind.Store(9000) // the first add-member is refused
 	now := time.Now()
 	tick(s, now)
 	if r := channelState(t, s, "alpha"); r.OwnerAdded || r.Welcomed || r.State != channelCreating {
 		t.Fatalf("after a refused add-member: %+v", r)
 	}
+	rec.f.relay.RejectKind.Store(0)
 	tick(s, now.Add(time.Minute))
 
 	r := channelState(t, s, "alpha")
-	addMember := "channels add-member --channel " + machineChanA + " --pubkey " + s.id.Owner + " --role admin"
+	addMember := "channels add-member --channel " + r.Chosen + " --pubkey " + s.id.Owner + " --role admin"
 	want := []string{
 		"channels create --name " + b.Label + " --type stream --visibility private --description amq-remote " + r.Reg,
 		addMember,
 		addMember,
-		"messages send --channel " + machineChanA + " --content AMQ Remote: this channel reaches " + b.Label + ". Write here to talk to that session. --mention " + s.id.Owner,
+		"messages send --channel " + r.Chosen + " --content AMQ Remote: this channel reaches " + b.Label + ". Write here to talk to that session. --mention " + s.id.Owner,
 	}
 	if got := rec.list(); !slices.Equal(got, want) {
 		t.Fatalf("buzz calls = %q\nwant %q", got, want)
 	}
-	if r.State != channelActive || r.ChannelID != machineChanA || r.Creates != 1 || !r.OwnerAdded || !r.Welcomed {
+	if r.State != channelActive || r.ChannelID != r.Chosen || r.Creates != 1 || !r.OwnerAdded || !r.Welcomed {
 		t.Fatalf("record = %+v", r)
 	}
 	if raw, _ := os.ReadFile(s.slotPath("beta")); string(raw) != string(corrupt) {
@@ -274,12 +254,15 @@ func TestMachineProvisionsAChannelForALiveSession(t *testing.T) {
 
 // A prompt from a session's active channel reaches that session only.
 func TestMachinePromptInAnActiveChannelReachesItsSession(t *testing.T) {
-	s, _ := machineServer(t)
+	s, rec := machineServer(t)
 	alpha, beta := liveSession(t, "alpha"), liveSession(t, "beta")
 	activeChannel(t, s, alpha, machineChanA)
 	activeChannel(t, s, beta, machineChanB)
+	rec.f.startMachine(t)
 
-	channelPrompt(t, s, machineChanA)
+	rec.f.s.Owner(rec.f.ownerSays(t, machineChanA, "hello"))
+	for deadline := time.Now().Add(5 * time.Second); len(inboxPrompts(t, alpha.Root)) == 0 && time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+	}
 	if got := inboxPrompts(t, alpha.Root); len(got) != 1 {
 		t.Fatalf("alpha got %d prompts, want 1", len(got))
 	}
@@ -289,13 +272,16 @@ func TestMachinePromptInAnActiveChannelReachesItsSession(t *testing.T) {
 }
 
 // A prompt from a channel no active record names reaches no session; the
-// answer lists the live sessions and their channels.
+// answer lists the live sessions and their channels. Owner drops a message
+// in such a channel, so the test runs the turn itself, with no claim and no
+// active record of its channel.
 func TestMachinePromptInAnUnknownChannelGetsTheDirectory(t *testing.T) {
-	s, _ := machineServer(t)
+	s, rec := machineServer(t)
 	alpha := liveSession(t, "alpha")
 	activeChannel(t, s, alpha, machineChanA)
 
-	said := channelPrompt(t, s, machineChanB)
+	s.runOwnerTurn(machineChanB, rec.f.ownerSays(t, machineChanB, "hello").Event, make(chan struct{}))
+	said := rec.f.lastAgentPost(machineChanB)
 	if got := inboxPrompts(t, alpha.Root); len(got) != 0 {
 		t.Fatalf("alpha got %d prompts from an unknown channel", len(got))
 	}
@@ -316,18 +302,8 @@ func TestMachineDetachArchivesAndReattachRestoresTheChannel(t *testing.T) {
 	s, rec := machineServer(t)
 	alpha := liveSession(t, "alpha")
 	activeChannel(t, s, alpha, machineChanA)
-	unarchives := 0
-	rec.reply = func(args []string) ([]byte, error) {
-		switch args[0] + " " + args[1] {
-		case "channels archive":
-			return []byte(refusedWrite), nil
-		case "channels unarchive":
-			if unarchives++; unarchives == 1 {
-				return []byte(refusedWrite), nil
-			}
-		}
-		return []byte(`{"accepted":true,"event_id":"ev"}`), nil
-	}
+	rec.f.groupState(t, machineChanA)
+	rec.f.relay.RejectKind.Store(9002) // archives and unarchives are refused
 	if _, err := binding.Retire(binding.RemovedDetached, func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
 		t.Fatal(err)
 	}
@@ -339,18 +315,30 @@ func TestMachineDetachArchivesAndReattachRestoresTheChannel(t *testing.T) {
 	if _, ok := readChannelRecord(s.slotPath("alpha")); ok {
 		t.Fatal("the retired record still holds the name's slot")
 	}
+	// On the direct transport a restore reads the relay's state: only a
+	// channel the relay shows archived needs an unarchive. The archive is
+	// retried after channelRetryGap and is accepted.
+	rec.f.relay.RejectKind.Store(0)
+	tick(s, now.Add(channelRetryGap+time.Minute))
+	if r := onlyRetired(t, s); !r.Archived {
+		t.Fatalf("retired record after an accepted archive = %+v", r)
+	}
 
+	rec.f.relay.RejectKind.Store(9002)
 	if err := binding.WriteNamed(alpha); err != nil { // the same session again
 		t.Fatal(err)
 	}
-	tick(s, now.Add(time.Minute))
+	now = now.Add(channelRetryGap + 2*time.Minute)
+	tick(s, now)
 	if _, ok := readChannelRecord(s.slotPath("alpha")); ok {
 		t.Fatal("a refused unarchive activated the channel")
 	}
-	tick(s, now.Add(2*time.Minute))
+	rec.f.relay.RejectKind.Store(0)
+	tick(s, now.Add(time.Minute))
 
 	want := []string{
 		"messages send --channel " + machineChanA + " --content Disconnected: " + alpha.Label + ". This channel no longer reaches it until the session connects again.",
+		"channels archive --channel " + machineChanA,
 		"channels archive --channel " + machineChanA,
 		"channels unarchive --channel " + machineChanA,
 		"channels unarchive --channel " + machineChanA,
@@ -425,15 +413,6 @@ func selfHolder(t *testing.T) launch.HolderIdentity {
 	return self
 }
 
-func acceptCreates(rec *machineCalls) {
-	rec.reply = func(args []string) ([]byte, error) {
-		if args[0]+" "+args[1] == "channels create" {
-			return []byte(`{"accepted":true,"channel_id":"` + machineChanA + `"}`), nil
-		}
-		return []byte(`{"accepted":true,"event_id":"ev"}`), nil
-	}
-}
-
 // A Codex app-server session records no holder, only its thread, so the
 // holder alone left it unknown: the machine agent made no channel for it and
 // never archived one. Its liveness comes from the daemon that runs the
@@ -441,12 +420,13 @@ func acceptCreates(rec *machineCalls) {
 func TestMachineServesACodexAppServerThreadUntilItEnds(t *testing.T) {
 	s, rec := machineServer(t)
 	a := bindAppServerThread(t, selfHolder(t))
-	acceptCreates(rec)
 	now := time.Now()
 	tick(s, now)
-	if r := channelState(t, s, a.b.Name); r.State != channelActive || r.ChannelID != machineChanA {
+	r := channelState(t, s, a.b.Name)
+	if r.State != channelActive || r.ChannelID != r.Chosen {
 		t.Fatalf("record for a loaded thread = %+v", r)
 	}
+	channel := r.ChannelID
 	if a.probes != 1 {
 		t.Fatalf("daemon asked %d times in one tick, want 1", a.probes)
 	}
@@ -458,8 +438,8 @@ func TestMachineServesACodexAppServerThreadUntilItEnds(t *testing.T) {
 		t.Fatalf("record after the thread ended = %+v", r)
 	}
 	want := []string{
-		"messages send --channel " + machineChanA + " --content Session ended: " + a.b.Label + ". This channel no longer reaches it.",
-		"channels archive --channel " + machineChanA,
+		"messages send --channel " + channel + " --content Session ended: " + a.b.Label + ". This channel no longer reaches it.",
+		"channels archive --channel " + channel,
 	}
 	if got := rec.list(); !slices.Equal(got, want) {
 		t.Fatalf("buzz calls = %q\nwant %q", got, want)
@@ -476,12 +456,13 @@ func TestMachineArchivesACodexThreadWhoseDaemonIsGone(t *testing.T) {
 	dead := selfHolder(t)
 	dead.ProcessStart = laterStart(t, dead.ProcessStart)
 	a := bindAppServerThread(t, dead) // a restarted daemon (this process) has it loaded
-	acceptCreates(rec)
 	now := time.Now()
 	tick(s, now)
-	if r := channelState(t, s, a.b.Name); r.State != channelActive {
+	r := channelState(t, s, a.b.Name)
+	if r.State != channelActive {
 		t.Fatalf("record for a thread loaded in a restarted daemon = %+v", r)
 	}
+	channel := r.ChannelID
 
 	a.loaded = nil
 	rec.reset()
@@ -497,15 +478,15 @@ func TestMachineArchivesACodexThreadWhoseDaemonIsGone(t *testing.T) {
 	a.loaded = []string{a.b.AppServer.Thread}
 	tick(s, now.Add(3*time.Minute))
 	want := []string{
-		"messages send --channel " + machineChanA + " --content Session ended: " + a.b.Label + ". This channel no longer reaches it.",
-		"channels archive --channel " + machineChanA,
-		"channels unarchive --channel " + machineChanA,
-		"messages send --channel " + machineChanA + " --content Connected again: " + a.b.Label + ".",
+		"messages send --channel " + channel + " --content Session ended: " + a.b.Label + ". This channel no longer reaches it.",
+		"channels archive --channel " + channel,
+		"channels unarchive --channel " + channel,
+		"messages send --channel " + channel + " --content Connected again: " + a.b.Label + ".",
 	}
 	if got := rec.list(); !slices.Equal(got, want) {
 		t.Fatalf("buzz calls = %q\nwant %q", got, want)
 	}
-	if r := channelState(t, s, a.b.Name); r.State != channelActive || r.ChannelID != machineChanA || r.Archived {
+	if r := channelState(t, s, a.b.Name); r.State != channelActive || r.ChannelID != channel || r.Archived {
 		t.Fatalf("restored record = %+v", r)
 	}
 }
@@ -518,7 +499,6 @@ func TestMachineKeepsACodexThreadWhoseProbeTimesOut(t *testing.T) {
 	dead := selfHolder(t)
 	dead.ProcessStart = laterStart(t, dead.ProcessStart)
 	a := bindAppServerThread(t, dead) // a replacement daemon has it loaded
-	acceptCreates(rec)
 	now := time.Now()
 	tick(s, now)
 	if r := channelState(t, s, a.b.Name); r.State != channelActive {
@@ -541,6 +521,7 @@ func TestMachineSaysSessionEndedForAPrunedSession(t *testing.T) {
 	s, rec := machineServer(t)
 	alpha := liveSession(t, "alpha")
 	activeChannel(t, s, alpha, machineChanA)
+	rec.f.groupState(t, machineChanA)
 	if _, err := binding.Retire(binding.RemovedEnded, func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
 		t.Fatal(err)
 	}
@@ -575,6 +556,9 @@ func TestMachineRecoveredSlotKeepsTheRetiredOutcome(t *testing.T) {
 	if err := s.save(&progressed, time.Now()); err != nil {
 		t.Fatal(err)
 	}
+	// The relay shows the archive that the retired record confirmed.
+	rec.f.groupState(t, machineChanA)
+	rec.f.relayState(t, nostr.Event{Kind: 9002, Tags: nostr.Tags{{"h", machineChanA}, {"archived", "true"}}})
 	if _, err := binding.Retire(binding.RemovedDetached, func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
 		t.Fatal(err)
 	}
@@ -605,6 +589,9 @@ func TestMachineRecoveredSlotKeepsTheRetiredOutcome(t *testing.T) {
 // sessions attached again, the relay refused each unarchive with "channel is
 // not archived", the restore kept that as a failure, and the sessions had no
 // channel ("its channel is being made") until a channel reset.
+//
+// On the direct transport the restore reads the relay's state first: a
+// channel it shows not archived is restored with no unarchive sent.
 func TestMachineRestoresAChannelTheRelaySaysIsNotArchived(t *testing.T) {
 	s, rec := machineServer(t)
 	alpha := liveSession(t, "alpha")
@@ -615,15 +602,9 @@ func TestMachineRestoresAChannelTheRelaySaysIsNotArchived(t *testing.T) {
 	if err := s.save(&r, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	rec.reply = func(args []string) ([]byte, error) {
-		if args[0]+" "+args[1] == "channels unarchive" {
-			return nil, fmt.Errorf(`buzz channels unarchive: exit status 2: {"error":"relay_error","message":"relay error 400: invalid: channel is not archived","retryable":false}`)
-		}
-		return []byte(`{"accepted":true,"event_id":"ev"}`), nil
-	}
+	rec.f.groupState(t, machineChanA)
 	tick(s, time.Now())
 	want := []string{
-		"channels unarchive --channel " + machineChanA,
 		"messages send --channel " + machineChanA + " --content Connected again: " + alpha.Label + ".",
 	}
 	if got := rec.list(); !slices.Equal(got, want) {
@@ -638,38 +619,34 @@ func TestMachineRestoresAChannelTheRelaySaysIsNotArchived(t *testing.T) {
 // each create, so a create whose outcome is unknown must never be sent
 // again. The leader looks for the channel instead and adopts the one it
 // owns whose description holds the record's reg.
+//
+// On the direct transport the agent chooses the channel id: the recovery of
+// an uncertain create sends the same stored event again (the same event
+// id), or adopts the chosen channel once the relay's state shows it. One
+// registration never gets a second signed create.
 func TestMachineUncertainCreateAdoptsOneChannelAndNeverCreatesAgain(t *testing.T) {
-	s, rec := machineServer(t)
-	alpha := liveSession(t, "alpha")
-	reg := ""
-	rec.reply = func(args []string) ([]byte, error) {
-		switch args[0] + " " + args[1] {
-		case "channels create":
-			reg = strings.TrimPrefix(args[len(args)-1], "amq-remote ")
-			return nil, &buzzcli.ExitError{Code: 2, Err: fmt.Errorf("buzz channels create: relay timeout")}
-		case "channels list":
-			return []byte(`[{"channel_id":"` + machineChanB + `","name":"other"},{"channel_id":"` + machineChanA + `","name":"` + alpha.Label + `"}]`), nil
-		case "channels get":
-			return []byte(`{"channel_id":"` + machineChanA + `","description":"amq-remote ` + reg + `"}`), nil
-		case "channels members":
-			return []byte(`[{"pubkey":"` + s.id.Agent + `","role":"owner"}]`), nil
-		}
-		return []byte(`{"accepted":true,"event_id":"ev"}`), nil
-	}
+	s, rec := machineServer(t, func(r *relaytest.Relay) { r.DropKind.Store(9007) })
+	liveSession(t, "alpha")
 	now := time.Now()
 	tick(s, now)
 	if r := channelState(t, s, "alpha"); r.State != channelUncertain {
 		t.Fatalf("after an unknown outcome: %+v", r)
 	}
-	tick(s, now.Add(time.Minute)) // before the lookup gap: nothing
+	rec.f.reconnectAll() // the relay closed the connection of the dropped create
+	tick(s, now.Add(time.Minute))
 	tick(s, now.Add(11*time.Minute))
-	tick(s, now.Add(30*time.Minute))
 
-	if n := rec.count("channels create"); n != 1 {
-		t.Fatalf("creates = %d, want 1; calls %q", n, rec.list())
+	r := channelState(t, s, "alpha")
+	creates := rec.creates()
+	if len(creates) != 1 || writeTag(creates[0], "h") != r.Chosen || writeTag(creates[0], "about") != "amq-remote "+r.Reg {
+		t.Fatalf("distinct creates = %+v, want one of the chosen channel %s; calls %q", creates, r.Chosen, rec.list())
 	}
-	if r := channelState(t, s, "alpha"); r.State != channelActive || r.ChannelID != machineChanA {
+	if r.State != channelActive || r.ChannelID != r.Chosen {
 		t.Fatalf("record = %+v", r)
+	}
+	tick(s, now.Add(30*time.Minute))
+	if n := len(rec.creates()); n != 1 {
+		t.Fatalf("distinct creates after a later tick = %d, want 1", n)
 	}
 }
 
@@ -680,68 +657,66 @@ func TestMachineUncertainCreateAdoptsOneChannelAndNeverCreatesAgain(t *testing.T
 // Regression (PR #1279 review): a create whose worker stopped before the
 // result was written, followed by a detach and a restart, was retired as a
 // record that made no channel, so the channel it made was never looked for.
+// On the direct transport it is looked for by its chosen id in the relay's
+// state.
 func TestMachineCreateThatReturnsAfterDetachIsArchived(t *testing.T) {
 	t.Run("create returns after detach", func(t *testing.T) {
-		s, rec := machineServer(t)
-		liveSession(t, "alpha")
-		rec.reply = func(args []string) ([]byte, error) {
-			if args[1] == "create" {
-				if _, err := binding.Retire(binding.RemovedDetached, func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
-					t.Error(err)
+		var detached atomic.Bool
+		s, rec := machineServer(t, func(r *relaytest.Relay) {
+			r.BeforePublish = func(evt nostr.Event) {
+				if evt.Kind == 9007 && detached.CompareAndSwap(false, true) {
+					if _, err := binding.Retire(binding.RemovedDetached, func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
+						t.Error(err)
+					}
 				}
-				return []byte(`{"accepted":true,"channel_id":"` + machineChanA + `"}`), nil
 			}
-			return []byte(`{"accepted":true}`), nil
-		}
+		})
+		liveSession(t, "alpha")
 		tick(s, time.Now())
 
 		if n := rec.count("channels add-member") + rec.count("messages send"); n != 0 {
 			t.Fatalf("a retired channel was set up: %q", rec.list())
 		}
-		if rec.count("channels archive --channel "+machineChanA) != 1 {
+		r := onlyRetired(t, s)
+		if rec.count("channels archive --channel "+r.Chosen) != 1 {
 			t.Fatalf("calls = %q, want the late channel archived", rec.list())
 		}
-		if r := onlyRetired(t, s); r.ChannelID != machineChanA || !r.Archived || r.Welcomed {
+		if r.ChannelID != r.Chosen || !r.Archived || r.Welcomed {
 			t.Fatalf("retired record = %+v", r)
 		}
 	})
 	t.Run("create result lost, then detach and restart", func(t *testing.T) {
-		s, rec := machineServer(t)
-		alpha := liveSession(t, "alpha")
-		var atCreate []byte
-		reg := ""
-		rec.reply = func(args []string) ([]byte, error) {
-			switch args[0] + " " + args[1] {
-			case "channels create":
+		var slot atomic.Pointer[string]
+		var atCreate atomic.Pointer[[]byte]
+		s, rec := machineServer(t, func(r *relaytest.Relay) {
+			r.BeforePublish = func(evt nostr.Event) {
 				// What the disk holds while the create runs is what a worker
 				// that stops here leaves behind.
-				atCreate, _ = os.ReadFile(s.slotPath("alpha"))
-				reg = strings.TrimPrefix(args[len(args)-1], "amq-remote ")
-				return []byte(`{"accepted":true,"channel_id":"` + machineChanA + `"}`), nil
-			case "channels list":
-				return []byte(`[{"channel_id":"` + machineChanA + `","name":"` + alpha.Label + `"}]`), nil
-			case "channels get":
-				return []byte(`{"channel_id":"` + machineChanA + `","description":"amq-remote ` + reg + `"}`), nil
-			case "channels members":
-				return []byte(`[{"pubkey":"` + s.id.Agent + `","role":"owner"}]`), nil
+				if path := slot.Load(); evt.Kind == 9007 && path != nil {
+					raw, _ := os.ReadFile(*path)
+					atCreate.Store(&raw)
+				}
 			}
-			return []byte(`{"accepted":true,"event_id":"ev"}`), nil
-		}
+		})
+		path := s.slotPath("alpha")
+		slot.Store(&path)
+		liveSession(t, "alpha")
 		tick(s, time.Now())
 		s.resign()
-		if err := os.WriteFile(s.slotPath("alpha"), atCreate, 0o600); err != nil {
+		if err := os.WriteFile(path, *atCreate.Load(), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		rec.reset()
 		if _, err := binding.Retire(binding.RemovedDetached, func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
 			t.Fatal(err)
 		}
-		tick(newMachineServer(t, s.cfg.StateDir), time.Now())
+		tick(newMachineServer(t, rec.f), time.Now())
 
-		if rec.count("channels list") != 1 || rec.count("channels archive --channel "+machineChanA) != 1 {
+		r := onlyRetired(t, s)
+		if rec.count("channels archive --channel "+r.Chosen) != 1 {
 			t.Fatalf("calls = %q, want the lost create looked for and its channel archived", rec.list())
 		}
-		if r := onlyRetired(t, s); r.ChannelID != machineChanA || !r.Archived {
+		if r.ChannelID != r.Chosen || !r.Archived {
 			t.Fatalf("retired record = %+v", r)
 		}
 	})
@@ -751,29 +726,44 @@ func TestMachineCreateThatReturnsAfterDetachIsArchived(t *testing.T) {
 // lifecycle: a tick went on creating channels for every binding after the
 // worker was told to stop. A create cut off by the stop stays uncertain, and
 // nothing else starts.
+//
+// The stop comes while the relay holds the first create, and that create
+// gets no OK, so its outcome is unknown.
 func TestMachineStopEndsTheBatchAndLeavesTheCutCreateUncertain(t *testing.T) {
-	s, rec := machineServer(t)
-	liveSession(t, "alpha")
-	liveSession(t, "beta")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	rec.reply = func(args []string) ([]byte, error) {
-		if args[1] == "create" {
-			cancel()
-			return nil, &buzzcli.ExitError{Code: -1, Err: fmt.Errorf("buzz channels create: signal: killed")}
+	s, rec := machineServer(t, func(r *relaytest.Relay) {
+		r.DropKind.Store(9007)
+		r.BeforePublish = func(evt nostr.Event) {
+			if evt.Kind == 9007 {
+				cancel()
+			}
 		}
-		return []byte(`{"accepted":true,"event_id":"ev"}`), nil
-	}
+	})
+	liveSession(t, "alpha")
+	liveSession(t, "beta")
 	s.machineTick(ctx, time.Now())
 
-	if got := rec.list(); len(got) != 1 {
+	creates := rec.creates()
+	if got := rec.list(); len(got) != 1 || len(creates) != 1 {
 		t.Fatalf("calls after the stop = %q, want only the cut create", got)
 	}
-	if r := channelState(t, s, "alpha"); r.State != channelUncertain || !r.Doubted {
-		t.Fatalf("cut create = %+v", r)
+	reg := strings.TrimPrefix(writeTag(creates[0], "about"), "amq-remote ")
+	cut := 0
+	for _, name := range []string{"alpha", "beta"} {
+		r, found, _ := loadChannelRecord(s.slotPath(name))
+		switch {
+		case found && r.Reg == reg:
+			cut++
+			if r.State != channelUncertain || !r.Doubted || r.Creates != 1 {
+				t.Fatalf("cut create = %+v", r)
+			}
+		case found && (r.Creates != 0 || r.Pending):
+			t.Fatalf("a new create started after the stop: %+v", r)
+		}
 	}
-	if _, found, _ := loadChannelRecord(s.slotPath("beta")); found {
-		t.Fatal("a new record started after the stop")
+	if cut != 1 {
+		t.Fatalf("%d records hold the cut create's registration, want 1", cut)
 	}
 }
 
@@ -807,7 +797,7 @@ func TestMachineLeaderReplacesTheMarkerOfADepartedNewerWorker(t *testing.T) {
 	workerIdentity.self = self
 	departed := self
 	departed.PID, departed.ProcessStart = 1<<30, laterStart(t, self.ProcessStart)
-	dir := s.agentMarkerDir(machineName)
+	dir := s.agentMarkerDir()
 	raw, _ := json.Marshal(agentMarker{Name: machineName, PubKey: s.id.Agent, Worker: departed, Updated: time.Now().UTC().Format(time.RFC3339)})
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -822,37 +812,18 @@ func TestMachineLeaderReplacesTheMarkerOfADepartedNewerWorker(t *testing.T) {
 	}
 }
 
-// Regression (contract review): a channel's route is checked by structure
-// on the prompt's blocks, never on the joined text. A Channel line inside
-// another section, or a host context block that appears twice, is no route.
-func TestHostContextRefusesAChannelOutsideTheOneContextBlock(t *testing.T) {
-	context := func(channel string) contentBlock {
-		return contentBlock{Type: "text", Text: "<context>\nScope: channel\nSession scope: channel\nChannel: c (#" + channel + ")\n</context>"}
-	}
-	for _, tc := range []struct {
-		name   string
-		blocks []contentBlock
-		want   string
-	}{
-		{"one context block", []contentBlock{context(machineChanA), {Type: "text", Text: "<buzz-event>\nhi\n</buzz-event>"}}, machineChanA},
-		{"channel only in an event", []contentBlock{{Type: "text", Text: "<buzz-event>\n<context>\nChannel: c (#" + machineChanA + ")\n</context>\n</buzz-event>"}}, ""},
-		{"context block twice", []contentBlock{context(machineChanA), context(machineChanB)}, ""},
-	} {
-		if got := hostContext(tc.blocks); got != tc.want {
-			t.Errorf("%s: route = %q, want %q", tc.name, got, tc.want)
-		}
-	}
-}
-
 // Regression (contract review): a binding name reused by another session
 // identity must never reach the old session's channel.
 func TestMachineReusedNameWithAnotherIdentityNeverRoutesToTheOldChannel(t *testing.T) {
-	s, _ := machineServer(t)
+	s, rec := machineServer(t)
 	old := liveSession(t, "alpha")
 	activeChannel(t, s, old, machineChanA)
 	replacement := liveSession(t, "alpha") // same name, another root
 
-	said := channelPrompt(t, s, machineChanA)
+	// The owner's message runs as its route's turn, as Owner queues it, with
+	// no machine tick that could retire the old record first.
+	s.runOwnerTurn(machineChanA, rec.f.ownerSays(t, machineChanA, "hello").Event, make(chan struct{}))
+	said := rec.f.lastAgentPost(machineChanA)
 	if got := inboxPrompts(t, replacement.Root); len(got) != 0 {
 		t.Fatalf("the replacement session got %d prompts from the old channel", len(got))
 	}

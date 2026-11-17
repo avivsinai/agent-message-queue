@@ -1,237 +1,42 @@
 package acp
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
-	"slices"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
-	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
-	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 )
 
-// One Buzz agent serves one session. Its pin names that session's binding:
-// the line "AMQ Remote session: <name>" in the agent's system prompt (new
-// agents; a Desktop draft and an import can carry a system prompt but not a
-// model), or the model amq-remote:<name> (agents made before the line). Buzz
-// Desktop passes both to this process as BUZZ_ACP_SYSTEM_PROMPT and
-// BUZZ_ACP_MODEL, so the pin never depends on Buzz calling session/set_model.
+// unpinnedError is an owner message that names no active channel of a
+// session. It chooses no session, so its answer lists the connected ones.
+type unpinnedError struct{}
 
-const (
-	envBuzzSystemPrompt = "BUZZ_ACP_SYSTEM_PROMPT"
-	envBuzzModel        = "BUZZ_ACP_MODEL"
-	envBuzzDisplayName  = "BUZZ_ACP_DISPLAY_NAME"
-)
-
-// pinLineRe matches one pin line and captures the name it gives.
-var pinLineRe = regexp.MustCompile(`(?m)^[ \t]*AMQ Remote session:[ \t]*(\S*)[ \t]*\r?$`)
-
-// helperLineRe matches the system prompt line that makes an agent the
-// per-machine helper. The helper serves no session and never delivers,
-// whatever is bound.
-var helperLineRe = regexp.MustCompile(`(?m)^[ \t]*AMQ Remote helper[ \t]*\r?$`)
-
-// machineLineRe matches the system prompt line that makes an agent the
-// machine agent: one agent per machine that serves every session through a
-// private channel per session (machine.go). It never uses a pin, a selected
-// model or the only binding.
-var machineLineRe = regexp.MustCompile(`(?m)^[ \t]*AMQ Remote machine[ \t]*\r?$`)
-
-// buzzAgent is the managed agent's record as Desktop passed it, captured
-// before PrepareWorkerEnv strips BUZZ_*.
-var buzzAgent struct{ systemPrompt, model string }
-
-func captureBuzzAgent() {
-	buzzAgent.systemPrompt = os.Getenv(envBuzzSystemPrompt)
-	buzzAgent.model = strings.TrimSpace(os.Getenv(envBuzzModel))
+func (*unpinnedError) Error() string {
+	return "this prompt came from no session's channel; write in the channel of the session you want"
 }
 
-// sessionPin resolves the binding an agent serves, or its helper or machine
-// role. Either pin source may name the binding; both naming the same binding
-// is accepted. Two different names, a role line beside a session pin or
-// beside the other role line, or a name that is not a binding name, is an
-// error that refuses every prompt. A pin line or role line that does not
-// parse fails closed rather than leaving the agent unpinned, where it would
-// drive the only binding.
-func sessionPin(systemPrompt, model string) (pin string, helper, machine bool, err error) {
-	lower := strings.ToLower(systemPrompt)
-	lines := pinLineRe.FindAllStringSubmatch(systemPrompt, -1)
-	if strings.Count(lower, "amq remote session:") != len(lines) {
-		return "", false, false, errors.New(`invalid session pin: write the system prompt line as "AMQ Remote session: <name>" on its own line`)
-	}
-	if strings.Count(lower, "amq remote helper") != len(helperLineRe.FindAllString(systemPrompt, -1)) {
-		return "", false, false, errors.New(`invalid helper line: write it as "AMQ Remote helper" on its own line`)
-	}
-	if strings.Count(lower, "amq remote machine") != len(machineLineRe.FindAllString(systemPrompt, -1)) {
-		return "", false, false, errors.New(`invalid machine line: write it as "AMQ Remote machine" on its own line`)
-	}
-	fromPrompt, found := "", false
-	for _, m := range lines {
-		if found && m[1] != fromPrompt {
-			return "", false, false, conflictingPins("the system prompt", fromPrompt, "the system prompt", m[1])
-		}
-		fromPrompt, found = m[1], true
-	}
-	fromModel, modelPin := strings.CutPrefix(model, bindingModelPrefix)
-	switch {
-	case !modelPin:
-		fromModel = ""
-	case fromModel == "":
-		return "", false, false, fmt.Errorf("invalid session pin: model %q names no binding", model)
-	}
-	if found && fromModel != "" && fromModel != fromPrompt {
-		return "", false, false, conflictingPins("the system prompt", fromPrompt, "the model", fromModel)
-	}
-	pin = fromModel
-	if found {
-		pin = fromPrompt
-	}
-	helper, machine = helperLineRe.MatchString(systemPrompt), machineLineRe.MatchString(systemPrompt)
-	switch {
-	case helper && machine:
-		return "", false, false, errors.New("conflicting roles: the system prompt makes this agent both the helper and the machine agent")
-	case helper && (found || pin != ""):
-		return "", false, false, fmt.Errorf("conflicting session pins: the system prompt makes this agent the helper and also names session %q; the helper serves no session", pin)
-	case machine && (found || pin != ""):
-		return "", false, false, fmt.Errorf("conflicting session pins: the system prompt makes this agent the machine agent and also names session %q; the machine agent routes by channel", pin)
-	case helper || machine || (!found && pin == ""):
-		return "", helper, machine, nil
-	}
-	if err := binding.ValidName(pin); err != nil {
-		return "", false, false, fmt.Errorf("invalid session pin %q: %v", pin, err)
-	}
-	return pin, false, false, nil
-}
-
-func conflictingPins(source, name, otherSource, other string) error {
-	return fmt.Errorf("conflicting session pins: %s names %q and %s names %q; make them name one session in Buzz Desktop", source, name, otherSource, other)
-}
-
-// unpinnedError is the helper, an unpinned agent with several bindings, or
-// a machine agent prompt that names no active channel of a session. None
-// chooses a session, so it lists the bound ones instead.
-type unpinnedError struct {
-	bindings []binding.Binding
-	helper   bool
-	machine  bool
-}
-
-func (e *unpinnedError) Error() string {
-	if e.machine {
-		return "this prompt came from no session's channel; write in the channel of the session you want"
-	}
-	return "this agent serves no session; DM the agent of the session you want"
-}
-
-// unpinnedReply lists each bound session and the agent to DM for it, or,
-// for the machine agent, the channel to write in.
-func (s *Server) unpinnedReply(e *unpinnedError) string {
-	if e.machine {
-		return s.machineDirectory()
-	}
-	var b strings.Builder
-	if e.helper {
-		b.WriteString("This is the AMQ Remote helper; it does not run prompts. Sessions bound on this machine:")
-	} else {
-		b.WriteString("Several sessions are bound and this agent names none, so it does not run prompts. Sessions bound on this machine:")
-	}
-	for _, bd := range e.bindings {
-		var names []string
-		for _, m := range s.agentMarkers(bd.Name) {
-			if state := m.state(time.Now()); m.DisplayName != "" && (state == AgentRunning || state == AgentIdle) {
-				names = append(names, strconv.Quote(m.DisplayName))
-			}
-		}
-		if len(names) > 0 {
-			fmt.Fprintf(&b, "\n- %s: DM %s", bd.Name, strings.Join(names, " or "))
-			continue
-		}
-		fmt.Fprintf(&b, "\n- %s: %s", bd.Name, s.noAgentText(bd, e.helper))
-	}
-	return b.String()
-}
-
-// noAgentText says what to do for a session with no running agent. Only
-// the helper drafts, and only for a live session with tries left.
-func (s *Server) noAgentText(b binding.Binding, helper bool) string {
-	importStep := fmt.Sprintf("run `amq-acp setup --session %s` and import the file in Buzz Desktop", b.Name)
-	if markers := s.agentMarkers(b.Name); len(markers) > 0 {
-		idle := false
-		for _, m := range markers {
-			switch m.state(time.Now()) {
-			case AgentRunning:
-				return "its agent runs; DM it in Buzz"
-			case AgentIdle:
-				idle = true
-			}
-		}
-		if idle {
-			return "its agent is idle; DM it, and Buzz starts it on the next message"
-		}
-		return "its agent is offline; DM it first, and if it does not answer within a minute, start it in Buzz Desktop"
-	}
-	if !helper || b.Name == binding.LegacyName {
-		return "no agent yet; " + importStep
-	}
-	if state, _ := s.liveness(b); state != binding.Live {
-		return fmt.Sprintf("session state %s, so no agent is drafted; run /amq-remote in that session, or %s", state, importStep)
-	}
-	if s.helperRequest(b).Count >= helperRequestTries {
-		return "Buzz Desktop did not create its agent; run /amq-remote in that session again, or " + importStep
-	}
-	return "no agent yet; Buzz Desktop opens \"Create agent\" for it"
-}
-
-// agentMarker is a pinned agent's record under
-// <state>/agents/<pin>/<pubkey>.json. Each identity has its own file, so two
-// agents pinned to one session never reset each other's state. It is
-// rewritten on each tick, so its update time shows the agent runs.
+// agentMarker is the machine agent's record under
+// <state>/agents/_machine/<pubkey>.json. Each identity has its own file. It
+// is rewritten on each tick, so its update time shows the agent runs.
 type agentMarker struct {
 	Name        string `json:"name"`
 	PubKey      string `json:"pubkey"`
 	DisplayName string `json:"display_name,omitempty"`
 	PID         int    `json:"pid"`
-	// Worker and Parent are the process identities of the worker that
-	// wrote the marker and of its parent buzz-acp, captured at worker start.
-	// Worker is also the marker's generation: an older worker never
-	// overwrites a newer one's marker. Both are zero in a marker from before
-	// they were recorded.
+	// Worker is the process identity of the worker that wrote the marker,
+	// captured at its start. It is also the marker's generation: an older
+	// worker never overwrites a newer one's marker.
 	Worker launch.HolderIdentity `json:"worker,omitzero"`
-	Parent launch.HolderIdentity `json:"parent,omitzero"`
 	// RelayKey is the machine agent's relay key (machine.go), so a reader
 	// finds its channel records.
 	RelayKey string `json:"relay_key,omitempty"`
-	// Host is "standalone" for a machine agent that runs on the direct
-	// relay transport, outside Buzz Desktop; empty otherwise.
-	Host string `json:"host,omitempty"`
-	// Serves is the binding as last seen bound.
-	Serves *binding.Binding `json:"serves,omitempty"`
-	// Archived is the state the relay last accepted for this identity.
-	Archived bool `json:"archived"`
-	// Channel is where the agent posts on its own: a session agent's latest
-	// DM, or the helper's control channel. OwnerAdmin records that the
-	// owner is an admin of the control channel. A marker from before it
-	// has only owner_added (a plain member), so setup runs again.
-	Channel    string `json:"channel,omitempty"`
-	OwnerAdmin bool   `json:"owner_admin,omitempty"`
-	// The rest are the helper's: when its control channel setup last
-	// failed, control channels it gave up on, and when and for which
-	// session it last sent a draft.
-	SetupFailed  string   `json:"setup_failed,omitempty"`
-	Dropped      []string `json:"dropped_channels,omitempty"`
-	LastDraft    string   `json:"last_draft,omitempty"`
-	LastDraftFor string   `json:"last_draft_for,omitempty"`
-	Updated      string   `json:"updated"`
+	// Host is "standalone": the agent runs inside amq-remote serve.
+	Host    string `json:"host,omitempty"`
+	Updated string `json:"updated"`
 }
 
 // agentMarkerFresh is how old a marker may be while its agent still runs.
@@ -247,21 +52,17 @@ const agentMarkerRefresh = 2 * time.Minute
 const (
 	// AgentRunning: the marker's worker runs.
 	AgentRunning = "running"
-	// AgentIdle: the worker is gone, but its parent buzz-acp still runs, so
-	// Buzz starts a worker on the next message (a lazy per-session agent).
-	AgentIdle = "idle"
-	// AgentOffline: neither process runs.
+	// AgentOffline: the marker's worker does not run.
 	AgentOffline = "offline"
 )
 
 // AgentState reports what a marker says at now, from its update time and
-// the worker and parent identities it records. A worker proven alive is
-// running; a fresh marker whose worker cannot be checked either way is
-// running too, as is a marker with no identity that is fresh. A worker
-// proven gone is idle while its recorded parent is alive with the same
-// start, else offline at once, however fresh the marker is. A stale marker
-// with no identity is offline.
-func AgentState(updated string, worker, parent launch.HolderIdentity, now time.Time) string {
+// the worker identity it records. A worker proven alive is running; a
+// fresh marker whose worker cannot be checked either way is running too,
+// as is a marker with no identity that is fresh. A worker proven gone is
+// offline at once, however fresh the marker is. A stale marker with no
+// identity is offline.
+func AgentState(updated string, worker launch.HolderIdentity, now time.Time) string {
 	at, err := time.Parse(time.RFC3339, updated)
 	fresh := err == nil && now.Sub(at) <= agentMarkerFresh
 	if worker.PID <= 0 {
@@ -274,26 +75,12 @@ func AgentState(updated string, worker, parent launch.HolderIdentity, now time.T
 	case state == launch.LeaseValid, state == launch.LeaseUnverified && fresh:
 		return AgentRunning
 	}
-	if parent.PID > 0 {
-		if state, _ := launch.InspectHolder(parent); state == launch.LeaseValid {
-			return AgentIdle
-		}
-	}
 	return AgentOffline
 }
 
-func (m agentMarker) state(now time.Time) string {
-	return AgentState(m.Updated, m.Worker, m.Parent, now)
-}
-
-// workerIdentity is this worker process and its parent buzz-acp, captured
-// at start (PrepareWorkerEnv) and recorded in every marker it writes.
-var workerIdentity struct{ self, parent launch.HolderIdentity }
-
-func captureWorkerIdentity() {
-	workerIdentity.self, _ = launch.HolderOf(os.Getpid())
-	workerIdentity.parent, _ = launch.HolderOf(os.Getppid())
-}
+// workerIdentity is this worker process, set at start (NewStandalone) and
+// recorded in every marker it writes.
+var workerIdentity struct{ self launch.HolderIdentity }
 
 // newerWorker reports whether worker a started after worker b. Unknown
 // start times are never newer.
@@ -306,8 +93,10 @@ func newerWorker(a, b launch.HolderIdentity) bool {
 	return aerr == nil && berr == nil && as > bs
 }
 
-func (s *Server) agentMarkerDir(pin string) string {
-	return filepath.Join(s.cfg.StateDir, "agents", pin)
+// agentMarkerDir is <state>/agents/_machine: the machine agent's marker and
+// its lead, dialog and mirror locks.
+func (s *Server) agentMarkerDir() string {
+	return filepath.Join(s.cfg.StateDir, "agents", machineName)
 }
 
 func readAgentMarker(path string) (agentMarker, bool) {
@@ -319,112 +108,16 @@ func readAgentMarker(path string) (agentMarker, bool) {
 	return m, true
 }
 
-// agentMarkers returns the record of every identity pinned to pin.
-func (s *Server) agentMarkers(pin string) []agentMarker {
-	entries, _ := os.ReadDir(s.agentMarkerDir(pin))
-	var out []agentMarker
-	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		if m, ok := readAgentMarker(filepath.Join(s.agentMarkerDir(pin), e.Name())); ok {
-			out = append(out, m)
-		}
-	}
-	return out
-}
-
-// buzzCall runs one buzz CLI command as the agent and returns its output. A
-// variable so tests can record calls without a relay.
-var buzzCall = func(budget time.Duration, args ...string) ([]byte, error) {
-	return buzzPort.Run(budget, nil, args...)
-}
-
-// machineCall is buzzCall for the machine agent's lifecycle: it stops when
-// the worker's context ends. A variable so tests can record calls without a
-// relay.
-var machineCall = func(ctx context.Context, budget time.Duration, args ...string) ([]byte, error) {
-	return buzzPort.RunContext(ctx, budget, nil, args...)
-}
-
-// buzzRun is buzzCall for one CLI write whose outcome matters. stdout shape
-// varies by subcommand; acceptedFor knows each shape the buzz CLI emits and
-// treats a refused write as an error to return.
-func buzzRun(budget time.Duration, args ...string) error {
-	out, err := buzzCall(budget, args...)
-	return acceptedFor(args, out, err)
-}
-
-// lifecycleTick keeps a pinned agent's Buzz identity in step with its
-// binding. A missing binding archives the agent (kind 9035, signed by the
-// agent itself, so no owner key is needed) and sets its status; a binding
-// that is back unarchives it (kind 9036) and clears the status. The marker
-// keeps the last state the relay accepted, so each change runs once; a
-// failed call is retried on the next tick. An unreadable binding proves
-// nothing and changes nothing.
-//
-// When it unarchives, it posts "Connected again" to its latest DM.
-//
-// Buzz may run N identical workers of one agent; only the worker that leads
-// its identity runs the tick, so each change runs once, not N times.
-func (s *Server) lifecycleTick(now time.Time) {
-	if s.id.Agent == "" || (!s.cfg.Helper && (s.cfg.Pin == "" || s.cfg.PinErr != nil)) {
-		return
-	}
-	if s.cfg.Helper {
-		if s.lead(helperName) {
-			s.helperTick(now)
-		}
-		return
-	}
-	if !s.lead(s.cfg.Pin) {
-		return
-	}
-	dir := s.agentMarkerDir(s.cfg.Pin)
-	m, _ := readAgentMarker(filepath.Join(dir, s.id.Agent+".json"))
-	m.Name, m.DisplayName = s.cfg.Pin, s.id.DisplayName
-	// The marker names this worker before any relay call, so a slow or
-	// failing relay never leaves the previous worker's identity in it.
-	s.writeAgentMarker(dir, m, now)
-	if raw, err := readSmallRegular(filepath.Join(dir, s.id.Agent+".dm")); err == nil && strings.TrimSpace(string(raw)) != "" {
-		m.Channel = strings.TrimSpace(string(raw))
-	} else {
-		s.mu.Lock()
-		if s.lastChannel != "" {
-			m.Channel = s.lastChannel
-		}
-		s.mu.Unlock()
-	}
-	b, err := binding.ReadNamed(s.cfg.Pin)
-	switch {
-	case errors.Is(err, binding.ErrNone):
-		if !m.Archived && buzzRun(s.cfg.PostTimeout, "agents", "archive", s.id.Agent, "--reason", "retired") == nil {
-			m.Archived = true
-			_ = buzzRun(s.cfg.PostTimeout, "users", "set-status", "--text", "session ended")
-		}
-	case err == nil:
-		if m.Archived && buzzRun(s.cfg.PostTimeout, "agents", "unarchive", s.id.Agent, "--reason", "returned") == nil {
-			m.Archived = false
-			_ = buzzRun(s.cfg.PostTimeout, "users", "set-status", "--clear")
-			if m.Channel != "" {
-				_, _ = postAnswer(m.Channel, "Connected again: "+sessionAgentName(b), s.cfg.PostTimeout)
-			}
-		}
-		m.Serves = &b
-	}
-	s.writeAgentMarker(dir, m, now)
-}
-
-// lead reports whether this worker leads the lifecycle of its Buzz identity
-// under pin. The first worker to take <pin>/<self>.lock leads for the life of
-// Serve; when it exits, the kernel drops the lock and the next tick of
-// another worker takes it. Without advisory locks amq-acp runs one worker
-// (PrepareWorkerEnv), which leads. A lock error skips this tick.
-func (s *Server) lead(pin string) bool {
+// lead reports whether this process leads the machine agent's identity: it
+// holds _machine/<self>.lock. The first process to take the lock leads until
+// it resigns or exits; then the kernel drops the lock and another process
+// can take it. Without advisory locks every process leads. A lock error is
+// no lead.
+func (s *Server) lead() bool {
 	if s.leader != nil || !lock.AdvisoryLockAvailable() {
 		return true
 	}
-	dir := s.agentMarkerDir(pin)
+	dir := s.agentMarkerDir()
 	if os.MkdirAll(dir, 0o700) != nil {
 		return false
 	}
@@ -444,16 +137,6 @@ func (s *Server) resign() {
 	}
 }
 
-// recordDM keeps channel as the latest DM of a pinned agent across its
-// workers, so the worker that leads its lifecycle posts "Connected again"
-// there. Every DM prompt writes it: the last writer is the latest DM.
-func (s *Server) recordDM(channel string) {
-	if !s.cfg.RemoteBinding || s.cfg.Helper || s.cfg.Pin == "" || s.cfg.PinErr != nil || s.id.Agent == "" {
-		return
-	}
-	_ = s.writeState(filepath.Join(s.agentMarkerDir(s.cfg.Pin), s.id.Agent+".dm"), []byte(channel+"\n"))
-}
-
 // writeAgentMarker stamps m as this process's and writes it under dir. Only
 // the worker that leads the identity writes (lead), and it never overwrites
 // the marker of a worker that started after it. A marker that already says
@@ -469,7 +152,7 @@ func (s *Server) writeAgentMarker(dir string, m agentMarker, now time.Time) {
 		}
 	}
 	m.PubKey, m.PID = s.id.Agent, os.Getpid()
-	m.Worker, m.Parent = workerIdentity.self, workerIdentity.parent
+	m.Worker = workerIdentity.self
 	m.Updated = now.UTC().Format(time.RFC3339)
 	raw, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
@@ -484,256 +167,8 @@ func (s *Server) writeAgentMarker(dir string, m agentMarker, now time.Time) {
 	_ = s.writeState(path, append(raw, '\n'))
 }
 
-// The per-machine helper ("AMQ Remote helper" in its system prompt) creates
-// the session agents. It never delivers. On each tick it:
-//   - creates the private control channel "amq-remote @ <machine>" once and
-//     adds the owner as an admin: Desktop accepts an agent draft only from a
-//     channel that both the sending agent and the owner belong to, and adds
-//     each new agent to that channel as the owner, which a relay may allow
-//     only an owner or admin of a private channel to do;
-//   - sends one draft-create per helperRequestGap for a live binding that
-//     no agent has a marker for yet (the fewest tries, then the oldest), so
-//     Desktop opens "Create agent" with the session's name and pin filled
-//     in. A binding whose session is unknown or ended, and the legacy
-//     unnamed binding, never get one. A binding gets at most
-//     helperRequestTries drafts, and a re-attach (a newer bound_at) starts a
-//     new budget; the draft is ephemeral, so a closed Desktop drops it.
-
-// helperName is the helper's marker directory under agents/. It is not a
-// valid binding name, so it never meets a session's.
-const helperName = "_helper"
-
-const (
-	helperRequestTries = 3
-	helperRequestGap   = 10 * time.Minute
-)
-
-// helperRequest is the bookkeeping of the draft requests for one binding,
-// under <state>/requests/<name>.json.
-type helperRequest struct {
-	Count int    `json:"count"`
-	Last  string `json:"last"`
-}
-
-func (s *Server) helperTick(now time.Time) {
-	if s.id.Agent == "" {
-		return
-	}
-	dir := s.agentMarkerDir(helperName)
-	m, _ := readAgentMarker(filepath.Join(dir, s.id.Agent+".json"))
-	m.Name, m.DisplayName = helperName, s.id.DisplayName
-	defer func() { s.writeAgentMarker(dir, m, now) }()
-	if s.id.Owner == "" || !s.helperChannel(&m, now) {
-		return
-	}
-	// Desktop shows one draft at a time and drops a draft that arrives
-	// while one is open, so the helper sends at most one draft per window
-	// across all sessions. The window ends early once the drafted session's
-	// agent runs: the owner closed that dialog.
-	if last, err := time.Parse(time.RFC3339, m.LastDraft); err == nil && now.Sub(last) < helperRequestGap &&
-		(m.LastDraftFor == "" || len(s.agentMarkers(m.LastDraftFor)) == 0) {
-		return
-	}
-	all, err := binding.List()
-	if err != nil {
-		return
-	}
-	var next *binding.Binding
-	var nextReq helperRequest
-	for i, b := range all {
-		if !s.draftable(b) {
-			continue
-		}
-		req := s.helperRequest(b)
-		if req.Count >= helperRequestTries {
-			continue
-		}
-		if next == nil || req.Count < nextReq.Count || (req.Count == nextReq.Count && req.Last < nextReq.Last) {
-			next, nextReq = &all[i], req
-		}
-	}
-	if next == nil {
-		return
-	}
-	sent, err := s.requestSessionAgent(m.Channel, *next, nextReq, now)
-	if sent {
-		m.LastDraft, m.LastDraftFor = now.UTC().Format(time.RFC3339), next.Name
-	}
-	if err != nil && s.channelGone(m.Channel, err.Error()) {
-		// Set a new control channel up after the backoff.
-		dropChannel(&m, now)
-	}
-}
-
-// helperDroppedMax bounds the control channels the helper remembers giving
-// up on.
-const helperDroppedMax = 8
-
-// dropChannel gives up on the helper's control channel: the next setup,
-// after the backoff, adopts or creates another one.
-func dropChannel(m *agentMarker, now time.Time) {
-	if m.Channel != "" {
-		m.Dropped = append(m.Dropped, m.Channel)
-		if len(m.Dropped) > helperDroppedMax {
-			m.Dropped = m.Dropped[len(m.Dropped)-helperDroppedMax:]
-		}
-	}
-	m.Channel, m.OwnerAdmin = "", false
-	m.SetupFailed = now.UTC().Format(time.RFC3339)
-}
-
-// helperChannel makes sure the control channel exists and the owner is an
-// admin of it. Before it creates one, it adopts a private channel of the same name
-// that the helper owns, unless it gave up on that channel. After a failure
-// it waits helperRequestGap, so a failing relay never gets a request every
-// tick and an unclear create never leaves a stream of new channels. A
-// channel that refuses the owner is given up.
-func (s *Server) helperChannel(m *agentMarker, now time.Time) bool {
-	if m.Channel != "" && m.OwnerAdmin {
-		return true
-	}
-	if failed, err := time.Parse(time.RFC3339, m.SetupFailed); err == nil && now.Sub(failed) < helperRequestGap {
-		return false
-	}
-	m.SetupFailed = now.UTC().Format(time.RFC3339)
-	name := "amq-remote"
-	if machine := binding.Machine(); machine != "" {
-		name += " @ " + machine
-	}
-	if m.Channel == "" {
-		out, err := buzzCall(s.cfg.PostTimeout, "channels", "list", "--member", "--visibility", "private")
-		var listed []struct {
-			ChannelID string `json:"channel_id"`
-			Name      string `json:"name"`
-		}
-		if err != nil || json.Unmarshal(out, &listed) != nil {
-			return false
-		}
-		for _, c := range listed {
-			if c.Name == name && c.ChannelID != "" && !slices.Contains(m.Dropped, c.ChannelID) && s.ownsChannel(c.ChannelID) {
-				m.Channel = c.ChannelID
-				break
-			}
-		}
-	}
-	if m.Channel == "" {
-		out, err := buzzCall(s.cfg.PostTimeout, "channels", "create", "--name", name, "--type", "stream", "--visibility", "private")
-		var created struct {
-			ChannelID string `json:"channel_id"`
-		}
-		if buzzcli.Classify(buzzcli.ShapeAccepted, out, err).Outcome != buzzop.Accepted || json.Unmarshal(out, &created) != nil || created.ChannelID == "" {
-			return false
-		}
-		m.Channel = created.ChannelID
-	}
-	// Adding the owner again with a new role changes the role, so a channel
-	// set up before the owner was made an admin is upgraded here.
-	out, err := buzzCall(s.cfg.PostTimeout, "channels", "add-member", "--channel", m.Channel, "--pubkey", s.id.Owner, "--role", "admin")
-	if buzzcli.Classify(buzzcli.ShapeAccepted, out, err).Outcome != buzzop.Accepted {
-		failure := string(out)
-		if err != nil {
-			failure = err.Error()
-		}
-		if s.channelGone(m.Channel, failure) {
-			dropChannel(m, now)
-		}
-		return false
-	}
-	m.OwnerAdmin, m.SetupFailed = true, ""
-	return true
-}
-
-// ownsChannel reports whether the helper is the owner of channel, so it
-// never adopts a channel someone else made with the same name.
-func (s *Server) ownsChannel(channel string) bool {
-	owner, ok := s.channelOwner(channel)
-	return ok && owner
-}
-
-// channelOwner reports whether the helper owns channel; ok is false when
-// the members could not be read, which proves nothing.
-func (s *Server) channelOwner(channel string) (owner, ok bool) {
-	return s.ownerOf(buzzCall(s.cfg.PostTimeout, "channels", "members", "--channel", channel))
-}
-
-// ownerOf reads a channels members result: whether this agent is the
-// channel's owner, and whether the members could be read at all.
-func (s *Server) ownerOf(out []byte, err error) (owner, ok bool) {
-	var members []struct {
-		PubKey string `json:"pubkey"`
-		Role   string `json:"role"`
-	}
-	if err != nil || json.Unmarshal(out, &members) != nil {
-		return false, false
-	}
-	for _, mb := range members {
-		if mb.PubKey == s.id.Agent && mb.Role == "owner" {
-			return true, true
-		}
-	}
-	return false, true
-}
-
-// channelGone reports whether a refused call shows the control channel is
-// unusable: the refusal says it is archived, or the relay lists the helper
-// no longer as its owner. A failure that proves neither, such as a timeout,
-// keeps the channel.
-func (s *Server) channelGone(channel, failure string) bool {
-	if channel == "" {
-		return false
-	}
-	if strings.Contains(strings.ToLower(failure), "archived") {
-		return true
-	}
-	owner, ok := s.channelOwner(channel)
-	return ok && !owner
-}
-
-// draftable reports whether the helper may draft an agent for b: a named
-// binding whose session is proven live and that no agent has a marker for.
-func (s *Server) draftable(b binding.Binding) bool {
-	if b.Name == binding.LegacyName || len(s.agentMarkers(b.Name)) > 0 {
-		return false
-	}
-	state, _ := s.liveness(b)
-	return state == binding.Live
-}
-
-// helperRequest returns b's draft bookkeeping. A re-attach (a bound_at newer
-// than the last request) is a new request with a full budget.
-func (s *Server) helperRequest(b binding.Binding) helperRequest {
-	var req helperRequest
-	if raw, err := readSmallRegular(filepath.Join(s.cfg.StateDir, "requests", b.Name+".json")); err == nil {
-		_ = json.Unmarshal(raw, &req)
-	}
-	last, err := time.Parse(time.RFC3339, req.Last)
-	if bound, berr := time.Parse(time.RFC3339, b.BoundAt); err == nil && berr == nil && bound.After(last) {
-		return helperRequest{}
-	}
-	return req
-}
-
-// requestSessionAgent records one more attempt for b and sends its
-// draft-create. It reports whether the attempt was recorded and sent, and
-// the draft-create error.
-func (s *Server) requestSessionAgent(channel string, b binding.Binding, req helperRequest, now time.Time) (bool, error) {
-	dir := filepath.Join(s.cfg.StateDir, "requests")
-	req.Count++
-	req.Last = now.UTC().Format(time.RFC3339)
-	raw, err := json.Marshal(req)
-	if err != nil {
-		return false, nil
-	}
-	// The attempt is recorded first, so a failing Desktop or relay never
-	// gets more than helperRequestTries requests.
-	if err := s.writeState(filepath.Join(dir, b.Name+".json"), append(raw, '\n')); err != nil {
-		return false, nil
-	}
-	return true, buzzRun(s.cfg.PostTimeout, "agents", "draft-create", "--channel", channel, "--display-name", sessionAgentName(b), "--system-prompt", "AMQ Remote session: "+b.Name)
-}
-
-// sessionAgentName is the Buzz agent name for b's session: its label, else
-// "AMQ: <name>" for a binding written before labels.
+// sessionAgentName is the name of b's session in Buzz, which its channel
+// carries: its label, else "AMQ: <name>" for a binding with no label.
 func sessionAgentName(b binding.Binding) string {
 	if b.Label != "" {
 		return b.Label

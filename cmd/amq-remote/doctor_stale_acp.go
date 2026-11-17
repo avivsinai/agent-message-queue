@@ -166,8 +166,7 @@ func imageDeleted(path string) bool {
 }
 
 // staleACPNotes turns probe outcomes into advice notes: one per stale
-// process (naming it and the installed path, with the Stop-and-Start
-// remedy) and, when anything is unknown, one note per distinct reason
+// process (naming it and the installed path, with the restart remedy) and, when anything is unknown, one note per distinct reason
 // naming every affected pid. Stale is advice, not a failure: a different
 // identity can also be a byte-identical copy or another binary with the
 // same name, so the operator decides.
@@ -182,8 +181,8 @@ func staleACPNotes(probes []staleProbe, path string) []boundaryFailure {
 			notes = append(notes, boundaryFailure{
 				Boundary: "stale_harness",
 				Subject:  fmt.Sprintf("pid %d", p.PID),
-				Detail:   fmt.Sprintf("amq-acp pid %d runs a different executable than the installed %s; if this is a Buzz Desktop agent, Stop and Start it", p.PID, path),
-				Remedy:   "If this is a Buzz Desktop agent, Stop and Start it so it runs the installed amq-acp",
+				Detail:   fmt.Sprintf("amq-acp pid %d runs a different executable than the installed %s", p.PID, path),
+				Remedy:   "Restart that amq-acp process so it runs the installed amq-acp",
 			})
 		case p.Reason != "":
 			reasonPids[p.Reason] = append(reasonPids[p.Reason], p.PID)
@@ -204,7 +203,7 @@ func staleACPNotes(probes []staleProbe, path string) []boundaryFailure {
 			Boundary: "stale_harness",
 			Subject:  "pid(s) " + strings.Join(parts, ", "),
 			Detail:   fmt.Sprintf("could not check amq-acp pid(s) %s: %s", strings.Join(parts, ", "), reason),
-			Remedy:   "If this is a Buzz Desktop agent, Stop and Start it and re-run doctor",
+			Remedy:   "Re-run doctor",
 		})
 	}
 	return notes
@@ -252,7 +251,7 @@ func staleACPFailures(probes []staleProbe) []boundaryFailure {
 				Boundary: "stale_harness",
 				Subject:  fmt.Sprintf("pid %d", p.PID),
 				Detail:   fmt.Sprintf("amq-acp pid %d runs an executable that an upgrade deleted, so it answers from a removed version", p.PID),
-				Remedy:   "If this is a Buzz Desktop agent, Stop and Start it (Agents, the agent) so it runs the installed amq-acp",
+				Remedy:   "Restart that amq-acp process so it runs the installed amq-acp",
 			})
 		}
 	}
