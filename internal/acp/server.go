@@ -130,16 +130,10 @@ type turnState struct {
 	// channel is the Buzz channel the owner's message came from ("" for an
 	// ACP prompt); the owner-facing text is posted there.
 	channel string
-	// mailboxEvent is the event id of a machine agent's turn, registered
-	// when the turn begins and cleared once the turn routes to a native
-	// binding. A cancel decides that event's durable outcome before it
-	// settles the turn, so a mailbox Stop is never acknowledged before it is
-	// recorded.
-	mailboxEvent string
 	// route is the channel of a machine agent's turn ("" for an ACP
 	// prompt).
 	route string
-	// event is the owner's verified message of a standalone turn (Owner),
+	// event is the owner's signed message of a machine agent's turn (Owner),
 	// set before the turn runs; nil for an ACP prompt.
 	event *nostr.Event
 }
@@ -969,30 +963,12 @@ func (s *Server) cancel(params json.RawMessage) (any, *rpcError) {
 		return nil, err
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	session, ok := s.sessions[parsed.SessionID]
 	if !ok {
-		s.mu.Unlock()
 		return nil, newRPCError(codeInvalidParams, "unknown sessionId %q", parsed.SessionID)
 	}
-	t, event := session.turn, ""
-	if t != nil && t.outcome == turnOpen {
-		event = t.mailboxEvent
-	}
-	s.mu.Unlock()
-	// A mailbox cancel is accepted only once it is the event's durable
-	// outcome; if a reply already is, the turn returns that reply.
-	if event != "" {
-		final, _, err := s.decideOutcome(event, mailboxOutcome{Cancelled: true})
-		if err != nil {
-			return nil, newRPCError(codeInternalError, "record cancel: %v", err)
-		}
-		if !final.Cancelled {
-			return struct{}{}, nil
-		}
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if t != nil && session.turn == t && t.settleLocked(turnCancelled) {
+	if t := session.turn; t != nil && t.settleLocked(turnCancelled) {
 		close(t.done)
 	}
 	return struct{}{}, nil

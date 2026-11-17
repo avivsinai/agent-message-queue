@@ -156,10 +156,6 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 		if b.Mailbox() {
 			return s.runMailbox(sessionID, text, eventID, b, turn, emit)
 		}
-		// A native turn's cancel goes to the endpoint, not to the outcome.
-		s.mu.Lock()
-		turn.mailboxEvent = ""
-		s.mu.Unlock()
 		root, target, native = b.Root, b.Target, b.NativeSession
 		// The session mirror tells this turn's frame from a peer's by its
 		// msg_id, recorded before the endpoint can send the frame.
@@ -777,13 +773,10 @@ func (r *remoteTurn) failed(state string, err error) (any, *rpcError) {
 // Post kinds: each event posts at most one status text (a timeout, a stop
 // that leaves work running, a failure to submit) and at most one final
 // answer. Separate markers keep an earlier status post from suppressing the
-// answer that a later delivery of the event brings. A cancel confirmation
-// ("Stopped waiting") is the one status allowed after the final marker, and
-// only when that marker records a cancel; it posts at most once.
+// answer that a later delivery of the event brings.
 const (
 	postStatus = "status"
 	postFinal  = "final"
-	postCancel = "cancel"
 )
 
 // say emits text as the agent message and returns the result. A client that
@@ -816,8 +809,6 @@ func (r *remoteTurn) say(kind string, outcome turnOutcome, stopReason, text stri
 //   - status: under the lock, skip if the final marker exists or the status
 //     was already posted; post to Buzz; then create the status marker;
 //     release. While a status post holds the lock, no final can reserve.
-//     A cancel confirmation is the reverse: it posts only when the final
-//     marker records a cancel.
 //     Config.PostTimeout bounds the hold, and a crash releases the flock.
 //
 // A post that failed is not retried, because the post has no idempotency
@@ -844,12 +835,7 @@ func (s *Server) postOnce(eventID, kind string, record []byte, channel, text str
 	dir := s.eventDir(eventID)
 	result := ""
 	err := s.withPostLock(eventID, func() error {
-		out, final := s.mailboxAnswered(eventID)
-		switch {
-		case kind == postCancel && (!final || !out.Cancelled):
-			result = "superseded: this event was not cancelled"
-			return nil
-		case kind != postCancel && final:
+		if _, final := s.mailboxAnswered(eventID); final {
 			result = "superseded: this event already has its final text"
 			return nil
 		}

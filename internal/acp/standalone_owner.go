@@ -242,7 +242,7 @@ func (s *Server) runOwnerTurn(ch string, evt nostr.Event, quit <-chan struct{}) 
 		s.sessions[sid] = &sessionState{ID: sid, ChannelID: ch, Thread: cockpitThread(sid), route: ch}
 	}
 	session, turn, _ := s.beginTurnLocked(sid)
-	turn.route, turn.channel, turn.mailboxEvent, turn.event = ch, ch, id, &evt
+	turn.route, turn.channel, turn.event = ch, ch, &evt
 	s.mu.Unlock()
 	defer s.finishTurn(session, turn)
 	defer s.showWorking(ch)()

@@ -214,9 +214,9 @@ func (s *Server) requestSweep() {
 // turn ended without one, for example on a timeout or a client that left.
 // An event waits while its turn can still be open (younger
 // than the turn timeout) or while it has no DM channel, and leaves the
-// sweep once it has an outcome or passes the horizon. The post and a cancel
-// both decide the event's outcome through one exclusive record, so exactly
-// one of them happens and each reply is posted at most once.
+// sweep once it has an outcome or passes the horizon. A turn's post and the
+// sweep's both decide the event's outcome through one exclusive record, so
+// each reply is posted at most once.
 func (s *Server) sweepLateReplies(now time.Time) {
 	l := &s.late
 	s.discoverClaims(now)
@@ -268,11 +268,11 @@ func (s *Server) sweepLateReplies(now time.Time) {
 				continue
 			}
 			posts++
-			final, won, err := s.decideOutcome(c.eventID, mailboxOutcome{ReplyID: replyID})
+			_, won, err := s.decideOutcome(c.eventID, mailboxOutcome{ReplyID: replyID})
 			if err != nil {
 				continue
 			}
-			if won && !final.Cancelled {
+			if won {
 				_ = s.publishFinal(c.eventID, c.channel, text)
 			}
 			l.drop(c.eventID)
