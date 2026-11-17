@@ -199,11 +199,10 @@ func (s *Server) requestSweep() {
 
 // sweepLateReplies posts the final reply of each recent mailbox event whose
 // turn ended without one, for example on a timeout or a client that left.
-// An event waits while its turn can still be open (younger
-// than the turn timeout), and leaves the sweep once it has an outcome or
-// passes the horizon. A turn's post and the
-// sweep's both decide the event's outcome through one exclusive record, so
-// each reply is posted at most once.
+// An event waits while its turn can still be open (younger than the turn
+// timeout), and leaves the sweep once it has an outcome or passes the
+// horizon. A turn's post and the sweep's both decide the event's outcome
+// through one exclusive record, so each reply is posted at most once.
 func (s *Server) sweepLateReplies(now time.Time) {
 	l := &s.late
 	s.discoverClaims(now)
