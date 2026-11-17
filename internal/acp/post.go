@@ -71,7 +71,8 @@ func (s *Server) recordFinal(eventID, result string, err error) string {
 }
 
 // post is publish that also returns the post's error. key names the post.
-// A server with no transport sends nothing: its post is not sent.
+// A server with no transport never posts: its result is a post that was
+// not sent.
 func (s *Server) post(key buzzop.Key, channel, text string) (string, error) {
 	if channel == "" || strings.TrimSpace(text) == "" {
 		return "", nil

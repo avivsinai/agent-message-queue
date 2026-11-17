@@ -697,9 +697,6 @@ type amqDelivery struct {
 	Completed bool   `json:"completed"`
 	Egress    string `json:"egress"`
 	Duplicate bool   `json:"duplicate,omitempty"`
-	// Posted is "posted" when the reply was published into the Buzz
-	// channel, or the post error.
-	Posted string `json:"posted,omitempty"`
 }
 
 func (s *Server) prompt(params json.RawMessage, emit func(any) error) (any, *rpcError) {
@@ -841,9 +838,7 @@ func (s *Server) waitForReply(sessionID string, delivery Delivery, turn *turnSta
 			if err := emitText(emit, sessionID, "agent_message_chunk", reply); err != nil {
 				return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
 			}
-			result := turnResult(delivery, turnReplied, reply)
-			result.Meta.AMQ.Posted = s.publish(turn.channel, reply)
-			return result, nil
+			return turnResult(delivery, turnReplied, reply), nil
 		}
 
 		select {
