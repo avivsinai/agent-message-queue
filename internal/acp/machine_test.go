@@ -273,8 +273,8 @@ func TestMachinePromptInAnActiveChannelReachesItsSession(t *testing.T) {
 
 // A prompt from a channel no active record names reaches no session; the
 // answer lists the live sessions and their channels. Owner drops a message
-// in such a channel, so the prompt is a turn that was queued while its
-// record was active and runs after it is not.
+// in such a channel, so the test runs the turn itself, with no claim and no
+// active record of its channel.
 func TestMachinePromptInAnUnknownChannelGetsTheDirectory(t *testing.T) {
 	s, rec := machineServer(t)
 	alpha := liveSession(t, "alpha")
