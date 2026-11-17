@@ -144,6 +144,29 @@ func TestMailboxTwoPollersReturnOneReply(t *testing.T) {
 	}
 }
 
+// Replies that one poll finds together are handled oldest first: each
+// status reply is progress, in the order the agent sent them, and the
+// answer is the final reply. The replies are in the inbox before the one
+// poll, so no timing decides what it sees (review of bead
+// agent-message-queue-vosl.9: the order within one poll had no
+// deterministic test).
+func TestMailboxOnePollReturnsProgressInOrderAndTheFinal(t *testing.T) {
+	s, root := standalone(t).s, liveSession(t, "alpha").Root
+	thread := cockpitThread("session/s")
+	since := time.Now().Add(-time.Minute)
+	replyAs(t, root, thread, "prompt", format.KindStatus, "reading the code")
+	replyAs(t, root, thread, "prompt", format.KindStatus, "running the tests")
+	answer := replyAs(t, root, thread, "prompt", format.KindAnswer, "all done")
+	watch := s.watchMailbox(binding.Binding{Root: root, Handle: "agent"}, thread, "prompt", since)
+	finalID, final, progress, err := watch.poll(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"agent: reading the code", "agent: running the tests"}; !slices.Equal(progress, want) || final != "all done" || finalID != answer {
+		t.Fatalf("progress=%q final=%q id=%q; want %q, then the answer %s", progress, final, finalID, want, answer)
+	}
+}
+
 // Regression: #957, the mover emitted
 // the drained receipt only if it also won forwarding. When another watch's
 // cur recovery won first, no drained receipt was ever written.
