@@ -22,6 +22,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/mailprompt"
+	remoteturn "github.com/avivsinai/agent-message-queue/internal/remote/turn"
 )
 
 // ProtocolVersion is the live ACP bridge version. Prompt turns remain open
@@ -30,11 +31,11 @@ import (
 const ProtocolVersion = 2
 
 // StopReasonEndTurn ends a prompt turn once a fresh reply was observed.
-const StopReasonEndTurn = "end_turn"
+const StopReasonEndTurn = remoteturn.StopReasonEndTurn
 
 // StopReasonRefusal ends a prompt turn without a reply: the bounded wait
 // expired before the recipient answered.
-const StopReasonRefusal = "refusal"
+const StopReasonRefusal = remoteturn.StopReasonRefusal
 
 // DeliveryStateQueued is the honest post-delivery state. The message sits in the
 // recipient's inbox/new; consumption is a separate, unproven event.
@@ -47,7 +48,7 @@ const DeliveryStateReplied = "replied"
 const DeliveryStateNoReply = "no_reply"
 
 // StopReasonCancelled ends a prompt turn the client cancelled.
-const StopReasonCancelled = "cancelled"
+const StopReasonCancelled = remoteturn.StopReasonCancelled
 
 // DeliveryStateCancelled marks a turn ended by session/cancel. The prompt
 // stays queued in AMQ; delivery is never retracted.
@@ -111,7 +112,7 @@ type sessionState struct {
 type turnState struct {
 	// timing is set when the prompt starts and fixed for the turn; nil means
 	// the startup values.
-	timing *turnTiming
+	timing *remoteturn.Timing
 	// prompt is the delivered prompt's message id; only a reply whose refs
 	// name it answers this turn.
 	prompt string
@@ -139,22 +140,16 @@ type turnState struct {
 	event *nostr.Event
 }
 
-// turnOutcome is how a turn settled. Its value is the reason on the wire.
-type turnOutcome string
+// turnOutcome is how a turn settled (remoteturn.Outcome).
+type turnOutcome = remoteturn.Outcome
 
 const (
-	turnOpen         turnOutcome = ""
-	turnReplied      turnOutcome = "replied"
-	turnCancelled    turnOutcome = "session_cancelled"
-	turnDisconnected turnOutcome = "client_disconnected"
-	turnTimedOut     turnOutcome = "reply_timeout"
+	turnOpen         = remoteturn.Open
+	turnReplied      = remoteturn.Replied
+	turnCancelled    = remoteturn.Cancelled
+	turnDisconnected = remoteturn.Disconnected
+	turnTimedOut     = remoteturn.TimedOut
 )
-
-// stopped reports a turn the client ended (a cancel or a closed stream)
-// before it was answered or timed out.
-func (o turnOutcome) stopped() bool {
-	return o == turnCancelled || o == turnDisconnected
-}
 
 // settleLocked decides the turn's outcome if it is still open; it reports
 // whether this call decided it. Caller holds s.mu.
@@ -166,16 +161,27 @@ func (t *turnState) settleLocked(outcome turnOutcome) bool {
 	return true
 }
 
+// settler is the Settle of a remote turn that runs as turn: it decides the
+// turn's outcome under s.mu if it is still open and returns the outcome that
+// stands. turnOpen only reads it.
+func (s *Server) settler(turn *turnState) func(turnOutcome) turnOutcome {
+	return func(outcome turnOutcome) turnOutcome {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if outcome != turnOpen {
+			turn.settleLocked(outcome)
+		}
+		return turn.outcome
+	}
+}
+
 // Server is one long-lived ACP stdio connection bound to one authenticated
 // AMQ routing context. Prompt requests run in goroutines so the reader stays
 // available while a turn waits for its reply.
 type Server struct {
-	// settingsRefused is the last reported reason acp.settings was refused,
-	// guarded by mu, so a bad file logs once, not on every turn.
-	settingsRefused string
-	// lastGood is the last valid settings (startup values until a file is
-	// read), guarded by mu.
-	lastGood *turnTiming
+	// timings reads acp.settings for each turn that starts; it is made at
+	// the first turn, guarded by mu.
+	timings  *remoteturn.Timings
 	cfg      Config
 	version  string
 	mu       sync.Mutex
@@ -807,11 +813,11 @@ func (s *Server) waitForReply(sessionID string, delivery Delivery, turn *turnSta
 		return nil, newRPCError(codeInternalError, "emit ACP session update: %v", err)
 	}
 
-	deadline := time.NewTimer(s.timing(turn).timeout)
+	deadline := time.NewTimer(s.timing(turn).Timeout)
 	defer deadline.Stop()
-	poll := time.NewTicker(s.timing(turn).poll)
+	poll := time.NewTicker(s.timing(turn).Poll)
 	defer poll.Stop()
-	heartbeat := time.NewTicker(s.timing(turn).heartbeat)
+	heartbeat := time.NewTicker(s.timing(turn).Heartbeat)
 	defer heartbeat.Stop()
 
 	// settle decides the outcome under the mutex; if another path already

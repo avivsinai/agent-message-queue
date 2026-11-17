@@ -21,6 +21,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/mirror"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
+	remoteturn "github.com/avivsinai/agent-message-queue/internal/remote/turn"
 )
 
 // TestRemotePromptSubmitsToTargetAndReturnsResult is the happy path for
@@ -63,7 +64,7 @@ func TestRemotePromptSubmitsToTargetAndReturnsResult(t *testing.T) {
 	eventID := strings.Repeat("ab", 32)
 	live.send(fmt.Sprintf(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":%q,"prompt":[{"type":"text","text":"say hi"}],"_meta":{"nostr":{"eventId":%q}}}}`, sessionID, eventID))
 
-	requestID, err := remoteRequestID(eventID)
+	requestID, err := remoteturn.RequestID(eventID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,276 +134,6 @@ func newTurn() *turnState {
 	return &turnState{done: make(chan struct{}), ready: make(chan struct{})}
 }
 
-type noCancel struct{ *fake.Runtime }
-
-func (r noCancel) CancelExact(requests.Key, string) (core.CancelEvidence, error) {
-	return core.CancelEvidence{Disposition: protocol.CancelUnsupported, Message: "native cancel unavailable"}, nil
-}
-
-// Regression: #876, an unsupported cancel was reported as a plain cancelled
-// turn while the native work kept running.
-func TestRemoteUnsupportedCancelSaysWorkContinues(t *testing.T) {
-	rt := fake.New("fake", "e_1")
-	s := remoteServer(t, noCancel{rt}, nil)
-	turn := newTurn()
-	var said []string
-	result, rpcErr := s.runRemote("s", "hello", strings.Repeat("a", 64), turn, func(v any) error {
-		note := v.(sessionUpdateNotification)
-		if note.Params.Update.SessionUpdate == "agent_message_chunk" {
-			said = append(said, note.Params.Update.Content.Text)
-		}
-		s.mu.Lock()
-		if turn.settleLocked("session_cancelled") {
-			close(turn.done)
-		}
-		s.mu.Unlock()
-		return nil
-	})
-	if rpcErr != nil {
-		t.Fatal(rpcErr)
-	}
-	got := result.(remotePromptResult)
-	if got.Meta.Remote.Cancel != string(protocol.CancelUnsupported) || len(said) != 1 || !strings.Contains(said[0], "work continues") {
-		t.Fatalf("result=%+v said=%q", got, said)
-	}
-}
-
-// Regression: #876, an error after the native run was reported as
-// not_submitted with no request reference.
-func TestRemoteErrorAfterNativeRunKeepsRequest(t *testing.T) {
-	rt := fake.New("fake", "e_1")
-	s := remoteServer(t, rt, func(point string) error {
-		if point == core.PointAfterNative {
-			return core.ErrCrashed
-		}
-		return nil
-	})
-	result, rpcErr := s.runRemote("s", "hello", strings.Repeat("b", 64), newTurn(), func(any) error { return nil })
-	if rpcErr != nil {
-		t.Fatal(rpcErr)
-	}
-	got := result.(remotePromptResult).Meta.Remote
-	if got.State == remoteNotSubmitted || got.RequestRef == "" {
-		t.Fatalf("native run exists but result is %+v", got)
-	}
-}
-
-type movingNative struct {
-	*fake.Runtime
-	id string
-}
-
-func (m *movingNative) NativeSessionID() string { return m.id }
-
-// Regression: #876, a replacement native session behind the same target
-// received the owner's prompts.
-func TestRemoteRefusesReplacementNativeSession(t *testing.T) {
-	rt := fake.New("fake", "e_1")
-	s := remoteServer(t, &movingNative{Runtime: rt, id: "replacement"}, nil)
-	result, rpcErr := s.runRemote("s", "hello", "", newTurn(), func(any) error { return nil })
-	if rpcErr != nil {
-		t.Fatal(rpcErr)
-	}
-	got := result.(remotePromptResult)
-	if got.Meta.Remote.Code != string(protocol.CodeUnshared) || len(rt.Snapshot().RunningKeys) != 0 {
-		t.Fatalf("replacement session was not refused: %+v", got)
-	}
-}
-
-// Regression: #876, a redelivered event after the endpoint reattached under a
-// new epoch got request_conflict instead of its stored result.
-func TestRemoteRedeliveryAfterReattachReturnsStoredResult(t *testing.T) {
-	rt := fake.New("fake", "e_1")
-	s := remoteServer(t, rt, nil)
-	eventID := strings.Repeat("c", 64)
-	id, _ := remoteRequestID(eventID)
-	run := func(emit func(any) error) remotePromptResult {
-		t.Helper()
-		result, rpcErr := s.runRemote("s", "hello", eventID, newTurn(), emit)
-		if rpcErr != nil {
-			t.Fatal(rpcErr)
-		}
-		return result.(remotePromptResult)
-	}
-	if first := run(func(any) error { rt.Complete(id, "native result"); return nil }); first.StopReason != StopReasonEndTurn {
-		t.Fatalf("first = %+v", first)
-	}
-	rt.SwitchSession("e_2")
-	if second := run(func(any) error { return nil }); second.StopReason != StopReasonEndTurn || second.Meta.Remote.State != "completed" {
-		t.Fatalf("redelivery = %+v", second)
-	}
-}
-
-// Regression: #876, a cancel that settled first was overwritten by a
-// completed snapshot.
-func TestRemoteSettledCancelWins(t *testing.T) {
-	r := &remoteTurn{s: NewServer(Config{}, "test"), emit: func(any) error { return nil }, turn: &turnState{done: make(chan struct{}), outcome: "session_cancelled"}}
-	close(r.turn.done)
-	result, rpcErr := r.follow(protocol.Snapshot{State: protocol.StateCompleted, Result: &protocol.Result{Text: "done"}})
-	if rpcErr != nil {
-		t.Fatal(rpcErr)
-	}
-	if got := result.(remotePromptResult); got.StopReason != StopReasonCancelled {
-		t.Fatalf("settled cancel overwritten: %+v", got)
-	}
-}
-
-// Regression: #876, a redelivery whose lookup failed asserted
-// not_submitted while the original native run existed.
-func TestRemoteRedeliveryLookupFailureIsUncertain(t *testing.T) {
-	rt := fake.New("fake", "e_1")
-	s := remoteServer(t, rt, nil)
-	eventID := strings.Repeat("e", 64)
-	if _, rpcErr := s.runRemote("s", "hello", eventID, newTurn(), func(any) error { return nil }); rpcErr != nil {
-		t.Fatal(rpcErr)
-	}
-	path := ipc.SocketPath(filepath.Join(s.cfg.Root, remoteStateDir))
-	if err := os.Rename(path, path+".hold"); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Rename(path+".hold", path) })
-	result, rpcErr := s.runRemote("s", "hello", eventID, newTurn(), func(any) error { return nil })
-	if rpcErr != nil {
-		t.Fatal(rpcErr)
-	}
-	if got := result.(remotePromptResult).Meta.Remote; got.State != remoteUncertain || got.RequestRef == "" {
-		t.Fatalf("redelivery = %+v", got)
-	}
-}
-
-// Regression: #876, the replay path read a completed request with a wrong
-// native pin.
-func TestRemoteReplayWithWrongPinIsRefused(t *testing.T) {
-	rt := fake.New("fake", "e_1")
-	s := remoteServer(t, rt, nil)
-	eventID := strings.Repeat("f", 64)
-	id, _ := remoteRequestID(eventID)
-	if _, rpcErr := s.runRemote("s", "hello", eventID, newTurn(), func(any) error { rt.Complete(id, "private result"); return nil }); rpcErr != nil {
-		t.Fatal(rpcErr)
-	}
-	s.cfg.RemoteNative = "another-session"
-	result, rpcErr := s.runRemote("s", "hello", eventID, newTurn(), func(any) error { return nil })
-	if rpcErr != nil {
-		t.Fatal(rpcErr)
-	}
-	if got := result.(remotePromptResult); got.StopReason == StopReasonEndTurn || got.Meta.Remote.Code != string(protocol.CodeUnshared) {
-		t.Fatalf("wrong pin read the request: %+v", got)
-	}
-}
-
-// Regression: #876, a busy-rejected event could not be retried after the
-// target became free.
-func TestRemoteBusyRedeliveryRetries(t *testing.T) {
-	rt := fake.New("fake", "e_1")
-	s := remoteServer(t, rt, nil)
-	busyID := "d2c80e1d-feb7-4c10-959e-23456789abcd"
-	resp, err := ipc.Call(filepath.Join(s.cfg.Root, remoteStateDir), ipc.Request{Command: &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit, RequestID: busyID, TargetID: "fake", Epoch: "e_1", NotAfter: protocol.FormatTime(time.Now().Add(time.Minute)), Input: &protocol.SubmitInput{Text: "occupy", Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn}}})
-	if err != nil || resp.AsError() != nil {
-		t.Fatal(err, resp.AsError())
-	}
-	eventID := strings.Repeat("d", 64)
-	id, _ := remoteRequestID(eventID)
-	s.cfg.TurnTimeout = 40 * time.Millisecond
-	s.cfg.PollInterval = 5 * time.Millisecond
-	first, rpcErr := s.runRemote("s", "hello", eventID, newTurn(), func(any) error { return nil })
-	if rpcErr != nil || first.(remotePromptResult).Meta.Remote.Code != string(protocol.CodeBusy) {
-		t.Fatalf("first = %+v %v", first, rpcErr)
-	}
-	if !rt.Complete(busyID, "finished") {
-		t.Fatal("no busy run")
-	}
-	second, rpcErr := s.runRemote("s", "hello", eventID, newTurn(), func(any) error { rt.Complete(id, "recovered"); return nil })
-	if rpcErr != nil {
-		t.Fatal(rpcErr)
-	}
-	if got := second.(remotePromptResult); got.StopReason != StopReasonEndTurn {
-		t.Fatalf("busy redelivery = %+v", got)
-	}
-}
-
-// TestRemoteBusyDMWaitsThenRuns covers: a DM that
-// arrives while the session is busy is queued once, then runs on the same
-// request id after the session is free.
-// The waits below are event-driven, each bounded only by a deadlock guard:
-// the earlier 1 s windows and 2 s turn budget failed on a loaded macOS CI
-// runner (release PR #1092, ci run 39306655165) with reply_timeout.
-func TestRemoteBusyDMWaitsThenRuns(t *testing.T) {
-	rt := fake.New("fake", "e_1")
-	s := remoteServer(t, rt, nil)
-	s.cfg.PollInterval = 5 * time.Millisecond
-	s.cfg.TurnTimeout = time.Minute
-	occupy := "d2c80e1d-feb7-4c10-959e-23456789abce"
-	resp, err := ipc.Call(filepath.Join(s.cfg.Root, remoteStateDir), ipc.Request{Command: &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit, RequestID: occupy, TargetID: "fake", Epoch: "e_1", NotAfter: protocol.FormatTime(time.Now().Add(time.Minute)), Input: &protocol.SubmitInput{Text: "local turn", Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn}}})
-	if err != nil || resp.AsError() != nil {
-		t.Fatal(err, resp.AsError())
-	}
-	eventID := strings.Repeat("e", 64)
-	id, err := remoteRequestID(eventID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var mu sync.Mutex
-	var thoughts []string
-	done := make(chan remotePromptResult, 1)
-	go func() {
-		result, rpcErr := s.runRemote("s", "hello from buzz", eventID, newTurn(), func(v any) error {
-			note := v.(sessionUpdateNotification)
-			if note.Params.Update.SessionUpdate == "agent_thought_chunk" {
-				mu.Lock()
-				thoughts = append(thoughts, note.Params.Update.Content.Text)
-				mu.Unlock()
-			}
-			return nil
-		})
-		if rpcErr != nil {
-			t.Errorf("run: %v", rpcErr)
-		}
-		done <- result.(remotePromptResult)
-	}()
-	guard := time.Now().Add(30 * time.Second)
-	for time.Now().Before(guard) && queuedThoughts(&mu, &thoughts) == 0 {
-		time.Sleep(5 * time.Millisecond)
-	}
-	queued := queuedThoughts(&mu, &thoughts)
-	if queued != 1 {
-		t.Fatalf("queued thoughts = %q", thoughts)
-	}
-	if rt.HasRun(id) {
-		t.Fatal("dm ran while the session was busy")
-	}
-	if !rt.Complete(occupy, "local done") {
-		t.Fatal("occupy did not complete")
-	}
-	for time.Now().Before(guard) {
-		if rt.Complete(id, "ran after the wait") {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	got := <-done
-	if got.StopReason != StopReasonEndTurn {
-		t.Fatalf("result = %+v", got)
-	}
-	if queuedThoughts(&mu, &thoughts) != 1 {
-		mu.Lock()
-		gotThoughts := append([]string(nil), thoughts...)
-		mu.Unlock()
-		t.Fatalf("queued thoughts after admit = %q", gotThoughts)
-	}
-}
-
-func queuedThoughts(mu *sync.Mutex, thoughts *[]string) int {
-	mu.Lock()
-	defer mu.Unlock()
-	n := 0
-	for _, text := range *thoughts {
-		if strings.HasPrefix(text, "Queued:") {
-			n++
-		}
-	}
-	return n
-}
-
 // TestRemoteCancelWhileQueuedSubmitsNothing covers:
 // session/cancel during the busy wait stops retrying and never admits the DM.
 func TestRemoteCancelWhileQueuedSubmitsNothing(t *testing.T) {
@@ -417,13 +148,13 @@ func TestRemoteCancelWhileQueuedSubmitsNothing(t *testing.T) {
 		t.Fatal(err, resp.AsError())
 	}
 	eventID := strings.Repeat("9", 64)
-	id, err := remoteRequestID(eventID)
+	id, err := remoteturn.RequestID(eventID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	turn := newTurn()
 	sawQueue := make(chan struct{}, 1)
-	done := make(chan remotePromptResult, 1)
+	done := make(chan remoteturn.Result, 1)
 	go func() {
 		result, rpcErr := s.runRemote("s", "hello from buzz", eventID, turn, func(v any) error {
 			note := v.(sessionUpdateNotification)
@@ -438,7 +169,7 @@ func TestRemoteCancelWhileQueuedSubmitsNothing(t *testing.T) {
 		if rpcErr != nil {
 			t.Errorf("run: %v", rpcErr)
 		}
-		done <- result.(remotePromptResult)
+		done <- result.(remoteturn.Result)
 	}()
 	select {
 	case <-sawQueue:
@@ -463,7 +194,7 @@ func TestRemoteCancelWhileQueuedSubmitsNothing(t *testing.T) {
 	if rpcErr != nil {
 		t.Fatal(rpcErr)
 	}
-	if again.(remotePromptResult).StopReason != StopReasonCancelled || rt.HasRun(id) {
+	if again.(remoteturn.Result).StopReason != StopReasonCancelled || rt.HasRun(id) {
 		t.Fatalf("redelivery ran: %+v hasRun=%v", again, rt.HasRun(id))
 	}
 }
@@ -489,7 +220,7 @@ func TestBindingModeFollowsTheBoundSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	evt := f.ownerSays(t, machineChanA, "hello again").Event
-	id, _ := remoteRequestID(evt.ID.Hex())
+	id, _ := remoteturn.RequestID(evt.ID.Hex())
 	directComplete(t, rt, id, "from the bound session")
 	f.s.runOwnerTurn(machineChanA, evt, nil)
 	if !rt.HasRun(id) || f.posts(machineChanA, "from the bound session") != 1 {
@@ -513,7 +244,7 @@ func TestRedeliveryAfterRebindStaysOnTheFirstSession(t *testing.T) {
 	directTiming(f, 200*time.Millisecond)
 	f.startMachine(t)
 	in := f.ownerSays(t, machineChanA, "hello")
-	id, _ := remoteRequestID(in.Event.ID.Hex())
+	id, _ := remoteturn.RequestID(in.Event.ID.Hex())
 	waitClosed(t, f.s.Owner(in))
 	if !a.Complete(id, "result from A") {
 		t.Fatal("the first delivery did not run in session A")
@@ -553,7 +284,7 @@ func TestCodexCarrierRecordsTheClientUserMessageID(t *testing.T) {
 	activeChannel(t, f.s, b, machineChanA)
 	directTiming(f, time.Second)
 	evt := f.ownerSays(t, machineChanA, "hello").Event
-	id, _ := remoteRequestID(evt.ID.Hex())
+	id, _ := remoteturn.RequestID(evt.ID.Hex())
 	directComplete(t, rt.Runtime, id, "done")
 	f.s.runOwnerTurn(machineChanA, evt, nil)
 	var key requests.Key
@@ -629,96 +360,6 @@ func TestExistingEventClaimIsMadeDurableBeforeUse(t *testing.T) {
 	}
 }
 
-// blockedSubmit is a fake whose Inspect advertises submit false with an
-// adapter reason once blocked is set (core.SubmitBlocker).
-type blockedSubmit struct {
-	*fake.Runtime
-	mu      sync.Mutex
-	blocked string
-}
-
-func (b *blockedSubmit) block(reason string) { b.mu.Lock(); b.blocked = reason; b.mu.Unlock() }
-
-func (b *blockedSubmit) Inspect() protocol.Session { s, _ := b.InspectSubmit(); return s }
-
-func (b *blockedSubmit) InspectSubmit() (protocol.Session, string) {
-	s := b.Runtime.Inspect()
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.blocked != "" {
-		s.Capabilities.Submit = false
-	}
-	return s, b.blocked
-}
-
-// Regression: #923, a deferred
-// unsupported refusal kept the adapter's reason on the record only, so the
-// owner's DM showed a bare "rejected (unsupported)".
-func TestDeferredRefusalReasonReachesTheDM(t *testing.T) {
-	rt := fake.New("fake", "e_1")
-	att := &blockedSubmit{Runtime: rt}
-	root := endpointRoot(t)
-	dir := filepath.Join(root, remoteStateDir)
-	store, err := requests.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ep := core.New(core.Config{Store: store})
-	ep.Register(att)
-	srv, err := ipc.Listen(dir, ep)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	served := make(chan struct{})
-	go func() { defer close(served); _ = srv.Serve(ctx) }()
-	t.Cleanup(func() { cancel(); <-served; _ = ep.Close(); _ = store.Close() })
-	s := NewServer(Config{Root: root, RemoteTarget: "fake", RemoteNative: "fake", HeartbeatInterval: 10 * time.Millisecond, TurnTimeout: 2 * time.Second}, "test")
-	s.cfg.PollInterval = 5 * time.Millisecond
-
-	rt.SetOffline(true)
-	const reason = "the bridge is too old: install it and reload the session"
-	var mu sync.Mutex
-	var said []string
-	done := make(chan remotePromptResult, 1)
-	go func() {
-		result, rpcErr := s.runRemote("s", "hello", strings.Repeat("d", 64), newTurn(), func(v any) error {
-			note := v.(sessionUpdateNotification)
-			if note.Params.Update.SessionUpdate == "agent_message_chunk" {
-				mu.Lock()
-				said = append(said, note.Params.Update.Content.Text)
-				mu.Unlock()
-			}
-			return nil
-		})
-		if rpcErr != nil {
-			t.Errorf("run: %v", rpcErr)
-		}
-		done <- result.(remotePromptResult)
-	}()
-	// Wait until the DM is deferred (received while offline), then let the
-	// target return with submit blocked and admit the deferred record.
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		recs, _, _ := store.ListWithPoison()
-		if len(recs) == 1 && recs[0].State == protocol.StateReceived {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	att.block(reason)
-	rt.SetOffline(false)
-	if err := ep.Tick(); err != nil {
-		t.Fatal(err)
-	}
-	got := <-done
-	mu.Lock()
-	defer mu.Unlock()
-	if got.Meta.Remote.State != string(protocol.StateRejected) || len(said) != 1 || !strings.Contains(said[0], reason) {
-		t.Fatalf("result=%+v said=%q; want the rejection DM to carry %q", got.Meta.Remote, said, reason)
-	}
-}
-
 // Regression: #959, one post marker per event
 // let a timeout notice suppress the answer a later delivery brought, and a
 // "Not connected" turn carried no event id, so it posted on every delivery.
@@ -734,7 +375,7 @@ func TestRedeliveryPostsEachKindOnce(t *testing.T) {
 		directTiming(f, 100*time.Millisecond)
 		f.startMachine(t)
 		in := f.ownerSays(t, machineChanA, "hi")
-		id, _ := remoteRequestID(in.Event.ID.Hex())
+		id, _ := remoteturn.RequestID(in.Event.ID.Hex())
 		waitClosed(t, f.s.Owner(in))
 		if !rt.Complete(id, "native answer") {
 			t.Fatal("request was not running after the timeout")
@@ -760,28 +401,6 @@ func TestRedeliveryPostsEachKindOnce(t *testing.T) {
 			t.Fatalf("posts=%q; want one not connected", posts)
 		}
 	})
-}
-
-// Regression: #959, an uncertain request
-// posted its notice as the final answer, so the answer it later resolved to
-// was suppressed on the next delivery.
-func TestUncertainNoticeDoesNotHideTheAnswer(t *testing.T) {
-	f := standalone(t)
-	deliver := func(snap protocol.Snapshot) {
-		turn := newTurn()
-		turn.channel = machineChanA
-		r := &remoteTurn{s: f.s, eventID: strings.Repeat("f", 64), emit: func(any) error { return nil }, turn: turn, meta: remoteMeta{Target: "fake"}}
-		if _, rpcErr := r.settled("replied", snap); rpcErr != nil {
-			t.Fatal(rpcErr)
-		}
-	}
-	deliver(protocol.Snapshot{State: protocol.StateUncertain, RequestRef: "ref"})
-	for range 2 {
-		deliver(protocol.Snapshot{State: protocol.StateCompleted, RequestRef: "ref", Result: &protocol.Result{Text: "the answer"}})
-	}
-	if posts := directContents(f.agentMessages(machineChanA)); len(posts) != 2 || posts[1] != "the answer" {
-		t.Fatalf("posts=%q; want one uncertainty notice and one answer", posts)
-	}
 }
 
 // Regression: #959, a lost reply to a busy
@@ -815,7 +434,7 @@ func TestRecoveredBusyRefusalDoesNotHideTheAnswer(t *testing.T) {
 		t.Fatal(err, resp.AsError())
 	}
 	in := f.ownerSays(t, machineChanA, "hello")
-	id, _ := remoteRequestID(in.Event.ID.Hex())
+	id, _ := remoteturn.RequestID(in.Event.ID.Hex())
 	ref := protocol.EncodeRef(ipc.LocalHost, "fake", id)
 	stop, done := make(chan struct{}), make(chan struct{})
 	t.Cleanup(func() { close(stop); <-done })

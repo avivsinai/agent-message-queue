@@ -13,6 +13,12 @@ import (
 	"fiatjaf.com/nostr"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
+	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
+	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
+	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
+	"github.com/avivsinai/agent-message-queue/internal/remote/mirror"
+	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
+	remoteturn "github.com/avivsinai/agent-message-queue/internal/remote/turn"
 )
 
 // routeSessionPrefix names the session of one route on a standalone
@@ -24,7 +30,7 @@ const routeSessionPrefix = "route/"
 // a slash command or a dialog answer is carried out at once, never behind
 // a turn, and its acknowledgement is posted once per event (postOnce). Any
 // other message is a turn: it waits in its route's queue, and each route
-// runs one turn at a time (runRemote). A message in a channel that is not
+// runs one turn at a time (runBound). A message in a channel that is not
 // an active route of this agent does nothing.
 //
 // The event's claim, remote-events/<agent>/<event>.json, is the eventClaim
@@ -33,11 +39,11 @@ const routeSessionPrefix = "route/"
 // none and holds the route's binding. When the claim already exists:
 //   - it is this agent's and Decided is set: nothing is done;
 //   - it is this agent's and Decided is empty: the turn runs again, and
-//     runRemote resumes it (one request, one final post per event);
+//     runBound resumes it (one request, one final post per event);
 //   - it is another agent's, or unreadable: nothing is done.
 //
 // A route whose session is no longer bound writes no claim; its turn gets
-// the refusal of runRemote, posted once per event.
+// the refusal of runBound, posted once per event.
 //
 // The returned channel closes once the handling has returned: after the
 // acknowledgement of a decision, or after the turn. Messages are handled
@@ -265,10 +271,102 @@ func (s *Server) runOwnerTurn(ch string, evt nostr.Event, quit <-chan struct{}) 
 		case <-ended:
 		}
 	}()
-	_, _ = s.runRemote(sid, evt.Content, id, turn, nil)
+	_, _ = s.runBound(sid, evt.Content, id, turn)
 	close(ended)
 	<-watched
 	return cut
+}
+
+// boundTurn is one owner turn of the machine agent: its remote turn, and
+// what only a mailbox turn uses.
+type boundTurn struct {
+	*remoteturn.Turn
+	turn *turnState
+	// signed is the owner's signed event of a mailbox turn as header
+	// context, nil when there is none.
+	signed map[string]any
+	// mailbox marks a mailbox turn; claimChannel is its claim's channel.
+	mailbox      bool
+	claimChannel string
+}
+
+// newBoundTurn is the owner turn of eventID that runs as turn. Its texts are
+// posted once per event and kind (postOnce) to postChannel, read when each
+// text is posted.
+func (s *Server) newBoundTurn(eventID string, turn *turnState) *boundTurn {
+	r := &boundTurn{turn: turn}
+	r.Turn = &remoteturn.Turn{
+		Name:    "machine agent",
+		EventID: eventID,
+		Timing:  s.timing(turn),
+		Done:    turn.done,
+		Settle:  s.settler(turn),
+		Post: func(kind, text string) string {
+			return s.postOnce(eventID, kind, []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), r.postChannel(), text)
+		},
+	}
+	return r
+}
+
+// postChannel is the Buzz channel the turn posts to. A mailbox turn posts
+// to its claim's channel, the channel of the event's first delivery.
+func (r *boundTurn) postChannel() string {
+	if r.mailbox {
+		return r.claimChannel
+	}
+	return r.turn.channel
+}
+
+// runBound runs the owner's message text as a turn in the session its
+// route is bound to: a mailbox turn (runMailbox) or a remote turn against
+// the bound target. A route with no connected session is refused once per
+// event.
+func (s *Server) runBound(sessionID, text, eventID string, turn *turnState) (remoteturn.Result, error) {
+	id, err := remoteturn.RequestID(eventID)
+	if err != nil {
+		return remoteturn.Result{}, fmt.Errorf("request id: %v", err)
+	}
+	// A prompt start also posts late replies of earlier turns; a post can
+	// take up to the post budget, so it never holds this turn.
+	s.requestSweep()
+	b, err := s.turnBinding(sessionID, eventID)
+	if err != nil {
+		r := s.newBoundTurn(eventID, turn)
+		r.Meta = remoteturn.Meta{State: "not_connected", Reason: err.Error()}
+		text := "Not connected: " + err.Error()
+		var unpinned *unpinnedError
+		switch {
+		case errors.As(err, &unpinned):
+			r.Meta.State = "not_pinned"
+			text = s.machineDirectory()
+		case errors.Is(err, errChannelNotConnected):
+			text = "This channel's session is not connected. Run /amq-remote in that session to connect it again."
+		}
+		return r.Say(postStatus, r.Settle(turnReplied), StopReasonRefusal, text)
+	}
+	// Both carriers name the images of the owner's message, which is the
+	// owner's event itself.
+	text = unfetchedImages(*turn.event, text)
+	if b.Mailbox() {
+		return s.runMailbox(sessionID, text, eventID, b, turn)
+	}
+	// The session mirror tells this turn's frame from a peer's by its
+	// msg_id, recorded before the endpoint can send the frame.
+	switch b.Harness {
+	case "claude":
+		_ = mirror.RecordCarried(b.Name, claude.FrameMsgID(ipc.LocalHost, b.Target, id))
+	case "codex":
+		_ = mirror.RecordCarried(b.Name, mirror.CodexCarriedID(codex.ClientUserMessageID(ipc.LocalHost, b.Target, id)))
+	case "pi":
+		// The pi bridge records the request's reference on the run's
+		// user record.
+		_ = mirror.RecordCarried(b.Name, protocol.EncodeRef(ipc.LocalHost, b.Target, id))
+	}
+	// The root, target and native pin are fixed here for the whole turn, so
+	// a later rebind never moves work that is already submitted.
+	r := s.newBoundTurn(eventID, turn)
+	r.Dir, r.Target, r.Native = filepath.Join(b.Root, remoteStateDir), b.Target, b.NativeSession
+	return r.Run(text)
 }
 
 // A turn's channel gets a typing pulse every workingEvery, which a Buzz

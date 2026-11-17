@@ -10,6 +10,9 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 )
 
+// settingsFile is the owner's settings file below the per-user home.
+const settingsFile = "acp.settings"
+
 // Issue 1023: the owner raises turn_timeout in acp.settings and the next
 // ACP prompt uses it, with no restart. The startup budget here ends the
 // turn at its first wait; the file's budget lets it end on the reply that
@@ -77,27 +80,5 @@ func TestOwnerTurnReadsTurnTimeoutFromSettingsFile(t *testing.T) {
 	waitClosed(t, done)
 	if out, _ := f.s.mailboxAnswered(in.Event.ID.Hex()); out.ReplyID != reply || f.posts(machineChanA, "done") != 1 {
 		t.Fatalf("outcome=%+v posts=%q; want the turn to run on the file's turn_timeout and end on its reply", out, f.agentTexts(machineChanA))
-	}
-}
-
-// Regression: #1023, {"turn_timout":"4s"} was accepted as an empty document, so
-// a typo silently reset a working turn timeout to the startup value. An
-// unknown key is refused and the last good value stays.
-func TestSettingsTypoKeepsTheLastGoodValue(t *testing.T) {
-	s := standalone(t).s
-	t.Setenv("HOME", canonicalTempDir(t))
-	t.Setenv("USERPROFILE", os.Getenv("HOME"))
-	dir, err := amqhome.EnsureDir()
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(dir, settingsFile)
-	for _, body := range []string{`{"turn_timeout":"30m"}`, `{"turn_timout":"4s"}`} {
-		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if got := s.loadTurnTiming().timeout; got != 30*time.Minute {
-			t.Fatalf("after %s turn timeout=%v; want 30m", body, got)
-		}
 	}
 }

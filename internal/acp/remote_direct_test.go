@@ -52,7 +52,7 @@ func directBusy(dir, ref string) bool {
 		return false
 	}
 	var rep protocol.Reply
-	return json.Unmarshal(resp.Reply, &rep) == nil && retryableBusy(rep.Snapshot)
+	return json.Unmarshal(resp.Reply, &rep) == nil && rep.Snapshot.State == protocol.StateRejected && rep.Snapshot.Code == protocol.CodeBusy
 }
 
 // directContents are the contents of evts in order.
