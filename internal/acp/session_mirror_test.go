@@ -77,19 +77,15 @@ func TestMirrorTickPostsEachTurnOnce(t *testing.T) {
 // turn is continued by a Stop hook 20 times in 60 s and is edited once per
 // gap, ending with its last answer (review: 21 stored events).
 func TestMirrorTickShowsARunningTurnLive(t *testing.T) {
-	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
-	transcript := filepath.Join(canonicalTempDir(t), "session.jsonl")
-	if err := os.WriteFile(transcript, []byte(`{"type":"user","uuid":"o0","promptId":"p0","timestamp":"2026-11-04T09:00:00Z","message":{"content":"earlier"}}`+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	f := newMirrorFixture(t)
 	appendLines := func(lines ...string) {
 		t.Helper()
-		f, err := os.OpenFile(transcript, os.O_APPEND|os.O_WRONLY, 0)
+		file, err := os.OpenFile(f.transcript, os.O_APPEND|os.O_WRONLY, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = f.WriteString(strings.Join(lines, "\n") + "\n")
-		_ = f.Close()
+		_, err = file.WriteString(strings.Join(lines, "\n") + "\n")
+		_ = file.Close()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -110,23 +106,6 @@ func TestMirrorTickShowsARunningTurnLive(t *testing.T) {
 	say := func(id string, sec int, stop, text string) string {
 		return assistant(id, sec, stop, `{"type":"text","text":"`+text+`"}`)
 	}
-	var sent []string
-	savedPost, savedEdit := postAnswer, editMessage
-	t.Cleanup(func() { postAnswer, editMessage = savedPost, savedEdit })
-	postAnswer = func(_, content string, _ time.Duration) (string, error) {
-		sent = append(sent, "post: "+content)
-		return strings.Repeat("a", 64), nil
-	}
-	editMessage = func(_, content string, _ time.Duration) error {
-		sent = append(sent, "edit: "+content)
-		return nil
-	}
-	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha", Harness: "claude", Transcript: transcript}
-	s := NewServer(Config{RemoteBinding: true, Machine: true, StateDir: canonicalTempDir(t)}, "test")
-	target := dialogTarget{name: "alpha", channel: "6eff60e4-32ab-48ec-bd3d-f4c97872f370"}
-	now := time.Now()
-	s.mirrorBinding(target, b, now, false) // first sight: starts at the end
-
 	dir, _ := mirror.DirFor("alpha")
 	type step struct {
 		lines []string
@@ -183,9 +162,8 @@ func TestMirrorTickShowsARunningTurnLive(t *testing.T) {
 		if step.lines != nil {
 			appendLines(step.lines...)
 		}
-		sent = nil
 		saved, _, _ := readMirrorFile(dir)
-		s.mirrorBinding(target, b, now.Add(time.Duration(step.after)*time.Second), false)
+		sent := f.tick(step.after)
 		if step.crash {
 			if err := writeMirrorFile(dir, &saved, false); err != nil {
 				t.Fatal(err)
@@ -614,7 +592,7 @@ func TestMirrorNeverPostsAnOffPeriodTurnAfterLostProgress(t *testing.T) {
 	if err := mirror.SetOff("alpha", false); err != nil {
 		t.Fatal(err)
 	}
-	f.s = NewServer(f.s.cfg, "restart")
+	f.s = NewStandalone(Standalone{Identity: f.s.id, Transport: f.s.direct}, "restart")
 	if sent := f.tick(4); len(sent) != 0 {
 		t.Fatalf("off-period turn posted after the progress was lost: %q", sent)
 	}

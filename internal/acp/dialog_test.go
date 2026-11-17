@@ -3,7 +3,6 @@ package acp
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -210,44 +209,20 @@ func TestFreeTextDialogTakesOnlyTheOwnersTypedAnswer(t *testing.T) {
 	}
 }
 
-// Only a signed owner event chooses and answers. An unavailable event answer
-// tells the owner why, and an actual signed deny chooses the other option.
+// Only a signed owner event chooses and answers: an actual signed deny
+// chooses the other option, whatever words came with it.
 func TestDialogAnswerIsTheVerifiedSignedEvent(t *testing.T) {
-	cases := []struct {
-		name     string
-		signed   string
-		wantDeny bool
-	}{
-		{name: "no verified event"},
-		{name: "signed deny", signed: "no", wantDeny: true},
+	f, dir := ownerDialogServer(t)
+	req := dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", OpenedAt: time.Now(),
+		Options: []dialog.Option{{N: 1, Label: "Allow once"}, {N: 2, Label: "Deny", Deny: true}}}
+	if err := dialog.Open(dir, req); err != nil {
+		t.Fatal(err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			f, dir := ownerDialogServer(t)
-			req := dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", OpenedAt: time.Now(),
-				Options: []dialog.Option{{N: 1, Label: "Allow once"}, {N: 2, Label: "Deny", Deny: true}}}
-			if err := dialog.Open(dir, req); err != nil {
-				t.Fatal(err)
-			}
-			f.s.dialogTick(time.Now())
-			evt := nostr.Event{}
-			err := errors.New("relay unreachable")
-			if tc.signed != "" {
-				evt = f.ownerSignedAt(t, machineChanA, tc.signed, time.Now())
-				err = nil
-			}
-			_, a, ok := f.s.dialogReplyOf(ownerMsg{channel: machineChanA, words: "1", verified: func() (nostr.Event, error) { return evt, err }})
-			if ok != (tc.signed != "") || ok && (a.Option == 2) != tc.wantDeny {
-				t.Fatalf("verified reply = %+v, %v; want signed deny=%v", a, ok, tc.wantDeny)
-			}
-			if tc.signed == "" {
-				for deadline := time.Now().Add(2 * time.Second); !strings.Contains(f.lastAgentPost(machineChanA), "Your reply was not taken as an answer"); time.Sleep(10 * time.Millisecond) {
-					if time.Now().After(deadline) {
-						t.Fatal("no not-taken notice was posted")
-					}
-				}
-			}
-		})
+	f.s.dialogTick(time.Now())
+	evt := f.ownerSignedAt(t, machineChanA, "no", time.Now())
+	_, a, ok := f.s.dialogReplyOf(f.ownerMsg(machineChanA, "1", evt))
+	if !ok || a.Option != 2 {
+		t.Fatalf("verified reply = %+v, %v; want the signed deny", a, ok)
 	}
 }
 

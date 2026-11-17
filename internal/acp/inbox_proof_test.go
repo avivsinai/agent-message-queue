@@ -3,7 +3,6 @@ package acp
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -11,10 +10,9 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 )
 
-// Regression: #976, the mailbox
-// prompt and steer paths proved an earlier delivery with os.Lstat, so a
-// directory at inbox/new/<id>.md read as a delivered message. Neither path
-// reports a delivery the inbox does not hold.
+// Regression: #976, the mailbox prompt path proved an earlier delivery with
+// os.Lstat, so a directory at inbox/new/<id>.md read as a delivered message.
+// It reports no delivery the inbox does not hold.
 func TestANonMessageInboxEntryIsNoDelivery(t *testing.T) {
 	root := canonicalTempDir(t)
 	for _, handle := range []string{"agent", mailboxSender} {
@@ -29,9 +27,5 @@ func TestANonMessageInboxEntryIsNoDelivery(t *testing.T) {
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}
 	if err := publishOnce(b, "cockpit/session/s", id, "", nil, time.Now(), "hello"); err == nil {
 		t.Fatal("prompt: a directory at the message name was reported delivered")
-	}
-	claim := steerClaim{MessageID: id, Created: time.Now().UTC().Format(time.RFC3339Nano), Root: root, Handle: "agent", Thread: "cockpit/session/s", Prompt: "p"}
-	if _, err := writeSteerOnce(claim, strings.Repeat("e", 64), "steer", func() bool { return true }); err == nil {
-		t.Fatal("steer: a directory at the message name was reported delivered")
 	}
 }

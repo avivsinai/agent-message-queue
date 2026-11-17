@@ -14,7 +14,7 @@ import (
 // prompt uses it, with no restart. The startup budget here would expire
 // before publish; the file's budget lets the turn end on its reply.
 func TestPromptReadsTurnTimeoutFromSettingsFile(t *testing.T) {
-	s, root := mailboxServer(t)
+	f, b := mailboxRoute(t)
 	home := canonicalTempDir(t)
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
@@ -25,28 +25,15 @@ func TestPromptReadsTurnTimeoutFromSettingsFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, settingsFile), []byte(`{"turn_timeout":"2s"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s.cfg.TurnTimeout = time.Nanosecond
-	s.mu.Lock()
-	s.ready = true
-	s.sessions["s"] = &sessionState{ID: "s"}
-	s.mu.Unlock()
-	run, _, rpcErr := s.beginPrompt([]byte(`{"sessionId":"s","prompt":[{"type":"text","text":"hi"}]}`))
-	if rpcErr != nil || run == nil {
-		t.Fatalf("begin prompt: %v", rpcErr)
-	}
-	replied := false
-	res, rpcErr := run(func(any) error {
-		if ids := inboxPrompts(t, root); !replied && len(ids) == 1 {
-			replied = true
-			replyAs(t, root, cockpitThread("session/s"), ids[0], format.KindAnswer, "done")
-		}
-		return nil
-	})
-	if rpcErr != nil {
-		t.Fatal(rpcErr)
-	}
-	if got := res.(remotePromptResult); got.StopReason != StopReasonEndTurn {
-		t.Fatalf("result=%+v; want the turn to run on the file's turn_timeout", got)
+	f.s.cfg.TurnTimeout = time.Nanosecond
+	f.machine(t)
+	in := f.ownerSays(t, machineChanA, "hi")
+	done := f.s.Owner(in)
+	id, prompt := promptOf(t, b)
+	reply := replyAs(t, b.Root, prompt.Header.Thread, id, format.KindAnswer, "done")
+	waitClosed(t, done)
+	if out, _ := f.s.mailboxAnswered(in.Event.ID.Hex()); out.ReplyID != reply || f.posts(machineChanA, "done") != 1 {
+		t.Fatalf("outcome=%+v posts=%q; want the turn to run on the file's turn_timeout and end on its reply", out, f.agentTexts(machineChanA))
 	}
 }
 
@@ -54,7 +41,7 @@ func TestPromptReadsTurnTimeoutFromSettingsFile(t *testing.T) {
 // a typo silently reset a working turn timeout to the startup value. An
 // unknown key is refused and the last good value stays.
 func TestSettingsTypoKeepsTheLastGoodValue(t *testing.T) {
-	s, _ := mailboxServer(t)
+	s := standalone(t).s
 	t.Setenv("HOME", canonicalTempDir(t))
 	t.Setenv("USERPROFILE", os.Getenv("HOME"))
 	dir, err := amqhome.EnsureDir()
