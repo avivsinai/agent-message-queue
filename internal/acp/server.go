@@ -179,8 +179,7 @@ func (s *Server) settler(turn *turnState) func(turnOutcome) turnOutcome {
 // AMQ routing context. Prompt requests run in goroutines so the reader stays
 // available while a turn waits for its reply.
 type Server struct {
-	// timings reads acp.settings for each turn that starts; it is made at
-	// the first turn, guarded by mu.
+	// timings reads acp.settings for each turn that starts.
 	timings  *remoteturn.Timings
 	cfg      Config
 	version  string
@@ -262,7 +261,12 @@ func NewServer(cfg Config, version string) *Server {
 	if cfg.PostTimeout <= 0 {
 		cfg.PostTimeout = defaultPostTimeout
 	}
+	name := "amq-acp"
+	if cfg.RemoteBinding {
+		name = "machine agent"
+	}
 	return &Server{
+		timings:  remoteturn.NewTimings(name),
 		cfg:      cfg,
 		id:       cfg.Identity,
 		version:  version,

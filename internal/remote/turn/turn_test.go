@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -454,20 +455,14 @@ func TestDeferredRefusalReasonReachesTheDM(t *testing.T) {
 	}
 }
 
-// Regression: #959, an uncertain request
-// posted its notice as the final answer, so the answer it later resolved to
-// was suppressed on the next delivery. post keeps the machine agent's rule
-// for one event's posts (postOnce): each kind at most once, and no status
-// after the final.
+// Regression: #959, an uncertain request posted its notice as the final
+// answer, so the answer it later resolved to was suppressed on the next
+// delivery. The notice is a status text and only the answer is the final
+// text; the caller's Post keeps each kind to one post per event.
 func TestUncertainNoticeDoesNotHideTheAnswer(t *testing.T) {
-	var posts []string
-	posted := map[string]bool{}
+	var kinds, texts []string
 	post := func(kind, text string) string {
-		if posted[kind] || posted[PostFinal] {
-			return "duplicate: this event already posted its " + kind + " text"
-		}
-		posted[kind] = true
-		posts = append(posts, text)
+		kinds, texts = append(kinds, kind), append(texts, text)
 		return "posted"
 	}
 	deliver := func(snap protocol.Snapshot) {
@@ -478,10 +473,8 @@ func TestUncertainNoticeDoesNotHideTheAnswer(t *testing.T) {
 		}
 	}
 	deliver(protocol.Snapshot{State: protocol.StateUncertain, RequestRef: "ref"})
-	for range 2 {
-		deliver(protocol.Snapshot{State: protocol.StateCompleted, RequestRef: "ref", Result: &protocol.Result{Text: "the answer"}})
-	}
-	if len(posts) != 2 || posts[1] != "the answer" {
-		t.Fatalf("posts=%q; want one uncertainty notice and one answer", posts)
+	deliver(protocol.Snapshot{State: protocol.StateCompleted, RequestRef: "ref", Result: &protocol.Result{Text: "the answer"}})
+	if !slices.Equal(kinds, []string{PostStatus, PostFinal}) || texts[1] != "the answer" {
+		t.Fatalf("posts=%q of kinds %q; want an uncertainty notice as status and the answer as final", texts, kinds)
 	}
 }

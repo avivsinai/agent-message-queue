@@ -13,7 +13,7 @@ import (
 // a typo silently reset a working turn timeout to the startup value. An
 // unknown key is refused and the last good value stays.
 func TestSettingsTypoKeepsTheLastGoodValue(t *testing.T) {
-	timings := NewTimings("amq-acp", Timing{Timeout: 10 * time.Minute, Poll: 100 * time.Millisecond, Heartbeat: 15 * time.Second})
+	timings, startup := NewTimings("amq-acp"), Timing{Timeout: 10 * time.Minute, Poll: 100 * time.Millisecond, Heartbeat: 15 * time.Second}
 	t.Setenv("HOME", canonicalTempDir(t))
 	t.Setenv("USERPROFILE", os.Getenv("HOME"))
 	dir, err := amqhome.EnsureDir()
@@ -25,7 +25,7 @@ func TestSettingsTypoKeepsTheLastGoodValue(t *testing.T) {
 		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if got := timings.Load().Timeout; got != 30*time.Minute {
+		if got := timings.Load(startup).Timeout; got != 30*time.Minute {
 			t.Fatalf("after %s turn timeout=%v; want 30m", body, got)
 		}
 	}

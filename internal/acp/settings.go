@@ -5,20 +5,10 @@ import (
 )
 
 // loadTurnTiming reads the durations of a turn that is starting from the
-// owner's settings file (remoteturn.Timings). The startup values are the
-// configured durations at the first turn.
+// owner's settings file (remoteturn.Timings); the configured durations are
+// its startup values.
 func (s *Server) loadTurnTiming() remoteturn.Timing {
-	s.mu.Lock()
-	if s.timings == nil {
-		name := "amq-acp"
-		if s.cfg.RemoteBinding {
-			name = "machine agent"
-		}
-		s.timings = remoteturn.NewTimings(name, remoteturn.Timing{Timeout: s.cfg.TurnTimeout, Poll: s.cfg.PollInterval, Heartbeat: s.cfg.HeartbeatInterval})
-	}
-	timings := s.timings
-	s.mu.Unlock()
-	return timings.Load()
+	return s.timings.Load(remoteturn.Timing{Timeout: s.cfg.TurnTimeout, Poll: s.cfg.PollInterval, Heartbeat: s.cfg.HeartbeatInterval})
 }
 
 // timing is the turn's durations: those fixed at turn start, or the startup

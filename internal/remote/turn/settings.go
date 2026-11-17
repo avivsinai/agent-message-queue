@@ -38,46 +38,49 @@ type settingsDoc struct {
 // starts. It keeps the last good value and reports each distinct refusal
 // once.
 type Timings struct {
-	name    string
-	startup Timing
+	name string
 	// mu guards lastGood and refused.
 	mu sync.Mutex
-	// lastGood is the last valid settings, the startup values until a file
-	// is read.
-	lastGood Timing
+	// lastGood is the last valid settings; nil until the first Load, which
+	// starts from its startup values.
+	lastGood *Timing
 	// refused is the last reported reason the file was refused, so a bad
 	// file logs once, not on every turn.
 	refused string
 }
 
-// NewTimings returns the timings of a process whose startup durations are
-// startup. name prefixes its stderr lines.
-func NewTimings(name string, startup Timing) *Timings {
-	return &Timings{name: name, startup: startup, lastGood: startup}
+// NewTimings returns the timings of one process. name prefixes its stderr
+// lines.
+func NewTimings(name string) *Timings {
+	return &Timings{name: name}
 }
 
-// Load reads the settings file for a turn that is starting. A valid file
-// becomes the last good value. A missing file means the startup values,
-// which is how the owner reverts. A refused file keeps the last good value
-// and is reported once per distinct reason; it never fails the turn.
-func (t *Timings) Load() Timing {
+// Load reads the settings file for a turn that is starting; startup is the
+// process's configured durations. A valid file becomes the last good value.
+// A missing file means the startup values, which is how the owner reverts.
+// A refused file keeps the last good value and is reported once per
+// distinct reason; it never fails the turn.
+func (t *Timings) Load(startup Timing) Timing {
 	// The read holds no lock, so a stalled home mount never blocks another
 	// turn's start behind it.
-	timing, found, err := readSettingsFile(t.startup)
+	timing, found, err := readSettingsFile(startup)
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.lastGood == nil {
+		t.lastGood = &startup
+	}
 	switch {
 	case err != nil:
 		if reason := err.Error(); reason != t.refused {
 			t.refused = reason
 			fmt.Fprintf(os.Stderr, "%s: ignoring %s, keeping the last good values: %v\n", t.name, settingsFile, err)
 		}
-		return t.lastGood
+		return *t.lastGood
 	case !found:
-		timing = t.startup
+		timing = startup
 	}
 	t.refused = ""
-	t.lastGood = timing
+	t.lastGood = &timing
 	return timing
 }
 
