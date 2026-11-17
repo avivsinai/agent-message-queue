@@ -1110,7 +1110,7 @@ func mirrorWord(text string) (on bool, ok bool) {
 // (signedWithin).
 func (s *Server) mirrorSwitchOf(m ownerMsg) (name string, on bool, at time.Time, ok bool) {
 	channel := m.channel
-	if !s.cfg.Machine || channel == "" || s.id.Owner == "" {
+	if channel == "" || s.id.Owner == "" {
 		return "", false, time.Time{}, false
 	}
 	if _, ok := mirrorWord(m.words); !ok {

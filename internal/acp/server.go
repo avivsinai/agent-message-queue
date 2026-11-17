@@ -548,9 +548,9 @@ type modelInfo struct {
 	Description string `json:"description"`
 }
 
-// remote reports whether turns drive an amq-remote target, pinned in the
-// environment or read from the binding on each turn.
-func (s *Server) remote() bool { return s.cfg.RemoteTarget != "" || s.cfg.RemoteBinding }
+// remote reports whether turns drive the amq-remote target pinned in the
+// environment.
+func (s *Server) remote() bool { return s.cfg.RemoteTarget != "" }
 
 // model is the one destination this process delivers to.
 func (s *Server) model() modelInfo {

@@ -49,9 +49,6 @@ func (s *Server) ownerCommandOf(m ownerMsg) (cmd ownerCommand, ok bool) {
 	if channel == "" || s.id.Owner == "" || !strings.HasPrefix(m.words, "/") {
 		return cmd, false
 	}
-	if !s.cfg.Machine {
-		return cmd, false
-	}
 	r, found := s.channelRoute(channel)
 	if !found {
 		return cmd, false

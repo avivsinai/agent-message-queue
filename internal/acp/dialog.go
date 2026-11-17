@@ -336,7 +336,7 @@ func (s *Server) machineTargets() []dialogTarget {
 // dialogTargets are the bindings this worker posts dialogs for: a machine
 // agent's live channels.
 func (s *Server) dialogTargets() []dialogTarget {
-	if !s.cfg.Machine || s.id.Agent == "" || s.id.RelayKey == "" || s.id.Owner == "" {
+	if s.id.Agent == "" || s.id.RelayKey == "" || s.id.Owner == "" {
 		return nil
 	}
 	return s.machineTargets()
@@ -361,12 +361,10 @@ func (s *Server) dropGoneDialogs(served map[string]bool, now time.Time) (waiting
 		return false
 	}
 	var names []string
-	if s.cfg.Machine {
-		entries, _ := os.ReadDir(root)
-		for _, e := range entries {
-			if e.IsDir() {
-				names = append(names, e.Name())
-			}
+	entries, _ := os.ReadDir(root)
+	for _, e := range entries {
+		if e.IsDir() {
+			names = append(names, e.Name())
 		}
 	}
 	snap := s.snapshot()
@@ -842,9 +840,6 @@ func writeAnswer(dir string, a dialog.Answer) (string, error) {
 func (s *Server) dialogReplyOf(m ownerMsg) (string, dialog.Answer, bool) {
 	channel := m.channel
 	if channel == "" || s.id.Owner == "" {
-		return "", dialog.Answer{}, false
-	}
-	if !s.cfg.Machine {
 		return "", dialog.Answer{}, false
 	}
 	r, ok := s.channelRoute(channel)
