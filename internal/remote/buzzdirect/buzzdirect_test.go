@@ -17,7 +17,8 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/outbox"
 )
 
-// posts is the posts interface of internal/acp; the port must satisfy it.
+// posts is the posts interface of internal/remote/machineagent; the port
+// must satisfy it.
 type posts interface {
 	Send(ctx context.Context, m buzzop.Message) buzzop.Result
 	Edit(ctx context.Context, key buzzop.Key, channel, eventID, content string) buzzop.Result

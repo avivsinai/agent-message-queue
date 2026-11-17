@@ -10,9 +10,7 @@ import (
 )
 
 // TestMain runs the package in a home of its own: every turn reads
-// ~/.amq/acp.settings, the hook check reads the Claude settings under the
-// home, and a binding store with no path of its own is below ~/.amq. No
-// test may read or write the developer's.
+// ~/.amq/acp.settings. No test may read or write the developer's.
 func TestMain(m *testing.M) {
 	home, err := os.MkdirTemp("", "amq-acp-home-")
 	if err == nil {
