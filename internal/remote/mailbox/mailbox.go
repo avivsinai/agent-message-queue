@@ -318,7 +318,7 @@ func (a *Attachment) prompt(id string, req core.BoundRequest) acp.MailboxPrompt 
 		return acp.MailboxPrompt{
 			To: a.handle, From: buzzCarrier, Thread: "cockpit/" + o["channel"], Subject: "Buzz DM",
 			Labels: []string{"acp", "buzz", "nostr:" + o["event"]},
-			Body: text + "\n\nThis came from the owner's Buzz DM. Answer with `amq reply --id " + id + "`; your reply is shown in that DM. " +
+			Body: text + "\n\nThis came from the owner in Buzz. Answer with `amq reply --id " + id + "`; your reply is shown in the same conversation. " +
 				"A reply with `--kind status` is not shown; any other reply is the final answer.",
 		}
 	}
