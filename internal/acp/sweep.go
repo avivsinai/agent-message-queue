@@ -86,8 +86,9 @@ func (l *lateReplySweep) pendingIDs() []string {
 	return ids
 }
 
-// startLateReplySweep runs the sweep worker until the returned stop is
-// called; stop waits for a running sweep, so a post is never cut off.
+// startLateReplySweep runs the machine agent's sweep, machine, dialog and
+// mirror workers and its owner turns until the returned stop is called;
+// stop waits for a running sweep, so a post is never cut off.
 func (s *Server) startLateReplySweep() (stop func()) {
 	kick := make(chan struct{}, 1)
 	s.mu.Lock()
@@ -101,43 +102,31 @@ func (s *Server) startLateReplySweep() (stop func()) {
 	// unknown outcome), and no new step starts.
 	machineDone := make(chan struct{})
 	machineCtx, cancelMachine := context.WithCancel(context.Background())
-	if s.cfg.Machine {
-		go s.paced(quit, machineDone, newWakeup("machine", machineScanInterval, machineIdlePoll), func(now time.Time) pace {
-			return s.machineTick(machineCtx, now)
-		})
-	} else {
-		close(machineDone)
-	}
+	go s.paced(quit, machineDone, newWakeup("machine", machineScanInterval, machineIdlePoll), func(now time.Time) pace {
+		return s.machineTick(machineCtx, now)
+	})
 	// The dialogs of a machine agent are posted in a worker of their own, so
 	// a dialog never waits behind the sweep or the machine lifecycle, and
 	// neither waits behind a dialog.
 	dialogDone := make(chan struct{})
-	if s.cfg.Machine {
-		s.dialogs.quit = quit
-		go s.paced(quit, dialogDone, newWakeup("dialog", machineScanInterval, idlePoll), func(now time.Time) pace {
-			// With no relay connection nothing is posted or read.
-			if !s.dialogLead() || s.offline() {
-				return pace{next: now.Add(machineScanInterval)}
-			}
-			return s.dialogTick(now)
-		})
-	} else {
-		close(dialogDone)
-	}
+	s.dialogs.quit = quit
+	go s.paced(quit, dialogDone, newWakeup("dialog", machineScanInterval, idlePoll), func(now time.Time) pace {
+		// With no relay connection nothing is posted or read.
+		if !s.dialogLead() || s.offline() {
+			return pace{next: now.Add(machineScanInterval)}
+		}
+		return s.dialogTick(now)
+	})
 	// A machine agent mirrors its sessions' finished turns in a worker of
 	// its own, so a slow post never delays a dialog.
 	mirrorDone := make(chan struct{})
-	if s.cfg.Machine {
-		s.mirrors.quit = quit
-		go s.paced(quit, mirrorDone, newWakeup("mirror", mirrorInterval, idlePoll), func(now time.Time) pace {
-			if !s.mirrorLead() || s.offline() {
-				return pace{next: now.Add(mirrorInterval)}
-			}
-			return s.mirrorTick(now)
-		})
-	} else {
-		close(mirrorDone)
-	}
+	s.mirrors.quit = quit
+	go s.paced(quit, mirrorDone, newWakeup("mirror", mirrorInterval, idlePoll), func(now time.Time) pace {
+		if !s.mirrorLead() || s.offline() {
+			return pace{next: now.Add(mirrorInterval)}
+		}
+		return s.mirrorTick(now)
+	})
 	// The owner turns run until the same quit.
 	s.owners.start(quit)
 	go func() {
