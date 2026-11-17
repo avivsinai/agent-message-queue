@@ -471,7 +471,7 @@ func publishOnce(b binding.Binding, threadID, id, eventID string, signed map[str
 func eventContext(evt nostr.Event) map[string]any {
 	raw, err := evt.MarshalJSON()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "amq-acp: event %s is delivered without its signed event: %v\n", evt.ID.Hex(), err)
+		fmt.Fprintf(os.Stderr, "machine agent: event %s is delivered without its signed event: %v\n", evt.ID.Hex(), err)
 		return nil
 	}
 	return map[string]any{"buzz": map[string]any{"event": json.RawMessage(raw)}}

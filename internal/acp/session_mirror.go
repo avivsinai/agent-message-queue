@@ -342,7 +342,7 @@ func (s *Server) dropGoneMirrors(served map[string]bool, now time.Time) (done bo
 func (s *Server) mirrorBinding(t dialogTarget, b binding.Binding, now time.Time, ended bool) (sent bool) {
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Fprintf(os.Stderr, "amq-acp: session mirror %s: %v\n", t.name, r)
+			fmt.Fprintf(os.Stderr, "machine agent: session mirror %s: %v\n", t.name, r)
 			s.mirrorBackOff(t.name, now)
 			sent = false
 		}

@@ -71,7 +71,7 @@ func (s *Server) Owner(in buzzop.Inbound) <-chan struct{} {
 		won, err := writeClaim(path, eventClaim{Name: r.Name, Agent: s.id.Agent, Decided: d.kind})
 		switch {
 		case err != nil:
-			fmt.Fprintf(os.Stderr, "amq-acp: the owner's %s in %s was not taken: %v\n", d.kind, ch, err)
+			fmt.Fprintf(os.Stderr, "machine agent: the owner's %s in %s was not taken: %v\n", d.kind, ch, err)
 			close(done)
 			return done
 		case !won:
@@ -85,7 +85,7 @@ func (s *Server) Owner(in buzzop.Inbound) <-chan struct{} {
 		if !started {
 			// The workers stopped after the claim was written: the decision
 			// is not carried out, and its claim keeps a replay from doing it.
-			fmt.Fprintf(os.Stderr, "amq-acp: the owner's %s in %s was not carried out: the machine agent stopped\n", d.kind, ch)
+			fmt.Fprintf(os.Stderr, "machine agent: the owner's %s in %s was not carried out: the machine agent stopped\n", d.kind, ch)
 			close(done)
 		}
 		return done
@@ -311,7 +311,7 @@ func (s *Server) showWorking(ch string) (stop func()) {
 			cancel()
 			if err != nil {
 				s.workingFailed.Do(func() {
-					fmt.Fprintf(os.Stderr, "amq-acp: the working indication is not shown in %s: %v\n", ch, err)
+					fmt.Fprintf(os.Stderr, "machine agent: the working indication is not shown in %s: %v\n", ch, err)
 				})
 			}
 			select {

@@ -343,7 +343,7 @@ func (s *Server) loadLateClaim(eventID string, now time.Time) (*lateClaim, bool)
 					s.late.inDoubt = map[string]struct{}{}
 				}
 				s.late.inDoubt[eventID] = struct{}{}
-				fmt.Fprintf(os.Stderr, "amq-acp: final post of event %s is in doubt (sending, or crashed while sending); not retried\n", eventID)
+				fmt.Fprintf(os.Stderr, "machine agent: final post of event %s is in doubt (sending, or crashed while sending); not retried\n", eventID)
 			}
 			return nil, false
 		}
