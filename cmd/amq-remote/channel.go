@@ -4,7 +4,7 @@ import (
 	"flag"
 	"io"
 
-	"github.com/avivsinai/agent-message-queue/internal/acp"
+	"github.com/avivsinai/agent-message-queue/internal/remote/machineagent"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
@@ -26,7 +26,7 @@ func channelCommand(args []string, stdout io.Writer, probe ...*jsonProbe) (int, 
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "usage: amq-remote channel reset NAME")
 	}
 	name := rest[1]
-	ch, err := acp.RequestChannelReset(name)
+	ch, err := machineagent.RequestChannelReset(name)
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}

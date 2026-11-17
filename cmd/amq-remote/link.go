@@ -21,7 +21,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/acp"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	karegistry "github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
@@ -29,6 +28,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/linkio"
+	"github.com/avivsinai/agent-message-queue/internal/remote/machineagent"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
@@ -375,7 +375,7 @@ func (ls *linkSet) restore(now time.Time) {
 					if t.Name != sh.Binding || t.Removed != binding.RemovedEnded || t.Mailbox() || filepath.Clean(t.Root) != filepath.Clean(ls.root) {
 						continue
 					}
-					nb, ok := acp.LiveAgain(t, now)
+					nb, ok := machineagent.LiveAgain(t, now)
 					if _, off := binding.DetachedFor(nb, tombs); ok && !off {
 						_, _ = binding.ReviveEnded(t, nb)
 					}
@@ -396,7 +396,7 @@ func (ls *linkSet) restore(now time.Time) {
 					_, _, _ = binding.Replace(b, nb)
 				}
 			case cur == b.NativeSession && state == binding.Ended:
-				nb, ok := acp.LiveAgain(b, now)
+				nb, ok := machineagent.LiveAgain(b, now)
 				if ok {
 					_, _, _ = binding.Replace(b, nb)
 				}

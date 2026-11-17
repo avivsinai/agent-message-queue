@@ -5,8 +5,8 @@ import (
 	"io"
 	"strings"
 
-	"github.com/avivsinai/agent-message-queue/internal/acp"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/machineagent"
 	"github.com/avivsinai/agent-message-queue/internal/remote/mirror"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
@@ -86,7 +86,7 @@ func mirrorCommand(args []string, stdout io.Writer, probe ...*jsonProbe) (int, e
 		if mirror.Off(dir) {
 			state = "off"
 		}
-		_, served := acp.MachineChannelOf(b)
+		_, served := machineagent.MachineChannelOf(b)
 		results = append(results, result{Name: b.Name, Mirror: state, Channel: served})
 		if c.json {
 			continue

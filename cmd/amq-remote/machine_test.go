@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/acp"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/machineagent"
 )
 
 // writeMarker writes one amq-acp marker under the agent directory dirName.
@@ -74,7 +74,7 @@ func TestAttachReportsTheMachineChannel(t *testing.T) {
 	// Regression (PR #1279 review): with the machine agent stopped, an
 	// uncertain or failed channel told the owner that AMQ keeps looking or
 	// tries again, although no worker runs. Starting the agent comes first.
-	for _, ch := range []acp.MachineChannel{{State: "uncertain", Error: "relay timeout"}, {State: "failed", Error: "refused", Retry: true}} {
+	for _, ch := range []machineagent.MachineChannel{{State: "uncertain", Error: "relay timeout"}, {State: "failed", Error: "refused", Retry: true}} {
 		var text bytes.Buffer
 		connected(&text, attachView{name: "claude-p-session3", label: "claude · p/session3 @ box",
 			machine: agentInfo{State: agentOffline, Display: "AMQ Remote @ box"}, channel: &ch})

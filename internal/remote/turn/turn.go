@@ -55,6 +55,15 @@ const (
 	StateUncertain = "uncertain"
 )
 
+// Delivery states of a prompt delivered as an AMQ message.
+const (
+	// StateQueued is a prompt in the recipient's inbox/new; consumption is
+	// a separate, unproven event.
+	StateQueued = "queued_to_inbox"
+	// StateReplied is a prompt answered by a fresh reply.
+	StateReplied = "replied"
+)
+
 // Post kinds: each event posts at most one status text (a timeout, a stop
 // that leaves work running, a failure to submit) and at most one final
 // answer. Separate kinds keep an earlier status post from suppressing the

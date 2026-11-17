@@ -1,0 +1,1150 @@
+package machineagent
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/format"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
+	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
+	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
+	"github.com/avivsinai/agent-message-queue/internal/remote/mailprompt"
+	"github.com/avivsinai/agent-message-queue/internal/remote/mirror"
+)
+
+// The machine agent mirrors each turn of a session into the session's
+// channel. A Claude turn is posted at its first assistant line, edited while
+// it runs and edited a last time when it ends; a turn of another harness is
+// posted when it ends. The transcript is the record and the post is a view
+// of it: the mirror never writes to the session, a mailbox or a binding.
+// Each binding's state lives in <mirror root>/<binding>/:
+//
+//	state.json       the transcript cursor, the fold, the queue of turn
+//	                 events not yet sent, and the watermark
+//	progress.json    a later state.json of the same generation, not synced
+//	posted/<turn>    the claim of one turn's post, created before the post;
+//	                 a claim with no event id is never posted or edited again
+//	carrier/<msg_id> a frame the native carrier sent (mirror.RecordCarried)
+//	off              present while the owner turned the mirror off
+//
+// A post is claimed before it is sent, and an unknown send outcome is never
+// retried: a lost post is acceptable for a view, a duplicate is not. An edit
+// is idempotent, so the final edit of a turn is tried once more.
+
+// mirrorInterval is the gap between mirror ticks.
+const mirrorInterval = 2 * time.Second
+
+// A post is edited only when what it shows changed (mirror.Fingerprint;
+// elapsed time alone is no change). A running turn's post waits
+// mirrorEditGap after the binding's last post or edit; an ended turn's post
+// waits mirrorGap after its own last post or edit. Only the edit that ends
+// a post showing the turn running skips the gap. A post gets
+// mirrorProgressMax counted edits; an Ended event's edit is not counted and
+// starts the count again. Past the count, a running turn's edit is dropped,
+// except to show it interrupted, and an ended turn's gap doubles with each
+// edit up to mirrorEditGapMax. Each edit is a stored relay event that
+// clients fetch, so the bound is on stored events, not on freshness.
+const (
+	mirrorEditGap     = 30 * time.Second
+	mirrorEditGapMax  = 10 * time.Minute
+	mirrorProgressMax = 10
+)
+
+// mirrorGap is how long a post with edits counted edits waits after its
+// last post or edit before its next edit.
+func mirrorGap(edits int) time.Duration {
+	gap := mirrorEditGap
+	for n := edits; n > mirrorProgressMax && gap < mirrorEditGapMax; n-- {
+		gap *= 2
+	}
+	return min(gap, mirrorEditGapMax)
+}
+
+// mirrorReadMax bounds the transcript bytes one binding reads in one tick.
+const mirrorReadMax = 64 << 20
+
+// mirrorQueueMax is the most turn events a binding's queue holds, besides
+// the events of turns whose post shows them running, which are never
+// dropped. Past it the oldest Continued is dropped first, since its post
+// already shows an earlier answer; a queue still longer keeps only its last
+// event, which counts the turns it dropped.
+const mirrorQueueMax = 5
+
+// Backoff of one binding after a failed post.
+const (
+	mirrorBackoffMin = 30 * time.Second
+	mirrorBackoffMax = 10 * time.Minute
+)
+
+// mirrorNote is posted once when a session's transcript cannot be read.
+const mirrorNote = "This session's activity is not available here"
+
+// mirrorState is the mirror's state, owned by the one worker goroutine that
+// runs mirrorTick.
+type mirrorState struct {
+	// quit closes when the mirror worker stops; nil outside it.
+	quit <-chan struct{}
+	// release drops the mirror lead; nil when not held.
+	release func()
+	backoff map[string]mirrorBackoff
+	// seen is what each binding's last tick read when it left nothing
+	// queued; a tick whose inputs still match it reads nothing.
+	seen map[string]mirrorSeen
+	// settled holds each binding whose last tick left nothing queued and
+	// nothing to read until its record changes: it has no record yet, or
+	// the note that its record cannot be read was posted.
+	settled map[string]bool
+	// scans are each mailbox binding's buzz inbox scans, new and cur.
+	scans map[string]mirrorScans
+}
+
+type mirrorBackoff struct {
+	until time.Time
+	step  time.Duration
+}
+
+// mirrorSeen is the inputs of a binding's tick that read its transcript to
+// the end and left nothing queued: the channel, the harness, the off switch
+// and the transcript as stat saw it before the read.
+type mirrorSeen struct {
+	channel, harness, source string
+	since                    int64
+	off                      bool
+	path                     string
+	info                     os.FileInfo
+	// dir is set when the transcript's directory is small enough to watch
+	// (mirrorDirWatchMax), so a new transcript there wakes the mirror.
+	dir bool
+}
+
+// mirrorDirWatchMax is the most entries a transcript's directory may have
+// for the mirror to watch it: on macOS a directory watch holds one file
+// descriptor per entry. A record that moves to a new file in a larger
+// directory is found at the idle poll.
+const mirrorDirWatchMax = 1024
+
+// smallDir reports whether dir has at most mirrorDirWatchMax entries.
+func smallDir(dir string) bool {
+	f, err := os.Open(dir)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+	names, _ := f.Readdirnames(mirrorDirWatchMax + 1)
+	return len(names) <= mirrorDirWatchMax
+}
+
+// unchanged reports whether a tick with these inputs would read nothing new:
+// the transcript is the same file, with the same size and modification time.
+func (m mirrorSeen) unchanged(t dialogTarget, b binding.Binding, off bool) bool {
+	if m.info == nil || m.channel != t.channel || m.harness != b.Harness || m.off != off || m.since != t.since {
+		return false
+	}
+	src := mirror.SourceFor(m.source)
+	if src == nil || src.Locate(b, m.path) != m.path {
+		return false
+	}
+	info, err := os.Stat(m.path)
+	return err == nil && os.SameFile(info, m.info) && info.Size() == m.info.Size() && info.ModTime().Equal(m.info.ModTime())
+}
+
+type mirrorScans struct {
+	root     string
+	new, cur *mailprompt.Scan
+}
+
+// mirrorFile is one binding's state.json.
+type mirrorFile struct {
+	Channel string `json:"channel"`
+	// Path is the transcript the cursor reads, File its identity, Offset
+	// the next byte to read. Skipping is set inside a line longer than one
+	// read, which is skipped; Skipped counts such lines.
+	Path     string       `json:"path,omitempty"`
+	File     string       `json:"file,omitempty"`
+	Offset   int64        `json:"offset"`
+	Skipping bool         `json:"skipping,omitempty"`
+	Skipped  int          `json:"skipped,omitempty"`
+	Fold     mirror.State `json:"fold"`
+	// Queue holds the turn events not yet sent, oldest first.
+	Queue []mirror.Event `json:"queue,omitempty"`
+	// Watermark is the time the mirror first saw the transcript, then the
+	// last line time of the newest turn sent: a turn that ends at or before
+	// it is never posted.
+	Watermark int64 `json:"watermark,omitempty"`
+	// Noted is set once the note was posted, to the locator it was posted
+	// for ("" for none).
+	Noted *string `json:"noted,omitempty"`
+	// Harness names the source of the record, so a binding that is gone
+	// can still be read to its end.
+	Harness string `json:"harness,omitempty"`
+	// Edited is the time of the binding's last post or edit, in unix
+	// milliseconds.
+	Edited int64 `json:"edited,omitempty"`
+	// Gen counts the synced writes of state.json; a progress.json applies
+	// only to the generation it names.
+	Gen int64 `json:"gen,omitempty"`
+}
+
+// mirrorDurable is the part of a binding's state that is written with a
+// sync: where its posts go and what may not be posted (again).
+type mirrorDurable struct {
+	Channel, Harness string
+	Watermark        int64
+	Noted            *string
+}
+
+func (st *mirrorFile) durable() mirrorDurable {
+	return mirrorDurable{Channel: st.Channel, Harness: st.Harness, Watermark: st.Watermark, Noted: st.Noted}
+}
+
+func (d mirrorDurable) equal(o mirrorDurable) bool {
+	return d.Channel == o.Channel && d.Harness == o.Harness && d.Watermark == o.Watermark &&
+		(d.Noted == nil) == (o.Noted == nil) && (d.Noted == nil || *d.Noted == *o.Noted)
+}
+
+// mirrorStopped reports whether the mirror worker is stopping.
+func (s *Agent) mirrorStopped() bool {
+	select {
+	case <-s.mirrors.quit:
+		return true
+	default:
+		return false
+	}
+}
+
+// mirrorLead reports whether this worker runs its machine agent's mirror:
+// the worker that holds <machine>/<self>.mirror.lock.
+func (s *Agent) mirrorLead() bool {
+	if s.mirrors.release != nil || !lock.AdvisoryLockAvailable() {
+		return true
+	}
+	if s.id.Agent == "" {
+		return false
+	}
+	dir := s.agentMarkerDir()
+	if os.MkdirAll(dir, 0o700) != nil {
+		return false
+	}
+	release, ok, err := lock.TryExclusive(filepath.Join(dir, s.id.Agent+".mirror.lock"))
+	if err != nil || !ok {
+		return false
+	}
+	s.mirrors.release = release
+	return true
+}
+
+// mirrorTick mirrors every live Claude binding with a channel, then posts
+// the open turn of each binding that ended and removes the state of each
+// binding that is gone. Its pace asks for the next tick in mirrorInterval
+// while a binding has more to read or send, or a gone binding's last post
+// waits, and else on a change to the bindings, the records, a mirrored
+// binding's record (its transcript), the record's directory, where a record
+// that moves to a new file (mirror.Source Locate) usually appears, or its
+// off switch. A record that moves elsewhere is found at the idle poll.
+func (s *Agent) mirrorTick(now time.Time) (p pace) {
+	served := map[string]bool{}
+	p.watch = s.sessionWatch()
+	for _, t := range s.dialogTargets() {
+		if s.mirrorStopped() {
+			return p
+		}
+		served[t.name] = true
+		// A mirrored binding is read fresh: it names the transcript to post.
+		if mirror.SourceFor(t.binding.Harness) == nil {
+			continue
+		}
+		b, err := binding.ReadNamed(t.name)
+		if err != nil || mirror.SourceFor(b.Harness) == nil {
+			continue
+		}
+		s.mirrorBinding(t, b, now, false)
+		seen, read := s.mirrors.seen[t.name]
+		if !read && !s.mirrors.settled[t.name] {
+			p.due(now.Add(mirrorInterval))
+		}
+		if read {
+			p.watch = append(p.watch, seen.path)
+			if seen.dir {
+				p.watch = append(p.watch, filepath.Dir(seen.path))
+			}
+		}
+		if dir, err := mirror.DirFor(t.name); err == nil {
+			p.watch = append(p.watch, dir)
+		}
+	}
+	if !s.mirrorStopped() && !s.dropGoneMirrors(served, now) {
+		p.due(now.Add(mirrorInterval))
+	}
+	return p
+}
+
+// dropGoneMirrors posts the open turn of each binding that is gone or ended
+// as "session ended", then removes its state, claims and carrier records.
+// A post proved not sent keeps them for the next tick; done is false then.
+func (s *Agent) dropGoneMirrors(served map[string]bool, now time.Time) (done bool) {
+	root, err := mirror.Root()
+	if err != nil {
+		return true
+	}
+	done = true
+	entries, _ := os.ReadDir(root)
+	snap := s.snapshot()
+	for _, e := range entries {
+		name := e.Name()
+		if !e.IsDir() || served[name] {
+			continue
+		}
+		// The snapshot only lets a live binding be skipped: whether it is
+		// gone or ended is decided from a fresh read, since a session can
+		// attach again while an earlier name's relay call runs.
+		if b, ok := snap.binding(name); ok && s.live(b) {
+			continue
+		}
+		b, err := binding.ReadNamed(name)
+		switch {
+		case errors.Is(err, binding.ErrNone), binding.ValidName(name) != nil:
+		case err == nil && !s.live(b):
+		default:
+			continue
+		}
+		dir := filepath.Join(root, name)
+		if st, _, found := readMirrorFile(dir); found && st.Channel != "" && binding.ValidName(name) == nil {
+			if !s.mirrorBinding(dialogTarget{name: name, channel: st.Channel}, b, now, true) {
+				done = false
+				continue
+			}
+		}
+		_ = os.RemoveAll(dir)
+		delete(s.mirrors.scans, name)
+		delete(s.mirrors.backoff, name)
+		delete(s.mirrors.seen, name)
+		delete(s.mirrors.settled, name)
+	}
+	return done
+}
+
+// mirrorBinding is one tick of one binding: locate, read, fold, queue and
+// send. ended reads what the transcript still holds and ends the open turn
+// as "session ended". It reports whether the queue was sent out; a panic is
+// recovered and backs the binding off.
+func (s *Agent) mirrorBinding(t dialogTarget, b binding.Binding, now time.Time, ended bool) (sent bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "machine agent: session mirror %s: %v\n", t.name, r)
+			s.mirrorBackOff(t.name, now)
+			sent = false
+		}
+	}()
+	if bo, ok := s.mirrors.backoff[t.name]; ok && now.Before(bo.until) {
+		return false
+	}
+	dir, err := mirror.DirFor(t.name)
+	if err != nil {
+		return true
+	}
+	off := mirror.Off(dir)
+	prev := s.mirrors.seen[t.name]
+	if !ended && prev.unchanged(t, b, off) {
+		return true
+	}
+	delete(s.mirrors.seen, t.name)
+	delete(s.mirrors.settled, t.name)
+	if os.MkdirAll(dir, 0o700) != nil {
+		return false
+	}
+	st, saved, _ := readMirrorFile(dir)
+	st.Channel = t.channel
+	// A turn that ended while the route was suspended is not posted.
+	st.Watermark = max(st.Watermark, t.since)
+	if b.Harness != "" {
+		st.Harness = b.Harness
+	}
+	src := mirror.SourceFor(st.Harness)
+	if src == nil {
+		return true
+	}
+	// read is the transcript as it was before a read that reached its end;
+	// waits is set when there is nothing to read until the record changes.
+	var read os.FileInfo
+	waits := false
+	path := src.Locate(b, st.Path)
+	switch {
+	case ended:
+		if st.Path != "" {
+			s.mirrorRead(dir, src, &st, st.Path, now)
+		}
+		var evs []mirror.Event
+		st.Fold, evs = mirror.Close(st.Fold, mirror.EndSessionEnded)
+		st.Queue = append(st.Queue, evs...)
+	case path == "":
+		s.mirrorUnavailable(dir, t.name, &st, "", off)
+		waits = off || st.noted("")
+	default:
+		info, statErr := os.Stat(path)
+		switch {
+		case !s.mirrorRead(dir, src, &st, path, now):
+			s.mirrorUnavailable(dir, t.name, &st, path, off)
+			waits = off || st.noted(path)
+		case statErr == nil && st.Offset >= info.Size():
+			read = info
+		case statErr != nil:
+			waits = true // a lazy record that does not exist yet
+		}
+	}
+	st.Queue = mergeQueue(st.Queue, st.Watermark, func(id string) bool { return mirrorRunning(dir, id) })
+	if off {
+		st.offQueue(st.runningTurn(dir))
+	}
+	if raw, err := json.Marshal(st); err != nil || !bytes.Equal(raw, saved) && writeMirrorFile(dir, &st, off) != nil {
+		return false
+	}
+	if !s.mirrorSend(dir, t, b, &st, now) {
+		return false
+	}
+	if read != nil && len(st.Queue) == 0 {
+		if s.mirrors.seen == nil {
+			s.mirrors.seen = map[string]mirrorSeen{}
+		}
+		dir := prev.dir
+		if prev.path != path {
+			dir = smallDir(filepath.Dir(path))
+		}
+		s.mirrors.seen[t.name] = mirrorSeen{channel: t.channel, harness: b.Harness, source: st.Harness, since: t.since, off: off, path: path, info: read, dir: dir}
+	} else if waits && len(st.Queue) == 0 {
+		if s.mirrors.settled == nil {
+			s.mirrors.settled = map[string]bool{}
+		}
+		s.mirrors.settled[t.name] = true
+	}
+	return true
+}
+
+// noted reports whether the note that locator cannot be read was posted.
+func (st *mirrorFile) noted(locator string) bool { return st.Noted != nil && *st.Noted == locator }
+
+// mirrorRead reads the new lines of path and queues the turn events they
+// make. A changed path ends the open turn as "session cleared" and reads
+// the new file from its start; a binding seen for the first time starts at
+// the end of its transcript. A file replaced in place (another identity, or
+// shorter than the offset) is read from its start again: the claims and the
+// watermark stop the turns already posted. For a Lazy source a missing file
+// is an empty record: seen first that way, it is read from its start once it
+// appears, and turns that end after now are posted. It reports whether path
+// could be read.
+func (s *Agent) mirrorRead(dir string, src *mirror.Source, st *mirrorFile, path string, now time.Time) bool {
+	first := st.Path == ""
+	if st.Path != path {
+		if !first {
+			var evs []mirror.Event
+			st.Fold, evs = mirror.Close(st.Fold, mirror.EndSessionCleared)
+			st.Queue = append(st.Queue, evs...)
+		}
+		st.Fold.Last = nil
+		st.Path, st.File, st.Offset, st.Skipping = path, "", 0, false
+	}
+	if first {
+		// The watermark is the newest line time at first sight, or now for a
+		// transcript with no timed line, so a later read from the start (a
+		// resumed older session, a replaced file) never posts a turn from
+		// before it.
+		c, err := claude.TranscriptTail(path)
+		if src.Lazy && errors.Is(err, fs.ErrNotExist) {
+			st.Watermark = max(st.Watermark, now.UnixMilli())
+			return true
+		}
+		if err != nil {
+			st.Path = ""
+			return false
+		}
+		newest := int64(0)
+		for _, raw := range c.Lines {
+			newest = max(newest, src.Time(raw))
+		}
+		if newest == 0 {
+			newest = now.UnixMilli()
+		}
+		st.Watermark = max(st.Watermark, newest)
+		st.File, st.Offset, st.Skipping = c.File, c.Next, c.Skipping
+		return true
+	}
+	c, err := claude.ReadTranscript(path, st.Offset, st.Skipping)
+	if src.Lazy && errors.Is(err, fs.ErrNotExist) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	if st.File != "" && c.File != st.File || c.Size < st.Offset {
+		// The re-read folds every turn again; a turn open in the old file
+		// must not end at its own opener.
+		st.Fold, st.Offset, st.Skipping = mirror.State{}, 0, false
+		if c, err = claude.ReadTranscript(path, 0, false); err != nil {
+			return false
+		}
+	}
+	st.File = c.File
+	carried := mirror.CarriedIn(dir)
+	// Read until caught up, at most mirrorReadMax bytes, so a backlog is
+	// folded whole before anything is sent.
+	for read := int64(0); ; {
+		if c.Skipping && !st.Skipping {
+			st.Skipped++
+		}
+		for _, raw := range c.Lines {
+			var evs []mirror.Event
+			st.Fold, evs = src.Fold(st.Fold, raw, carried)
+			st.Queue = append(st.Queue, evs...)
+		}
+		read += c.Next - st.Offset
+		moved := c.Next > st.Offset
+		st.Offset, st.Skipping = c.Next, c.Skipping
+		if !moved || st.Offset >= c.Size || read >= mirrorReadMax {
+			return true
+		}
+		if c, err = claude.ReadTranscript(path, st.Offset, st.Skipping); err != nil || c.File != st.File {
+			return true
+		}
+	}
+}
+
+// mergeQueue drops each event at or before the watermark, which is never
+// sent, except a Continued. It keeps one event for each change of a turn's
+// post: a Progress replaces the turn's queued Opened or Progress; an Ended
+// or Continued replaces the turn's queued Progress and folds into its
+// queued Opened (then an Ended: the turn is posted once, ended), Ended or
+// Continued. A queue longer than mirrorQueueMax drops its oldest Continued,
+// then keeps only its last event, which counts the turns it dropped. It
+// never drops an event of a turn whose post shows it running (running),
+// which it asks only of an event it would drop.
+func mergeQueue(q []mirror.Event, watermark int64, running func(id string) bool) []mirror.Event {
+	var out []mirror.Event
+	for _, ev := range q {
+		if ev.Kind != mirror.Continued && ev.Turn.LastTS <= watermark && !running(ev.Turn.ID) {
+			continue
+		}
+		out = mergeEvent(out, ev)
+	}
+	if len(out) <= mirrorQueueMax {
+		return out
+	}
+	last, n := out[len(out)-1], len(out)
+	var kept []mirror.Event
+	for _, ev := range out[:len(out)-1] {
+		if n > mirrorQueueMax && ev.Kind == mirror.Continued && !running(ev.Turn.ID) {
+			last.Turn.Earlier += ev.Turn.Earlier
+			n--
+			continue
+		}
+		kept = append(kept, ev)
+	}
+	if n > mirrorQueueMax {
+		held := kept[:0]
+		for _, ev := range kept {
+			switch {
+			case running(ev.Turn.ID):
+				held = append(held, ev)
+			case ev.Kind == mirror.Ended:
+				last.Turn.Earlier += 1 + ev.Turn.Earlier
+			default:
+				last.Turn.Earlier += ev.Turn.Earlier
+			}
+		}
+		kept = held
+	}
+	return append(kept, last)
+}
+
+// mergeEvent adds ev to the merged queue out.
+func mergeEvent(out []mirror.Event, ev mirror.Event) []mirror.Event {
+	queued := func(kinds ...string) int {
+		for i := len(out) - 1; i >= 0; i-- {
+			if out[i].Turn.ID == ev.Turn.ID {
+				if slices.Contains(kinds, out[i].Kind) {
+					return i
+				}
+				return -1
+			}
+		}
+		return -1
+	}
+	replace := func(i int, kind string) []mirror.Event {
+		earlier := out[i].Turn.Earlier
+		out[i].Kind, out[i].Turn = kind, ev.Turn
+		out[i].Turn.Earlier = max(earlier, ev.Turn.Earlier)
+		return out
+	}
+	switch ev.Kind {
+	case mirror.Progress:
+		if i := queued(mirror.Opened, mirror.Progress); i >= 0 {
+			return replace(i, out[i].Kind)
+		}
+	case mirror.Ended, mirror.Continued:
+		if i := queued(mirror.Progress); i >= 0 {
+			out = slices.Delete(out, i, i+1)
+		}
+		if i := queued(mirror.Opened, mirror.Ended, mirror.Continued); i >= 0 {
+			kind := out[i].Kind
+			if kind == mirror.Opened {
+				kind = mirror.Ended
+			}
+			return replace(i, kind)
+		}
+	}
+	return append(out, ev)
+}
+
+// mirrorRunning reports whether the claim (in dir) of turn id records that
+// its post shows the turn running.
+func mirrorRunning(dir, id string) bool {
+	if !turnIDRe.MatchString(id) {
+		return false
+	}
+	c, _ := readMirrorClaim(filepath.Join(dir, "posted", id+".json"))
+	return c.Running && c.Event != ""
+}
+
+// runningTurn is the turn whose post shows it running (mirrorRunning): the
+// fold's open or last turn, else a turn with a queued event; "" for none.
+func (st *mirrorFile) runningTurn(dir string) string {
+	var ids []string
+	for _, t := range []*mirror.Turn{st.Fold.Open, st.Fold.Last} {
+		if t != nil {
+			ids = append(ids, t.ID)
+		}
+	}
+	for i := len(st.Queue) - 1; i >= 0; i-- {
+		ids = append(ids, st.Queue[i].Turn.ID)
+	}
+	for _, id := range ids {
+		if mirrorRunning(dir, id) {
+			return id
+		}
+	}
+	return ""
+}
+
+// offQueue is the queue while the mirror is off: nothing, or one final edit
+// of the post that shows its turn running (running, from runningTurn),
+// which shows it ended by the switch. A turn that ended keeps its answer.
+func (st *mirrorFile) offQueue(running string) {
+	var ev mirror.Event
+	found := false
+	for i := len(st.Queue) - 1; i >= 0 && running != ""; i-- {
+		if q := st.Queue[i]; q.Turn.ID == running {
+			if q.Kind == mirror.Ended && q.Turn.End == mirror.EndMirrorOff {
+				// Already queued: its tries are kept.
+				st.Queue = []mirror.Event{q}
+				return
+			}
+			if !found {
+				ev, found = q, true
+			}
+		}
+	}
+	for _, t := range []*mirror.Turn{st.Fold.Open, st.Fold.Last} {
+		if t != nil && running != "" && t.ID == running {
+			ev, found = mirror.Event{Turn: *t}, true
+			break
+		}
+	}
+	st.Queue = nil
+	if !found {
+		return
+	}
+	if ev.Turn.End == "" {
+		ev.Turn.Text = ""
+	}
+	ev.Kind, ev.Tries, ev.Turn.End = mirror.Ended, 0, mirror.EndMirrorOff
+	st.Queue = []mirror.Event{ev}
+}
+
+// turnIDRe matches a turn id that names a claim file.
+var turnIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+
+// errMirrorWait holds an edit until its gap has passed.
+var errMirrorWait = errors.New("the mirror edit waits for the edit gap")
+
+// mirrorSend sends the queue from its head and reports whether it was sent
+// out. An Opened or an Ended with no claim posts the turn; a Progress, an
+// Ended or a Continued whose claim holds an event id edits its post. An
+// edit that waits for its gap stays queued and the events after it are
+// sent. A send proved not sent keeps the event queued and backs the
+// binding off. Any other failure leaves the outcome unknown: a post's claim
+// stays with no event id and the turn is never sent again, a progress edit
+// is dropped, and the final edit of a turn is tried once more after the
+// backoff. Only an end moves the watermark.
+func (s *Agent) mirrorSend(dir string, t dialogTarget, b binding.Binding, st *mirrorFile, now time.Time) bool {
+	for i := 0; i < len(st.Queue); {
+		if s.mirrorStopped() {
+			return false
+		}
+		ev := st.Queue[i]
+		id := ev.Turn.ID
+		claim := filepath.Join(dir, "posted", id+".json")
+		final := ev.Kind == mirror.Ended || ev.Kind == mirror.Continued
+		var err error
+		sent, edit := false, false
+		switch {
+		case !turnIDRe.MatchString(id):
+		case ev.Kind == mirror.Opened && ev.Turn.LastTS > st.Watermark:
+			var event string
+			event, err = s.mirrorPost(claim, t, b, ev.Turn, now)
+			sent = err == nil && event != ""
+		case ev.Kind == mirror.Progress:
+			sent, err = s.mirrorProgress(claim, t, b, ev.Turn, now, st.Edited)
+		case final && mirrorPosted(claim):
+			edit = true
+			sent, err = s.mirrorEdit(claim, t, b, ev, now)
+		case ev.Kind == mirror.Ended && ev.Turn.LastTS > st.Watermark:
+			var event string
+			event, err = s.mirrorPost(claim, t, b, ev.Turn, now)
+			sent = err == nil && event != ""
+		}
+		if errors.Is(err, errMirrorWait) {
+			i++
+			continue
+		}
+		if notSent(err) {
+			s.mirrorBackOff(t.name, now)
+			return false
+		}
+		if err != nil && edit && !sent && ev.Tries == 0 {
+			st.Queue[i].Tries++
+			_ = writeMirrorFile(dir, st, false)
+			s.mirrorBackOff(t.name, now)
+			return false
+		}
+		st.Queue = slices.Delete(st.Queue, i, i+1)
+		if sent {
+			st.Edited = now.UnixMilli()
+		}
+		if final {
+			st.Watermark = max(st.Watermark, ev.Turn.LastTS)
+		}
+		if writeMirrorFile(dir, st, false) != nil {
+			return false
+		}
+		if err != nil {
+			s.mirrorBackOff(t.name, now)
+			return false
+		}
+		delete(s.mirrors.backoff, t.name)
+	}
+	return len(st.Queue) == 0
+}
+
+// mirrorClaim is one turn's posted/<turn>.json: the post, the fingerprint
+// of what it shows, whether it shows the turn running or interrupted, and
+// the number of counted edits it had. Buzz and Earlier are facts the post
+// keeps once it showed them: the turn answered Buzz, and the backlog turns
+// dropped before it. Checked is set once the turn's end decided Buzz.
+// EditedAt is the time of the post or its last edit, in unix milliseconds.
+type mirrorClaim struct {
+	dialogPost
+	Shown    string `json:"shown,omitempty"`
+	Running  bool   `json:"running,omitempty"`
+	Halted   bool   `json:"halted,omitempty"`
+	Edits    int    `json:"edits,omitempty"`
+	EditedAt int64  `json:"edited_at,omitempty"`
+	Buzz     bool   `json:"buzz,omitempty"`
+	Answered bool   `json:"answered,omitempty"`
+	Checked  bool   `json:"checked,omitempty"`
+	Earlier  int    `json:"earlier,omitempty"`
+}
+
+// waited reports whether gap passed at now since the time from, in unix
+// milliseconds. A clock that went back keeps no gap.
+func waited(now time.Time, from int64, gap time.Duration) bool {
+	d := now.UnixMilli() - from
+	return d < 0 || d >= gap.Milliseconds()
+}
+
+// buzzPrefix starts a post that shows Buzz as its cause.
+const buzzPrefix = "▶ " + mirror.CauseBuzz + "\n"
+
+func readMirrorClaim(path string) (mirrorClaim, bool) {
+	raw, err := readSmallRegular(path)
+	if err != nil {
+		return mirrorClaim{}, false
+	}
+	var c mirrorClaim
+	if json.Unmarshal(raw, &c) != nil {
+		return mirrorClaim{}, false
+	}
+	// A claim written before Buzz was recorded has it only in its post.
+	c.Buzz = c.Buzz || strings.HasPrefix(c.Text, buzzPrefix)
+	return c, true
+}
+
+func writeMirrorClaim(path string, c mirrorClaim) error {
+	raw, err := json.Marshal(c)
+	if err != nil {
+		return err
+	}
+	// path is <mirror root>/<name>/posted/<id>.json: the mirror root anchors
+	// the write, so neither directory below it is followed as a link.
+	root := filepath.Dir(filepath.Dir(filepath.Dir(path)))
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return err
+	}
+	_, err = fsq.WriteStateFile(root, rel, raw, 0o600)
+	return err
+}
+
+// mirrorPosted reports whether claim holds the event id of a post.
+func mirrorPosted(claim string) bool {
+	c, found := readMirrorClaim(claim)
+	return found && c.Event != ""
+}
+
+// mirrorKey names one post or edit (what) of a turn's mirror post in binding
+// name. shown, the turn's fingerprint, and its timestamps fix the text, so
+// two texts never share a key.
+func mirrorKey(name, what string, turn mirror.Turn, shown string) buzzop.Key {
+	return buzzop.Key(fmt.Sprintf("mirror/%s/%s/%s/%s/%d/%d", name, turn.ID, what, shown, turn.StartTS, turn.LastTS))
+}
+
+// mirrorPost claims turn's post, posts it and records its event id. A turn
+// already claimed is not posted. It returns the event id the claim holds.
+// An unknown post that names its event, which the transport replays, is
+// recorded as posted, so it is still edited.
+func (s *Agent) mirrorPost(claim string, t dialogTarget, b binding.Binding, turn mirror.Turn, now time.Time) (string, error) {
+	p := mirrorClaim{dialogPost: dialogPost{Channel: t.channel}, EditedAt: now.UnixMilli()}
+	s.mirrorFacts(&p, t.name, b, &turn)
+	p.Text, p.Shown, p.Running, p.Halted = mirror.Render(turn), mirror.Fingerprint(turn), turn.End == "", turn.Halted
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return "", err
+	}
+	if won, err := createExclusive(claim, raw); err != nil || !won {
+		if err == nil {
+			had, _ := readMirrorClaim(claim)
+			return had.Event, nil
+		}
+		return "", err
+	}
+	r := s.posts.Send(context.Background(), buzzop.Message{Key: mirrorKey(t.name, "post", turn, p.Shown),
+		Channel: t.channel, Content: p.Text})
+	if r.Outcome == buzzop.NotSent {
+		_ = os.Remove(claim)
+	}
+	if r.Outcome != buzzop.Accepted && (r.Outcome != buzzop.Unknown || r.EventID == "") {
+		return "", resultError(r)
+	}
+	if r.EventID == "" {
+		return "", errors.New("the post gave no event id")
+	}
+	p.Event = r.EventID
+	return r.EventID, writeMirrorClaim(claim, p)
+}
+
+// mirrorProgress edits the post of the running turn when what it shows
+// changed and the turn had fewer than mirrorProgressMax counted edits, or
+// when it was interrupted, and reports whether it edited it. An edit
+// within the gaps (edited is the binding's last post or edit) waits.
+func (s *Agent) mirrorProgress(claim string, t dialogTarget, b binding.Binding, turn mirror.Turn, now time.Time, edited int64) (bool, error) {
+	c, found := readMirrorClaim(claim)
+	if !found || c.Event == "" {
+		return false, nil
+	}
+	s.mirrorFacts(&c, t.name, b, &turn)
+	shown := mirror.Fingerprint(turn)
+	capped := c.Edits >= mirrorProgressMax && turn.Halted == c.Halted
+	if capped || shown == c.Shown {
+		return false, nil
+	}
+	if !waited(now, edited, mirrorEditGap) {
+		return false, errMirrorWait
+	}
+	text := mirror.Render(turn)
+	if err := resultError(s.posts.Edit(context.Background(), mirrorKey(t.name, "edit", turn, shown), c.Channel, c.Event, text)); err != nil {
+		return false, err
+	}
+	c.Text, c.Shown, c.Running, c.Halted, c.Edits, c.EditedAt = text, shown, true, turn.Halted, c.Edits+1, now.UnixMilli()
+	return true, writeMirrorClaim(claim, c)
+}
+
+// mirrorEdit makes the edit of an ended turn's post for ev, an Ended or
+// Continued event, and reports whether it edited it. A turn with no post,
+// or one whose outcome is unknown, is not edited. The edit that ends a post
+// showing the turn running is sent at once; any other waits for the post's
+// gap. The edit that shows the mirror turned off is the post's last. An
+// edit sent whose claim could not be written still reports it sent.
+func (s *Agent) mirrorEdit(claim string, t dialogTarget, b binding.Binding, ev mirror.Event, now time.Time) (bool, error) {
+	p, found := readMirrorClaim(claim)
+	if !found || p.Event == "" {
+		return false, nil
+	}
+	turn := ev.Turn
+	s.mirrorFacts(&p, t.name, b, &turn)
+	shown := mirror.Fingerprint(turn)
+	if shown == p.Shown {
+		return false, nil
+	}
+	if !p.Running && !waited(now, p.EditedAt, mirrorGap(p.Edits)) {
+		return false, errMirrorWait
+	}
+	text := mirror.Render(turn)
+	if err := resultError(s.posts.Edit(context.Background(), mirrorKey(t.name, "edit", turn, shown), p.Channel, p.Event, text)); err != nil {
+		return false, err
+	}
+	p.Text, p.Shown, p.Running, p.Halted, p.EditedAt = text, shown, false, turn.Halted, now.UnixMilli()
+	if p.Edits++; ev.Kind == mirror.Ended {
+		p.Edits = 0
+	}
+	if turn.End == mirror.EndMirrorOff {
+		p.Event = ""
+	}
+	return true, writeMirrorClaim(claim, p)
+}
+
+// mirrorFacts applies to turn the facts its post keeps (claim c) and keeps
+// the new ones in c: the dropped backlog turns, whether the turn shows Buzz
+// as its cause, and whether it answered Buzz. Once a post shows either fact
+// it keeps it, whatever a later edit's turn or the inbox then hold. Buzz is
+// decided once, at the turn's first end: a turn the fold names Buzz, or a
+// mailbox binding's (named name) doorbell or task turn that replied to a
+// Buzz message, which also answered Buzz. The caller keeps c with the post
+// or edit that shows the decision.
+func (s *Agent) mirrorFacts(c *mirrorClaim, name string, b binding.Binding, turn *mirror.Turn) {
+	c.Earlier = max(c.Earlier, turn.Earlier)
+	turn.Earlier = c.Earlier
+	c.Buzz = c.Buzz || turn.Cause == mirror.CauseBuzz
+	c.Answered = c.Answered || turn.Answered
+	if !c.Checked && turn.End != "" {
+		c.Checked = true
+		if mirror.BuzzReplaces(turn.Cause) && s.mirrorRepliedToBuzz(name, b, *turn) {
+			c.Buzz, c.Answered = true, true
+		}
+	}
+	if c.Buzz {
+		turn.Cause = mirror.CauseBuzz
+	}
+	turn.Answered = c.Answered
+}
+
+// mirrorRepliedToBuzz reports whether the buzz inbox of a mailbox binding's
+// root holds a reply from its handle, created between the turn's first
+// assistant line and its last line, to a Buzz message: the message it
+// directly answers, its last ref, is from buzz. The reply is a tool call
+// inside the turn, so it is delivered before the closing message is
+// written.
+func (s *Agent) mirrorRepliedToBuzz(name string, b binding.Binding, turn mirror.Turn) bool {
+	if !b.Mailbox() || turn.FirstAssistantTS == 0 {
+		return false
+	}
+	from, to := time.UnixMilli(turn.FirstAssistantTS), time.UnixMilli(turn.LastTS)
+	if s.mirrors.scans == nil {
+		s.mirrors.scans = map[string]mirrorScans{}
+	}
+	sc, ok := s.mirrors.scans[name]
+	if !ok || sc.root != b.Root {
+		sc = mirrorScans{root: b.Root, new: mailprompt.NewScan(fsq.AgentInboxNew(b.Root, mailboxSender)), cur: mailprompt.NewScan(fsq.AgentInboxCur(b.Root, mailboxSender))}
+		s.mirrors.scans[name] = sc
+	}
+	for _, box := range []*mailprompt.Scan{sc.new, sc.cur} {
+		if box.Refresh() != nil {
+			continue
+		}
+		for _, h := range box.Headers() {
+			if h == nil || h.From != b.Handle {
+				continue
+			}
+			if created, err := time.Parse(time.RFC3339Nano, h.Created); err == nil && !created.Before(from) && !created.After(to) && len(h.Refs) > 0 && fromBuzz(b, h.Refs[len(h.Refs)-1]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// fromBuzz reports whether message id in the inbox of the binding's handle
+// is from buzz.
+func fromBuzz(b binding.Binding, id string) bool {
+	if fsq.ValidateMessageFilename(id+".md") != nil {
+		return false
+	}
+	for _, dir := range []string{fsq.AgentInboxNew(b.Root, b.Handle), fsq.AgentInboxCur(b.Root, b.Handle)} {
+		if h, err := format.ReadHeaderFile(filepath.Join(dir, id+".md")); err == nil && h.From == mailboxSender {
+			return true
+		}
+	}
+	return false
+}
+
+// mirrorUnavailable posts the note once for each locator that cannot be
+// read. The note is recorded before it is posted, so it is attempted at
+// most once per locator; only a post proved not sent (buzzop.NotSent) is
+// tried again. A relay refusal (buzzop.Rejected) is an ordinary failure and
+// keeps the marker: re-posting against a refusing relay would loop. Each
+// attempt is its own post of binding name, under a fresh key.
+func (s *Agent) mirrorUnavailable(dir, name string, st *mirrorFile, key string, off bool) {
+	if off || st.Noted != nil && *st.Noted == key {
+		return
+	}
+	was := st.Noted
+	st.Noted = &key
+	if writeMirrorFile(dir, st, false) != nil {
+		st.Noted = was
+		return
+	}
+	note := buzzop.Message{Key: buzzop.Key("mirror-note/" + name + "/" + rand.Text()), Channel: st.Channel, Content: mirrorNote}
+	if s.posts.Send(context.Background(), note).Outcome == buzzop.NotSent {
+		st.Noted = was
+	}
+}
+
+// mirrorBackOff delays a binding's next tick: 30 s, doubling to 10 min.
+func (s *Agent) mirrorBackOff(name string, now time.Time) {
+	if s.mirrors.backoff == nil {
+		s.mirrors.backoff = map[string]mirrorBackoff{}
+	}
+	bo := s.mirrors.backoff[name]
+	bo.step = min(max(bo.step*2, mirrorBackoffMin), mirrorBackoffMax)
+	bo.until = now.Add(bo.step)
+	s.mirrors.backoff[name] = bo
+}
+
+// readMirrorFile returns dir's state and the bytes it was read from: the
+// progress.json of state.json's generation when there is a good one, else
+// state.json.
+func readMirrorFile(dir string) (mirrorFile, []byte, bool) {
+	st, raw, ok := readMirrorState(filepath.Join(dir, "state.json"))
+	if !ok {
+		return mirrorFile{}, nil, false
+	}
+	if next, nraw, ok := readMirrorState(filepath.Join(dir, "progress.json")); ok && next.Gen == st.Gen && next.durable().equal(st.durable()) {
+		return next, nraw, true
+	}
+	return st, raw, true
+}
+
+func readMirrorState(path string) (mirrorFile, []byte, bool) {
+	raw, err := fsq.ReadRegularNoFollowBounded(path, 16<<20)
+	if err != nil {
+		return mirrorFile{}, nil, false
+	}
+	var st mirrorFile
+	if json.Unmarshal(raw, &st) != nil {
+		return mirrorFile{}, nil, false
+	}
+	return st, raw, true
+}
+
+// writeMirrorFile records st. Only what prevents a second post must survive
+// an OS crash: each post's claim under posted/ is created exclusively and
+// synced, and the watermark, the note and the channel are synced in
+// state.json. Everything else (the cursor, the fold, the queue and the edit
+// pacing) only moves forward from there, so it goes to progress.json
+// without a sync while those stay as state.json holds them. A crash then
+// rolls that part back to state.json: the mirror reads lines again, and the
+// claims and the watermark keep a turn from being posted twice. A change of
+// the synced part writes a new generation of state.json, and a progress.json
+// of an older generation, lost, or empty is never read.
+//
+// A tick that discards what it read, because the mirror is off, is synced
+// (discard): a rolled-back cursor would read those lines again, and once the
+// mirror is on it would post turns from the off period. Only a tick that
+// folds what it may still post is left unsynced.
+func writeMirrorFile(dir string, st *mirrorFile, discard bool) error {
+	// The synced part is compared with what state.json holds on disk, not with
+	// memory: only the file says what survives a crash, and a missing or
+	// unreadable file must force the synced write.
+	if base, _, ok := readMirrorState(filepath.Join(dir, "state.json")); ok && !discard && base.Gen == st.Gen && base.durable().equal(st.durable()) {
+		raw, err := json.Marshal(st)
+		if err != nil {
+			return err
+		}
+		return fsq.WriteStateFileUnsynced(filepath.Dir(dir), filepath.Join(filepath.Base(dir), "progress.json"), raw, 0o600)
+	}
+	next := *st
+	next.Gen++
+	raw, err := json.Marshal(next)
+	if err != nil {
+		return err
+	}
+	if _, err := fsq.WriteStateFile(filepath.Dir(dir), filepath.Join(filepath.Base(dir), "state.json"), raw, 0o600); err != nil {
+		return err
+	}
+	st.Gen = next.Gen
+	return nil
+}
+
+// Replies to the owner's mirror switch.
+const (
+	mirrorOffReply = "Mirror off for this session. Type `mirror on` to start it again."
+	mirrorOnReply  = "Mirror on."
+	// mirrorStaleReply answers a switch signed before the decision that set
+	// the mirror as it is.
+	mirrorStaleReply = "The mirror was not switched: a later decision set it."
+)
+
+// mirrorWord reads text that is exactly "mirror off" or "mirror on" (case
+// ignored).
+func mirrorWord(text string) (on bool, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(text)) {
+	case "mirror off":
+		return false, true
+	case "mirror on":
+		return true, true
+	}
+	return false, false
+}
+
+// mirrorSwitchOf reads the owner's message m in a machine agent's channel
+// whose verified content is exactly "mirror off" or "mirror on". It returns
+// the channel's binding, the switch, and when the owner signed it
+// (signedWithin).
+func (s *Agent) mirrorSwitchOf(m ownerMsg) (name string, on bool, at time.Time, ok bool) {
+	channel := m.channel
+	if channel == "" || s.id.Owner == "" {
+		return "", false, time.Time{}, false
+	}
+	if _, ok := mirrorWord(m.words); !ok {
+		return "", false, time.Time{}, false
+	}
+	// Only a channel the mirror serves takes the switch: a live Claude
+	// binding whose session this channel serves.
+	r, found := s.channelRoute(channel)
+	if !found {
+		return "", false, time.Time{}, false
+	}
+	if b, err := binding.ReadNamed(r.Name); err != nil || mirror.SourceFor(b.Harness) == nil || b.SessionIdentity() != r.Identity || !s.live(b) {
+		return "", false, time.Time{}, false
+	}
+	evt := m.event
+	if on, ok = mirrorWord(dropMentions(evt.Content)); !ok || !signedWithin(evt, time.Time{}, time.Now()) {
+		return "", false, time.Time{}, false
+	}
+	return r.Name, on, evt.CreatedAt.Time(), true
+}
+
+// setMirror turns the mirror of binding name on or off by the owner's
+// message signed at at, unless a later decision set it, and returns the
+// reply for the owner.
+func setMirror(name string, on bool, at time.Time) string {
+	applied, err := mirror.Switch(name, !on, at)
+	switch {
+	case err != nil:
+		return "The mirror could not be switched: " + err.Error()
+	case !applied:
+		return mirrorStaleReply
+	case on:
+		return mirrorOnReply
+	}
+	return mirrorOffReply
+}

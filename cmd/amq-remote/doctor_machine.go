@@ -11,13 +11,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/acp"
 	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/dialogguard"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
+	"github.com/avivsinai/agent-message-queue/internal/remote/machineagent"
 	"github.com/avivsinai/agent-message-queue/internal/remote/machinecred"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/outbox"
@@ -415,7 +415,7 @@ func notAuthenticatedFor(st *machineStatus, now time.Time) time.Duration {
 func doctorChannels(all []binding.Binding, fail, note reportFunc) map[string]string {
 	out := map[string]string{}
 	for _, b := range all {
-		ch, ok := acp.MachineChannelOf(b)
+		ch, ok := machineagent.MachineChannelOf(b)
 		if !ok {
 			continue
 		}
