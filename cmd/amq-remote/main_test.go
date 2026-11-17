@@ -1686,6 +1686,46 @@ func TestRefusalsClearedOnRestart(t *testing.T) {
 	}
 }
 
+// Each serve start refused the manifest entry of a Claude session whose
+// process had ended, and doctor failed on it, because nothing removed the
+// entry (agent-message-queue-vosl.11).
+func TestServeStartRemovesTheEntryOfAnEndedClaudeProcess(t *testing.T) {
+	root := canonicalTempDir(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(root, stateDirName)
+	path := manifest.DefaultPath(stateDir)
+	const ended = "claude:2147483646" // a pid above every OS limit never runs
+	if err := manifest.Write(path, manifest.File{Adapters: []manifest.Adapter{
+		{Kind: "claude", Target: ended, Config: json.RawMessage(`{"pid":2147483646}`)},
+		{Kind: "codex", Target: "codex-abc", Config: json.RawMessage(`{"socket":"` + filepath.Join(root, "absent.sock") + `","thread":"t1"}`)},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	rawAdapters := func() []json.RawMessage {
+		var f struct{ Adapters []json.RawMessage }
+		data, err := os.ReadFile(path)
+		if err != nil || json.Unmarshal(data, &f) != nil {
+			t.Fatalf("read manifest: %v", err)
+		}
+		return f.Adapters
+	}
+	codexEntry := rawAdapters()[1]
+	ep, _, err := startFromManifest(stateDir, root, path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ep.Close() })
+	if got := rawAdapters(); len(got) != 1 || !bytes.Equal(got[0], codexEntry) {
+		t.Fatalf("manifest adapters after start = %s; want only %s", got, codexEntry)
+	}
+	refusals, err := loadRefusals(stateDir)
+	if err != nil || len(refusals) != 1 || refusals[0].Target != "codex-abc" {
+		t.Fatalf("refusals = %+v, %v; want only the codex refusal", refusals, err)
+	}
+}
+
 // startFromManifest loads manifestFile the way serve does and runs the ONE
 // production startup path (serveStartupFrom: validate -> Build -> owned
 // sequence -> diagnostics publish) with the shipped carrier wiring.
@@ -1695,7 +1735,7 @@ func startFromManifest(stateDir, root, manifestFile string, sugar []manifest.Ada
 		return nil, nil, err
 	}
 	noop := func(protocol.Snapshot, map[string]string) error { return nil }
-	_, ep, _, refusals, err := serveStartupFrom(stateDir, root, amqio.DefaultHandle, mf, sugar, noop, nil, io.Discard, wireCarrier(root, io.Discard))
+	_, ep, _, refusals, err := serveStartupFrom(stateDir, root, amqio.DefaultHandle, manifestFile, mf, sugar, noop, nil, io.Discard, wireCarrier(root, io.Discard))
 	return ep, refusals, err
 }
 
@@ -1728,10 +1768,10 @@ func ownedStartup(t *testing.T, stateDir, root, manifestFile string, sugar []man
 }
 
 // TestManifestBytesUnchangedAfterFlag (611.13 r3, r4/r5 rewrite) pins through
-// the production startup path that serve NEVER writes to the user's manifest
-// path. A codex-only manifest, started with --fake sugar, must have
-// byte-identical manifest.json after the flag append. RED if the production
-// path ever calls manifest.Write.
+// the production startup path that serve never writes flag entries or a
+// refused entry to the user's manifest path. A codex-only manifest, started
+// with --fake sugar, must have byte-identical manifest.json after the flag
+// append.
 func TestManifestBytesUnchangedAfterFlag(t *testing.T) {
 	root, err := os.MkdirTemp("", "amqrnowr")
 	if err != nil {
@@ -2008,6 +2048,41 @@ func TestDoctorRefusalsErrorSurfaced(t *testing.T) {
 	}
 	if refErr == "" {
 		t.Fatalf("refusals_error empty for a truncated refusals.json")
+	}
+}
+
+// The fix of a refused session's target told the user to edit the manifest
+// by hand; it named no command that removes the target
+// (agent-message-queue-vosl.11).
+func TestDoctorNamesTheDetachThatRemovesARefusedTarget(t *testing.T) {
+	root := canonicalTempDir(t)
+	t.Setenv(binding.EnvPath, filepath.Join(root, "binding.json"))
+	stateDir := filepath.Join(root, stateDirName)
+	if err := manifest.Write(manifest.DefaultPath(stateDir), manifest.File{Adapters: []manifest.Adapter{
+		{Kind: "claude", Target: "claude:7", Config: json.RawMessage(`{"pid":7}`)},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "refusals.json"), []byte(`[
+  {"kind": "claude", "target": "claude:7", "error": "claude adapter: refused"}
+]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := binding.WriteNamed(binding.Binding{Root: root, Target: "claude:7", NativeSession: "session-7", Name: "claude-7"}); err != nil {
+		t.Fatal(err)
+	}
+	report, _, err := doctor([]string{"--root", root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows []boundaryFailure
+	for _, f := range report.(map[string]any)["failing"].([]boundaryFailure) {
+		if f.Boundary == "registration" {
+			rows = append(rows, f)
+		}
+	}
+	if len(rows) != 1 || rows[0].Subject != "claude:7" || !strings.Contains(rows[0].Remedy, "amq-remote detach --name claude-7") {
+		t.Fatalf("registration rows = %+v; want one for claude:7 naming its detach", rows)
 	}
 }
 

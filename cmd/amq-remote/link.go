@@ -1007,10 +1007,18 @@ func dropManifestLink(stateDir, name string) error {
 
 // editManifest applies edit to the manifest under the lock attach uses.
 func editManifest(stateDir string, edit func(*manifest.File)) error {
+	return editManifestAt(manifest.DefaultPath(stateDir), func(f *manifest.File) bool {
+		edit(f)
+		return true
+	})
+}
+
+// editManifestAt applies edit to the manifest at path under its lock
+// (path + ".lock") and writes the result only when edit reports a change.
+func editManifestAt(path string, edit func(*manifest.File) bool) error {
 	if !lock.AdvisoryLockAvailable() {
 		return errors.New("refusing to update the manifest without an advisory file lock")
 	}
-	path := manifest.DefaultPath(stateDir)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -1019,12 +1027,38 @@ func editManifest(stateDir string, edit func(*manifest.File)) error {
 		if err != nil {
 			return err
 		}
-		edit(&f)
+		if !edit(&f) {
+			return nil
+		}
 		if err := manifest.Validate(f); err != nil {
 			return err
 		}
 		return manifest.Write(path, f)
 	})
+}
+
+// removeAdapter removes from the manifest at path the first adapter entry
+// that match accepts, and reports whether it removed one. A manifest with no
+// such entry is not written, and its directory and lock are not created.
+func removeAdapter(path string, match func(manifest.Adapter) bool) (bool, error) {
+	mf, err := manifest.Load(path)
+	if err != nil {
+		return false, err
+	}
+	if !slices.ContainsFunc(mf.Adapters, match) {
+		return false, nil
+	}
+	removed := false
+	err = editManifestAt(path, func(f *manifest.File) bool {
+		i := slices.IndexFunc(f.Adapters, match)
+		if i < 0 {
+			return false
+		}
+		f.Adapters = slices.Delete(f.Adapters, i, i+1)
+		removed = true
+		return true
+	})
+	return removed && err == nil, err
 }
 
 // shareWithLink adds or replaces one binding's share on a declared link.

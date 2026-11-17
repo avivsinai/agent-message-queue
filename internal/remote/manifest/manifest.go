@@ -10,7 +10,10 @@
 // not register targets from a re-read: attach adds a target to a running
 // serve by writing the manifest and registering the adapter live, and a
 // target absent from the manifest at the next start is not registered, so its
-// live records reconcile as attachment_lost. While serve runs, the relay
+// live records reconcile as attachment_lost. At start, serve removes an
+// entry whose factory proves its target ended (registry.ErrTargetGone), and
+// detach removes the entry of the session it detaches (a running serve keeps
+// that target until it restarts). While serve runs, the relay
 // reloads its shares when the manifest bytes change (a changed relay url,
 // relay_self or share entry still needs a restart), and the link set syncs
 // its links when the manifest mtime changes. Every other command reads the
@@ -574,8 +577,10 @@ var knownTopLevel = map[string]bool{"schema_version": true, "layer": true, "adap
 
 // Write persists the manifest, filling the passive-manifest layer field
 // ("remote", per the extensions/remote ownership) when unset. It creates the
-// parent directory. serve writes the merged (file + flag) set here so the
-// manifest is the single source of truth and `amq doctor` can diagnose it.
+// parent directory. Commands that edit the manifest (attach, detach, share,
+// link) write it here; serve writes only the file it loaded, and only to
+// remove an entry whose target ended. Flag entries (--fake, --codex-socket)
+// are never written.
 func Write(path string, f File) error {
 	if f.SchemaVersion == 0 {
 		f.SchemaVersion = SchemaVersion

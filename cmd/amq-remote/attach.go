@@ -1060,6 +1060,9 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	if err != nil {
 		return protocol.ExitActionRequired, fmt.Errorf("the session is detached, but its link share entry was not removed: %w", err)
 	}
+	if err := removeDetachedAdapters(gone, stderr); err != nil {
+		return protocol.ExitActionRequired, fmt.Errorf("the session is detached, but its manifest entry was not removed: %w", err)
+	}
 	if c.json {
 		if removed == nil {
 			removed = []string{}
@@ -1092,6 +1095,42 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	}
 	say(stdout, "Disconnected. The session keeps running.")
 	return 0, nil
+}
+
+// removeDetachedAdapters removes the adapter entry of each native session in
+// names that the owner detached from its root's manifest, so serve does not
+// attach it again at its next start. An entry whose target a current binding
+// of the same root names stays. An entry that a relay share names stays too,
+// with a note on stderr.
+func removeDetachedAdapters(names []string, stderr io.Writer) error {
+	tombs, err := binding.Tombstones()
+	if err != nil {
+		return err
+	}
+	all, err := binding.List()
+	if err != nil {
+		return err
+	}
+	for _, t := range tombs {
+		if !slices.Contains(names, t.Name) || t.Mailbox() || t.Target == "" || t.Removed != binding.RemovedDetached {
+			continue
+		}
+		if slices.ContainsFunc(all, func(b binding.Binding) bool {
+			return filepath.Clean(b.Root) == filepath.Clean(t.Root) && b.Target == t.Target
+		}) {
+			continue
+		}
+		path := manifest.DefaultPath(filepath.Join(t.Root, stateDirName))
+		_, err := removeAdapter(path, func(a manifest.Adapter) bool { return a.Target == t.Target })
+		if manifest.IsValidation(err) {
+			say(stderr, "note: the manifest entry of %s stays: %v", t.Target, err)
+			continue
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // selfEnded reports whether an ended session's tombstone that match accepts

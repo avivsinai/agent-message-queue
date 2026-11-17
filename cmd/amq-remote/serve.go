@@ -171,7 +171,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	if err == nil {
 		relayCfg = mfSnap.Relay
 		edges = buildDMEdges(c.root, stateDir, relayCfg, stderr)
-		_, ep, carrier, _, err = serveStartupFrom(stateDir, c.root, *me, mfSnap, sugar, carrierPublish, &carrier, stderr, wireCarrier(c.root, stderr))
+		_, ep, carrier, _, err = serveStartupFrom(stateDir, c.root, *me, manifestFile, mfSnap, sugar, carrierPublish, &carrier, stderr, wireCarrier(c.root, stderr))
 	}
 	if err != nil {
 		return serveStartupError(err, sugar, manifestFile)
@@ -460,8 +460,11 @@ func openServeStore(stateDir string) (*requests.Store, *core.Endpoint, error) {
 // the warn writer: doctor reads what exists, and
 // losing startup keeps its own exit code. Refusals are rewritten EVERY owned
 // start, including empty — a removed adapter must not persist as 'refused'
-// forever. The caller owns the returned endpoint: Close it when done.
-func serveStartupFrom(stateDir, root, handle string, mf manifest.File, sugar []manifest.Adapter, publish core.Publisher, carrierOut **amqio.Carrier, warn io.Writer, wire func(*amqio.Carrier)) (*requests.Store, *core.Endpoint, *amqio.Carrier, []registry.Outcome, error) {
+// forever. An entry whose factory proves its target ended is removed from
+// manifestFile, the file mf was loaded from, under the same owner lock and
+// before that publish (see removeGoneTargets). The caller owns the returned
+// endpoint: Close it when done.
+func serveStartupFrom(stateDir, root, handle, manifestFile string, mf manifest.File, sugar []manifest.Adapter, publish core.Publisher, carrierOut **amqio.Carrier, warn io.Writer, wire func(*amqio.Carrier)) (*requests.Store, *core.Endpoint, *amqio.Carrier, []registry.Outcome, error) {
 	mf.Adapters = append(append([]manifest.Adapter(nil), mf.Adapters...), sugar...)
 	if verr := manifest.Validate(mf); verr != nil {
 		return nil, nil, nil, nil, verr
@@ -484,10 +487,45 @@ func serveStartupFrom(stateDir, root, handle string, mf manifest.File, sugar []m
 	if err != nil {
 		return store, ep, carrier, refusals, err
 	}
+	refusals = removeGoneTargets(manifestFile, refusals, warn)
 	if perr := persistRefusals(stateDir, refusals); perr != nil && warn != nil {
 		say(warn, "warning: could not persist adapter refusals: %v", perr)
 	}
 	return store, ep, carrier, refusals, nil
+}
+
+// removeGoneTargets removes from the manifest at path the entry of each
+// refusal whose factory proved its target ended (registry.ErrTargetGone) and
+// returns the refusals that remain. It runs only while serve holds the owner
+// lock. An entry is removed, one per edit and validated, only while the file
+// still holds it as Build read it; an entry that stays (a relay share names
+// it, it changed, the lock or write failed) stays a refusal, with a warning.
+func removeGoneTargets(path string, refusals []registry.Outcome, warn io.Writer) []registry.Outcome {
+	kept := refusals[:0:0]
+	for _, oc := range refusals {
+		if !errors.Is(oc.Refusal, registry.ErrTargetGone) {
+			kept = append(kept, oc)
+			continue
+		}
+		m := oc.Manifest
+		removed, err := removeAdapter(path, func(a manifest.Adapter) bool {
+			return a.Target == m.Target && a.Kind == m.Kind && sameJSON(a.Config, m.Config)
+		})
+		if removed {
+			if warn != nil {
+				say(warn, "removed the manifest entry of %s: %v", m.Target, oc.Refusal)
+			}
+			continue
+		}
+		if err == nil {
+			err = errors.New("the file no longer holds the entry serve read")
+		}
+		if warn != nil {
+			say(warn, "warning: the manifest entry of %s stays: %v", m.Target, err)
+		}
+		kept = append(kept, oc)
+	}
+	return kept
 }
 
 // startupSequence is the construction-plus-reconcile order serve runs, as

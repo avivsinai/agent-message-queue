@@ -1493,3 +1493,39 @@ func TestDetachByNameDropsAShareEntryWithNoBinding(t *testing.T) {
 		t.Fatalf("manifest after named detach = %+v, %v", got, err)
 	}
 }
+
+// Detach left the adapter entry of the session it detached, so every serve
+// start attached it again or refused it (agent-message-queue-vosl.11).
+func TestDetachByNameRemovesTheSessionsManifestEntry(t *testing.T) {
+	for _, row := range []struct {
+		name            string
+		alreadyDetached bool
+	}{{"bound", false}, {"detached earlier", true}} {
+		t.Run(row.name, func(t *testing.T) {
+			root := canonicalTempDir(t)
+			t.Setenv(binding.EnvPath, filepath.Join(root, "binding.json"))
+			path := manifest.DefaultPath(filepath.Join(root, stateDirName))
+			if err := manifest.Write(path, manifest.File{Adapters: []manifest.Adapter{
+				{Kind: "claude", Target: "claude:7", Config: json.RawMessage(`{"pid":7}`)},
+				{Kind: "claude", Target: "claude:8", Config: json.RawMessage(`{"pid":8}`)},
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := binding.WriteNamed(binding.Binding{Root: root, Target: "claude:7", NativeSession: "session-7", Name: "claude-7"}); err != nil {
+				t.Fatal(err)
+			}
+			if row.alreadyDetached {
+				if _, _, err := binding.Detach(func(b binding.Binding) bool { return b.Name == "claude-7" }, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if code, err := detach([]string{"--name", "claude-7", "--root", root}, io.Discard, io.Discard); code != 0 || err != nil {
+				t.Fatalf("detach = %d, %v", code, err)
+			}
+			got, err := manifest.Load(path)
+			if err != nil || len(got.Adapters) != 1 || got.Adapters[0].Target != "claude:8" {
+				t.Fatalf("adapters after detach = %+v, %v; want only claude:8", got.Adapters, err)
+			}
+		})
+	}
+}
