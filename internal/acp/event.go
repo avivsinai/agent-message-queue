@@ -16,8 +16,8 @@ const (
 
 var nostrEventIDRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-// The event record is a claim, not a receipt: like the mailbox steer claim
-// it fixes only what a replay must not re-decide (message id, created time,
+// The event record is a claim, not a receipt: it fixes only what a replay
+// must not re-decide (message id, created time,
 // destination, thread). It records no delivery outcome — what was delivered
 // is what the recipient inbox proves at replay time, never what the first
 // attempt wrote here.

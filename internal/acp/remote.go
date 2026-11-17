@@ -431,59 +431,18 @@ func (s *Server) ownsClaim(c eventClaim, _ string) bool {
 }
 
 // eventsDir is remote-events, which holds the per-agent event directories
-// and the event state written before them.
+// and the event state of a process with no Buzz identity.
 func (s *Server) eventsDir() string { return filepath.Join(s.cfg.StateDir, "remote-events") }
 
-// eventDir is the directory of one event's state. Each Buzz agent keeps its
+// eventDir is the directory of an event's state. Each Buzz agent keeps its
 // own, remote-events/<agent pubkey>/, because one Buzz event can reach
-// several agents, and each handles it for itself. State from older
-// builds, which had no per-agent directory, lives in remote-events itself; an
-// event whose claim is there and is this agent's stays there. A process with
-// no Buzz identity uses remote-events itself.
-func (s *Server) eventDir(eventID string) string {
+// several agents, and each handles it for itself. A process with no Buzz
+// identity uses remote-events itself.
+func (s *Server) eventDir(_ string) string {
 	if s.id.Agent == "" {
 		return s.eventsDir()
 	}
-	own := filepath.Join(s.eventsDir(), s.id.Agent)
-	if eventID != "" && s.ownsLegacyEvent(own, eventID) {
-		return s.eventsDir()
-	}
-	return own
-}
-
-// ownsLegacyEvent reports whether the event's state was written before
-// per-agent directories and is this agent's: its own directory has no claim
-// of the event, and remote-events has one this agent owns. A steer event is
-// this agent's when its parent event is. A yes is recorded once as
-// <own>/<event>.legacy, so the event never changes directory while it runs.
-func (s *Server) ownsLegacyEvent(own, eventID string) bool {
-	marker := filepath.Join(own, eventID+".legacy")
-	if _, err := os.Lstat(marker); err == nil {
-		return true
-	}
-	for _, suffix := range []string{".json", ".steer.json"} {
-		if _, err := os.Lstat(filepath.Join(own, eventID+suffix)); err == nil {
-			return false
-		}
-	}
-	owned := false
-	if raw, err := readSmallRegular(filepath.Join(s.eventsDir(), eventID+".json")); err == nil {
-		var c eventClaim
-		owned = json.Unmarshal(raw, &c) == nil && c.Valid() == nil && s.ownsClaim(c, "")
-	} else {
-		var steer steerClaim
-		if raw, err := readSmallRegular(filepath.Join(s.eventsDir(), eventID+".steer.json")); err == nil &&
-			json.Unmarshal(raw, &steer) == nil && steer.ParentEvent != "" && steer.ParentEvent != eventID {
-			owned = s.ownsLegacyEvent(own, steer.ParentEvent)
-		}
-	}
-	if !owned {
-		return false
-	}
-	// A failed record leaves the decision to the next call; it reaches the
-	// same answer while the flat claim stays.
-	_, _ = createExclusive(marker, nil)
-	return true
+	return filepath.Join(s.eventsDir(), s.id.Agent)
 }
 
 // createExclusive publishes raw at path only if nothing is there yet. The

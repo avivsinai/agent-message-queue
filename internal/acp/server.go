@@ -136,8 +136,6 @@ type turnState struct {
 	// settles the turn, so a mailbox Stop is never acknowledged before it is
 	// recorded.
 	mailboxEvent string
-	// mailboxSteer is set once a mailbox turn's prompt is published.
-	mailboxSteer *mailboxSteerTarget
 	// route is the channel of a machine agent's turn ("" for an ACP
 	// prompt).
 	route string

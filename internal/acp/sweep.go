@@ -49,10 +49,9 @@ type lateReplySweep struct {
 	pending   map[string]struct{}
 
 	// Owned by the worker (or a test calling sweepLateReplies). The cursor
-	// lists claimDirs()[cursorDir].
-	cursor    *os.File
-	cursorDir int
-	scans     map[string][2]*inboxScan
+	// lists the agent's event directory.
+	cursor *os.File
+	scans  map[string][2]*inboxScan
 	// inDoubt holds the events whose final post was seen sending,
 	// already logged. Such events are rare and the set is not pruned.
 	inDoubt map[string]struct{}
@@ -307,17 +306,14 @@ func matchClaims(sc *inboxScan, index map[string]*lateClaim) map[string][]replyH
 }
 
 // discoverClaims lists the next lateReplyBudget entries of this agent's
-// claim directories and adds the recent mailbox claims among them. The
-// listing resumes where the last sweep stopped and moves to the next
-// directory after the end of one.
+// event directory and adds the recent mailbox claims among them. The
+// listing resumes where the last sweep stopped and starts again after the
+// end.
 func (s *Server) discoverClaims(now time.Time) {
 	l := &s.late
 	if l.cursor == nil {
-		dirs := s.claimDirs()
-		l.cursorDir %= len(dirs)
-		f, err := os.Open(dirs[l.cursorDir])
+		f, err := os.Open(s.eventDir(""))
 		if err != nil {
-			l.cursorDir++
 			return
 		}
 		l.cursor = f
@@ -335,17 +331,7 @@ func (s *Server) discoverClaims(now time.Time) {
 	if err != nil || len(entries) < lateReplyBudget {
 		_ = l.cursor.Close()
 		l.cursor = nil
-		l.cursorDir++
 	}
-}
-
-// claimDirs are the directories that hold this agent's claims: its own, then
-// remote-events for claims written before per-agent directories.
-func (s *Server) claimDirs() []string {
-	if s.id.Agent == "" {
-		return []string{s.eventsDir()}
-	}
-	return []string{filepath.Join(s.eventsDir(), s.id.Agent), s.eventsDir()}
 }
 
 // lateClaim is one mailbox event the sweep may post for.
