@@ -22,8 +22,8 @@ const lateReplyInterval = 30 * time.Second
 // scans unbounded history.
 const lateReplyHorizon = 24 * time.Hour
 
-// lateReplyBudget is how many remote-events entries one sweep lists to
-// discover claims this process did not make.
+// lateReplyBudget is how many entries of the agent's event directory one
+// sweep lists to discover claims this process did not make.
 const lateReplyBudget = 512
 
 // lateReplyPosts caps the posts of one sweep; the rest wait for the next.
@@ -34,7 +34,8 @@ const lateReplyPosts = 8
 // one sweep waits behind a running one.
 //
 // One sweep costs: one listing read of at most lateReplyBudget entries of
-// remote-events, a few small state reads per pending claim, one listing of
+// the agent's event directory, a few small state reads per pending claim,
+// one listing of
 // buzz inbox/new and inbox/cur per queue root with an eligible claim, the
 // headers of names not seen before, one pass over each root's cached
 // headers, and at most lateReplyPosts posts. Pending claims are the ones
