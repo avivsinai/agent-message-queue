@@ -130,18 +130,10 @@ type turnState struct {
 	// channel is the Buzz channel the owner's message came from ("" for an
 	// ACP prompt); the owner-facing text is posted there.
 	channel string
-	// mailboxEvent is the event id of a machine agent's turn, registered
-	// when the turn begins and cleared once the turn routes to a native
-	// binding. A cancel decides that event's durable outcome before it
-	// settles the turn, so a mailbox Stop is never acknowledged before it is
-	// recorded.
-	mailboxEvent string
-	// mailboxSteer is set once a mailbox turn's prompt is published.
-	mailboxSteer *mailboxSteerTarget
 	// route is the channel of a machine agent's turn ("" for an ACP
 	// prompt).
 	route string
-	// event is the owner's verified message of a standalone turn (Owner),
+	// event is the owner's signed message of a machine agent's turn (Owner),
 	// set before the turn runs; nil for an ACP prompt.
 	event *nostr.Event
 }
@@ -227,9 +219,6 @@ type Server struct {
 	// dialogs is the dialog poster's state, used only by the worker that
 	// runs dialogTick.
 	dialogs dialogState
-	// notices limits the lines that say why an owner decision was not
-	// taken.
-	notices noticeLimit
 	// mirrors is the session mirror's state, used only by the worker that
 	// runs mirrorTick.
 	mirrors mirrorState
@@ -240,7 +229,7 @@ type Server struct {
 	// mirror workers.
 	targets targetCache
 	// appServers judges Codex app-server threads for the current machine
-	// tick, or is nil before the first one and in a worker that runs none.
+	// tick, or is nil before the first one.
 	appServers atomic.Pointer[appServerJudge]
 }
 
@@ -708,9 +697,6 @@ type amqDelivery struct {
 	Completed bool   `json:"completed"`
 	Egress    string `json:"egress"`
 	Duplicate bool   `json:"duplicate,omitempty"`
-	// Posted is "posted" when the reply was published into the Buzz
-	// channel, or the post error.
-	Posted string `json:"posted,omitempty"`
 }
 
 func (s *Server) prompt(params json.RawMessage, emit func(any) error) (any, *rpcError) {
@@ -852,9 +838,7 @@ func (s *Server) waitForReply(sessionID string, delivery Delivery, turn *turnSta
 			if err := emitText(emit, sessionID, "agent_message_chunk", reply); err != nil {
 				return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
 			}
-			result := turnResult(delivery, turnReplied, reply)
-			result.Meta.AMQ.Posted = s.publish(turn.channel, reply)
-			return result, nil
+			return turnResult(delivery, turnReplied, reply), nil
 		}
 
 		select {
@@ -974,30 +958,12 @@ func (s *Server) cancel(params json.RawMessage) (any, *rpcError) {
 		return nil, err
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	session, ok := s.sessions[parsed.SessionID]
 	if !ok {
-		s.mu.Unlock()
 		return nil, newRPCError(codeInvalidParams, "unknown sessionId %q", parsed.SessionID)
 	}
-	t, event := session.turn, ""
-	if t != nil && t.outcome == turnOpen {
-		event = t.mailboxEvent
-	}
-	s.mu.Unlock()
-	// A mailbox cancel is accepted only once it is the event's durable
-	// outcome; if a reply already is, the turn returns that reply.
-	if event != "" {
-		final, _, err := s.decideOutcome(event, mailboxOutcome{Cancelled: true})
-		if err != nil {
-			return nil, newRPCError(codeInternalError, "record cancel: %v", err)
-		}
-		if !final.Cancelled {
-			return struct{}{}, nil
-		}
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if t != nil && session.turn == t && t.settleLocked(turnCancelled) {
+	if t := session.turn; t != nil && t.settleLocked(turnCancelled) {
 		close(t.done)
 	}
 	return struct{}{}, nil

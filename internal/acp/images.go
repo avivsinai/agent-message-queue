@@ -3,55 +3,37 @@ package acp
 import (
 	"net/url"
 	"path"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"fiatjaf.com/nostr"
 )
 
-// eventMedia is one file of a Buzz event: its URL and what its imeta tag
-// declares (empty or zero when undeclared).
-type eventMedia struct {
-	url  string
-	mime string
-	sha  string
-	size int64
-}
-
-// imetaMedia reads one NIP-92 imeta tag; ok is false for any other tag and
-// for one with no url.
-func imetaMedia(t []string) (m eventMedia, ok bool) {
+// imetaURL is the url of one NIP-92 imeta tag, "" for any other tag and for
+// one with no url.
+func imetaURL(t []string) string {
 	if len(t) < 2 || t[0] != "imeta" {
-		return m, false
+		return ""
 	}
+	url := ""
 	for _, field := range t[1:] {
-		key, value, _ := strings.Cut(field, " ")
-		value = strings.TrimSpace(value)
-		switch key {
-		case "url":
-			m.url = value
-		case "m":
-			m.mime = strings.ToLower(value)
-		case "x":
-			m.sha = strings.ToLower(value)
-		case "size":
-			m.size, _ = strconv.ParseInt(value, 10, 64)
+		if key, value, _ := strings.Cut(field, " "); key == "url" {
+			url = strings.TrimSpace(value)
 		}
 	}
-	return m, m.url != ""
+	return url
 }
 
 // unfetchedImages returns prompt with one `[image not attached: ...]` line
-// per file of the owner's event evt: a standalone machine agent does not
-// download media.
+// per file of the owner's event evt: the machine agent does not download
+// media.
 func unfetchedImages(evt nostr.Event, prompt string) string {
 	var lines []string
 	seen := map[string]bool{}
 	for _, t := range evt.Tags {
-		if m, ok := imetaMedia(t); ok && !seen[m.url] {
-			seen[m.url] = true
-			lines = append(lines, "[image not attached: "+oneLine(mediaName(m.url))+": amq-remote serve does not download images yet]")
+		if u := imetaURL(t); u != "" && !seen[u] {
+			seen[u] = true
+			lines = append(lines, "[image not attached: "+oneLine(mediaName(u))+": amq-remote serve does not download images yet]")
 		}
 	}
 	if len(lines) == 0 {

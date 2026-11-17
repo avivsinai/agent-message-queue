@@ -59,14 +59,14 @@ func (s *Server) Owner(in buzzop.Inbound) <-chan struct{} {
 	evt, ch, id := in.Event, in.Channel, in.Event.ID.Hex()
 	path := filepath.Join(s.eventDir(id), id+".json")
 	if c, found := readClaim(path); found {
-		if c == nil || c.Decided != "" || !s.ownsClaim(*c, "") {
+		if c == nil || c.Decided != "" || !s.ownsClaim(*c) {
 			close(done)
 			return done
 		}
 		s.owners.queue(s, ch, ownerTurn{evt: evt, done: done})
 		return done
 	}
-	m := ownerMsg{channel: ch, words: dropMentions(evt.Content), verified: func() (nostr.Event, error) { return evt, nil }}
+	m := ownerMsg{channel: ch, words: dropMentions(evt.Content), event: evt}
 	if d, ok := s.decideOwner(m); ok {
 		won, err := writeClaim(path, eventClaim{Name: r.Name, Agent: s.id.Agent, Decided: d.kind})
 		switch {
@@ -242,7 +242,7 @@ func (s *Server) runOwnerTurn(ch string, evt nostr.Event, quit <-chan struct{}) 
 		s.sessions[sid] = &sessionState{ID: sid, ChannelID: ch, Thread: cockpitThread(sid), route: ch}
 	}
 	session, turn, _ := s.beginTurnLocked(sid)
-	turn.route, turn.channel, turn.mailboxEvent, turn.event = ch, ch, id, &evt
+	turn.route, turn.channel, turn.event = ch, ch, &evt
 	s.mu.Unlock()
 	defer s.finishTurn(session, turn)
 	defer s.showWorking(ch)()

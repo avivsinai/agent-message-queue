@@ -44,15 +44,14 @@ type Standalone struct {
 }
 
 // NewStandalone builds a machine agent's server on sa.Transport. Its state
-// directory is BindingStateDir, beside the binding file. The marker
-// it writes records this process as the worker and no parent.
+// directory is BindingStateDir, beside the binding file. The marker it
+// writes records this process as the worker.
 func NewStandalone(sa Standalone, version string) *Server {
 	s := NewServer(Config{RemoteBinding: true, Machine: true, Identity: sa.Identity}, version)
 	s.buzz = directOps{s: s, t: sa.Transport}
 	s.posts = boundedPosts{s: s, t: sa.Transport}
 	s.direct, s.online = sa.Transport, sa.Online
-	self, _ := launch.HolderOf(os.Getpid())
-	workerIdentity.self, workerIdentity.parent = self, launch.HolderIdentity{}
+	workerIdentity.self, _ = launch.HolderOf(os.Getpid())
 	return s
 }
 
@@ -62,7 +61,7 @@ func NewStandalone(sa Standalone, version string) *Server {
 // stop ends the workers and releases every lock they took. Call it again
 // only after stop.
 func (s *Server) StartMachine() (stop func(), ok bool) {
-	if s.id.Agent == "" || !s.lead(machineName) {
+	if s.id.Agent == "" || !s.lead() {
 		return nil, false
 	}
 	return s.startLateReplySweep(), true

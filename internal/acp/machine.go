@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -123,12 +122,9 @@ type channelRecord struct {
 	// ArchiveSent is written before the channel's archive is sent, so a
 	// restore unarchives a channel that may be archived although no archive
 	// was confirmed.
-	ArchiveSent bool `json:"archive_sent,omitempty"`
-	// Orphans are channels found for Reg that are not used. A retired
-	// record archives them.
-	Orphans     []string `json:"orphans,omitempty"`
-	RetiredBy   string   `json:"retired_by,omitempty"`
-	RetiredFrom string   `json:"retired_from,omitempty"`
+	ArchiveSent bool   `json:"archive_sent,omitempty"`
+	RetiredBy   string `json:"retired_by,omitempty"`
+	RetiredFrom string `json:"retired_from,omitempty"`
 	// RetiredAt is when the record left its active slot, set once then;
 	// empty in a record retired before it was recorded.
 	RetiredAt string `json:"retired_at,omitempty"`
@@ -141,13 +137,13 @@ type channelRecord struct {
 // inDoubt reports whether a create of r may have made a channel that is not
 // known yet.
 func (r channelRecord) inDoubt() bool {
-	return (r.Doubted || r.Pending) && r.ChannelID == "" && len(r.Orphans) == 0
+	return (r.Doubted || r.Pending) && r.ChannelID == ""
 }
 
-// prunable reports whether a retired record may be removed: every channel it
+// prunable reports whether a retired record may be removed: the channel it
 // made is archived, or it made none and no create is in doubt.
 func (r channelRecord) prunable() bool {
-	return r.Archived || (r.ChannelID == "" && len(r.Orphans) == 0 && !r.inDoubt())
+	return r.Archived || (r.ChannelID == "" && !r.inDoubt())
 }
 
 func channelDirFor(stateDir, relayKey, machine string) string {
@@ -165,9 +161,7 @@ func loadChannelRecord(path string) (r channelRecord, found bool, err error) {
 		r, found, err := decodeChannelRecord(path)
 		return cachedRecord{r, found}, err
 	})
-	r = c.r
-	r.Orphans = slices.Clone(r.Orphans)
-	return r, c.found || err != nil, err
+	return c.r, c.found || err != nil, err
 }
 
 type cachedRecord struct {
@@ -309,15 +303,12 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) (p pace) {
 	gone := s.machine.goneDaemons
 	s.machine.goneDaemons = nil
 	s.appServers.Store(nil)
-	if !s.cfg.Machine || s.id.Agent == "" || s.stopped() || !s.lead(machineName) {
+	if !s.cfg.Machine || s.id.Agent == "" || s.stopped() || !s.lead() {
 		return pace{next: now.Add(machineScanInterval)}
 	}
 	if due(s.machine.marked, lateReplyInterval, now) {
-		dir := s.agentMarkerDir(machineName)
-		m, _ := readAgentMarker(filepath.Join(dir, s.id.Agent+".json"))
-		m.Name, m.DisplayName, m.RelayKey = machineName, s.id.DisplayName, s.id.RelayKey
-		m.Host = "standalone"
-		s.writeAgentMarker(dir, m, now)
+		m := agentMarker{Name: machineName, DisplayName: s.id.DisplayName, RelayKey: s.id.RelayKey, Host: "standalone"}
+		s.writeAgentMarker(s.agentMarkerDir(), m, now)
 		s.machine.marked = now.UTC().Format(time.RFC3339)
 	}
 	if s.id.RelayKey == "" || s.id.Owner == "" {
@@ -363,7 +354,7 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) (p pace) {
 		s.judgeRoutes(now)
 	}
 	for _, r := range s.snapshot().records {
-		if at, ok := recordDue(r, channelStepGap, now); ok {
+		if at, ok := recordDue(r, now); ok {
 			p.due(at)
 		}
 	}
@@ -372,9 +363,9 @@ func (s *Server) machineTick(ctx context.Context, now time.Time) (p pace) {
 
 // recordDue is when the slot record r needs its next step: at once while
 // it is set up or retired, at its retry time while it waits on one (an
-// uncertain create waits uncertain); ok is false for an active record and
-// one that is never tried again.
-func recordDue(r channelRecord, uncertain time.Duration, now time.Time) (at time.Time, ok bool) {
+// uncertain create waits channelStepGap); ok is false for an active record
+// and one that is never tried again.
+func recordDue(r channelRecord, now time.Time) (at time.Time, ok bool) {
 	switch {
 	case r.Pending:
 	case r.State == channelActive:
@@ -384,7 +375,7 @@ func recordDue(r channelRecord, uncertain time.Duration, now time.Time) (at time
 	case r.State == channelFailed, r.State == channelUncertain:
 		gap := channelRetryGap
 		if r.State == channelUncertain {
-			gap = uncertain
+			gap = channelStepGap
 		}
 		if last, err := time.Parse(time.RFC3339, r.LastTry); err == nil {
 			return last.Add(gap), true
@@ -494,7 +485,7 @@ func daemonGone(view *codex.View, b binding.Binding) bool {
 // has ended when the daemon it was bound in, still running, no longer has
 // it loaded, or when that daemon was gone, with the thread loaded nowhere,
 // on two ticks in a row. Any other binding's liveness is its holder's, as
-// it is in a worker that runs no machine tick.
+// every binding's is before the first machine tick.
 func (s *Server) liveness(b binding.Binding) (binding.State, string) {
 	j := s.appServers.Load()
 	if j == nil {
@@ -982,7 +973,7 @@ func (s *Server) retiredRecords() []channelRecord {
 
 // cleanRetired works on one retired record: it finds a channel an uncertain
 // or unfinished create made, says "Session ended" in a channel that was
-// active for a session that ended, and archives every channel the record
+// active for a session that ended, and archives the channel the record
 // made. archived is written only after the archive is confirmed; a failure
 // is retried after channelRetryGap without limit. A retired record never
 // gets add-member, a welcome or activation.
@@ -996,7 +987,7 @@ func (s *Server) cleanRetired(r channelRecord, now time.Time) {
 	if r.Archived || s.stopped() || (r.LastTry != "" && r.LastError != "" && !due(r.LastTry, channelRetryGap, now)) {
 		return
 	}
-	if r.ChannelID == "" && len(r.Orphans) == 0 && !r.inDoubt() {
+	if r.ChannelID == "" && !r.inDoubt() {
 		return
 	}
 	if !s.unchanged(r) {
@@ -1019,7 +1010,7 @@ func (s *Server) cleanRetired(r channelRecord, now time.Time) {
 			_ = s.save(&r, now)
 			return
 		}
-		r.ChannelID, r.Orphans, r.Pending, r.Doubted = ids[0], ids[1:], false, true
+		r.ChannelID, r.Pending, r.Doubted = ids[0], false, true
 		if s.save(&r, now) != nil {
 			return
 		}
@@ -1051,20 +1042,6 @@ func (s *Server) cleanRetired(r channelRecord, now time.Time) {
 			text = "Disconnected: " + r.Label + ". This channel no longer reaches it until the session connects again."
 		}
 		_ = s.buzz.Send(ctx, buzzop.Message{Key: retiredKey("ended", r), Channel: r.ChannelID, Content: text})
-	}
-	for len(r.Orphans) > 0 {
-		if s.stopped() {
-			return
-		}
-		key := buzzop.Key("archive-orphan/" + r.Reg + "/" + r.Orphans[0])
-		if res := s.buzz.SetArchived(ctx, key, r.Orphans[0], true); res.Outcome != buzzop.Accepted {
-			fail(res.Reason)
-			return
-		}
-		r.Orphans = r.Orphans[1:]
-		if s.save(&r, now) != nil {
-			return
-		}
 	}
 	if r.ChannelID != "" {
 		if s.stopped() {
@@ -1264,7 +1241,7 @@ type resetRequest struct {
 // applyResets retires each record named by a reset request whose reg still
 // matches it, and reports whether a request stays. The next provisioning makes a new record with a new reg; the
 // retired one keeps being reconciled and archived, so a late channel of an
-// uncertain create is archived as an orphan. A request is dropped once it is
+// uncertain create is still found and archived. A request is dropped once it is
 // applied or names no current record; one whose request or record cannot be
 // read, or whose retirement failed, stays for the next scan.
 func (s *Server) applyResets(now time.Time) (left bool) {
@@ -1382,8 +1359,6 @@ func (s *Server) machineDirectory() string {
 			fmt.Fprintf(&b, "\n- %s: its channel %q is suspended (%s)", label, r.Label, r.Suspended)
 		case ok && r.State == channelActive && r.Identity == bd.SessionIdentity():
 			fmt.Fprintf(&b, "\n- %s: write in the %q channel", label, r.Label)
-		case !s.provisionable(bd):
-			fmt.Fprintf(&b, "\n- %s: DM its own agent", label)
 		case ok:
 			fmt.Fprintf(&b, "\n- %s: its channel is %s", label, r.State)
 		default:

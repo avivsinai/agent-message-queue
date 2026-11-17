@@ -18,7 +18,6 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
-	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzevent"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
@@ -547,8 +546,8 @@ func reactionOption(req dialog.Request, rs []buzzop.Reaction, owner string) int 
 // postDialog claims req's post record, posts it and records the message. A
 // post proved not sent drops the claim so the next tick posts again; any
 // other failure leaves the outcome unknown, and the dialog is not posted
-// again. An unknown post that names its event (the direct transport, which
-// replays it) keeps that event, so it is still read and edited.
+// again. An unknown post that names its event, which the transport
+// replays, keeps that event, so it is still read and edited.
 func (s *Server) postDialog(path string, t dialogTarget, req dialog.Request) {
 	label := t.label
 	if label == "" {
@@ -630,11 +629,11 @@ func (s *Server) dialogEditBackOff(id string, now time.Time) {
 	s.dialogs.edits[id] = bo
 }
 
-// DialogPosted reports whether the Buzz agent of binding name posted dialog
-// id and knows the posted message, so the owner can answer it in Buzz. It is
-// false while the dialog is unposted, while its post is in flight, and when
-// the post's outcome is unknown with no event named. An unknown post on the
-// direct transport names its event, which is replayed, so it counts.
+// DialogPosted reports whether the machine agent posted dialog id of
+// binding name and knows the posted message, so the owner can answer it in
+// Buzz. It is false while the dialog is unposted, while its post is in
+// flight, and when the post's outcome is unknown with no event named. An
+// unknown post that names its event is replayed, so it counts.
 func DialogPosted(name, id string) bool {
 	stateDir, err := BindingStateDir()
 	if err != nil {
@@ -747,7 +746,7 @@ func (s *Server) dialogLead() bool {
 	if s.id.Agent == "" {
 		return false
 	}
-	dir := s.agentMarkerDir(machineName)
+	dir := s.agentMarkerDir()
 	if os.MkdirAll(dir, 0o700) != nil {
 		return false
 	}
@@ -759,13 +758,12 @@ func (s *Server) dialogLead() bool {
 	return true
 }
 
-// ownerMsg is one message in a Buzz channel that may be an owner decision.
-// words is the text it shows the owner typed, with leading mentions
-// dropped; it only selects which messages are verified. verified returns
-// the owner's signed event that a decision reads, or why there is none.
+// ownerMsg is one owner message in a Buzz channel that may be an owner
+// decision. event is the owner's signed event, verified before Owner takes
+// it, and words is its text with leading mentions dropped.
 type ownerMsg struct {
 	channel, words string
-	verified       func() (nostr.Event, error)
+	event          nostr.Event
 }
 
 // The kinds of owner decision, as a claim records them.
@@ -840,8 +838,7 @@ func writeAnswer(dir string, a dialog.Answer) (string, error) {
 // is the verified owner event: its content is the answer and its e tags
 // are its thread. A thread reply to a dialog's post answers that dialog;
 // any other message answers only when exactly one dialog is open in the
-// channel. With no verified event the dialogs stay pending and the channel
-// is told why, once per open set.
+// channel.
 func (s *Server) dialogReplyOf(m ownerMsg) (string, dialog.Answer, bool) {
 	channel := m.channel
 	if channel == "" || s.id.Owner == "" {
@@ -864,14 +861,13 @@ func (s *Server) dialogReplyOf(m ownerMsg) (string, dialog.Answer, bool) {
 		return "", dialog.Answer{}, false
 	}
 	var open []dialog.Request
-	var openIDs []string
 	posted := map[string]string{}
 	for _, req := range reqs {
 		p, found := readDialogPost(filepath.Join(s.dialogPostDir(name), req.ID+".json"))
 		if !found || p.Channel != channel {
 			continue
 		}
-		open, openIDs, posted[req.ID] = append(open, req), append(openIDs, req.ID), p.Event
+		open, posted[req.ID] = append(open, req), p.Event
 	}
 	if len(open) == 0 || !slices.ContainsFunc(open, func(req dialog.Request) bool {
 		_, ok := dialog.ParseAnswer(req, m.words)
@@ -879,11 +875,7 @@ func (s *Server) dialogReplyOf(m ownerMsg) (string, dialog.Answer, bool) {
 	}) {
 		return "", dialog.Answer{}, false
 	}
-	evt, err := m.verified()
-	if err != nil {
-		s.tellUnverified(channel, "dialog:"+strings.Join(openIDs, ","), "Your reply was not taken as an answer", err)
-		return "", dialog.Answer{}, false
-	}
+	evt := m.event
 	req, ok := answerTarget(dir, evt, open, posted, time.Now())
 	if !ok {
 		return "", dialog.Answer{}, false
@@ -936,65 +928,6 @@ func signedWithin(evt nostr.Event, floor, now time.Time) bool {
 // dropMentions trims text and drops its leading mentions
 // (buzzevent.DropMentions).
 func dropMentions(text string) string { return buzzevent.DropMentions(text) }
-
-// errNotOwner is a verified event that someone other than the owner signed.
-var errNotOwner = errors.New("the event is not the owner's")
-
-// errNoEventID is a prompt that names no Nostr event to verify.
-var errNoEventID = errors.New("the message names no signed event")
-
-// unverifiedNoticeEvery is how often one decision may say why it was not
-// taken.
-const unverifiedNoticeEvery = 10 * time.Minute
-
-// noticeLimit lets one line per key through every unverifiedNoticeEvery.
-type noticeLimit struct {
-	mu   sync.Mutex
-	last map[string]time.Time
-}
-
-func (n *noticeLimit) allow(key string, now time.Time) bool {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	for k, at := range n.last {
-		if now.Sub(at) >= unverifiedNoticeEvery {
-			delete(n.last, k)
-		}
-	}
-	if _, recent := n.last[key]; recent {
-		return false
-	}
-	if n.last == nil {
-		n.last = map[string]time.Time{}
-	}
-	n.last[key] = now
-	return true
-}
-
-// tellUnverified posts one line into channel saying why an owner decision
-// was not taken, at most once per key every unverifiedNoticeEvery. A
-// verified event from someone other than the owner says nothing.
-func (s *Server) tellUnverified(channel, key, lead string, err error) {
-	if errors.Is(err, errNotOwner) {
-		return
-	}
-	fmt.Fprintf(os.Stderr, "amq-acp: an owner decision in %s was not taken: %v\n", channel, err)
-	if !s.notices.allow(key, time.Now()) {
-		return
-	}
-	var why string
-	switch {
-	case errors.Is(err, errNoEventID):
-		why = err.Error()
-	case errors.Is(err, buzzevent.ErrNotFound):
-		why = "the relay does not serve its signed event"
-	case errors.Is(err, buzzevent.ErrWrongID), errors.Is(err, buzzevent.ErrWrongKind), errors.Is(err, buzzevent.ErrWrongChannel):
-		why = "its signed event is not a message in this channel"
-	default:
-		why = "its signed event could not be read from the relay (" + relay.Category(err) + ")"
-	}
-	go s.publish(channel, lead+": "+why+".")
-}
 
 // replyRefs are the events a signed message replies to under NIP-10: its e
 // tags marked "root" or "reply", or, when no e tag has a marker, its first

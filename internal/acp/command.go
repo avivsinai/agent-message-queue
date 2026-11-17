@@ -42,8 +42,8 @@ type ownerCommand struct {
 // ownerCommandOf reads the owner's message m whose verified content is one
 // line that starts with "/", and queues it for the wake of the channel's
 // mailbox seat, which types it into the terminal like Remote Control. ok is
-// false for any other message, including a "/" line that is not verified
-// as the owner's: that goes to the session as an ordinary message.
+// false for any other message: that goes to the session as an ordinary
+// message.
 func (s *Server) ownerCommandOf(m ownerMsg) (cmd ownerCommand, ok bool) {
 	channel := m.channel
 	if channel == "" || s.id.Owner == "" || !strings.HasPrefix(m.words, "/") {
@@ -63,10 +63,7 @@ func (s *Server) ownerCommandOf(m ownerMsg) (cmd ownerCommand, ok bool) {
 	if err != nil || !s.serves(r, b) {
 		return cmd, false
 	}
-	evt, err := m.verified()
-	if err != nil {
-		return cmd, false
-	}
+	evt := m.event
 	cmd.text = dropMentions(evt.Content)
 	if !strings.HasPrefix(cmd.text, "/") {
 		return cmd, false
