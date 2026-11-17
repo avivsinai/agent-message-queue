@@ -213,20 +213,20 @@ func routeReady(f buzzop.ChannelFacts, id buzzop.Identity) bool {
 
 // findChosen finds the channel a create of r made: the record's chosen
 // channel when its relay-signed state names this agent as the creator,
-// none when it does not. ok is false when the state could not be read,
+// "" when it does not. ok is false when the state could not be read,
 // which proves nothing.
-func (s *Server) findChosen(r channelRecord) (ids []string, ok bool) {
+func (s *Server) findChosen(r channelRecord) (id string, ok bool) {
 	if r.Chosen == "" {
-		return nil, true
+		return "", true
 	}
 	f, err := s.observe(r.Chosen)
 	if err != nil {
-		return nil, false
+		return "", false
 	}
 	if f.Creator == s.id.Agent {
-		return []string{r.Chosen}, true
+		return r.Chosen, true
 	}
-	return nil, true
+	return "", true
 }
 
 // lookupChosen resolves an uncertain create of r. The observation comes
@@ -238,13 +238,13 @@ func (s *Server) findChosen(r channelRecord) (ids []string, ok bool) {
 // it; an accepted create waits for the observation; any other outcome
 // proves nothing and waits for the next pass.
 func (s *Server) lookupChosen(r *channelRecord) {
-	ids, ok := s.findChosen(*r)
+	id, ok := s.findChosen(*r)
 	switch {
 	case !ok:
 		r.LastError = unreadableState
 		return
-	case len(ids) == 1:
-		r.ChannelID, r.State, r.LastError = ids[0], channelCreating, ""
+	case id != "":
+		r.ChannelID, r.State, r.LastError = id, channelCreating, ""
 		return
 	}
 	res := s.buzz.CreateChannel(s.lifeCtx(), s.createSpec(*r)).Result

@@ -1000,17 +1000,17 @@ func (s *Server) cleanRetired(r channelRecord, now time.Time) {
 	}
 	ctx := s.lifeCtx()
 	if r.inDoubt() {
-		ids, ok := s.findChosen(r)
+		id, ok := s.findChosen(r)
 		if !ok {
 			fail("could not look for the channel of an uncertain create")
 			return
 		}
-		if len(ids) == 0 {
+		if id == "" {
 			r.LastError = "no channel found yet for an uncertain create"
 			_ = s.save(&r, now)
 			return
 		}
-		r.ChannelID, r.Pending, r.Doubted = ids[0], false, true
+		r.ChannelID, r.Pending, r.Doubted = id, false, true
 		if s.save(&r, now) != nil {
 			return
 		}
