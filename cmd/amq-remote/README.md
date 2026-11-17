@@ -900,7 +900,10 @@ this session, `--name <name>` removes the binding of that name, and `--all`
 removes every binding. The session and the endpoint keep running. A session
 the machine agent serves stops taking messages in its channel at once, and
 the machine agent archives the channel; attaching the same session again
-brings the channel back.
+brings the channel back. Detach of a native session also removes its target's
+entry from `manifest.json`; a running endpoint keeps the target until it
+restarts. At its next start, `serve` removes the entry of a Claude session
+whose process ended.
 
 A defaulted name that another session holds, or held before it was detached
 or ended, is never taken: the session gets the next free `<name>-N`.

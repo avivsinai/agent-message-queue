@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -135,11 +136,14 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 	doctorRequestStore(stateDir, report, fail)
 	// Print adapter refusals persisted by serve, so doctor shows them.
 	refusals, loadErr := loadRefusals(stateDir)
+	if loadErr == nil {
+		refusals = declaredRefusals(stateDir, refusals)
+	}
 	switch {
 	case loadErr == nil && len(refusals) > 0:
 		report["refusals"] = refusals
 		for _, r := range refusals {
-			fail("registration", r.Target, r.Kind+": "+r.Error, "fix the manifest entry for "+r.Target+", then restart serve")
+			fail("registration", r.Target, r.Kind+": "+r.Error, refusalFix(c.root, all, r.Target))
 		}
 	case loadErr != nil && !errors.Is(loadErr, os.ErrNotExist):
 		// A truncated or unreadable refusals.json must not be dropped
@@ -173,6 +177,47 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 		report["notes"] = notes
 	}
 	return finish()
+}
+
+// declaredRefusals keeps the refusals whose target the manifest of stateDir
+// still declares: an entry removed since serve started is no refusal. When
+// that manifest cannot be read, every refusal is kept.
+func declaredRefusals(stateDir string, refusals []refusalEntry) []refusalEntry {
+	mf, err := manifest.Load(manifest.DefaultPath(stateDir))
+	if err != nil {
+		return refusals
+	}
+	var kept []refusalEntry
+	for _, r := range refusals {
+		if slices.ContainsFunc(mf.Adapters, func(a manifest.Adapter) bool { return a.Target == r.Target }) {
+			kept = append(kept, r)
+		}
+	}
+	return kept
+}
+
+// refusalFix is the fix of a refused target. When a native binding of root,
+// or a tombstone of one that was not moved, names the target, detach of that
+// name removes it; a current binding's name comes first.
+func refusalFix(root string, all []binding.Binding, target string) string {
+	names := func(b binding.Binding) bool {
+		return !b.Mailbox() && b.Target == target && filepath.Clean(b.Root) == filepath.Clean(root)
+	}
+	name := ""
+	if i := slices.IndexFunc(all, names); i >= 0 {
+		name = all[i].Name
+	} else if tombs, err := binding.Tombstones(); err == nil {
+		for _, t := range tombs {
+			if names(t) && (t.Removed == "" || t.Removed == binding.RemovedEnded || t.Removed == binding.RemovedDetached) {
+				name = t.Name
+				break
+			}
+		}
+	}
+	if name == "" {
+		return "fix the manifest entry for " + target + ", then restart serve"
+	}
+	return "fix the cause, or run `amq-remote detach --name " + name + "` to remove the target; then restart serve"
 }
 
 // hookFormFinding reports an installed Claude hook that is not the form its

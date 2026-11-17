@@ -208,7 +208,11 @@ func Attach(cfg config) (*Attachment, error) {
 		// No registry entry for the pid: a claude session we cannot identify
 		// is never attached (a missing registry file is "unknown session",
 		// not "no registry kind"): readSessionRegistry returns nil,nil on
-		// absence and Attach refuses it.
+		// absence and Attach refuses it. A pid that no process holds names a
+		// session that ended: a later process with that pid is another one.
+		if alive, aerr := pidAlive(cfg.Pid); aerr == nil && !alive {
+			return nil, fmt.Errorf("claude adapter: pid %d is not running: %w", cfg.Pid, registry.ErrTargetGone)
+		}
 		return nil, fmt.Errorf("claude adapter: pid %d has no session registry entry; refusing", cfg.Pid)
 	}
 	if reg.Kind != "" && reg.Kind != "interactive" {

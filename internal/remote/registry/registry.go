@@ -165,6 +165,11 @@ func Build(ctx context.Context, root, stateDir, me string, f manifest.File) []Ou
 	return outcomes
 }
 
+// ErrTargetGone marks a refusal whose factory proved that the entry's target
+// can never attach again. Serve removes such an entry from the manifest; it
+// is not a refusal.
+var ErrTargetGone = errors.New("the target's session ended")
+
 // ErrIncomplete marks a discoverer that returned some candidates but could
 // not examine everything (a bounded scan hit its limit). Its candidates are
 // still valid.
