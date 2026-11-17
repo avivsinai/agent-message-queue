@@ -227,9 +227,6 @@ type Server struct {
 	// dialogs is the dialog poster's state, used only by the worker that
 	// runs dialogTick.
 	dialogs dialogState
-	// notices limits the lines that say why an owner decision was not
-	// taken.
-	notices noticeLimit
 	// mirrors is the session mirror's state, used only by the worker that
 	// runs mirrorTick.
 	mirrors mirrorState

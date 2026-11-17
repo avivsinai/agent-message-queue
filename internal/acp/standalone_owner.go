@@ -66,7 +66,7 @@ func (s *Server) Owner(in buzzop.Inbound) <-chan struct{} {
 		s.owners.queue(s, ch, ownerTurn{evt: evt, done: done})
 		return done
 	}
-	m := ownerMsg{channel: ch, words: dropMentions(evt.Content), verified: func() (nostr.Event, error) { return evt, nil }}
+	m := ownerMsg{channel: ch, words: dropMentions(evt.Content), event: evt}
 	if d, ok := s.decideOwner(m); ok {
 		won, err := writeClaim(path, eventClaim{Name: r.Name, Agent: s.id.Agent, Decided: d.kind})
 		switch {

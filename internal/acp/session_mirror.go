@@ -1107,9 +1107,7 @@ func mirrorWord(text string) (on bool, ok bool) {
 // mirrorSwitchOf reads the owner's message m in a machine agent's channel
 // whose verified content is exactly "mirror off" or "mirror on". It returns
 // the channel's binding, the switch, and when the owner signed it
-// (signedWithin). The words only select which messages are verified;
-// without a verified owner event the switch does not apply and the channel
-// is told why.
+// (signedWithin).
 func (s *Server) mirrorSwitchOf(m ownerMsg) (name string, on bool, at time.Time, ok bool) {
 	channel := m.channel
 	if !s.cfg.Machine || channel == "" || s.id.Owner == "" {
@@ -1127,11 +1125,7 @@ func (s *Server) mirrorSwitchOf(m ownerMsg) (name string, on bool, at time.Time,
 	if b, err := binding.ReadNamed(r.Name); err != nil || mirror.SourceFor(b.Harness) == nil || b.SessionIdentity() != r.Identity || !s.live(b) {
 		return "", false, time.Time{}, false
 	}
-	evt, err := m.verified()
-	if err != nil {
-		s.tellUnverified(channel, "mirror:"+channel, "The mirror was not switched", err)
-		return "", false, time.Time{}, false
-	}
+	evt := m.event
 	if on, ok = mirrorWord(dropMentions(evt.Content)); !ok || !signedWithin(evt, time.Time{}, time.Now()) {
 		return "", false, time.Time{}, false
 	}
