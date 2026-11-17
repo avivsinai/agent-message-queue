@@ -27,20 +27,16 @@ type agentMarker struct {
 	PubKey      string `json:"pubkey"`
 	DisplayName string `json:"display_name,omitempty"`
 	PID         int    `json:"pid"`
-	// Worker and Parent are the process identities of the worker that
-	// wrote the marker and of its parent, captured at worker start. Worker
-	// is also the marker's generation: an older worker never overwrites a
-	// newer one's marker. A standalone agent records no parent.
+	// Worker is the process identity of the worker that wrote the marker,
+	// captured at its start. It is also the marker's generation: an older
+	// worker never overwrites a newer one's marker.
 	Worker launch.HolderIdentity `json:"worker,omitzero"`
-	Parent launch.HolderIdentity `json:"parent,omitzero"`
 	// RelayKey is the machine agent's relay key (machine.go), so a reader
 	// finds its channel records.
 	RelayKey string `json:"relay_key,omitempty"`
-	// Host is "standalone": the agent runs on the direct relay transport.
-	Host string `json:"host,omitempty"`
-	// Archived is always false: the machine agent never archives itself.
-	Archived bool   `json:"archived"`
-	Updated  string `json:"updated"`
+	// Host is "standalone": the agent runs inside amq-remote serve.
+	Host    string `json:"host,omitempty"`
+	Updated string `json:"updated"`
 }
 
 // agentMarkerFresh is how old a marker may be while its agent still runs.
@@ -90,9 +86,9 @@ func AgentState(updated string, worker, parent launch.HolderIdentity, now time.T
 	return AgentOffline
 }
 
-// workerIdentity is this worker process and its parent, set at start
-// (NewStandalone) and recorded in every marker it writes.
-var workerIdentity struct{ self, parent launch.HolderIdentity }
+// workerIdentity is this worker process, set at start (NewStandalone) and
+// recorded in every marker it writes.
+var workerIdentity struct{ self launch.HolderIdentity }
 
 // newerWorker reports whether worker a started after worker b. Unknown
 // start times are never newer.
@@ -105,8 +101,10 @@ func newerWorker(a, b launch.HolderIdentity) bool {
 	return aerr == nil && berr == nil && as > bs
 }
 
-func (s *Server) agentMarkerDir(pin string) string {
-	return filepath.Join(s.cfg.StateDir, "agents", pin)
+// agentMarkerDir is <state>/agents/_machine: the machine agent's marker and
+// its lead, dialog and mirror locks.
+func (s *Server) agentMarkerDir() string {
+	return filepath.Join(s.cfg.StateDir, "agents", machineName)
 }
 
 func readAgentMarker(path string) (agentMarker, bool) {
@@ -118,16 +116,16 @@ func readAgentMarker(path string) (agentMarker, bool) {
 	return m, true
 }
 
-// lead reports whether this worker leads the lifecycle of its Buzz identity
-// under pin. The first worker to take <pin>/<self>.lock leads until it
-// resigns or exits; then the kernel drops the lock and the next tick of
-// another worker takes it. Without advisory locks every worker leads. A
-// lock error skips this tick.
-func (s *Server) lead(pin string) bool {
+// lead reports whether this process leads the machine agent's identity: it
+// holds _machine/<self>.lock. The first process to take the lock leads until
+// it resigns or exits; then the kernel drops the lock and another process
+// can take it. Without advisory locks every process leads. A lock error is
+// no lead.
+func (s *Server) lead() bool {
 	if s.leader != nil || !lock.AdvisoryLockAvailable() {
 		return true
 	}
-	dir := s.agentMarkerDir(pin)
+	dir := s.agentMarkerDir()
 	if os.MkdirAll(dir, 0o700) != nil {
 		return false
 	}
@@ -162,7 +160,7 @@ func (s *Server) writeAgentMarker(dir string, m agentMarker, now time.Time) {
 		}
 	}
 	m.PubKey, m.PID = s.id.Agent, os.Getpid()
-	m.Worker, m.Parent = workerIdentity.self, workerIdentity.parent
+	m.Worker = workerIdentity.self
 	m.Updated = now.UTC().Format(time.RFC3339)
 	raw, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {

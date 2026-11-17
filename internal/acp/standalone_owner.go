@@ -59,7 +59,7 @@ func (s *Server) Owner(in buzzop.Inbound) <-chan struct{} {
 	evt, ch, id := in.Event, in.Channel, in.Event.ID.Hex()
 	path := filepath.Join(s.eventDir(id), id+".json")
 	if c, found := readClaim(path); found {
-		if c == nil || c.Decided != "" || !s.ownsClaim(*c, "") {
+		if c == nil || c.Decided != "" || !s.ownsClaim(*c) {
 			close(done)
 			return done
 		}

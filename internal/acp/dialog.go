@@ -746,7 +746,7 @@ func (s *Server) dialogLead() bool {
 	if s.id.Agent == "" {
 		return false
 	}
-	dir := s.agentMarkerDir(machineName)
+	dir := s.agentMarkerDir()
 	if os.MkdirAll(dir, 0o700) != nil {
 		return false
 	}

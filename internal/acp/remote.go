@@ -360,7 +360,7 @@ func (s *Server) turnBinding(sessionID, eventID string) (binding.Binding, error)
 		if err := json.Unmarshal(raw, &c); err != nil || c.Valid() != nil {
 			return binding.Binding{}, fmt.Errorf("event %s has an unreadable recorded binding; refusing to resubmit", eventID)
 		}
-		if !s.ownsClaim(c, sessionID) {
+		if !s.ownsClaim(c) {
 			return binding.Binding{}, fmt.Errorf("event %s was claimed by another Buzz agent; it runs there, not here", eventID)
 		}
 		// A claim can be visible before its directory entry is durable. Every
@@ -416,7 +416,7 @@ func (c eventClaim) binding() binding.Binding {
 
 // ownsClaim reports whether this agent made the claim. A claim that names no
 // agent is no one's.
-func (s *Server) ownsClaim(c eventClaim, _ string) bool {
+func (s *Server) ownsClaim(c eventClaim) bool {
 	return c.Agent != "" && c.Agent == s.id.Agent
 }
 
