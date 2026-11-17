@@ -22,7 +22,7 @@ const channelTag = "h"
 
 var (
 	// ErrWrongID means the event's id is not the hash of its content.
-	ErrWrongID = errors.New("buzz event id is not the hash of its content")
+	ErrWrongID = errors.New("buzz event id differs from the requested id")
 	// ErrWrongKind means the event is not a plaintext channel message.
 	ErrWrongKind = errors.New("buzz event is not a plaintext channel message")
 	// ErrWrongChannel means the event does not carry exactly one channel
