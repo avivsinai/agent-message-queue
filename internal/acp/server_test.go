@@ -1283,4 +1283,9 @@ func TestSessionNewAdvertisesOneModelThatSetModelAccepts(t *testing.T) {
 	if reply := live.read(); reply["error"] != nil {
 		t.Fatalf("set_model refused the advertised model: %v", reply)
 	}
+	// The destination is fixed by the process: any other model is refused.
+	live.send(fmt.Sprintf(`{"jsonrpc":"2.0","id":4,"method":"session/set_model","params":{"sessionId":%q,"modelId":"amq-remote:a"}}`, created["sessionId"]))
+	if reply := live.read(); reply["error"] == nil {
+		t.Fatalf("set_model accepted a model that is not advertised: %v", reply)
+	}
 }
