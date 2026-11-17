@@ -15,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/acp"
 	"github.com/avivsinai/agent-message-queue/internal/agentidentity"
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -29,6 +28,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/linkio"
+	"github.com/avivsinai/agent-message-queue/internal/remote/machineagent"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/pi"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -895,7 +895,7 @@ func openDialogs(name string) []dialogRow {
 		if err != nil || phase == dialog.PhaseResolved {
 			continue
 		}
-		rows = append(rows, dialogRow{ID: r.ID, Tool: r.Tool, Phase: phase, Posted: acp.DialogPosted(name, r.ID), OpenedAt: r.OpenedAt})
+		rows = append(rows, dialogRow{ID: r.ID, Tool: r.Tool, Phase: phase, Posted: machineagent.DialogPosted(name, r.ID), OpenedAt: r.OpenedAt})
 	}
 	return rows
 }
@@ -931,7 +931,7 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 		state, evidence := inspect(b)
 		row := bindingRow{Name: b.Name, Label: b.Label, State: state, Evidence: evidence, Root: b.Root, Handle: b.Handle, Target: b.Target,
 			Dialogs: openDialogs(b.Name)}
-		if ch, ok := acp.MachineChannelOf(b); ok {
+		if ch, ok := machineagent.MachineChannelOf(b); ok {
 			row.Channel, row.ChannelName = ch.State, ch.Name
 		}
 		if b.Harness == "codex" && b.Carrier == binding.CarrierMailbox && b.AppServer.Thread == "" {
@@ -1043,7 +1043,7 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		if !match(b) {
 			return false
 		}
-		_, has := acp.MachineChannelOf(b)
+		_, has := machineagent.MachineChannelOf(b)
 		channel = channel || has
 		return true
 	}, ended)

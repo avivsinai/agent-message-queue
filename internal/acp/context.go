@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
-	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/sessionguard"
 )
 
@@ -60,22 +59,11 @@ type Config struct {
 	RemoteTarget string
 	// RemoteNative is the native session the owner shared. A target attached
 	// to any other session is refused.
-	RemoteNative string
-	// RemoteBinding reads root, target and native pin from a binding file on
-	// each turn. Only NewStandalone sets it.
-	RemoteBinding bool
-	// Machine marks the machine agent. It routes each owner message by the
-	// private channel it came from. Only NewStandalone sets it.
-	Machine           bool
+	RemoteNative      string
 	StateDir          string
 	TurnTimeout       time.Duration
 	PollInterval      time.Duration
 	HeartbeatInterval time.Duration
-	// PostTimeout bounds one Buzz post (default 30 s).
-	PostTimeout time.Duration
-	// Identity is the machine agent's Buzz identity (NewStandalone); zero
-	// for the ACP stdio server. NewServer fixes it for the server's life.
-	Identity buzzop.Identity
 }
 
 // LoadConfig resolves the routing context from the environment. An absent root,

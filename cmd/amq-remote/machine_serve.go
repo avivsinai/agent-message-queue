@@ -17,7 +17,6 @@ import (
 
 	"fiatjaf.com/nostr"
 
-	"github.com/avivsinai/agent-message-queue/internal/acp"
 	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
@@ -27,6 +26,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzevent"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
+	"github.com/avivsinai/agent-message-queue/internal/remote/machineagent"
 	"github.com/avivsinai/agent-message-queue/internal/remote/machinecred"
 	"github.com/avivsinai/agent-message-queue/internal/remote/outbox"
 )
@@ -34,10 +34,10 @@ import (
 // Every serve runs a machineSet. It runs the machine agent enrolled under
 // <amq home>/remote/machine (machinecred) when exactly one is, its grant
 // holds, the relay names its self key, and no other machine agent runs
-// here. The serve whose StartMachine takes the agent's machine lock runs
+// here. The serve whose Start takes the agent's machine lock runs
 // it; the others wait and take over when that serve stops. The set owns
 // the agent's relay connection and the replay of posts whose outcome is
-// unknown; the engine (acp) owns everything else.
+// unknown; the engine (machineagent) owns everything else.
 
 const (
 	machineStatusFile = "status.json"
@@ -414,14 +414,14 @@ func (ms *machineSet) sayOnce(key, msg string) {
 }
 
 // machineRun is one machine agent: its server, built when the set first
-// tries to start it, and, once StartMachine took the machine lock, its
+// tries to start it, and, once Start took the machine lock, its
 // outbox, port and relay client.
 type machineRun struct {
 	home   string
 	id     buzzop.Identity
 	state  string // the engine's state directory
 	ops    string // the outbox directory
-	srv    *acp.Server
+	srv    *machineagent.Agent
 	port   portHolder
 	conn   atomic.Pointer[relay.Conn]
 	stderr io.Writer
@@ -472,7 +472,7 @@ func newMachineRun(home, agent string, cred machinecred.Credential, self string,
 	}
 	state := filepath.Join(filepath.Dir(path), "acp")
 	run := &machineRun{home: home, id: id, state: state, ops: machineOutboxDir(state, id.RelayKey, agent), stderr: stderr, done: make(chan struct{})}
-	run.srv = acp.NewStandalone(acp.Standalone{Identity: id, Transport: &run.port, Online: run.online}, version)
+	run.srv = machineagent.New(machineagent.Config{Identity: id, Transport: &run.port, Online: run.online, StateDir: state})
 	return run, nil
 }
 
@@ -483,7 +483,7 @@ func (run *machineRun) start(cred machinecred.Credential) (started bool, err err
 	if run.started {
 		return true, nil
 	}
-	stop, ok := run.srv.StartMachine()
+	stop, ok := run.srv.Start()
 	if !ok {
 		return false, nil
 	}
@@ -840,8 +840,8 @@ func (run *machineRun) take(evt nostr.Event, now time.Time) (at int64, delivered
 		why = "its channel is not a route of this agent"
 	} else if evt.PubKey.Hex() != run.id.Owner {
 		why = "its author is not the owner"
-	} else if evt.CreatedAt.Time().After(now.Add(acp.OwnerSkew)) {
-		why = fmt.Sprintf("it is dated more than %s after this machine's clock", acp.OwnerSkew)
+	} else if evt.CreatedAt.Time().After(now.Add(machineagent.OwnerSkew)) {
+		why = fmt.Sprintf("it is dated more than %s after this machine's clock", machineagent.OwnerSkew)
 	}
 	if why != "" {
 		if _, said := in.dropped[id]; !said {
@@ -1059,7 +1059,7 @@ func machineMarkers(now time.Time) []machineMarker {
 		if err != nil || json.Unmarshal(raw, &m) != nil || m.Host != hostStandalone {
 			continue
 		}
-		out = append(out, machineMarker{key: key, worker: m.Worker, state: acp.AgentState(m.Updated, m.Worker, now)})
+		out = append(out, machineMarker{key: key, worker: m.Worker, state: machineagent.AgentState(m.Updated, m.Worker, now)})
 	}
 	return out
 }

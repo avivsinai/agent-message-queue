@@ -11,16 +11,11 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
-
-	"fiatjaf.com/nostr"
 
 	"github.com/avivsinai/agent-message-queue/internal/acp/acpwire"
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
-	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
-	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/mailprompt"
 	remoteturn "github.com/avivsinai/agent-message-queue/internal/remote/turn"
 )
@@ -39,10 +34,10 @@ const StopReasonRefusal = remoteturn.StopReasonRefusal
 
 // DeliveryStateQueued is the honest post-delivery state. The message sits in the
 // recipient's inbox/new; consumption is a separate, unproven event.
-const DeliveryStateQueued = "queued_to_inbox"
+const DeliveryStateQueued = remoteturn.StateQueued
 
 // DeliveryStateReplied marks a turn answered by a fresh reply on the thread.
-const DeliveryStateReplied = "replied"
+const DeliveryStateReplied = remoteturn.StateReplied
 
 // DeliveryStateNoReply marks a turn whose bounded reply wait expired.
 const DeliveryStateNoReply = "no_reply"
@@ -100,9 +95,6 @@ type sessionState struct {
 	Thread    string
 	// turn is the in-flight prompt turn, nil while idle.
 	turn *turnState
-	// route is the channel of a machine agent's session (Owner); every turn
-	// of the session carries the same.
-	route string
 }
 
 // turnState is one prompt turn. Its terminal outcome is decided exactly once,
@@ -129,15 +121,6 @@ type turnState struct {
 	ready chan struct{}
 	// outcome is turnOpen until settled.
 	outcome turnOutcome
-	// channel is the Buzz channel the owner's message came from ("" for an
-	// ACP prompt); the owner-facing text is posted there.
-	channel string
-	// route is the channel of a machine agent's turn ("" for an ACP
-	// prompt).
-	route string
-	// event is the owner's signed message of a machine agent's turn (Owner),
-	// set before the turn runs; nil for an ACP prompt.
-	event *nostr.Event
 }
 
 // turnOutcome is how a turn settled (remoteturn.Outcome).
@@ -191,61 +174,10 @@ type Server struct {
 	// begins after this point never had a connected client, so it refuses
 	// immediately instead of waiting out the bounded timeout.
 	streamClosed bool
-	// late is the late-reply sweep state (machine agent only).
-	late lateReplySweep
-	// id is the machine agent's Buzz identity (Config.Identity), fixed at
-	// construction. Its owner is the only key whose reactions and messages
-	// answer a dialog.
-	id buzzop.Identity
-	// leader releases the lifecycle lead of this worker's Buzz identity, or
-	// is nil. StartMachine and the machine worker set it; the workers' stop
-	// releases it.
-	leader func()
-	// machine is the machine leader's pacing, used only by the machine
-	// worker.
-	machine machineState
-	// buzz are the machine lifecycle's Buzz operations, posts the Buzz
-	// writes and reads of dialogs, the session mirror and the hook warnings,
-	// and direct the relay transport that serves both. Only NewStandalone
-	// sets them: an ACP stdio server has none, and nothing it runs reaches
-	// them.
-	buzz   lifecycle
-	posts  posts
-	direct Transport
-	// working holds each route's working indication (*working);
-	// workingFailed says the first failed pulse once.
-	working       sync.Map
-	workingFailed sync.Once
-	// online reports whether the transport has a relay connection; nil
-	// means it is not known, and the machine tick runs.
-	online func() bool
-	// owners are a machine agent's owner turns (Owner), run while its
-	// machine workers run.
-	owners ownerTurns
-	// dialogs is the dialog poster's state, used only by the worker that
-	// runs dialogTick.
-	dialogs dialogState
-	// mirrors is the session mirror's state, used only by the worker that
-	// runs mirrorTick.
-	mirrors mirrorState
-	// view is the bindings and channel records the machine, dialog and
-	// mirror workers share.
-	view sessionView
-	// targets caches a machine agent's dialog targets for the dialog and
-	// mirror workers.
-	targets targetCache
-	// appServers judges Codex app-server threads for the current machine
-	// tick, or is nil before the first one.
-	appServers atomic.Pointer[appServerJudge]
 }
 
 // NewServer builds a server bound to one already authenticated routing context.
 func NewServer(cfg Config, version string) *Server {
-	if cfg.StateDir == "" && cfg.RemoteBinding {
-		if path, err := binding.Path(); err == nil {
-			cfg.StateDir = filepath.Join(filepath.Dir(path), "acp")
-		}
-	}
 	if cfg.StateDir == "" {
 		cfg.StateDir = filepath.Join(cfg.Root, "meta", "acp")
 	}
@@ -258,17 +190,9 @@ func NewServer(cfg Config, version string) *Server {
 	if cfg.HeartbeatInterval <= 0 {
 		cfg.HeartbeatInterval = defaultHeartbeatInterval
 	}
-	if cfg.PostTimeout <= 0 {
-		cfg.PostTimeout = defaultPostTimeout
-	}
-	name := "amq-acp"
-	if cfg.RemoteBinding {
-		name = "machine agent"
-	}
 	return &Server{
-		timings:  remoteturn.NewTimings(name),
+		timings:  remoteturn.NewTimings("amq-acp"),
 		cfg:      cfg,
-		id:       cfg.Identity,
 		version:  version,
 		sessions: make(map[string]*sessionState),
 		store:    newSessionStore(cfg),

@@ -1,0 +1,954 @@
+package machineagent
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+	"unicode/utf8"
+
+	"fiatjaf.com/nostr"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
+	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzevent"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
+	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
+)
+
+// The machine agent mirrors every harness dialog of the sessions it serves.
+// A harness seam opens a request under the binding's dialogs directory
+// (package dialog); the worker that leads this agent posts it once into the
+// session's channel, turns the owner's
+// ✅ or ❌ reaction or typed reply into the answer file, and edits the post
+// with the outcome once the dialog is resolved, by Buzz or in the terminal.
+// The first answer wins: answers and resolutions are create-exclusive.
+//
+// A post record <state>/dialogs/<binding>/<id>.json is created before the
+// post, so a dialog is posted at most once across workers and restarts; it
+// moves to done/ once the post shows the outcome.
+
+// dialogTextMax bounds the dialog body in a post; the options are still
+// offered under a cut body.
+const dialogTextMax = 3500
+
+// reactionPollInterval is the gap between reads of the owner's reactions on
+// one posted dialog while it is fresh.
+var reactionPollInterval = 3 * time.Second
+
+const (
+	// reactionPollFresh is how long a dialog is fresh; each further span of
+	// that length doubles its gap between reaction reads.
+	reactionPollFresh = 2 * time.Minute
+	// reactionPollMax caps the gap between reaction reads.
+	reactionPollMax = time.Minute
+)
+
+// reactionPollGap is the gap between reaction reads of a dialog open for
+// age: reactionPollInterval while it is fresh, then doubling every
+// reactionPollFresh up to reactionPollMax. Each read is a relay round trip,
+// and a dialog left open for long is seldom answered from Buzz.
+func reactionPollGap(age time.Duration) time.Duration {
+	gap := reactionPollInterval
+	for n := age / reactionPollFresh; n > 0 && gap < reactionPollMax; n-- {
+		gap *= 2
+	}
+	return min(gap, reactionPollMax)
+}
+
+// reacted reports whether owner reacted with emoji.
+func reacted(rs []buzzop.Reaction, owner, emoji string) bool {
+	for _, r := range rs {
+		if strings.TrimSpace(r.Emoji) == emoji && slices.Contains(r.PubKeys, owner) {
+			return true
+		}
+	}
+	return false
+}
+
+// dialogPost is the record of one posted dialog.
+type dialogPost struct {
+	Channel string `json:"channel"`
+	// Event is the posted message; "" while the post is in flight or when
+	// its outcome is unknown. Such a dialog is never posted again.
+	Event string `json:"event,omitempty"`
+	Text  string `json:"text"`
+}
+
+// dialogTarget is one binding whose dialogs this worker posts, and where.
+type dialogTarget struct {
+	name, channel, label string
+	// since is when the target's route last left suspension, in Unix
+	// milliseconds; zero when it never did.
+	since int64
+	// binding is the target's binding as dialogTargets read it.
+	binding binding.Binding
+}
+
+// dialogState is the poster's state, owned by the one worker goroutine that
+// runs dialogTick.
+type dialogState struct {
+	polled map[string]time.Time // dialog id -> last reaction read
+	// edits holds the backoff of each dialog whose post edit failed.
+	edits map[string]mirrorBackoff
+	// quiet holds each binding whose last full pass left nothing to do;
+	// its directories are not read again until one of them changes or the
+	// entry is due.
+	quiet map[string]dialogQuiet
+	// quit closes when the dialog worker stops; nil outside it.
+	quit <-chan struct{}
+	// release drops the dialog lead; nil when not held.
+	release func()
+}
+
+// dialogKeep is how long a resolved dialog's files are kept.
+const dialogKeep = time.Hour
+
+// A failed post edit is tried again after dialogEditBackoffMin, doubling to
+// dialogEditBackoffMax.
+const (
+	dialogEditBackoffMin = 4 * time.Second
+	dialogEditBackoffMax = 5 * time.Minute
+)
+
+// dialogTick posts the open dialogs of every live binding this worker
+// serves, newest first, reads the owner's reactions on them, and edits the
+// posts of dialogs that were resolved. A dialog whose seam process is gone
+// expires. Resolved dialogs are dropped after dialogKeep, and the dialogs of
+// a binding that is gone expire and are removed. Its pace asks for the next
+// tick in machineScanInterval while a binding is not quiet (an open dialog,
+// a post to edit) or a gone binding's seam may still read, at the earliest
+// quiet binding's due time, and else on a change to the bindings, the
+// records or a served binding's dialogs.
+func (s *Agent) dialogTick(now time.Time) (p pace) {
+	type scope struct {
+		t     dialogTarget
+		dir   string
+		open  map[string]bool
+		key   [3]fsq.FileVersion // as of before the pass; keyed false when unusable
+		keyed bool
+	}
+	type step struct {
+		t   dialogTarget
+		dir string
+		req dialog.Request
+	}
+	var scopes []scope
+	var steps []step
+	served := map[string]bool{}
+	targets := s.dialogTargets()
+	for _, t := range targets {
+		if s.dialogStopped() {
+			return p
+		}
+		served[t.name] = true
+		if s.dialogsQuiet(t.name, now) {
+			continue
+		}
+		dir, err := dialog.DirFor(t.name)
+		if err != nil {
+			continue
+		}
+		key, keyed := s.dialogQuietKey(t.name, dir, now)
+		reqs, err := dialog.Requests(dir)
+		if err != nil {
+			continue
+		}
+		open := map[string]bool{}
+		for _, req := range reqs {
+			if req.PID > 0 && !pidAlive(req.PID) {
+				_, _ = dialog.Resolve(dir, dialog.Resolved{ID: req.ID, Outcome: dialog.OutcomeExpired, By: dialog.ByTimeout, At: now.UTC()})
+				continue
+			}
+			open[req.ID] = true
+			steps = append(steps, step{t, dir, req})
+		}
+		scopes = append(scopes, scope{t, dir, open, key, keyed})
+	}
+	// Each step may wait on the relay, so a dialog left open never delays
+	// the post or the reactions of a newer one.
+	sort.SliceStable(steps, func(i, j int) bool { return steps[i].req.OpenedAt.After(steps[j].req.OpenedAt) })
+	for _, st := range steps {
+		if s.dialogStopped() {
+			return p
+		}
+		s.dialogStep(st.t, st.dir, st.req, now)
+	}
+	for _, sc := range scopes {
+		if s.dialogStopped() {
+			return p
+		}
+		closed := s.dialogClose(sc.t.name, sc.dir, sc.open, now)
+		due := s.pruneDialogs(sc.t.name, sc.dir, now)
+		if len(sc.open) == 0 && closed && sc.keyed {
+			s.markDialogsQuiet(sc.t.name, sc.dir, sc.key, earliest(due, now.Add(sessionViewReconcile)))
+		}
+	}
+	if s.dialogStopped() {
+		return p
+	}
+	if s.dropGoneDialogs(served, now) {
+		p.due(now.Add(machineScanInterval))
+	}
+	p.watch = s.sessionWatch()
+	root, err := dialog.Root()
+	if err == nil {
+		p.watch = append(p.watch, root)
+	}
+	for _, t := range targets {
+		if q, ok := s.dialogs.quiet[t.name]; ok {
+			p.due(q.until)
+		} else {
+			p.due(now.Add(machineScanInterval))
+		}
+		if err == nil {
+			p.watch = append(p.watch, filepath.Join(root, t.name, "requests"), filepath.Join(root, t.name, "resolved"))
+		}
+		p.watch = append(p.watch, s.dialogPostDir(t.name))
+	}
+	return p
+}
+
+// dialogQuiet is a binding whose dialogs need nothing until key changes or
+// until: no dialog is open, every post was edited, and no resolved dialog
+// is due to be pruned before until.
+type dialogQuiet struct {
+	key   [3]fsq.FileVersion
+	until time.Time
+}
+
+// dialogQuietKey is the version of the directories a seam or a post
+// changes: requests, resolved and the post directory. Answers and events
+// matter only to an open dialog, and a binding with one is never quiet. ok
+// is false when one could not be read or changed too recently to stand for
+// its content.
+func (s *Agent) dialogQuietKey(name, dir string, now time.Time) (key [3]fsq.FileVersion, ok bool) {
+	ok = true
+	for i, p := range []string{filepath.Join(dir, "requests"), filepath.Join(dir, "resolved"), s.dialogPostDir(name)} {
+		v, settled, err := fsq.LstatVersion(p, now)
+		key[i] = v
+		ok = ok && settled && err == nil
+	}
+	return key, ok
+}
+
+// markDialogsQuiet records that name's dialogs need nothing before until,
+// when its directories still have the version read before the pass: a pass
+// that changed them, or a seam that wrote meanwhile, leaves it unmarked.
+func (s *Agent) markDialogsQuiet(name, dir string, before [3]fsq.FileVersion, until time.Time) {
+	key, ok := s.dialogQuietKey(name, dir, time.Now())
+	if !ok || key != before {
+		delete(s.dialogs.quiet, name)
+		return
+	}
+	if s.dialogs.quiet == nil {
+		s.dialogs.quiet = map[string]dialogQuiet{}
+	}
+	s.dialogs.quiet[name] = dialogQuiet{key: key, until: until}
+}
+
+// dialogsQuiet reports whether name's dialogs still need nothing: none of
+// its directories changed since its last full pass, and nothing is due.
+func (s *Agent) dialogsQuiet(name string, now time.Time) bool {
+	q, ok := s.dialogs.quiet[name]
+	if !ok {
+		return false
+	}
+	root, err := dialog.Root()
+	if err == nil && now.Before(q.until) {
+		if key, ok := s.dialogQuietKey(name, filepath.Join(root, name), now); ok && key == q.key {
+			return true
+		}
+	}
+	delete(s.dialogs.quiet, name)
+	return false
+}
+
+// dialogStopped reports whether the dialog worker is stopping.
+func (s *Agent) dialogStopped() bool {
+	select {
+	case <-s.dialogs.quit:
+		return true
+	default:
+		return false
+	}
+}
+
+// routable reports whether r is an active channel record of this machine
+// agent on its relay that is not suspended.
+func routable(r channelRecord, id buzzop.Identity) bool {
+	return r.State == channelActive && r.ChannelID != "" && r.Machine == id.Agent && r.Relay == id.RelayURL && r.Suspended == ""
+}
+
+// serves reports whether the routable record r is the channel of b's live
+// session.
+func (s *Agent) serves(r channelRecord, b binding.Binding) bool {
+	return b.SessionIdentity() == r.Identity && s.live(b)
+}
+
+// targetCache holds a machine agent's dialog targets for one session
+// snapshot and one machine tick's app-server judge, so the dialog and mirror
+// workers, which tick at the same pace, judge each binding's liveness once.
+type targetCache struct {
+	mu      sync.Mutex
+	snap    *sessionSnapshot
+	judge   *appServerJudge
+	at      time.Time
+	targets []dialogTarget
+}
+
+// machineTargets are a machine agent's live channels. They are judged again
+// when the snapshot or the machine tick changes, and at least every
+// machineScanInterval. Callers must not modify the result.
+func (s *Agent) machineTargets() []dialogTarget {
+	c := &s.targets
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	snap, judge, now := s.snapshot(), s.appServers.Load(), time.Now()
+	if c.snap == snap && c.judge == judge && !now.Before(c.at) && now.Sub(c.at) < machineScanInterval {
+		return c.targets
+	}
+	var out []dialogTarget
+	for _, r := range snap.activeRecords() {
+		if !routable(r, s.id) {
+			continue
+		}
+		if b, ok := snap.binding(r.Name); ok && s.serves(r, b) {
+			target := dialogTarget{name: r.Name, channel: r.ChannelID, label: sessionAgentName(b), binding: b}
+			if resumed, err := time.Parse(time.RFC3339, r.Resumed); err == nil {
+				target.since = resumed.UnixMilli()
+			}
+			out = append(out, target)
+		}
+	}
+	c.snap, c.judge, c.at, c.targets = snap, judge, now, out
+	return out
+}
+
+// dialogTargets are the bindings this worker posts dialogs for: a machine
+// agent's live channels.
+func (s *Agent) dialogTargets() []dialogTarget {
+	if s.id.Agent == "" || s.id.RelayKey == "" || s.id.Owner == "" {
+		return nil
+	}
+	return s.machineTargets()
+}
+
+// live reports whether b's session may still run: it is not proven ended.
+// A binding written before holders were recorded has unknown liveness.
+func (s *Agent) live(b binding.Binding) bool {
+	state, _ := s.liveness(b)
+	return state != binding.Ended
+}
+
+// dropGoneDialogs expires the open dialogs of each binding that is gone or
+// ended, except the bindings this tick served (judged live at most
+// machineScanInterval ago, so one that just ended is dropped a tick later),
+// edits their posts, and removes the binding's dialogs once their
+// seams left (seamsLeft). waiting reports whether a gone binding's dialogs
+// stay for a seam that may still read them.
+func (s *Agent) dropGoneDialogs(served map[string]bool, now time.Time) (waiting bool) {
+	root, err := dialog.Root()
+	if err != nil {
+		return false
+	}
+	var names []string
+	entries, _ := os.ReadDir(root)
+	for _, e := range entries {
+		if e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+	snap := s.snapshot()
+	for _, name := range names {
+		if served[name] {
+			continue
+		}
+		delete(s.dialogs.quiet, name)
+		dir := filepath.Join(root, name)
+		if _, err := os.Lstat(dir); err != nil {
+			continue
+		}
+		// The snapshot only lets a live binding be skipped: whether it is
+		// gone or ended is decided from a fresh read, since a session can
+		// attach again while an earlier name's relay call runs.
+		if b, ok := snap.binding(name); ok && s.live(b) {
+			continue
+		}
+		b, err := binding.ReadNamed(name)
+		switch {
+		// A name no binding can have serves nothing.
+		case errors.Is(err, binding.ErrNone), binding.ValidName(name) != nil:
+		case err == nil && !s.live(b):
+		default:
+			continue
+		}
+		reqs, _ := dialog.Requests(dir)
+		for _, req := range reqs {
+			_, _ = dialog.Resolve(dir, dialog.Resolved{ID: req.ID, Outcome: dialog.OutcomeExpired, By: dialog.ByTimeout, At: now.UTC()})
+		}
+		s.dialogClose(name, dir, nil, now)
+		if !seamsLeft(dir, now) {
+			waiting = true
+			continue
+		}
+		_ = os.RemoveAll(dir)
+		_ = os.RemoveAll(s.dialogPostDir(name))
+	}
+	return waiting
+}
+
+// seamGrace is how long a resolved dialog's directory stays while its seam
+// process still runs, so the seam reads how its dialog ended.
+const seamGrace = 2 * time.Minute
+
+// seamsLeft reports whether every dialog in dir is resolved and its seam has
+// read that or cannot any more: its process is gone, or the resolution is
+// older than seamGrace. Removing the directory earlier would let a seam that
+// still waits write into a directory that comes back.
+func seamsLeft(dir string, now time.Time) bool {
+	entries, err := os.ReadDir(filepath.Join(dir, "requests"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	for _, e := range entries {
+		id, ok := strings.CutSuffix(e.Name(), ".json")
+		if !ok {
+			continue
+		}
+		res, resolved, err := dialog.ReadResolved(dir, id)
+		if err != nil || !resolved {
+			return false
+		}
+		var req dialog.Request
+		if raw, err := readSmallRegular(filepath.Join(dir, "requests", e.Name())); err == nil && json.Unmarshal(raw, &req) == nil &&
+			req.PID > 0 && pidAlive(req.PID) && now.Sub(res.At) < seamGrace {
+			return false
+		}
+	}
+	return true
+}
+
+// pruneDialogs removes the files of each dialog resolved more than
+// dialogKeep ago, the request first, so it never reads as open again. due
+// is when the next kept dialog is to be removed; it is now when one could
+// not be read or removed.
+func (s *Agent) pruneDialogs(name, dir string, now time.Time) (due time.Time) {
+	due = now.Add(dialogKeep)
+	entries, _ := os.ReadDir(filepath.Join(dir, "resolved"))
+	for _, e := range entries {
+		id, ok := strings.CutSuffix(e.Name(), ".json")
+		if !ok || !e.Type().IsRegular() {
+			continue
+		}
+		res, found, err := dialog.ReadResolved(dir, id)
+		if err != nil || !found {
+			due = now
+			continue
+		}
+		if now.Sub(res.At) <= dialogKeep {
+			due = earliest(due, res.At.Add(dialogKeep))
+			continue
+		}
+		if os.Remove(filepath.Join(dir, "requests", e.Name())) != nil && !notExist(filepath.Join(dir, "requests", e.Name())) {
+			due = now
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, "answers", e.Name()))
+		_ = os.Remove(filepath.Join(s.dialogPostDir(name), e.Name()))
+		_ = os.Remove(filepath.Join(s.dialogPostDir(name), "done", e.Name()))
+		_ = os.Remove(filepath.Join(dir, "resolved", e.Name()))
+		delete(s.dialogs.polled, id)
+		delete(s.dialogs.edits, id)
+	}
+	return due
+}
+
+func earliest(a, b time.Time) time.Time {
+	if b.Before(a) {
+		return b
+	}
+	return a
+}
+
+func notExist(path string) bool {
+	_, err := os.Lstat(path)
+	return errors.Is(err, os.ErrNotExist)
+}
+
+func (s *Agent) dialogPostDir(name string) string {
+	return filepath.Join(s.cfg.StateDir, "dialogs", name)
+}
+
+// dialogStep posts req once, then reads the owner's reactions on the post
+// every reactionPollGap until it is answered: ❌ picks the deny option and
+// beats ✅, which picks option 1.
+func (s *Agent) dialogStep(t dialogTarget, dir string, req dialog.Request, now time.Time) {
+	path := filepath.Join(s.dialogPostDir(t.name), req.ID+".json")
+	p, found := readDialogPost(path)
+	if !found {
+		s.postDialog(path, t, req)
+		return
+	}
+	if p.Event == "" {
+		return
+	}
+	if phase, _, _, _, err := dialog.Lookup(dir, req.ID); err != nil || phase != dialog.PhaseOpen {
+		return
+	}
+	if s.dialogs.polled == nil {
+		s.dialogs.polled = map[string]time.Time{}
+	}
+	if last, ok := s.dialogs.polled[req.ID]; ok && now.Sub(last) < reactionPollGap(now.Sub(req.OpenedAt)) {
+		return
+	}
+	s.dialogs.polled[req.ID] = now
+	rs, err := s.posts.Reactions(context.Background(), p.Event)
+	if err != nil {
+		return
+	}
+	if n := reactionOption(req, rs, s.id.Owner); n != 0 {
+		_, _ = dialog.WriteAnswer(dir, dialog.Answer{ID: req.ID, Option: n, By: dialog.ByBuzz, At: now.UTC()})
+	}
+}
+
+// reactionOption is the option the owner's reaction picks: ❌ the deny
+// option, which beats ✅, option 1. A reaction never answers a dialog
+// without that option; 0 means no answer.
+func reactionOption(req dialog.Request, rs []buzzop.Reaction, owner string) int {
+	if reacted(rs, owner, "❌") {
+		for _, o := range req.Options {
+			if o.Deny {
+				return o.N
+			}
+		}
+	}
+	if reacted(rs, owner, "✅") {
+		for _, o := range req.Options {
+			if o.N == 1 {
+				return 1
+			}
+		}
+	}
+	return 0
+}
+
+// postDialog claims req's post record, posts it and records the message. A
+// post proved not sent drops the claim so the next tick posts again; any
+// other failure leaves the outcome unknown, and the dialog is not posted
+// again. An unknown post that names its event, which the transport
+// replays, keeps that event, so it is still read and edited.
+func (s *Agent) postDialog(path string, t dialogTarget, req dialog.Request) {
+	label := t.label
+	if label == "" {
+		label = "A session"
+	}
+	p := dialogPost{Channel: t.channel, Text: dialogText(label, req)}
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return
+	}
+	if won, err := createExclusive(path, raw); err != nil || !won {
+		return
+	}
+	r := s.posts.Send(context.Background(), buzzop.Message{Key: buzzop.Key("dialog/" + t.name + "/" + req.ID),
+		Channel: t.channel, Content: p.Text})
+	if r.Outcome == buzzop.NotSent {
+		_ = os.Remove(path)
+		return
+	}
+	if r.EventID == "" || (r.Outcome != buzzop.Accepted && r.Outcome != buzzop.Unknown) {
+		return
+	}
+	p.Event = r.EventID
+	_ = s.writeDialogPost(path, p)
+}
+
+// dialogClose edits the post of each dialog that is no longer open and has
+// a resolution with its outcome, and moves its record to done/. A failed
+// edit is tried again after a backoff (dialogEditBackoffMin, doubling).
+// closed reports whether no post is left to edit.
+func (s *Agent) dialogClose(name, dir string, open map[string]bool, now time.Time) (closed bool) {
+	postDir := s.dialogPostDir(name)
+	entries, _ := os.ReadDir(postDir)
+	left := 0
+	for _, e := range entries {
+		id, ok := strings.CutSuffix(e.Name(), ".json")
+		if !ok || !e.Type().IsRegular() {
+			continue
+		}
+		left++
+		if open[id] {
+			continue
+		}
+		res, resolved, err := dialog.ReadResolved(dir, id)
+		if err != nil || !resolved {
+			continue
+		}
+		path := filepath.Join(postDir, e.Name())
+		p, found := readDialogPost(path)
+		if !found {
+			continue
+		}
+		if bo, ok := s.dialogs.edits[id]; ok && now.Before(bo.until) {
+			continue
+		}
+		if p.Event != "" && s.posts.Edit(context.Background(), buzzop.Key("dialog/"+name+"/"+id+"/closed"),
+			p.Channel, p.Event, p.Text+"\n\n"+outcomeLine(res)).Outcome != buzzop.Accepted {
+			s.dialogEditBackOff(id, now)
+			continue
+		}
+		delete(s.dialogs.polled, id)
+		delete(s.dialogs.edits, id)
+		done := filepath.Join(postDir, "done")
+		if os.MkdirAll(done, 0o700) == nil && os.Rename(path, filepath.Join(done, e.Name())) == nil {
+			left--
+		}
+	}
+	return left == 0
+}
+
+// dialogEditBackOff delays the next edit of dialog id's post.
+func (s *Agent) dialogEditBackOff(id string, now time.Time) {
+	if s.dialogs.edits == nil {
+		s.dialogs.edits = map[string]mirrorBackoff{}
+	}
+	bo := s.dialogs.edits[id]
+	bo.step = min(max(bo.step*2, dialogEditBackoffMin), dialogEditBackoffMax)
+	bo.until = now.Add(bo.step)
+	s.dialogs.edits[id] = bo
+}
+
+// DialogPosted reports whether the machine agent posted dialog id of
+// binding name and knows the posted message, so the owner can answer it in
+// Buzz. It is false while the dialog is unposted, while its post is in
+// flight, and when the post's outcome is unknown with no event named. An
+// unknown post that names its event is replayed, so it counts.
+func DialogPosted(name, id string) bool {
+	stateDir, err := BindingStateDir()
+	if err != nil {
+		return false
+	}
+	p, found := readDialogPost(filepath.Join(stateDir, "dialogs", name, id+".json"))
+	return found && p.Event != ""
+}
+
+func readDialogPost(path string) (dialogPost, bool) {
+	raw, err := readSmallRegular(path)
+	if err != nil {
+		return dialogPost{}, false
+	}
+	var p dialogPost
+	if json.Unmarshal(raw, &p) != nil {
+		return dialogPost{}, false
+	}
+	return p, true
+}
+
+func (s *Agent) writeDialogPost(path string, p dialogPost) error {
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return err
+	}
+	return s.writeState(path, raw)
+}
+
+// dialogText is the Buzz message for one dialog: who asks, the dialog body,
+// the numbered options and how to answer.
+func dialogText(label string, req dialog.Request) string {
+	var b strings.Builder
+	if req.Tool != "" {
+		fmt.Fprintf(&b, "%s wants to run %s:\n", label, req.Tool)
+	} else {
+		fmt.Fprintf(&b, "%s asks:\n", label)
+	}
+	body := strings.TrimSpace(req.Text)
+	if len(body) > dialogTextMax {
+		cut := dialogTextMax
+		for cut > 0 && !utf8.RuneStart(body[cut]) {
+			cut--
+		}
+		body = body[:cut] + "\n… full text in the terminal"
+	}
+	if body != "" {
+		b.WriteString(body + "\n")
+	}
+	deny := false
+	if len(req.Options) > 0 {
+		b.WriteString("\n")
+	}
+	for _, o := range req.Options {
+		fmt.Fprintf(&b, "%d. %s\n", o.N, o.Label)
+		deny = deny || o.Deny
+	}
+	var how []string
+	if len(req.Options) > 0 {
+		how = append(how, "React ✅ = 1")
+		if deny {
+			how = append(how, "❌ = Deny")
+		}
+		how = append(how, "or reply a number / yes / no")
+	}
+	if req.FreeText {
+		how = append(how, "or reply with your answer")
+	}
+	if len(how) == 0 {
+		how = append(how, "Answer in the terminal")
+	}
+	// A blank line ends the option list, so Buzz shows the hint as its own
+	// paragraph, not as part of the last option.
+	b.WriteString("\n" + strings.Join(how, ", ") + ".")
+	return b.String()
+}
+
+// outcomeLine is the line a resolved dialog's post gains. An expired
+// dialog's label, when set, says why it expired before its deadline.
+func outcomeLine(r dialog.Resolved) string {
+	switch {
+	case r.By == dialog.ByTerminal || r.Outcome == dialog.OutcomeTerminal:
+		return "→ Answered in the terminal"
+	case r.By == dialog.ByTimeout || r.Outcome == dialog.OutcomeExpired:
+		if r.Label != "" {
+			return "→ Expired: " + r.Label
+		}
+		return "→ Expired"
+	}
+	label := r.Label
+	if label == "" {
+		switch r.Outcome {
+		case dialog.OutcomeAllowed:
+			label = "Allowed"
+		case dialog.OutcomeDenied:
+			label = "Denied"
+		default:
+			label = "Answered"
+		}
+	}
+	return "→ " + label + " (Buzz)"
+}
+
+// dialogLead reports whether this worker posts its agent's dialogs: the
+// worker that holds _machine/<self>.dialog.lock.
+func (s *Agent) dialogLead() bool {
+	if s.dialogs.release != nil || !lock.AdvisoryLockAvailable() {
+		return true
+	}
+	if s.id.Agent == "" {
+		return false
+	}
+	dir := s.agentMarkerDir()
+	if os.MkdirAll(dir, 0o700) != nil {
+		return false
+	}
+	release, ok, err := lock.TryExclusive(filepath.Join(dir, s.id.Agent+".dialog.lock"))
+	if err != nil || !ok {
+		return false
+	}
+	s.dialogs.release = release
+	return true
+}
+
+// ownerMsg is one owner message in a Buzz channel that may be an owner
+// decision. event is the owner's signed event, verified before Owner takes
+// it, and words is its text with leading mentions dropped.
+type ownerMsg struct {
+	channel, words string
+	event          nostr.Event
+}
+
+// The kinds of owner decision, as a claim records them.
+const (
+	decidedMirror  = "mirror"
+	decidedCommand = "command"
+	decidedDialog  = "dialog"
+)
+
+// decision is an owner message taken as a decision: a mirror switch, a
+// slash command, or a dialog answer. kind says which fields are set.
+type decision struct {
+	kind string
+	// A mirror switch of binding name, signed at at.
+	name string
+	on   bool
+	at   time.Time
+	// A slash command.
+	cmd ownerCommand
+	// An answer to a dialog in dir.
+	dir    string
+	answer dialog.Answer
+}
+
+// decideOwner reads m as a mirror switch, then a slash command, then a
+// dialog answer, and returns the first that applies. ok is false when m
+// is none of them: it is a message for the session.
+func (s *Agent) decideOwner(m ownerMsg) (d decision, ok bool) {
+	if name, on, at, ok := s.mirrorSwitchOf(m); ok {
+		return decision{kind: decidedMirror, name: name, on: on, at: at}, true
+	}
+	// The owner's slash command is typed into the terminal; while a dialog
+	// is open it waits, so it is never taken as an answer.
+	if cmd, ok := s.ownerCommandOf(m); ok {
+		return decision{kind: decidedCommand, cmd: cmd}, true
+	}
+	if dir, answer, ok := s.dialogReplyOf(m); ok {
+		return decision{kind: decidedDialog, dir: dir, answer: answer}, true
+	}
+	return decision{}, false
+}
+
+// act carries out d in channel and returns the owner's acknowledgement;
+// err is set only when a dialog answer could not be recorded.
+func (s *Agent) act(channel string, d decision) (string, error) {
+	switch d.kind {
+	case decidedMirror:
+		return setMirror(d.name, d.on, d.at), nil
+	case decidedCommand:
+		return s.commandReply(channel, d.cmd), nil
+	}
+	return writeAnswer(d.dir, d.answer)
+}
+
+// writeAnswer records a dialog answer and returns the owner's
+// acknowledgement: "Answered.", "Already answered." when another answer
+// won, or why it could not be recorded, with the error.
+func writeAnswer(dir string, a dialog.Answer) (string, error) {
+	won, err := dialog.WriteAnswer(dir, a)
+	switch {
+	case err != nil:
+		return "The answer could not be recorded: " + err.Error(), err
+	case !won:
+		return "Already answered.", nil
+	}
+	return "Answered.", nil
+}
+
+// dialogReplyOf returns the answer that the owner's Buzz message m gives
+// to an open dialog posted in its channel, and the dialog's directory. The
+// words only select a message that looks like an answer; the answer itself
+// is the verified owner event: its content is the answer and its e tags
+// are its thread. A thread reply to a dialog's post answers that dialog;
+// any other message answers only when exactly one dialog is open in the
+// channel.
+func (s *Agent) dialogReplyOf(m ownerMsg) (string, dialog.Answer, bool) {
+	channel := m.channel
+	if channel == "" || s.id.Owner == "" {
+		return "", dialog.Answer{}, false
+	}
+	r, ok := s.channelRoute(channel)
+	if !ok {
+		return "", dialog.Answer{}, false
+	}
+	name := r.Name
+	dir, err := dialog.DirFor(name)
+	if err != nil {
+		return "", dialog.Answer{}, false
+	}
+	reqs, err := dialog.Requests(dir)
+	if err != nil {
+		return "", dialog.Answer{}, false
+	}
+	var open []dialog.Request
+	posted := map[string]string{}
+	for _, req := range reqs {
+		p, found := readDialogPost(filepath.Join(s.dialogPostDir(name), req.ID+".json"))
+		if !found || p.Channel != channel {
+			continue
+		}
+		open, posted[req.ID] = append(open, req), p.Event
+	}
+	if len(open) == 0 || !slices.ContainsFunc(open, func(req dialog.Request) bool {
+		_, ok := dialog.ParseAnswer(req, m.words)
+		return ok
+	}) {
+		return "", dialog.Answer{}, false
+	}
+	evt := m.event
+	req, ok := answerTarget(dir, evt, open, posted, time.Now())
+	if !ok {
+		return "", dialog.Answer{}, false
+	}
+	a, ok := dialog.ParseAnswer(req, dropMentions(evt.Content))
+	a.Event = evt.ID.Hex()
+	return dir, a, ok
+}
+
+// answerTarget is the open dialog that the verified owner event evt
+// answers: the one dialog whose post its NIP-10 root or reply names, or,
+// when it has no e tag at all, the only dialog open in its channel. It
+// answers nothing when its refs name no open dialog or more than one, when
+// it fails the time rule against its dialog's opening (signedWithin), or
+// when it is bound to another dialog. Choosing binds evt to its dialog
+// (BindEvent) before any answer is written, so no later path moves it.
+// posted maps each open dialog to its post's event id.
+func answerTarget(dir string, evt nostr.Event, open []dialog.Request, posted map[string]string, now time.Time) (dialog.Request, bool) {
+	refs, tagged := replyRefs(evt)
+	var here []dialog.Request
+	for _, req := range open {
+		if !tagged || posted[req.ID] != "" && slices.Contains(refs, posted[req.ID]) {
+			here = append(here, req)
+		}
+	}
+	if len(here) != 1 || !signedWithin(evt, here[0].OpenedAt.Add(-ownerSkew), now) {
+		return dialog.Request{}, false
+	}
+	if bound, err := dialog.BindEvent(dir, evt.ID.Hex(), here[0].ID); err != nil || bound != here[0].ID {
+		return dialog.Request{}, false
+	}
+	return here[0], true
+}
+
+// ownerSkew bounds how far the clock that dates an owner's signed message
+// may be from this machine's. OwnerSkew is the same bound for a frontend
+// that checks an owner message before Owner.
+const ownerSkew = 60 * time.Second
+const OwnerSkew = ownerSkew
+
+// signedWithin is the time rule of every owner decision: evt was signed no
+// earlier than floor and at most ownerSkew after now. A replayed message is
+// older than the state it would decide, and a message dated ahead would
+// outrank the owner's later ones.
+func signedWithin(evt nostr.Event, floor, now time.Time) bool {
+	at := evt.CreatedAt.Time()
+	return !at.Before(floor) && !at.After(now.Add(ownerSkew))
+}
+
+// dropMentions trims text and drops its leading mentions
+// (buzzevent.DropMentions).
+func dropMentions(text string) string { return buzzevent.DropMentions(text) }
+
+// nostrEventIDRe matches a Nostr event id: 64 lowercase hex.
+var nostrEventIDRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// replyRefs are the events a signed message replies to under NIP-10: its e
+// tags marked "root" or "reply", or, when no e tag has a marker, its first
+// and last e tag. A "mention" never counts. tagged reports whether the
+// message has any e tag.
+func replyRefs(evt nostr.Event) (refs []string, tagged bool) {
+	var es []nostr.Tag
+	marked := false
+	for _, t := range evt.Tags {
+		if len(t) >= 2 && t[0] == "e" {
+			es = append(es, t)
+			marked = marked || len(t) >= 4 && t[3] != ""
+		}
+	}
+	for i, t := range es {
+		reply := len(t) >= 4 && (t[3] == "root" || t[3] == "reply")
+		if !marked {
+			reply = i == 0 || i == len(es)-1
+		}
+		if reply && nostrEventIDRe.MatchString(t[1]) && !slices.Contains(refs, t[1]) {
+			refs = append(refs, t[1])
+		}
+	}
+	return refs, len(es) > 0
+}

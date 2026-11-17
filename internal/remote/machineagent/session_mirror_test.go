@@ -1,0 +1,619 @@
+package machineagent
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"slices"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/format"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/harness"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
+	"github.com/avivsinai/agent-message-queue/internal/relay/relaytest"
+	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
+	"github.com/avivsinai/agent-message-queue/internal/remote/mirror"
+)
+
+// A direct post that the relay rejects stays the same outbox
+// event and unchanged queue entry, then publishes once after retryGap.
+func TestMirrorTickPostsEachTurnOnce(t *testing.T) {
+	f := newMirrorFixture(t, func(r *relaytest.Relay) { r.DropKind.Store(9) })
+	f.add(f.userLine("o1", "p1", 0, "run the tests", nil), f.assistantLine("m1", 1, "end_turn", textBlock("All pass.")))
+	f.tick(2)
+	dir, _ := mirror.DirFor("alpha")
+	st, _, _ := readMirrorFile(dir)
+	if st.Offset != fileSize(t, f.transcript) {
+		t.Fatalf("cursor after unknown write = %d; want the full transcript read", st.Offset)
+	}
+	claim, found := readMirrorClaim(filepath.Join(dir, "posted", "o1.json"))
+	if !found || claim.Event == "" {
+		t.Fatalf("unknown direct outcome has no retained event: %+v, %v", claim, found)
+	}
+	// Mirror the relay's replay boundary, without writing another event.
+	start := time.Date(2026, 11, 4, 9, 1, 0, 0, time.UTC).UnixMilli()
+	key := mirrorKey("alpha", "post", mirror.Turn{ID: "o1", StartTS: start, LastTS: start + 1000}, claim.Shown)
+	record, found, err := f.f.out.Get(string(key))
+	if err != nil || !found {
+		t.Fatalf("the once-only outbox record was not at its mirror key: found=%v err=%v", found, err)
+	}
+	if record.EventID != claim.Event {
+		t.Fatalf("outbox event id %s differs from mirror claim's %s", record.EventID, claim.Event)
+	}
+	// The unknown attempt died with its connection. A fixture reconnect uses
+	// the same relay key and outbox for the next attempt, not a new event.
+	proofPort := f.f.reconnect()
+	proof := proofPort.Replay(context.Background(), key)
+	if proof.Outcome != buzzop.Accepted {
+		t.Fatalf("direct outbox replay was refused: %+v, claim=%+v", proof, claim)
+	}
+	seen := map[string]int{}
+	for _, event := range f.f.relay.Events() {
+		if event.Kind == 9 && event.ID.Hex() == claim.Event {
+			seen[event.ID.Hex()]++
+		}
+	}
+	if len(seen) != 1 || seen[claim.Event] != 1 {
+		t.Fatalf("stored duplicate event(s): %v", seen)
+	}
+	_ = st
+}
+
+// A Claude turn is posted when its first assistant line arrives, shown as
+// running, edited only when what it shows changed and at most once every
+// mirrorEditGap, and edited at once with its answer. A tick that changes
+// nothing sends nothing. The second turn's tick crashes after its post: the
+// post still gets its final edit (agent-message-queue-07h review). The third
+// turn changes 12 times and gets mirrorProgressMax progress edits, then
+// still shows the interrupt (review: the cap kept it "running"). The fourth
+// turn is continued by a Stop hook 20 times in 60 s and is edited once per
+// gap, ending with its last answer (review: 21 stored events).
+func TestMirrorTickShowsARunningTurnLive(t *testing.T) {
+	f := newMirrorFixture(t)
+	appendLines := func(lines ...string) {
+		t.Helper()
+		file, err := os.OpenFile(f.transcript, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = file.WriteString(strings.Join(lines, "\n") + "\n")
+		_ = file.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Lines at sec seconds after 09:01:00.
+	ts := func(sec int) string {
+		return time.Date(2026, 11, 4, 9, 1, 0, 0, time.UTC).Add(time.Duration(sec) * time.Second).Format(time.RFC3339)
+	}
+	opener := func(id string, sec int, prompt string) string {
+		return `{"type":"user","uuid":"` + id + `","promptId":"p` + id + `","timestamp":"` + ts(sec) + `","message":{"content":"` + prompt + `"}}`
+	}
+	assistant := func(id string, sec int, stop, block string) string {
+		return `{"type":"assistant","uuid":"a` + id + `","timestamp":"` + ts(sec) + `","message":{"id":"` + id + `","stop_reason":"` + stop + `","content":[` + block + `]}}`
+	}
+	toolUse := func(id string, sec int, name string) string {
+		return assistant(id, sec, "tool_use", `{"type":"tool_use","id":"t`+id+`","name":"`+name+`","input":{}}`)
+	}
+	say := func(id string, sec int, stop, text string) string {
+		return assistant(id, sec, stop, `{"type":"text","text":"`+text+`"}`)
+	}
+	dir, _ := mirror.DirFor("alpha")
+	type step struct {
+		lines []string
+		after int  // tick time, seconds after now
+		crash bool // state.json is lost after the post
+		want  []string
+	}
+	steps := []step{
+		{lines: []string{opener("o1", 0, "run the tests"), toolUse("m1", 2, "Bash")}, after: 0,
+			want: []string{"post: ▶ run the tests\n… running · 1 tool (Bash) · 2s"}},
+		{lines: []string{toolUse("m2", 10, "Read")}, after: 10},
+		{lines: []string{toolUse("m3", 35, "Grep")}, after: 35,
+			want: []string{"edit: ▶ run the tests\n… running · 3 tools (Bash, Read, Grep) · 35s"}},
+		{lines: []string{say("m4", 40, "tool_use", "Still checking.")}, after: 40},
+		{after: 70},
+		{lines: []string{say("m5", 72, "end_turn", "All pass.")}, after: 72,
+			want: []string{"edit: ▶ run the tests\n✓ 3 tools (Bash, Read, Grep) · 1m12s\nAll pass."}},
+		{after: 75},
+		{lines: []string{opener("o2", 100, "commit"), toolUse("n1", 101, "Bash")}, after: 100, crash: true,
+			want: []string{"post: ▶ commit\n… running · 1 tool (Bash) · 1s"}},
+		{lines: []string{say("n2", 103, "end_turn", "Committed.")}, after: 103,
+			want: []string{"edit: ▶ commit\n✓ 1 tool (Bash) · 3s\nCommitted."}},
+		{lines: []string{opener("o3", 200, "loop"), toolUse("k0", 201, "Bash")}, after: 200,
+			want: []string{"post: ▶ loop\n… running · 1 tool (Bash) · 1s"}},
+	}
+	for i := 1; i <= 12; i++ {
+		st := step{lines: []string{toolUse("k"+strconv.Itoa(i), 201+31*i, "Bash")}, after: 200 + 31*i}
+		if i <= mirrorProgressMax {
+			st.want = []string{fmt.Sprintf("edit: ▶ loop\n… running · %d tools (Bash ×%d) · %s", i+1, i+1, time.Duration(1+31*i)*time.Second)}
+		}
+		steps = append(steps, st)
+	}
+	interrupt := `{"type":"user","uuid":"i3","promptId":"po3","timestamp":"` + ts(574) + `","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}}`
+	steps = append(steps,
+		step{lines: []string{interrupt}, after: 574,
+			want: []string{"edit: ▶ loop\n✗ interrupted · 13 tools (Bash ×13) · 6m14s"}},
+		step{lines: []string{say("k13", 580, "end_turn", "Done.")}, after: 580,
+			want: []string{"edit: ▶ loop\n✓ 13 tools (Bash ×13) · 6m20s\nDone."}},
+		step{lines: []string{opener("o4", 700, "ship"), say("h0", 701, "end_turn", "done 0")}, after: 701,
+			want: []string{"post: ▶ ship\n✓ 1s\ndone 0"}})
+	for i := 1; i <= 20; i++ {
+		hook := `{"type":"user","uuid":"g` + strconv.Itoa(i) + `","promptId":"po4","isMeta":true,"timestamp":"` + ts(700+3*i) + `","message":{"content":[{"type":"text","text":"Stop hook feedback: keep going"}]}}`
+		st := step{lines: []string{hook, say("h"+strconv.Itoa(i), 701+3*i, "end_turn", "done "+strconv.Itoa(i))}, after: 702 + 3*i}
+		if i%10 == 0 {
+			st.want = []string{fmt.Sprintf("edit: ▶ ship\n✓ %s\ndone %d", time.Duration(1+3*i)*time.Second, i)}
+		}
+		steps = append(steps, st)
+	}
+	// Review of the mirror: a late line of an ended turn edited its post
+	// only to show a longer elapsed time.
+	steps = append(steps, step{after: 800},
+		step{lines: []string{assistant("h20", 790, "end_turn", `{"type":"thinking","thinking":"…"}`)}, after: 840})
+	for i, step := range steps {
+		if step.lines != nil {
+			appendLines(step.lines...)
+		}
+		saved, _, _ := readMirrorFile(dir)
+		sent := f.tick(step.after)
+		if step.crash {
+			if err := writeMirrorFile(dir, &saved, false); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if !slices.Equal(sent, step.want) {
+			t.Fatalf("step %d at +%ds: sent %q; want %q", i+1, step.after, sent, step.want)
+		}
+	}
+}
+
+// mirrorFixture writes an actual conversation transcript and reads the
+// agent's post and edit events from the direct in-process relay. Each case
+// is the same kind of observable output: initial post, or edit of that post.
+type mirrorFixture struct {
+	t          *testing.T
+	f          *standaloneFixture
+	s          *Agent
+	b          binding.Binding
+	target     dialogTarget
+	transcript string
+	now        time.Time
+	sent       []string
+	read       int
+}
+
+func newMirrorFixture(t *testing.T, opts ...func(*relaytest.Relay)) *mirrorFixture {
+	d := standalone(t, opts...)
+	root := canonicalTempDir(t)
+	f := &mirrorFixture{t: t, f: d, transcript: filepath.Join(root, "session.jsonl"), now: time.Now()}
+	if err := fsq.EnsureAgentDirs(root, "agent"); err != nil {
+		t.Fatal(err)
+	}
+	f.b = binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent", Name: "alpha", Harness: "claude", Transcript: f.transcript}
+	f.b.Holder, _ = launch.HolderOf(os.Getpid())
+	if err := binding.WriteNamed(f.b); err != nil {
+		t.Fatal(err)
+	}
+	activeChannel(t, d.s, f.b, machineChanA)
+	d.groupState(t, machineChanA)
+	f.s = d.s
+	f.target = dialogTarget{name: "alpha", channel: machineChanA}
+	if err := os.WriteFile(f.transcript, []byte(`{"type":"user","uuid":"o0","promptId":"p0","timestamp":"2026-11-04T09:00:00Z","message":{"content":"earlier"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.s.mirrorBinding(f.target, f.b, f.now, false) // first sight: at transcript end
+	f.read = len(d.relay.Events())
+	return f
+}
+
+// tick advances the transcript's mirror and records what it actually wrote.
+func (f *mirrorFixture) tick(sec int) []string {
+	f.s.mirrorBinding(f.target, f.b, f.now.Add(time.Duration(sec)*time.Second), false)
+	f.sent = nil
+	for _, evt := range f.f.relay.Events()[f.read:] {
+		if evt.PubKey.Hex() != f.s.id.Agent || (evt.Kind != 9 && evt.Kind != 40003) {
+			continue
+		}
+		if h := evt.Tags.Find("h"); len(h) < 2 || h[1] != f.target.channel {
+			continue
+		}
+		kind := "post: "
+		if evt.Kind == 40003 {
+			kind = "edit: "
+		}
+		f.sent = append(f.sent, kind+evt.Content)
+	}
+	f.read = len(f.f.relay.Events())
+	return append([]string(nil), f.sent...)
+}
+
+// ts is sec seconds after 09:01:00.
+func (f *mirrorFixture) ts(sec float64) string {
+	return time.Date(2026, 11, 4, 9, 1, 0, 0, time.UTC).Add(time.Duration(sec * float64(time.Second))).Format(time.RFC3339Nano)
+}
+
+// add appends transcript lines, each given as its top-level fields.
+func (f *mirrorFixture) add(lines ...map[string]any) {
+	f.t.Helper()
+	var b strings.Builder
+	for _, l := range lines {
+		raw, err := json.Marshal(l)
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		b.Write(raw)
+		b.WriteByte('\n')
+	}
+	file, err := os.OpenFile(f.transcript, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	_, err = file.WriteString(b.String())
+	_ = file.Close()
+	if err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+func (f *mirrorFixture) userLine(uuid, promptID string, sec float64, text string, extra map[string]any) map[string]any {
+	l := map[string]any{"type": "user", "uuid": uuid, "promptId": promptID, "timestamp": f.ts(sec), "message": map[string]any{"content": []any{map[string]any{"type": "text", "text": text}}}}
+	for k, v := range extra {
+		l[k] = v
+	}
+	return l
+}
+
+func (f *mirrorFixture) assistantLine(id string, sec float64, stop string, block map[string]any) map[string]any {
+	return map[string]any{"type": "assistant", "uuid": "a" + id, "timestamp": f.ts(sec), "message": map[string]any{"id": id, "stop_reason": stop, "content": []any{block}}}
+}
+
+func toolBlock(name string) map[string]any {
+	return map[string]any{"type": "tool_use", "id": "t" + name, "name": name, "input": map[string]any{}}
+}
+
+func textBlock(text string) map[string]any { return map[string]any{"type": "text", "text": text} }
+
+// Regression (idle profile of a machine agent): every 2 s tick opened and
+// read each live session's transcript even when it had not changed. An
+// unchanged transcript is not read again; a grown one is.
+func TestMirrorReadsATranscriptOnlyWhenItChanged(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a file mode that denies its owner a read")
+	}
+	f := newMirrorFixture(t)
+	if got := f.tick(1); len(got) != 0 {
+		t.Fatalf("sent %q; want nothing", got)
+	}
+	// A read now fails and posts the unavailable note, so a tick that
+	// sends nothing read nothing. The mode change keeps size and mtime.
+	if err := os.Chmod(f.transcript, 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.tick(3); len(got) != 0 {
+		t.Fatalf("the unchanged transcript was read again: sent %q", got)
+	}
+	if err := os.Chmod(f.transcript, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.add(f.userLine("o1", "p1", 0, "ship", nil), f.assistantLine("m1", 1, "end_turn", textBlock("Shipped.")))
+	if got, want := f.tick(5), []string{"post: ▶ ship\n✓ 1s\nShipped."}; !slices.Equal(got, want) {
+		t.Fatalf("sent %q; want %q", got, want)
+	}
+}
+
+// Review of the mirror: a turn a Stop hook continued was no longer the live
+// turn, so its post never showed it running again.
+func TestMirrorReopenedTurnShowsRunning(t *testing.T) {
+	f := newMirrorFixture(t)
+	f.add(f.userLine("o1", "p1", 0, "ship", nil), f.assistantLine("m1", 1, "end_turn", textBlock("Shipped.")))
+	if got, want := f.tick(1), []string{"post: ▶ ship\n✓ 1s\nShipped."}; !slices.Equal(got, want) {
+		t.Fatalf("sent %q; want %q", got, want)
+	}
+	f.add(f.userLine("g1", "p1", 2, "Stop hook feedback: run the tests", map[string]any{"isMeta": true}), f.assistantLine("m2", 3, "tool_use", toolBlock("Bash")))
+	if got, want := f.tick(40), []string{"edit: ▶ ship\n… running · 1 tool (Bash) · 3s"}; !slices.Equal(got, want) {
+		t.Fatalf("sent %q; want %q", got, want)
+	}
+}
+
+// Review of the mirror: a Stop hook that loops, its tool line and its
+// answer read in separate ticks, edited the post twice per cycle without
+// end. Past its counted edits, the post is edited at most once per gap.
+func TestMirrorLoopingStopHookEditsOncePerGap(t *testing.T) {
+	f := newMirrorFixture(t)
+	f.add(f.userLine("o1", "p1", 0, "ship", nil), f.assistantLine("m0", 0, "end_turn", textBlock("done 0")))
+	f.tick(0)
+	var at []int
+	for i := 1; i <= 12; i++ {
+		sec := 40 * i
+		f.add(f.userLine("g"+strconv.Itoa(i), "p1", float64(sec), "Stop hook feedback: keep going", map[string]any{"isMeta": true}),
+			f.assistantLine("t"+strconv.Itoa(i), float64(sec), "tool_use", toolBlock("Bash")))
+		for range f.tick(sec) {
+			at = append(at, sec)
+		}
+		f.add(f.assistantLine("m"+strconv.Itoa(i), float64(sec+2), "end_turn", textBlock("done "+strconv.Itoa(i))))
+		for range f.tick(sec + 2) {
+			at = append(at, sec+2)
+		}
+	}
+	if len(at) <= mirrorProgressMax {
+		t.Fatalf("edits at +%ds; want the cycles shown", at)
+	}
+	for i := mirrorProgressMax + 1; i < len(at); i++ {
+		if time.Duration(at[i]-at[i-1])*time.Second < mirrorEditGap {
+			t.Fatalf("edits at +%ds; want them at least %s apart", at, mirrorEditGap)
+		}
+	}
+}
+
+// Review of the mirror: past the edit cap a Continued edit was dropped, so
+// a turn a Stop hook kept going lost its last answer.
+func TestMirrorLastAnswerLandsPastTheCap(t *testing.T) {
+	f := newMirrorFixture(t)
+	f.add(f.userLine("o1", "p1", 0, "ship", nil), f.assistantLine("m0", 0, "end_turn", textBlock("done 0")))
+	f.tick(0)
+	var last string
+	for i := 1; i <= 14; i++ {
+		sec := 31 * i
+		f.add(f.userLine("g"+strconv.Itoa(i), "p1", float64(sec), "Stop hook feedback: keep going", map[string]any{"isMeta": true}),
+			f.assistantLine("m"+strconv.Itoa(i), float64(sec), "end_turn", textBlock("done "+strconv.Itoa(i))))
+		if sent := f.tick(sec); len(sent) > 0 {
+			last = sent[len(sent)-1]
+		}
+	}
+	for sec := 31 * 15; sec <= 31*14+int(mirrorEditGapMax/time.Second); sec += 30 {
+		if sent := f.tick(sec); len(sent) > 0 {
+			last = sent[len(sent)-1]
+		}
+	}
+	if !strings.HasSuffix(last, "\ndone 14") {
+		t.Fatalf("last edit %q; want the last answer, done 14", last)
+	}
+}
+
+// Review of the mirror: a looping Stop hook past the cap left its turn
+// live while its post showed an answer, and turning the mirror off then
+// erased that answer. Off ends a running post without an answer and leaves
+// an ended post's answer.
+func TestMirrorOffKeepsTheShownAnswer(t *testing.T) {
+	t.Run("ended post", func(t *testing.T) {
+		f := newMirrorFixture(t)
+		f.add(f.userLine("o1", "p1", 0, "ship", nil), f.assistantLine("m0", 0, "end_turn", textBlock("done 0")))
+		f.tick(0)
+		var sec int
+		for i := 1; i <= 13; i++ {
+			sec = 40 * i
+			f.add(f.userLine("g"+strconv.Itoa(i), "p1", float64(sec), "Stop hook feedback: keep going", map[string]any{"isMeta": true}),
+				f.assistantLine("t"+strconv.Itoa(i), float64(sec), "tool_use", toolBlock("Bash")))
+			f.tick(sec)
+			f.add(f.assistantLine("m"+strconv.Itoa(i), float64(sec+2), "end_turn", textBlock("done "+strconv.Itoa(i))))
+			f.tick(sec + 2)
+		}
+		dir, _ := mirror.DirFor("alpha")
+		if st, _, _ := readMirrorFile(dir); !slices.ContainsFunc(st.Queue, func(ev mirror.Event) bool { return ev.Kind == mirror.Continued }) {
+			t.Fatalf("queue %+v; want a Continued waiting", st.Queue)
+		}
+		if err := mirror.SetOff("alpha", true); err != nil {
+			t.Fatal(err)
+		}
+		for after := sec + 4; after <= sec+int(mirrorEditGapMax/time.Second); after += 30 {
+			if sent := f.tick(after); len(sent) > 0 {
+				t.Fatalf("at +%ds sent %q; want the post to keep its answer", after, sent)
+			}
+		}
+	})
+	t.Run("running post", func(t *testing.T) {
+		f := newMirrorFixture(t)
+		f.add(f.userLine("o1", "p1", 0, "ship", nil), f.assistantLine("m1", 1, "tool_use", toolBlock("Bash")))
+		f.tick(1)
+		if err := mirror.SetOff("alpha", true); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := f.tick(2), []string{"edit: ▶ ship\n■ ended (mirror off) · 1 tool (Bash) · 1s"}; !slices.Equal(got, want) {
+			t.Fatalf("sent %q; want %q", got, want)
+		}
+		f.add(f.assistantLine("m2", 3, "end_turn", textBlock("Shipped.")))
+		if got := f.tick(60); len(got) > 0 {
+			t.Fatalf("sent %q after the off edit; want nothing", got)
+		}
+	})
+}
+
+// Review of the mirror: the queue kept every waiting Continued, so turns
+// continued faster than their gap grew it without bound. It stays within
+// mirrorQueueMax, and each post ends with its newest answer or an earlier
+// one, never without one.
+func TestMirrorQueueBoundsWaitingContinued(t *testing.T) {
+	f := newMirrorFixture(t)
+	dir, _ := mirror.DirFor("alpha")
+	const turns = 12
+	for i := 1; i <= turns; i++ {
+		n, sec := strconv.Itoa(i), 5*i
+		f.add(f.userLine("o"+n, "p"+n, float64(sec), "task "+n, nil), f.assistantLine("m"+n, float64(sec+1), "end_turn", textBlock("a "+n)))
+		f.tick(sec + 1)
+		f.add(f.assistantLine("m"+n, float64(sec+2), "end_turn", textBlock("b "+n)))
+		f.tick(sec + 2)
+		if st, _, _ := readMirrorFile(dir); len(st.Queue) > mirrorQueueMax {
+			t.Fatalf("after turn %d the queue holds %d events; want at most %d", i, len(st.Queue), mirrorQueueMax)
+		}
+	}
+	for sec := 5*turns + 30; sec <= 5*turns+120; sec += 30 {
+		f.tick(sec)
+	}
+	for i := 1; i <= turns; i++ {
+		n := strconv.Itoa(i)
+		c, _ := readMirrorClaim(filepath.Join(dir, "posted", "o"+n+".json"))
+		if !strings.HasSuffix(c.Text, "\na "+n) && !strings.HasSuffix(c.Text, "\na "+n+"\nb "+n) {
+			t.Fatalf("post of turn %d shows %q; want its answer", i, c.Text)
+		}
+	}
+}
+
+// Review of the mirror: a running post's Ended was dropped by the queue
+// cap when six turns arrived after a backoff, so the post showed its turn
+// running for ever.
+func TestMirrorRunningPostEndsAfterABacklog(t *testing.T) {
+	f := newMirrorFixture(t)
+	f.add(f.userLine("o1", "p1", 0, "ship", nil), f.assistantLine("m1", 1, "tool_use", toolBlock("Bash")))
+	f.tick(1)
+	f.f.relay.RejectKind.Store(40003)
+	f.add(f.assistantLine("m2", 35, "tool_use", toolBlock("Read")))
+	f.tick(35) // the progress edit is not sent: the binding backs off
+	f.f.relay.RejectKind.Store(0)
+	f.add(f.assistantLine("m3", 40, "end_turn", textBlock("Shipped.")))
+	for i := 2; i <= 7; i++ {
+		n := strconv.Itoa(i)
+		f.add(f.userLine("o"+n, "p"+n, float64(40+2*i), "task "+n, nil), f.assistantLine("m"+n+"x", float64(41+2*i), "end_turn", textBlock("done "+n)))
+	}
+	f.tick(35 + int(mirrorBackoffMin/time.Second) + 1)
+	dir, _ := mirror.DirFor("alpha")
+	c, _ := readMirrorClaim(filepath.Join(dir, "posted", "o1.json"))
+	if c.Running || !strings.HasSuffix(c.Text, "\nShipped.") {
+		t.Fatalf("post of the running turn: running %t, %q; want it ended with its answer", c.Running, c.Text)
+	}
+}
+
+// A doorbell turn whose reply to a Buzz message reached the buzz inbox
+// during the turn shows Buzz as its cause and omits the answer the carrier
+// posts itself.
+func TestMirrorDoorbellTurnThatRepliedToBuzzShowsBuzz(t *testing.T) {
+	f := newMirrorFixture(t)
+	write := func(dir string, m format.Message) {
+		t.Helper()
+		data, err := m.Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, m.Header.ID+".md"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(fsq.AgentInboxCur(f.b.Root, "agent"), format.Message{Header: format.Header{Schema: format.CurrentSchema, ID: "prompt-1", From: mailboxSender, To: []string{"agent"}, Thread: "buzz-1", Created: f.ts(-5)}, Body: "deploy"})
+	write(fsq.AgentInboxNew(f.b.Root, mailboxSender), format.Message{Header: format.Header{Schema: format.CurrentSchema, ID: "reply-1", From: "agent", To: []string{mailboxSender}, Thread: "buzz-1", Created: f.ts(1.5), Refs: []string{"prompt-1"}}, Body: "Deployed."})
+	f.add(f.userLine("o1", "p1", 0, harness.Doorbell, nil), f.assistantLine("m1", 1, "tool_use", toolBlock("Bash")), f.assistantLine("m2", 2, "end_turn", textBlock("Replied.")))
+	if got, want := f.tick(2), []string{"post: ▶ Buzz\n✓ 1 tool (Bash) · 2s"}; !slices.Equal(got, want) {
+		t.Fatalf("sent %q; want %q", got, want)
+	}
+}
+
+// Review of the mirror: the "earlier turns" note of a backlog's turn was
+// lost at the post's next edit.
+func TestMirrorEditKeepsEarlierNote(t *testing.T) {
+	f := newMirrorFixture(t)
+	claim := filepath.Join(canonicalTempDir(t), "o1.json")
+	turn := mirror.Turn{ID: "o1", Cause: "ship", End: mirror.EndDone, Text: "Shipped.", Earlier: 3}
+	if _, err := f.s.mirrorPost(claim, f.target, f.b, turn, f.now); err != nil {
+		t.Fatal(err)
+	}
+	turn.Earlier, turn.Text = 0, "Shipped and tagged."
+	if _, err := f.s.mirrorEdit(claim, f.target, f.b, mirror.Event{Kind: mirror.Continued, Turn: turn}, f.now.Add(mirrorEditGap)); err != nil {
+		t.Fatal(err)
+	}
+	got := f.tick(int(mirrorEditGap/time.Second) + 1)
+	want := []string{"post: ▶ ship\n✓\nShipped.\n(+3 earlier turns not shown)", "edit: ▶ ship\n✓\nShipped and tagged.\n(+3 earlier turns not shown)"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("sent %q; want %q", f.sent, want)
+	}
+}
+
+// agent-message-queue-6r9 review: a /resume to an older session after the
+// mirror first saw an empty transcript posted that session's old turns.
+func TestMirrorResumeToOlderSessionPostsNoOldTurn(t *testing.T) {
+	cfg := canonicalTempDir(t)
+	t.Setenv("CLAUDE_CONFIG_DIR", cfg)
+	f := newMirrorFixture(t)
+	proj := filepath.Join(cfg, "projects", "-work-proj")
+	if err := os.MkdirAll(proj, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cfg, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := `{"type":"user","uuid":"h1","promptId":"hp1","timestamp":"2026-11-04T08:00:00Z","origin":{"kind":"human"},"message":{"content":"old prompt"}}` + "\n" +
+		`{"type":"assistant","uuid":"ha1","timestamp":"2026-11-04T08:00:02Z","message":{"id":"hm1","stop_reason":"end_turn","content":[{"type":"text","text":"old answer"}]}}` + "\n"
+	if err := os.WriteFile(filepath.Join(proj, "old.jsonl"), []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pid := os.Getpid()
+	session := func(id string) {
+		entry := `{"pid":` + strconv.Itoa(pid) + `,"sessionId":"` + id + `","cwd":"/work/proj"}`
+		if err := os.WriteFile(filepath.Join(cfg, "sessions", strconv.Itoa(pid)+".json"), []byte(entry), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	session("cur")
+	f.tick(0)
+	session("old")
+	if sent := f.tick(60); len(sent) != 0 {
+		t.Fatalf("old turns posted after resume: %q", sent)
+	}
+}
+
+func fileSize(t *testing.T, path string) int64 {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi.Size()
+}
+
+// Regression (review of agent-message-queue-udg): the cursor past turns
+// read while the mirror was off lived only in the unsynced progress.json.
+// After that file was lost in a crash and the mirror was switched on, the
+// off-period turn was posted.
+func TestMirrorNeverPostsAnOffPeriodTurnAfterLostProgress(t *testing.T) {
+	f := newMirrorFixture(t)
+	if err := mirror.SetOff("alpha", true); err != nil {
+		t.Fatal(err)
+	}
+	f.add(f.userLine("secret-u", "secret-p", 0, "private off-period input", nil),
+		f.assistantLine("secret-a", 1, "end_turn", textBlock("private off-period answer")))
+	if sent := f.tick(2); len(sent) != 0 {
+		t.Fatalf("posted while off: %q", sent)
+	}
+	dir, err := mirror.DirFor("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, "progress.json")); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := mirror.SetOff("alpha", false); err != nil {
+		t.Fatal(err)
+	}
+	f.s = New(Config{Identity: f.s.id, Transport: f.s.direct})
+	if sent := f.tick(4); len(sent) != 0 {
+		t.Fatalf("off-period turn posted after the progress was lost: %q", sent)
+	}
+}
+
+// A turn that ended while its route was suspended is not posted when the
+// route returns; a turn that ends after the return is.
+func TestMirrorPostsNoTurnThatEndedWhileItsRouteWasSuspended(t *testing.T) {
+	f := newMirrorFixture(t)
+	after, err := time.Parse(time.RFC3339Nano, f.ts(60))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.target.since = after.UnixMilli()
+	f.add(f.userLine("o1", "p1", 0, "while suspended", nil), f.assistantLine("m0", 0, "end_turn", textBlock("do not send this")))
+	if got := f.tick(100); len(got) != 0 {
+		t.Fatalf("suspended route's turn posted: %q", got)
+	}
+	f.add(f.userLine("o2", "p2", 62, "after return", nil), f.assistantLine("m2", 63, "end_turn", textBlock("send this one")))
+	got := f.tick(64)
+	if len(got) == 0 || !strings.Contains(strings.Join(got, "\n"), "after return") || strings.Contains(strings.Join(got, "\n"), "do not send this") {
+		t.Fatalf("posts = %q; want only the post after return", got)
+	}
+}

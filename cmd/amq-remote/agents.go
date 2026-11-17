@@ -9,23 +9,23 @@ import (
 	"strings"
 	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/acp"
 	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/machineagent"
 	"github.com/avivsinai/agent-message-queue/internal/remote/machinecred"
 )
 
 // The machine agent runs inside amq-remote serve. It is known from its
 // enrolled credential and the marker it rewrites while it runs,
 // <binding dir>/acp/agents/_machine/<pubkey>.json with host "standalone",
-// which records its process identity (acp.AgentState). A marker with
+// which records its process identity (machineagent.AgentState). A marker with
 // another host is a file no agent writes, and is ignored.
 const (
-	agentRunning = acp.AgentRunning // the marker's worker runs
-	agentOffline = acp.AgentOffline // a marker or credential exists, no process of its runs
-	agentMissing = "missing"        // no marker and no enrolled credential
+	agentRunning = machineagent.AgentRunning // the marker's worker runs
+	agentOffline = machineagent.AgentOffline // a marker or credential exists, no process of its runs
+	agentMissing = "missing"                 // no marker and no enrolled credential
 
 	machineMarkerDir = "_machine"
 	maxMarkerBytes   = 64 * 1024
@@ -152,7 +152,7 @@ func machineMarkerOf(now time.Time) agentInfo {
 		if err != nil {
 			continue
 		}
-		state := acp.AgentState(m.Updated, m.Worker, now)
+		state := machineagent.AgentState(m.Updated, m.Worker, now)
 		if stateRank[state] > stateRank[info.State] {
 			info.State = state
 		}
@@ -182,7 +182,7 @@ type attachView struct {
 	unproven string
 	// channel is the machine agent's record of the session's channel; nil
 	// when it has none.
-	channel *acp.MachineChannel
+	channel *machineagent.MachineChannel
 	// reviewer is the automatic approvals reviewer of a Codex thread, which
 	// answers its approvals so none reach Buzz; "" for the user.
 	reviewer string
@@ -205,7 +205,7 @@ func viewOf(b binding.Binding, name string, reused bool) attachView {
 	}
 	deadline := now.Add(channelWait)
 	for {
-		if c, ok := acp.MachineChannelOf(b); ok {
+		if c, ok := machineagent.MachineChannelOf(b); ok {
 			v.channel = &c
 		}
 		if !v.machine.serves() || v.unproven != "" || (v.channel != nil && v.channel.State != "creating") || !time.Now().Before(deadline) {

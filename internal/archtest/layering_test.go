@@ -19,8 +19,9 @@ import (
 const module = "github.com/avivsinai/agent-message-queue"
 
 const (
-	cliPkg = module + "/internal/cli"
-	acpPkg = module + "/internal/acp"
+	cliPkg          = module + "/internal/cli"
+	acpPkg          = module + "/internal/acp"
+	machineAgentPkg = module + "/internal/remote/machineagent"
 )
 
 // importGraph holds the module-local imports of each package. Test-file
@@ -45,19 +46,24 @@ func TestOnlyAMQCommandLinksCLI(t *testing.T) {
 	}
 }
 
-// TestRemotePackagesDoNotLinkACP keeps the remote-control packages below
-// the ACP companion: cmd/amq-remote is the wiring point that may join them.
-// The match is exact, so leaf packages under internal/acp stay allowed.
+// TestRemotePackagesDoNotLinkACP keeps the remote-control packages and
+// cmd/amq-remote apart from the ACP companion: none of them reaches
+// internal/acp, and internal/acp does not reach the machine agent engine.
+// The match on internal/acp is exact, so leaf packages under it stay
+// allowed.
 func TestRemotePackagesDoNotLinkACP(t *testing.T) {
 	graph := loadImportGraph(t)
 	remote := module + "/internal/remote"
 	for _, pkg := range graph.packages() {
-		if pkg != remote && !strings.HasPrefix(pkg, remote+"/") {
+		if pkg != remote && !strings.HasPrefix(pkg, remote+"/") && pkg != module+"/cmd/amq-remote" {
 			continue
 		}
 		if chain := graph.chain(pkg, acpPkg); chain != nil {
 			t.Errorf("%s reaches internal/acp: %s", pkg, strings.Join(chain, " -> "))
 		}
+	}
+	if chain := graph.chain(acpPkg, machineAgentPkg); chain != nil {
+		t.Errorf("internal/acp reaches internal/remote/machineagent: %s", strings.Join(chain, " -> "))
 	}
 }
 
