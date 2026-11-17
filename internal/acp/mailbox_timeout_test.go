@@ -25,12 +25,12 @@ func TestMailboxExpiredReplayDoesNotDenyDelivery(t *testing.T) {
 	s.cfg.TurnTimeout = time.Nanosecond
 	turn := newTurn()
 	turn.channel, turn.event = machineChanA, &in.Event
-	result, rpcErr := s.runRemote(routeSessionPrefix+machineChanA, in.Event.Content, event, turn, nil)
-	if rpcErr != nil {
-		t.Fatal(rpcErr)
+	got, err := s.runBound(routeSessionPrefix+machineChanA, in.Event.Content, event, turn)
+	if err != nil {
+		t.Fatal(err)
 	}
 	said := strings.Join(f.agentTexts(machineChanA), "|")
-	if got := result.(remotePromptResult); got.Meta.Remote.State != remoteUncertain || !strings.Contains(said, "Do not resend") || strings.Contains(said, "Not delivered") {
+	if got.Meta.Remote.State != remoteUncertain || !strings.Contains(said, "Do not resend") || strings.Contains(said, "Not delivered") {
 		t.Fatalf("expired replay result=%+v said=%q", got, said)
 	}
 	if prompts := inboxPrompts(t, root); len(prompts) != 1 {

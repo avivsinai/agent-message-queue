@@ -15,6 +15,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/mailprompt"
+	remoteturn "github.com/avivsinai/agent-message-queue/internal/remote/turn"
 )
 
 // inboxPrompts lists the prompt ids in the agent's inbox (new and cur).
@@ -424,8 +425,8 @@ func TestMailboxCancelBeforeDeliveryPublishesNothing(t *testing.T) {
 		close(turn.done)
 	}
 	s.mu.Unlock()
-	if _, rpcErr := s.runRemote(routeSessionPrefix+machineChanA, "hello", event, turn, nil); rpcErr != nil {
-		t.Fatal(rpcErr)
+	if _, err := s.runBound(routeSessionPrefix+machineChanA, "hello", event, turn); err != nil {
+		t.Fatal(err)
 	}
 	if ids := inboxPrompts(t, b.Root); len(ids) != 0 {
 		t.Fatalf("cancelled before delivery, but the inbox has %d prompt(s)", len(ids))
@@ -445,7 +446,8 @@ func TestMailboxCancelWhilePublishLockHeldPublishesNothing(t *testing.T) {
 		close(turn.done)
 	}
 	s.mu.Unlock()
-	r := &remoteTurn{s: s, sessionID: "s", eventID: strings.Repeat("6", 64), turn: turn, meta: remoteMeta{Target: "agent"}}
+	r := s.newBoundTurn(strings.Repeat("6", 64), turn)
+	r.Meta = remoteturn.Meta{Target: "agent"}
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}
 	claim, err := s.publishClaimed(r, time.Now().Add(time.Second), b, "t", "hello")
 	if !errors.Is(err, errStoppedBeforePublish) || claim.MessageID == "" {
@@ -546,9 +548,10 @@ func TestLosingReplyReturnsTheWinner(t *testing.T) {
 	}
 	turn := newTurn()
 	turn.channel = chanA
-	r := &remoteTurn{s: s, eventID: eventID, turn: turn, mailbox: true, claimChannel: chanA, meta: remoteMeta{Target: "agent"}}
-	if _, rpcErr := s.sayReply(r, "own", "reply A"); rpcErr != nil {
-		t.Fatal(rpcErr)
+	r := s.newBoundTurn(eventID, turn)
+	r.mailbox, r.claimChannel, r.Meta = true, chanA, remoteturn.Meta{Target: "agent"}
+	if _, err := s.sayReply(r, "own", "reply A"); err != nil {
+		t.Fatal(err)
 	}
 	if posts := f.agentTexts(chanA); len(posts) != 0 {
 		t.Fatalf("posts=%q; want nothing posted", posts)
