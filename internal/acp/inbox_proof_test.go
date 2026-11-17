@@ -3,6 +3,7 @@ package acp
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,7 +26,7 @@ func TestANonMessageInboxEntryIsNoDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}
-	if err := publishOnce(b, "cockpit/session/s", id, "", nil, time.Now(), "hello"); err == nil {
+	if err := publishOnce(b, "cockpit/session/s", id, strings.Repeat("e", 64), nil, time.Now(), "hello"); err == nil {
 		t.Fatal("prompt: a directory at the message name was reported delivered")
 	}
 }

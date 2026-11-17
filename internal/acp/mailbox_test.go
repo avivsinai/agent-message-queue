@@ -246,7 +246,7 @@ func TestMailboxDeliveryLeavesBuzzAMailbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}
-	if err := publishOnce(b, "t", strings.Repeat("3", 64), "", nil, time.Now(), "say hi"); err != nil {
+	if err := publishOnce(b, "t", strings.Repeat("3", 64), strings.Repeat("e", 64), nil, time.Now(), "say hi"); err != nil {
 		t.Fatal(err)
 	}
 	identity, _ := fsq.SnapshotDeliveryRoot(root)
@@ -280,7 +280,7 @@ func TestRedeliveredPromptStillGetsTheBuzzMailbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}
-	if err := publishOnce(b, "t", id, "", nil, time.Now(), "say hi"); err != nil {
+	if err := publishOnce(b, "t", id, strings.Repeat("e", 64), nil, time.Now(), "say hi"); err != nil {
 		t.Fatal(err)
 	}
 	identity, _ := fsq.SnapshotDeliveryRoot(root)
@@ -472,7 +472,7 @@ func TestMailboxDeliveryCompletesAnOlderMailbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}
-	if err := publishOnce(b, "t", strings.Repeat("6", 64), "", nil, time.Now(), "say hi"); err != nil {
+	if err := publishOnce(b, "t", strings.Repeat("6", 64), strings.Repeat("e", 64), nil, time.Now(), "say hi"); err != nil {
 		t.Fatal(err)
 	}
 	if ids := inboxPrompts(t, root); len(ids) != 1 {
@@ -480,18 +480,19 @@ func TestMailboxDeliveryCompletesAnOlderMailbox(t *testing.T) {
 	}
 }
 
-// Regression: #895, a turn cancelled before delivery still published. On
-// the direct transport a turn stops when the machine workers stop, as a
-// client that left; the turn runs under the claim Owner wrote for it.
+// Regression: #895, a turn cancelled before delivery still published. An
+// owner turn stops when the machine workers stop, as a client that left;
+// the turn runs under the claim Owner wrote for it.
 func TestMailboxCancelBeforeDeliveryPublishesNothing(t *testing.T) {
 	f, b := mailboxRoute(t)
 	s := f.s
-	event := f.ownerSays(t, machineChanA, "hello").Event.ID.Hex()
-	if _, err := writeClaim(filepath.Join(s.eventDir(event), event+".json"), eventClaim{Binding: b, Name: b.Name, Agent: s.id.Agent}); err != nil {
+	in := f.ownerSays(t, machineChanA, "hello")
+	event := in.Event.ID.Hex()
+	if _, err := writeClaim(filepath.Join(s.eventDir(), event+".json"), eventClaim{Binding: b, Name: b.Name, Agent: s.id.Agent}); err != nil {
 		t.Fatal(err)
 	}
 	turn := newTurn()
-	turn.channel = machineChanA
+	turn.channel, turn.event = machineChanA, &in.Event
 	s.mu.Lock()
 	if turn.settleLocked(turnDisconnected) {
 		close(turn.done)
@@ -599,14 +600,14 @@ func TestLateReplyIsPostedOnceAfterTheTurn(t *testing.T) {
 	if got := strings.Count(strings.Join(posts, "|"), "late answer"); got != 1 {
 		t.Fatalf("late answer posted %d times; posts=%q", got, posts)
 	}
-	if _, err := os.Stat(filepath.Join(s.eventDir(eventID), eventID+".posted.final")); err != nil {
+	if _, err := os.Stat(filepath.Join(s.eventDir(), eventID+".posted.final")); err != nil {
 		t.Fatalf("no outcome recorded: %v", err)
 	}
 }
 
 // Regression: #961, when the sweep had
 // posted reply B, a turn that then decided its own reply A lost and still
-// showed A. It returns the winner, B.
+// showed A. The losing turn posts nothing: the winner, B, stands.
 func TestLosingReplyReturnsTheWinner(t *testing.T) {
 	const chanA = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
 	f, root := standalone(t), liveSession(t, "alpha").Root
@@ -617,18 +618,14 @@ func TestLosingReplyReturnsTheWinner(t *testing.T) {
 	if _, won, err := s.decideOutcome(eventID, mailboxOutcome{ReplyID: winner}); err != nil || !won {
 		t.Fatalf("won=%v err=%v", won, err)
 	}
-	var shown []string
 	turn := newTurn()
 	turn.channel = chanA
-	r := &remoteTurn{s: s, eventID: eventID, turn: turn, mailbox: true, claimChannel: chanA, meta: remoteMeta{Target: "agent"}, emit: func(v any) error {
-		shown = append(shown, v.(sessionUpdateNotification).Params.Update.Content.Text)
-		return nil
-	}}
-	if _, rpcErr := s.sayReply(r, binding.Binding{Root: root, Handle: "agent"}, "own", "reply A"); rpcErr != nil {
+	r := &remoteTurn{s: s, eventID: eventID, turn: turn, mailbox: true, claimChannel: chanA, meta: remoteMeta{Target: "agent"}}
+	if _, rpcErr := s.sayReply(r, "own", "reply A"); rpcErr != nil {
 		t.Fatal(rpcErr)
 	}
-	if posts := f.agentTexts(chanA); strings.Join(shown, "|") != "reply B" || len(posts) != 0 {
-		t.Fatalf("shown=%q posts=%q; want reply B shown and nothing posted", shown, posts)
+	if posts := f.agentTexts(chanA); len(posts) != 0 {
+		t.Fatalf("posts=%q; want nothing posted", posts)
 	}
 }
 
@@ -643,7 +640,7 @@ func TestStatusNeverPostsAfterTheFinal(t *testing.T) {
 	f := standalone(t)
 	s := f.s
 	eventID := strings.Repeat("6", 64)
-	dir := s.eventDir(eventID)
+	dir := s.eventDir()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -685,10 +682,10 @@ func TestDamagedFinalMarkerIsNeverAReply(t *testing.T) {
 			s, root := f.s, b.Root
 			in := f.ownerSays(t, machineChanA, "hello")
 			event := in.Event.ID.Hex()
-			if err := os.MkdirAll(s.eventDir(event), 0o700); err != nil {
+			if err := os.MkdirAll(s.eventDir(), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			if err := plant(filepath.Join(s.eventDir(event), event+".posted.final")); err != nil {
+			if err := plant(filepath.Join(s.eventDir(), event+".posted.final")); err != nil {
 				t.Fatal(err)
 			}
 			f.machine(t)

@@ -60,9 +60,6 @@ type lateReplySweep struct {
 
 // add records a mailbox event this process claimed.
 func (l *lateReplySweep) add(eventID string) {
-	if eventID == "" {
-		return
-	}
 	l.pendingMu.Lock()
 	defer l.pendingMu.Unlock()
 	if l.pending == nil {
@@ -203,8 +200,8 @@ func (s *Server) requestSweep() {
 // sweepLateReplies posts the final reply of each recent mailbox event whose
 // turn ended without one, for example on a timeout or a client that left.
 // An event waits while its turn can still be open (younger
-// than the turn timeout) or while it has no DM channel, and leaves the
-// sweep once it has an outcome or passes the horizon. A turn's post and the
+// than the turn timeout), and leaves the sweep once it has an outcome or
+// passes the horizon. A turn's post and the
 // sweep's both decide the event's outcome through one exclusive record, so
 // each reply is posted at most once.
 func (s *Server) sweepLateReplies(now time.Time) {
@@ -263,7 +260,7 @@ func (s *Server) sweepLateReplies(now time.Time) {
 				continue
 			}
 			if won {
-				_ = s.publishFinal(c.eventID, c.channel, text)
+				_ = s.publishFinal(c.eventID, c.claim.Channel, text)
 			}
 			l.drop(c.eventID)
 		}
@@ -302,7 +299,7 @@ func matchClaims(sc *inboxScan, index map[string]*lateClaim) map[string][]replyH
 func (s *Server) discoverClaims(now time.Time) {
 	l := &s.late
 	if l.cursor == nil {
-		f, err := os.Open(s.eventDir(""))
+		f, err := os.Open(s.eventDir())
 		if err != nil {
 			return
 		}
@@ -326,10 +323,10 @@ func (s *Server) discoverClaims(now time.Time) {
 
 // lateClaim is one mailbox event the sweep may post for.
 type lateClaim struct {
-	eventID, channel string
-	claim            mailboxClaim
-	created          time.Time
-	b                binding.Binding
+	eventID string
+	claim   mailboxClaim
+	created time.Time
+	b       binding.Binding
 	// unsentReply is the reply id of an answer that is the event's outcome
 	// but was never posted (finalUnsent).
 	unsentReply string
@@ -355,7 +352,7 @@ func (s *Server) loadLateClaim(eventID string, now time.Time) (*lateClaim, bool)
 		}
 		c.unsentReply = out.ReplyID
 	}
-	dir := s.eventDir(eventID)
+	dir := s.eventDir()
 	// Only this agent's own claim: another agent posts its own replies.
 	var rec eventClaim
 	if raw, err := readSmallRegular(filepath.Join(dir, eventID+".json")); err != nil || json.Unmarshal(raw, &rec) != nil || rec.Valid() != nil || !rec.Mailbox() || !s.ownsClaim(rec) {
@@ -376,10 +373,6 @@ func (s *Server) loadLateClaim(eventID string, now time.Time) (*lateClaim, bool)
 	}
 	if now.Before(turnEnds) && c.unsentReply == "" {
 		return nil, true // its turn can still be open
-	}
-	// No delivery named a channel yet: a later one may record it.
-	if c.channel = s.eventChannel(eventID, c.claim.Channel, ""); c.channel == "" {
-		return nil, true
 	}
 	return &c, true
 }
@@ -411,7 +404,7 @@ func (s *Server) resendFinal(c *lateClaim) {
 		if err := fsq.SyncDir(filepath.Dir(sending)); err != nil {
 			return err
 		}
-		result, err := s.post(finalKey(c.eventID), c.channel, text)
+		result, err := s.post(finalKey(c.eventID), c.claim.Channel, text)
 		if notSent(err) {
 			if err := os.Rename(sending, unsent); err != nil {
 				return err

@@ -589,7 +589,7 @@ func TestEventClaimLoserFollowsTheWinner(t *testing.T) {
 	eventID := strings.Repeat("b", 64)
 	winner := binding.Binding{Root: "/winner", Target: "claude:1", NativeSession: "s-winner"}
 	raw, _ := json.Marshal(eventClaim{Binding: winner, Name: "winner", Agent: f.s.id.Agent})
-	if won, err := createExclusive(filepath.Join(f.s.eventDir(eventID), eventID+".json"), raw); err != nil || !won {
+	if won, err := createExclusive(filepath.Join(f.s.eventDir(), eventID+".json"), raw); err != nil || !won {
 		t.Fatalf("seed claim: won=%v err=%v", won, err)
 	}
 	loser := binding.Binding{Root: "/loser", Target: "claude:2", NativeSession: "s-loser", Name: "loser"}
@@ -608,7 +608,7 @@ func TestEventClaimLoserFollowsTheWinner(t *testing.T) {
 func TestExistingEventClaimIsMadeDurableBeforeUse(t *testing.T) {
 	f := standalone(t)
 	eventID := strings.Repeat("c", 64)
-	claimDir := f.s.eventDir(eventID)
+	claimDir := f.s.eventDir()
 	raw, _ := json.Marshal(eventClaim{Binding: binding.Binding{Root: "/r", Target: "claude:1", NativeSession: "s"}, Name: "r", Agent: f.s.id.Agent})
 	if won, err := createExclusive(filepath.Join(claimDir, eventID+".json"), raw); err != nil || !won {
 		t.Fatalf("seed claim: %v %v", won, err)

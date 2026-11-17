@@ -100,12 +100,11 @@ type remoteTurn struct {
 	quiet bool
 }
 
-// postChannel is the Buzz channel the turn posts to. A mailbox event posts
-// to its persisted DM, resolved at the moment of the post: the claim's
-// channel, else the one a delivery recorded later.
+// postChannel is the Buzz channel the turn posts to. A mailbox turn posts
+// to its claim's channel, the channel of the event's first delivery.
 func (r *remoteTurn) postChannel() string {
-	if r.mailbox && r.eventID != "" {
-		return r.s.eventChannel(r.eventID, r.claimChannel, "")
+	if r.mailbox {
+		return r.claimChannel
 	}
 	return r.turn.channel
 }
@@ -147,11 +146,9 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 		}
 		// Both carriers name the images of the owner's message, which is the
 		// owner's event itself.
-		if turn.event != nil {
-			text = unfetchedImages(*turn.event, text)
-		}
+		text = unfetchedImages(*turn.event, text)
 		if b.Mailbox() {
-			return s.runMailbox(sessionID, text, eventID, b, turn, emit)
+			return s.runMailbox(sessionID, text, eventID, b, turn)
 		}
 		root, target, native = b.Root, b.Target, b.NativeSession
 		// The session mirror tells this turn's frame from a peer's by its
@@ -303,7 +300,7 @@ func (s *Server) eventCancelPath(eventID string) (string, error) {
 	if s.cfg.StateDir == "" || eventID == "" || eventID != filepath.Base(eventID) {
 		return "", fmt.Errorf("cancel has no durable event record")
 	}
-	return filepath.Join(s.eventDir(eventID), eventID+".cancelled"), nil
+	return filepath.Join(s.eventDir(), eventID+".cancelled"), nil
 }
 
 func (s *Server) eventCancelled(eventID string) bool {
@@ -354,7 +351,7 @@ func (s *Server) sessionBinding(sessionID string) (binding.Binding, error) {
 // so a rebind between deliveries cannot run the event twice in two sessions.
 // A first delivery records its binding before submit.
 func (s *Server) turnBinding(sessionID, eventID string) (binding.Binding, error) {
-	path := filepath.Join(s.eventDir(eventID), eventID+".json")
+	path := filepath.Join(s.eventDir(), eventID+".json")
 	if raw, err := readSmallRegular(path); err == nil {
 		var c eventClaim
 		if err := json.Unmarshal(raw, &c); err != nil || c.Valid() != nil {
@@ -395,9 +392,9 @@ func (s *Server) turnBinding(sessionID, eventID string) (binding.Binding, error)
 }
 
 // eventClaim is an event's first-delivery record: the binding it runs
-// under, and the Buzz agent that claimed it. Agents share remote-events, and
-// one Buzz event can reach several agents (a channel they all belong to), so
-// an agent follows and sweeps only its own claims.
+// under, and the Buzz agent that claimed it. Each agent keeps its claims in
+// its own event directory (eventDir). A claim is checked before use: an
+// agent follows and sweeps only a claim that names it (ownsClaim).
 type eventClaim struct {
 	binding.Binding
 	Name  string `json:"name,omitempty"`
@@ -424,11 +421,11 @@ func (s *Server) ownsClaim(c eventClaim) bool {
 // and the event state of a process with no Buzz identity.
 func (s *Server) eventsDir() string { return filepath.Join(s.cfg.StateDir, "remote-events") }
 
-// eventDir is the directory of an event's state. Each Buzz agent keeps its
-// own, remote-events/<agent pubkey>/, because one Buzz event can reach
-// several agents, and each handles it for itself. A process with no Buzz
-// identity uses remote-events itself.
-func (s *Server) eventDir(_ string) string {
+// eventDir is the directory of this process's event state. Each Buzz agent
+// keeps its own, remote-events/<agent pubkey>/, because one Buzz event can
+// reach several agents, and each handles it for itself. A process with no
+// Buzz identity uses remote-events itself.
+func (s *Server) eventDir() string {
 	if s.id.Agent == "" {
 		return s.eventsDir()
 	}
@@ -826,7 +823,7 @@ func (s *Server) postOnce(eventID, kind string, record []byte, channel, text str
 		}
 		return s.publishFinal(eventID, channel, text)
 	}
-	dir := s.eventDir(eventID)
+	dir := s.eventDir()
 	result := ""
 	err := s.withPostLock(eventID, func() error {
 		if _, final := s.mailboxAnswered(eventID); final {
@@ -854,7 +851,7 @@ func (s *Server) reserveFinal(eventID string, record []byte) (bool, error) {
 	won := false
 	err := s.withPostLock(eventID, func() error {
 		var err error
-		won, err = createExclusive(filepath.Join(s.eventDir(eventID), eventID+".posted."+postFinal), record)
+		won, err = createExclusive(filepath.Join(s.eventDir(), eventID+".posted."+postFinal), record)
 		return err
 	})
 	return won, err
@@ -862,7 +859,7 @@ func (s *Server) reserveFinal(eventID string, record []byte) (bool, error) {
 
 // withPostLock runs fn under the event's post lock.
 func (s *Server) withPostLock(eventID string, fn func() error) error {
-	dir := s.eventDir(eventID)
+	dir := s.eventDir()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}

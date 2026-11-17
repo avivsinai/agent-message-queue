@@ -90,7 +90,7 @@ func (s *Server) post(key buzzop.Key, channel, text string) (string, error) {
 }
 
 func (s *Server) finalStatePath(eventID string, state finalPost) string {
-	return filepath.Join(s.eventDir(eventID), eventID+".posted."+postFinal+"."+string(state))
+	return filepath.Join(s.eventDir(), eventID+".posted."+postFinal+"."+string(state))
 }
 
 // finalPostState reads the event's final-post state: accepted wins over

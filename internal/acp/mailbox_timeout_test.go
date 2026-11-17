@@ -24,7 +24,7 @@ func TestMailboxExpiredReplayDoesNotDenyDelivery(t *testing.T) {
 	stop()
 	s.cfg.TurnTimeout = time.Nanosecond
 	turn := newTurn()
-	turn.channel = machineChanA
+	turn.channel, turn.event = machineChanA, &in.Event
 	result, rpcErr := s.runRemote(routeSessionPrefix+machineChanA, in.Event.Content, event, turn, nil)
 	if rpcErr != nil {
 		t.Fatal(rpcErr)
