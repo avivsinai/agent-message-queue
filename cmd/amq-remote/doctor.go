@@ -136,9 +136,6 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 	doctorRequestStore(stateDir, report, fail)
 	// Print adapter refusals persisted by serve, so doctor shows them.
 	refusals, loadErr := loadRefusals(stateDir)
-	if loadErr == nil {
-		refusals = declaredRefusals(stateDir, refusals)
-	}
 	switch {
 	case loadErr == nil && len(refusals) > 0:
 		report["refusals"] = refusals
@@ -177,23 +174,6 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 		report["notes"] = notes
 	}
 	return finish()
-}
-
-// declaredRefusals keeps the refusals whose target the manifest of stateDir
-// still declares: an entry removed since serve started is no refusal. When
-// that manifest cannot be read, every refusal is kept.
-func declaredRefusals(stateDir string, refusals []refusalEntry) []refusalEntry {
-	mf, err := manifest.Load(manifest.DefaultPath(stateDir))
-	if err != nil {
-		return refusals
-	}
-	var kept []refusalEntry
-	for _, r := range refusals {
-		if slices.ContainsFunc(mf.Adapters, func(a manifest.Adapter) bool { return a.Target == r.Target }) {
-			kept = append(kept, r)
-		}
-	}
-	return kept
 }
 
 // refusalFix is the fix of a refused target. When a native binding of root,

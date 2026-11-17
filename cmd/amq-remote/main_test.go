@@ -1688,7 +1688,7 @@ func TestRefusalsClearedOnRestart(t *testing.T) {
 
 // Each serve start refused the manifest entry of a Claude session whose
 // process had ended, and doctor failed on it, because nothing removed the
-// entry (agent-message-queue-BEADID).
+// entry (agent-message-queue-vosl.11).
 func TestServeStartRemovesTheEntryOfAnEndedClaudeProcess(t *testing.T) {
 	root := canonicalTempDir(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
@@ -2051,10 +2051,10 @@ func TestDoctorRefusalsErrorSurfaced(t *testing.T) {
 	}
 }
 
-// Doctor failed on refusals of targets the manifest no longer declared, and
-// the fix of a refused session named no command that removes it
-// (agent-message-queue-BEADID).
-func TestDoctorReportsDeclaredRefusalsWithTheirDetach(t *testing.T) {
+// The fix of a refused session's target told the user to edit the manifest
+// by hand; it named no command that removes the target
+// (agent-message-queue-vosl.11).
+func TestDoctorNamesTheDetachThatRemovesARefusedTarget(t *testing.T) {
 	root := canonicalTempDir(t)
 	t.Setenv(binding.EnvPath, filepath.Join(root, "binding.json"))
 	stateDir := filepath.Join(root, stateDirName)
@@ -2064,15 +2064,11 @@ func TestDoctorReportsDeclaredRefusalsWithTheirDetach(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(stateDir, "refusals.json"), []byte(`[
-  {"kind": "claude", "target": "claude:7", "error": "claude adapter: refused"},
-  {"kind": "claude", "target": "claude:9", "error": "claude adapter: refused"}
+  {"kind": "claude", "target": "claude:7", "error": "claude adapter: refused"}
 ]`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := binding.WriteNamed(binding.Binding{Root: root, Target: "claude:7", NativeSession: "session-7", Name: "claude-7"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := binding.Detach(func(b binding.Binding) bool { return b.Name == "claude-7" }, nil); err != nil {
 		t.Fatal(err)
 	}
 	report, _, err := doctor([]string{"--root", root})
@@ -2087,9 +2083,6 @@ func TestDoctorReportsDeclaredRefusalsWithTheirDetach(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].Subject != "claude:7" || !strings.Contains(rows[0].Remedy, "amq-remote detach --name claude-7") {
 		t.Fatalf("registration rows = %+v; want one for claude:7 naming its detach", rows)
-	}
-	if got := report.(map[string]any)["refusals"].([]refusalEntry); len(got) != 1 {
-		t.Fatalf("refusals = %+v; want only claude:7", got)
 	}
 }
 

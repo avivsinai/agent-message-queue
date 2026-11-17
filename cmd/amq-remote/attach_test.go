@@ -1495,7 +1495,7 @@ func TestDetachByNameDropsAShareEntryWithNoBinding(t *testing.T) {
 }
 
 // Detach left the adapter entry of the session it detached, so every serve
-// start attached it again or refused it (agent-message-queue-BEADID).
+// start attached it again or refused it (agent-message-queue-vosl.11).
 func TestDetachByNameRemovesTheSessionsManifestEntry(t *testing.T) {
 	for _, row := range []struct {
 		name            string
