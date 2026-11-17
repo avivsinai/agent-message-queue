@@ -36,11 +36,10 @@ const (
 type agentInfo struct {
 	State   string
 	Display string // the display name of the newest marker
-	// PubKey, RelayKey and Path are those of the marker in the best state,
-	// the newest among equals: its file name (the agent's public key), the
-	// relay key it records, and its file. With no marker, PubKey is the
-	// enrolled credential's key.
-	PubKey, RelayKey, Path string
+	// PubKey and Path are those of the marker in the best state, the newest
+	// among equals: its file name (the agent's public key) and its file.
+	// With no marker, PubKey is the enrolled credential's key.
+	PubKey, Path string
 	// Status is the agent's status file; nil when it has none.
 	Status *machineStatus
 }
@@ -144,7 +143,6 @@ func machineMarkerOf(now time.Time) agentInfo {
 			DisplayName string                `json:"display_name"`
 			Updated     string                `json:"updated"`
 			Worker      launch.HolderIdentity `json:"worker"`
-			RelayKey    string                `json:"relay_key"`
 			Host        string                `json:"host"`
 		}
 		if err != nil || json.Unmarshal(raw, &m) != nil || m.Host != hostStandalone {
@@ -163,8 +161,7 @@ func machineMarkerOf(now time.Time) agentInfo {
 		}
 		if rank := stateRank[state]; rank > bestRank || rank == bestRank && updated.After(bestAt) {
 			bestRank, bestAt = rank, updated
-			info.PubKey, info.RelayKey = strings.TrimSuffix(e.Name(), ".json"), m.RelayKey
-			info.Path = filepath.Join(dir, e.Name())
+			info.PubKey, info.Path = strings.TrimSuffix(e.Name(), ".json"), filepath.Join(dir, e.Name())
 		}
 	}
 	return info

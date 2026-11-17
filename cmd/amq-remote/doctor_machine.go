@@ -320,13 +320,10 @@ func shQuote(s string) string {
 
 // machineAgentRow is what doctor found about the machine agent.
 type machineAgentRow struct {
-	State    string `json:"state"`
-	Name     string `json:"name,omitempty"`
-	RelayKey bool   `json:"relay_key"`
-	// A standalone agent's host, the first 8 characters of its key and of
-	// the owner's key, its relay and relay state, its grant's end and its
-	// refusal code.
-	Host                string `json:"host,omitempty"`
+	State string `json:"state"`
+	Name  string `json:"name,omitempty"`
+	// The first 8 characters of the agent's key and of the owner's key, the
+	// agent's relay and relay state, its grant's end and its refusal code.
 	Agent               string `json:"agent,omitempty"`
 	Owner               string `json:"owner,omitempty"`
 	Relay               string `json:"relay,omitempty"`
@@ -361,7 +358,7 @@ func doctorMachineAgent(machine agentInfo, fail, note reportFunc) machineAgentRo
 // relay is authenticated, and its grant does not end soon.
 func doctorStandalone(machine agentInfo, row machineAgentRow, now time.Time, fail, note reportFunc) machineAgentRow {
 	row.Name = nonEmpty(machine.Display, "AMQ Remote @ "+nonEmpty(binding.Machine(), "this machine"))
-	row.Host, row.Agent, row.RelayKey = hostStandalone, short(machine.PubKey), machine.RelayKey != ""
+	row.Agent = short(machine.PubKey)
 	st := machine.Status
 	if st != nil {
 		row.Relay, row.RelayState, row.GrantEnd, row.Refusal = st.RelayURL, st.RelayState, st.GrantNotAfter, machine.refusal()

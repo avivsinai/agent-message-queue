@@ -980,9 +980,9 @@ state directory:
   or refuses it, fails when its relay has not been authenticated for more
   than a minute, and notes a grant that ends within 14 days, with the renew
   commands. A machine with no machine agent gets a note with the
-  [one-time setup](#machine-agent). The `machine_agent` row adds `host`
-  (`standalone`), `agent` and `owner` (the first 8 characters of each key), `relay`,
-  `relay_state`, `grant_end` and `refusal`.
+  [one-time setup](#machine-agent). The `machine_agent` row adds `agent`
+  and `owner` (the first 8 characters of each key), `relay`, `relay_state`,
+  `grant_end` and `refusal`.
 - The channel of each binding the machine agent serves is `active`.
 - Each mailbox binding: its handle is registered, and `amq wake check`
   reports a live wake on the current image.
