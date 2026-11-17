@@ -1,10 +1,11 @@
-// Package binding stores which live session the per-user Buzz agent drives.
-// `amq-remote attach --self` writes it at the moment the owner consents
-// inside that session; the machine agent writes it again only to restore that
-// share for the same identity and the same recorded session, never after a
-// detach. amq-acp in binding mode reads it on every prompt.
-// A request keeps the binding it was submitted under, so a later attach
-// never moves work that is already running.
+// Package binding stores which live sessions the machine agent serves, one
+// binding per session. `amq-remote attach --self` writes a binding at the
+// moment the owner consents inside that session; the machine agent writes
+// it again only to restore that share for the same identity and the same
+// recorded session, never after a detach. The machine agent inside
+// `amq-remote serve` reads the binding of a channel's session for each
+// owner message. A request keeps the binding it was submitted under, so a
+// later attach never moves work that is already running.
 package binding
 
 import (

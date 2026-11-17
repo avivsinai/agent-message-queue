@@ -41,8 +41,8 @@ import (
 const Kind = "mailbox"
 
 // The carrier inboxes prompts come from, and so the inboxes the handle
-// answers: buzz for a Buzz DM (as in amq-acp binding mode), amq-remote for
-// every other origin.
+// answers: buzz for a request that the Buzz carrier brought from the
+// owner's message, amq-remote for every other origin.
 const (
 	buzzCarrier  = "buzz"
 	localCarrier = "amq-remote"
@@ -307,9 +307,10 @@ func (a *Attachment) submitLocked(root *fsq.DeliveryRoot, ref string, req core.B
 	return core.Admission{Admitted: true, RunID: ent.MessageID}, nil
 }
 
-// prompt is the message for req: a Buzz DM keeps amq-acp binding mode's
-// sender, thread and labels; every other origin comes from amq-remote on
-// one thread per creator host.
+// prompt is the message for req. A request that the Buzz carrier brought
+// comes from buzz on the thread cockpit/<channel>, labelled acp, buzz and
+// nostr:<event>; every other origin comes from amq-remote on one thread
+// per creator host.
 func (a *Attachment) prompt(id string, req core.BoundRequest) acp.MailboxPrompt {
 	text := strings.TrimRight(req.Input.Text, "\n")
 	o := req.Origin

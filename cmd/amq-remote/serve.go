@@ -198,7 +198,8 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	server.SetVersion(version)
 	server.SetRegistrar(liveRegistrar(c.root, stateDir, *me, ep))
 	server.SetLinkHandler(links.request)
-	// amq-acp mirrors a Buzz-started request's native activity into Desktop.
+	// amq-acp in remote-target mode reads a request's native activity from
+	// this stream and shows it to its ACP client while the turn runs.
 	server.SetActivityHandler(activity.MirrorHandler(ep))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

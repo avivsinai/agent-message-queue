@@ -73,8 +73,9 @@ Commands:
                            its grant request for amq-owner-sign --machine
   machine enroll --grant FILE
                            Enroll the owner-signed machine grant
-  attach --self            Bind your AMQ Remote Buzz agent to the session this
-                           runs in (starts the endpoint when none runs)
+  attach --self            Give the session this runs in its Buzz channel
+                           through the machine agent (--native starts the
+                           endpoint when none runs)
   detach --self|--name N|--all
                            Unbind; the session keeps running
   bindings                 Bound sessions: live, unknown, or ended (pruned)

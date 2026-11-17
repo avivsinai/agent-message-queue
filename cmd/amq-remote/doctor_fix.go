@@ -19,7 +19,7 @@ import (
 // and none is installed. It never creates a settings file in a Claude
 // config dir that does not exist, never installs a hook the owner removed
 // with its uninstall command (doctor notes it), never restarts amq-acp or a
-// wake, never deletes a request record, and never writes a Buzz agent list. An approval or Stop hook it
+// wake, and never deletes a request record. An approval or Stop hook it
 // installs records the owner's opt-in, so the machine agent restores it
 // when another writer removes it.
 func doctorFix(root, stateDir string, all []binding.Binding, fail reportFunc) []string {

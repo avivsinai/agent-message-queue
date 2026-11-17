@@ -40,8 +40,9 @@ import (
 // attachReadyTimeout bounds the wait for an endpoint that attach started.
 const attachReadyTimeout = 20 * time.Second
 
-// attach binds the per-user Buzz agent to the session the owner is typing
-// in. Typing the command is the sharing choice, so the invoking session is
+// attach binds the session the owner is typing in for the machine agent,
+// which gives it a Buzz channel. Typing the command is the sharing choice,
+// so the invoking session is
 // found exactly, never guessed from a
 // discovery list: Claude by its process ancestry, Codex by CODEX_THREAD_ID.
 // The machine agent may later restore that share for the same identity and
