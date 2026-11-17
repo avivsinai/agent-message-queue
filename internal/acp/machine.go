@@ -140,7 +140,7 @@ func (r channelRecord) inDoubt() bool {
 	return (r.Doubted || r.Pending) && r.ChannelID == ""
 }
 
-// prunable reports whether a retired record may be removed: every channel it
+// prunable reports whether a retired record may be removed: the channel it
 // made is archived, or it made none and no create is in doubt.
 func (r channelRecord) prunable() bool {
 	return r.Archived || (r.ChannelID == "" && !r.inDoubt())
@@ -485,7 +485,7 @@ func daemonGone(view *codex.View, b binding.Binding) bool {
 // has ended when the daemon it was bound in, still running, no longer has
 // it loaded, or when that daemon was gone, with the thread loaded nowhere,
 // on two ticks in a row. Any other binding's liveness is its holder's, as
-// it is in a worker that runs no machine tick.
+// every binding's is before the first machine tick.
 func (s *Server) liveness(b binding.Binding) (binding.State, string) {
 	j := s.appServers.Load()
 	if j == nil {
@@ -973,7 +973,7 @@ func (s *Server) retiredRecords() []channelRecord {
 
 // cleanRetired works on one retired record: it finds a channel an uncertain
 // or unfinished create made, says "Session ended" in a channel that was
-// active for a session that ended, and archives every channel the record
+// active for a session that ended, and archives the channel the record
 // made. archived is written only after the archive is confirmed; a failure
 // is retried after channelRetryGap without limit. A retired record never
 // gets add-member, a welcome or activation.

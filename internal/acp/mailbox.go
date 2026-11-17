@@ -37,8 +37,8 @@ const mailboxSubject = "Buzz DM"
 type mailboxClaim struct {
 	MessageID string `json:"message_id"`
 	Created   string `json:"created"`
-	// Thread is the cockpit thread of the first delivery. A redelivery on a
-	// new ACP session publishes and waits there, never on its own thread.
+	// Thread is the cockpit thread of the first delivery. A redelivery
+	// publishes and waits there.
 	Thread string `json:"thread"`
 	// Channel is the Buzz channel of the first delivery, so the late-reply
 	// sweep can post a reply that arrives after the turn ended. An older

@@ -805,9 +805,9 @@ func (r *remoteTurn) say(kind string, outcome turnOutcome, stopReason, text stri
 //     release. While a status post holds the lock, no final can reserve.
 //     Config.PostTimeout bounds the hold, and a crash releases the flock.
 //
-// A post that failed is not retried, because the post has no idempotency
-// key, with one exception: a mailbox answer whose post was not sent is
-// posted again by the late-reply sweep (finalUnsent). The
+// A status post that failed is not retried: its key is made for one send
+// (noteKey). A mailbox answer whose post was not sent is posted again by
+// the late-reply sweep under the event's final key (finalUnsent). The
 // event id is 64 lowercase hex, checked when the prompt is parsed (event.go
 // eventIDsFromMeta) or the id of the owner's signed event, so it cannot
 // leave the state dir. Without an event id

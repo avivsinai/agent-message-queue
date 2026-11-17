@@ -175,8 +175,8 @@ func (s *Server) writeAgentMarker(dir string, m agentMarker, now time.Time) {
 	_ = s.writeState(path, append(raw, '\n'))
 }
 
-// sessionAgentName is the Buzz agent name for b's session: its label, else
-// "AMQ: <name>" for a binding written before labels.
+// sessionAgentName is the name of b's session in Buzz, which its channel
+// carries: its label, else "AMQ: <name>" for a binding with no label.
 func sessionAgentName(b binding.Binding) string {
 	if b.Label != "" {
 		return b.Label

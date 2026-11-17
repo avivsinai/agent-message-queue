@@ -229,7 +229,7 @@ type Server struct {
 	// mirror workers.
 	targets targetCache
 	// appServers judges Codex app-server threads for the current machine
-	// tick, or is nil before the first one and in a worker that runs none.
+	// tick, or is nil before the first one.
 	appServers atomic.Pointer[appServerJudge]
 }
 

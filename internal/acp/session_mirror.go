@@ -819,8 +819,8 @@ func mirrorKey(name, what string, turn mirror.Turn, shown string) buzzop.Key {
 
 // mirrorPost claims turn's post, posts it and records its event id. A turn
 // already claimed is not posted. It returns the event id the claim holds.
-// An unknown post that names its event (the direct transport, which replays
-// it) is recorded as posted, so it is still edited.
+// An unknown post that names its event, which the transport replays, is
+// recorded as posted, so it is still edited.
 func (s *Server) mirrorPost(claim string, t dialogTarget, b binding.Binding, turn mirror.Turn, now time.Time) (string, error) {
 	p := mirrorClaim{dialogPost: dialogPost{Channel: t.channel}, EditedAt: now.UnixMilli()}
 	s.mirrorFacts(&p, t.name, b, &turn)
@@ -845,7 +845,7 @@ func (s *Server) mirrorPost(claim string, t dialogTarget, b binding.Binding, tur
 		return "", resultError(r)
 	}
 	if r.EventID == "" {
-		return "", errors.New("buzz messages send gave no event id")
+		return "", errors.New("the post gave no event id")
 	}
 	p.Event = r.EventID
 	return r.EventID, writeMirrorClaim(claim, p)
