@@ -203,5 +203,5 @@ the owner's reaction or reply into `answers/<id>.json`; the waiting seam
 applies it. The first create-exclusive write of `resolved/<id>.json` decides
 how the dialog ended. See [the compatibility manifest](remote-compat.md) for
 the harness seams and
-[the amq-remote reference](../cmd/amq-remote/README.md#approvals-from-the-buzz-dm)
+[the amq-remote reference](../cmd/amq-remote/README.md#approvals-from-the-buzz-channel)
 for commands.

@@ -144,7 +144,7 @@ Each adapter has a unique `target` (the id you pass to `inspect` and
 
 | Kind | Required `config` | What `inspect` advertises on this tree |
 | --- | --- | --- |
-| `claude` | `pid` (Claude Code process id). Optional `home` overrides the Claude home directory. Dialogs reach Buzz through the PermissionRequest hook (see [Approvals from the Buzz DM](#approvals-from-the-buzz-dm)). | `Inspect` and `Submit` over the session's cross-session socket. Submit evidence is `submitted`, so a relay share for Claude sets `min_evidence` `submitted`. `CancelRequest` and `Steer` are false. Unsupported on Windows. See [Claude Code](#claude-code). |
+| `claude` | `pid` (Claude Code process id). Optional `home` overrides the Claude home directory. Dialogs reach Buzz through the PermissionRequest hook (see [Approvals from the Buzz channel](#approvals-from-the-buzz-channel)). | `Inspect` and `Submit` over the session's cross-session socket. Submit evidence is `submitted`, so a relay share for Claude sets `min_evidence` `submitted`. `CancelRequest` and `Steer` are false. Unsupported on Windows. See [Claude Code](#claude-code). |
 | `codex` | `socket` and `thread`. | `Inspect`, `Submit`, and `CancelRequest`. `Steer` is false. |
 | `pi` | `handle`; optional `upgrade_hint`, the remedy shown when the live bridge is too old and publishes none. The pi-bridge extension directory for that handle, `agents/<handle>/extensions/pi-bridge/` under the root, must already exist. | `Inspect` and `Submit`. `CancelRequest` only while the live bridge advertises `bridge_revision` 5 or higher. Submit evidence is `submitted`. |
 | `acp` | `handle`: the `AM_ME` of a running `amq-acp host`, whose directory `agents/<handle>/extensions/acp-host/` under the root must already exist. | `Inspect` and `Submit` over the host's bridge seam (protocol `amq:acp-host:v1`). `CancelRequest`: `amq-remote cancel` or `/cancel` stops the request's ACP turn, or keeps a request that has not run from running. Submit evidence is `submitted`, so a relay share sets `min_evidence` `submitted`. See [the acp-host wire](../../docs/pi-bridge-protocol.md#the-acp-host-wire). |
@@ -1104,7 +1104,7 @@ behind. The hook command itself always exits 0, so a broken bridge never
 blocks Claude Code. After an endpoint restart, a request that was in flight
 reads `uncertain`.
 
-### Approvals from the Buzz DM
+### Approvals from the Buzz channel
 
 Every dialog a connected session raises in its terminal also shows in the
 session's Buzz channel: a command, a file edit, a network or permission
