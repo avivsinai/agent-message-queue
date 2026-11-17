@@ -26,11 +26,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/acp"
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
+	"github.com/avivsinai/agent-message-queue/internal/remote/mailprompt"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
@@ -145,7 +145,7 @@ type Attachment struct {
 type entry struct {
 	MessageID   string             `json:"message_id,omitempty"`
 	Created     string             `json:"created,omitempty"`
-	Prompt      *acp.MailboxPrompt `json:"prompt,omitempty"`
+	Prompt      *mailprompt.Prompt `json:"prompt,omitempty"`
 	Undelivered string             `json:"undelivered,omitempty"`
 	Cancelled   bool               `json:"cancelled,omitempty"`
 	Acked       bool               `json:"acked,omitempty"`
@@ -157,7 +157,7 @@ type outcome struct {
 	State     protocol.State     `json:"state"`
 	Text      string             `json:"text"`
 	Truncated bool               `json:"truncated,omitempty"`
-	Replies   []acp.MailboxReply `json:"replies,omitempty"`
+	Replies   []mailprompt.Reply `json:"replies,omitempty"`
 }
 
 // NativeSessionID implements core.NativeIdentifier: the handle.
@@ -248,7 +248,7 @@ func (a *Attachment) submitLocked(root *fsq.DeliveryRoot, ref string, req core.B
 		if decided || ent.Acked {
 			return core.Admission{Admitted: true, RunID: ent.MessageID}, nil
 		}
-		present, err := acp.InboxHasMessage(root, a.handle, ent.MessageID)
+		present, err := mailprompt.InboxHasMessage(root, a.handle, ent.MessageID)
 		if err != nil {
 			return core.Admission{}, err
 		}
@@ -293,8 +293,8 @@ func (a *Attachment) submitLocked(root *fsq.DeliveryRoot, ref string, req core.B
 		}
 		return core.Admission{Code: protocol.CodeExpired, Message: windowClosed}, nil
 	}
-	err = acp.PublishMailboxPrompt(root, ent.MessageID, created, *ent.Prompt)
-	if reason, refused := acp.NotDeliveredReason(err); refused {
+	err = mailprompt.Publish(root, ent.MessageID, created, *ent.Prompt)
+	if reason, refused := mailprompt.NotDeliveredReason(err); refused {
 		ent.Undelivered = reason
 		if err := a.writeEntry(root, ref, ent); err != nil {
 			return core.Admission{}, err
@@ -311,11 +311,11 @@ func (a *Attachment) submitLocked(root *fsq.DeliveryRoot, ref string, req core.B
 // comes from buzz on the thread cockpit/<channel>, labelled acp, buzz and
 // nostr:<event>; every other origin comes from amq-remote on one thread
 // per creator host.
-func (a *Attachment) prompt(id string, req core.BoundRequest) acp.MailboxPrompt {
+func (a *Attachment) prompt(id string, req core.BoundRequest) mailprompt.Prompt {
 	text := strings.TrimRight(req.Input.Text, "\n")
 	o := req.Origin
 	if o["carrier"] == "buzz" && o["event"] != "" && o["channel"] != "" {
-		return acp.MailboxPrompt{
+		return mailprompt.Prompt{
 			To: a.handle, From: buzzCarrier, Thread: "cockpit/" + o["channel"], Subject: "Buzz DM",
 			Labels: []string{"acp", "buzz", "nostr:" + o["event"]},
 			Body: text + "\n\nThis came from the owner in Buzz. Answer with `amq reply --id " + id + "`; your reply is shown in the same conversation. " +
@@ -323,7 +323,7 @@ func (a *Attachment) prompt(id string, req core.BoundRequest) acp.MailboxPrompt 
 		}
 	}
 	ref := refOf(req.Key)
-	return acp.MailboxPrompt{
+	return mailprompt.Prompt{
 		To: a.handle, From: localCarrier, Thread: "remote/" + req.Key.CreatorHost, Subject: "remote request " + ref,
 		Labels: []string{"remote", "request_ref:" + ref},
 		Body:   text + "\n\nAnswer with `amq reply --id " + id + "`; your reply is the request's result.",
@@ -384,7 +384,7 @@ func (a *Attachment) observe(root *fsq.DeliveryRoot, ref string, ent entry) (cor
 		if err != nil {
 			return core.Evidence{}, err
 		}
-		present, err := acp.InboxHasMessage(root, a.handle, ent.MessageID)
+		present, err := mailprompt.InboxHasMessage(root, a.handle, ent.MessageID)
 		if err != nil {
 			return core.Evidence{}, err
 		}
@@ -412,7 +412,7 @@ func (a *Attachment) observe(root *fsq.DeliveryRoot, ref string, ent entry) (cor
 // finalReply finds the newest reply to the prompt that is not a status and
 // has a body. The proposed outcome consumes every matched reply up to it.
 func (a *Attachment) finalReply(root *fsq.DeliveryRoot, ent entry, created time.Time) (outcome, bool, error) {
-	replies, err := acp.FindReplies(root, ent.Prompt.From, a.handle, ent.Prompt.Thread, ent.MessageID, created)
+	replies, err := mailprompt.FindReplies(root, ent.Prompt.From, a.handle, ent.Prompt.Thread, ent.MessageID, created)
 	if err != nil {
 		return outcome{}, false, err
 	}
@@ -436,7 +436,7 @@ func (a *Attachment) finalReply(root *fsq.DeliveryRoot, ent entry, created time.
 
 // replyBody reads a matched reply from the box it was found in, or from cur
 // when another consumer moved it since.
-func (a *Attachment) replyBody(root *fsq.DeliveryRoot, inbox string, r acp.MailboxReply) (string, error) {
+func (a *Attachment) replyBody(root *fsq.DeliveryRoot, inbox string, r mailprompt.Reply) (string, error) {
 	var err error
 	for _, box := range []string{r.Box, "cur"} {
 		var msg format.Message
@@ -488,7 +488,7 @@ func (a *Attachment) CancelExact(key requests.Key, _ string) (core.CancelEvidenc
 		switch {
 		case ent.Undelivered != "" || ent.Acked:
 		default:
-			present, err := acp.InboxHasMessage(root, a.handle, ent.MessageID)
+			present, err := mailprompt.InboxHasMessage(root, a.handle, ent.MessageID)
 			if err != nil {
 				return err
 			}
@@ -546,7 +546,7 @@ func (a *Attachment) AcknowledgeResultChecked(key requests.Key, _ string, digest
 				return fmt.Errorf("mailbox: request %s holds no result with digest %s", ref, digest)
 			}
 			for _, r := range out.Replies {
-				if err := acp.ConsumeReply(root, ent.Prompt.From, r); err != nil {
+				if err := mailprompt.ConsumeReply(root, ent.Prompt.From, r); err != nil {
 					return err
 				}
 			}

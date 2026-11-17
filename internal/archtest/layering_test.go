@@ -50,17 +50,9 @@ func TestOnlyAMQCommandLinksCLI(t *testing.T) {
 // The match is exact, so leaf packages under internal/acp stay allowed.
 func TestRemotePackagesDoNotLinkACP(t *testing.T) {
 	graph := loadImportGraph(t)
-	allowed := map[string]bool{
-		// The mailbox prompt, the reply scan, and InboxHasMessage still live
-		// in internal/acp. Remove when they move out.
-		module + "/internal/remote/mailbox": true,
-	}
 	remote := module + "/internal/remote"
 	for _, pkg := range graph.packages() {
 		if pkg != remote && !strings.HasPrefix(pkg, remote+"/") {
-			continue
-		}
-		if allowed[pkg] {
 			continue
 		}
 		if chain := graph.chain(pkg, acpPkg); chain != nil {
