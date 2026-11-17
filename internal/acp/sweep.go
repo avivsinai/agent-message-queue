@@ -13,6 +13,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/mailprompt"
 )
 
 // lateReplyInterval is how often the sweep worker sweeps for late replies.
@@ -52,7 +53,7 @@ type lateReplySweep struct {
 	// Owned by the worker (or a test calling sweepLateReplies). The cursor
 	// lists the agent's event directory.
 	cursor *os.File
-	scans  map[string][2]*inboxScan
+	scans  map[string][2]*mailprompt.Scan
 	// inDoubt holds the events whose final post was seen sending,
 	// already logged. Such events are rare and the set is not pruned.
 	inDoubt map[string]struct{}
@@ -230,17 +231,17 @@ func (s *Server) sweepLateReplies(now time.Time) {
 		posts++
 		s.resendFinal(c)
 	}
-	scans := map[string][2]*inboxScan{}
+	scans := map[string][2]*mailprompt.Scan{}
 	for root, index := range byRoot {
 		if posts == lateReplyPosts {
 			break
 		}
 		sc, ok := l.scans[root]
 		if !ok {
-			sc = [2]*inboxScan{newInboxScan(fsq.AgentInboxNew(root, mailboxSender)), newInboxScan(fsq.AgentInboxCur(root, mailboxSender))}
+			sc = [2]*mailprompt.Scan{mailprompt.NewScan(fsq.AgentInboxNew(root, mailboxSender)), mailprompt.NewScan(fsq.AgentInboxCur(root, mailboxSender))}
 		}
 		scans[root] = sc
-		if sc[0].refresh() != nil || sc[1].refresh() != nil {
+		if sc[0].Refresh() != nil || sc[1].Refresh() != nil {
 			continue
 		}
 		newHits, curHits := matchClaims(sc[0], index), matchClaims(sc[1], index)
@@ -269,9 +270,9 @@ func (s *Server) sweepLateReplies(now time.Time) {
 
 // matchClaims makes one pass over a box's cached headers and returns, per
 // prompt id in index, the replies to it, oldest first.
-func matchClaims(sc *inboxScan, index map[string]*lateClaim) map[string][]replyHit {
-	hits := map[string][]replyHit{}
-	for name, header := range sc.headers {
+func matchClaims(sc *mailprompt.Scan, index map[string]*lateClaim) map[string][]mailprompt.Hit {
+	hits := map[string][]mailprompt.Hit{}
+	for name, header := range sc.Headers() {
 		if header == nil {
 			continue
 		}
@@ -280,13 +281,13 @@ func matchClaims(sc *inboxScan, index map[string]*lateClaim) map[string][]replyH
 			if !ok {
 				continue
 			}
-			if hit, ok := replyTo(name, header, c.b.Handle, c.claim.Thread, c.created); ok {
+			if hit, ok := mailprompt.ReplyTo(name, header, c.b.Handle, c.claim.Thread, c.created); ok {
 				hits[ref] = append(hits[ref], hit)
 			}
 		}
 	}
 	for _, h := range hits {
-		sortHits(h)
+		mailprompt.SortHits(h)
 	}
 	return hits
 }

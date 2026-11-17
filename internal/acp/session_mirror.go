@@ -21,6 +21,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
+	"github.com/avivsinai/agent-message-queue/internal/remote/mailprompt"
 	"github.com/avivsinai/agent-message-queue/internal/remote/mirror"
 )
 
@@ -162,7 +163,7 @@ func (m mirrorSeen) unchanged(t dialogTarget, b binding.Binding, off bool) bool 
 
 type mirrorScans struct {
 	root     string
-	new, cur *inboxScan
+	new, cur *mailprompt.Scan
 }
 
 // mirrorFile is one binding's state.json.
@@ -952,14 +953,14 @@ func (s *Server) mirrorRepliedToBuzz(name string, b binding.Binding, turn mirror
 	}
 	sc, ok := s.mirrors.scans[name]
 	if !ok || sc.root != b.Root {
-		sc = mirrorScans{root: b.Root, new: newInboxScan(fsq.AgentInboxNew(b.Root, mailboxSender)), cur: newInboxScan(fsq.AgentInboxCur(b.Root, mailboxSender))}
+		sc = mirrorScans{root: b.Root, new: mailprompt.NewScan(fsq.AgentInboxNew(b.Root, mailboxSender)), cur: mailprompt.NewScan(fsq.AgentInboxCur(b.Root, mailboxSender))}
 		s.mirrors.scans[name] = sc
 	}
-	for _, box := range []*inboxScan{sc.new, sc.cur} {
-		if box.refresh() != nil {
+	for _, box := range []*mailprompt.Scan{sc.new, sc.cur} {
+		if box.Refresh() != nil {
 			continue
 		}
-		for _, h := range box.headers {
+		for _, h := range box.Headers() {
 			if h == nil || h.From != b.Handle {
 				continue
 			}

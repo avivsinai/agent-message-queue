@@ -21,6 +21,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
+	"github.com/avivsinai/agent-message-queue/internal/remote/mailprompt"
 )
 
 // ProtocolVersion is the live ACP bridge version. Prompt turns remain open
@@ -823,7 +824,7 @@ func (s *Server) waitForReply(sessionID string, delivery Delivery, turn *turnSta
 	}
 	// The poll reads only inbox/new. Another consumer of cfg.Me may drain the
 	// reply to cur first, so each heartbeat also reads cur.
-	inboxNew, inboxCur := newInboxScan(fsq.AgentInboxNew(s.cfg.Root, s.cfg.Me)), newInboxScan(fsq.AgentInboxCur(s.cfg.Root, s.cfg.Me))
+	inboxNew, inboxCur := mailprompt.NewScan(fsq.AgentInboxNew(s.cfg.Root, s.cfg.Me)), mailprompt.NewScan(fsq.AgentInboxCur(s.cfg.Root, s.cfg.Me))
 	scan := inboxNew
 	for {
 		reply, found, err := s.replyForDelivery(delivery, scan)
@@ -889,17 +890,17 @@ func turnResult(delivery Delivery, outcome turnOutcome, reply string) promptResu
 // than it. It never moves a file: other consumers drain cfg.Me. Stale or
 // thread-rent messages are never picked up; a malformed unrelated mailbox
 // item does not fail the poll.
-func (s *Server) replyForDelivery(delivery Delivery, scan *inboxScan) (string, bool, error) {
+func (s *Server) replyForDelivery(delivery Delivery, scan *mailprompt.Scan) (string, bool, error) {
 	// Only a reply that refs this turn's prompt answers it. Time and thread
 	// alone would let a late answer to a cancelled prompt complete the next
 	// one. amq reply sets refs to the answered message plus its refs, so a
 	// reply to an in-turn steer, which refs the prompt, also qualifies.
-	hits, err := scan.replies(delivery.To, delivery.Thread, delivery.MessageID, delivery.Created)
+	hits, err := scan.Replies(delivery.To, delivery.Thread, delivery.MessageID, delivery.Created)
 	if err != nil {
 		return "", false, err
 	}
 	for index := len(hits) - 1; index >= 0; index-- {
-		msg, err := scan.read(hits[index].filename)
+		msg, err := scan.Read(hits[index].Filename)
 		if err != nil || strings.TrimSpace(msg.Body) == "" {
 			continue
 		}

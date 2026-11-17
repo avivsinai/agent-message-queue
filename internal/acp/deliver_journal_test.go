@@ -11,6 +11,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/remote/mailprompt"
 )
 
 // rememberEvent plants the claim journal an earlier attempt left, through
@@ -569,7 +570,7 @@ func TestReplayDeliversAndWaitsOnTheClaimedThread(t *testing.T) {
 		t.Fatalf("header thread %q to %v, delivery thread %q to %q; want the claim's %q and agent", msg.Header.Thread, msg.Header.To, d.Thread, d.To, claim.Thread)
 	}
 	replyAs(t, root, msg.Header.Thread, d.MessageID, format.KindAnswer, "done")
-	got, found, err := NewServer(cfg, "test").replyForDelivery(d, newInboxScan(fsq.AgentInboxNew(root, "buzz")))
+	got, found, err := NewServer(cfg, "test").replyForDelivery(d, mailprompt.NewScan(fsq.AgentInboxNew(root, "buzz")))
 	if err != nil || !found || got != "done" {
 		t.Fatalf("reply on the delivered thread: %q found=%v err=%v", got, found, err)
 	}

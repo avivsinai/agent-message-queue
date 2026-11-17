@@ -12,6 +12,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
+	"github.com/avivsinai/agent-message-queue/internal/remote/mailprompt"
 	"github.com/avivsinai/agent-message-queue/internal/sessionguard"
 )
 
@@ -189,7 +190,7 @@ func deliverLocked(cfg Config, root *fsq.DeliveryRoot, build func(messageID, cre
 		}
 		created = parsed
 	}
-	delivered, err := InboxHasMessage(root, claim.To, claim.MessageID)
+	delivered, err := mailprompt.InboxHasMessage(root, claim.To, claim.MessageID)
 	if err != nil {
 		return Delivery{}, err
 	}
@@ -396,7 +397,7 @@ func DeliverPrepared(root *fsq.DeliveryRoot, to, thread, id string, created time
 	if len(data) > format.MaxMessageSize {
 		return Delivery{}, fmt.Errorf("message exceeds the maximum AMQ message size")
 	}
-	held, err := InboxHasMessage(root, to, id)
+	held, err := mailprompt.InboxHasMessage(root, to, id)
 	if err != nil {
 		return Delivery{}, err
 	}
@@ -412,36 +413,6 @@ func claimIdentity(eventID, messageID, to, thread string) *eventRecord {
 	return &eventRecord{EventID: eventID, MessageID: messageID, To: to, Thread: thread}
 }
 
-// InboxHasMessage reports whether the recipient's inbox (new or cur) already
-// holds the claimed message: the only delivery proof a replay trusts. Both
-// locations are inspected through the pinned delivery root with a no-follow
-// regular-file read: a directory or a symlink named <id>.md is not a
-// delivery, and the entry must parse as the claimed message
-// (header id equals the claimed id) — anything else refuses instead of
-// reporting a delivery that is not one.
-func InboxHasMessage(root *fsq.DeliveryRoot, handle, messageID string) (bool, error) {
-	name := messageID + ".md"
-	for _, rel := range []string{
-		filepath.Join("agents", handle, "inbox", "new", name),
-		filepath.Join("agents", handle, "inbox", "cur", name),
-	} {
-		msg, err := format.ReadMessageFileRoot(root, rel)
-		if err == nil {
-			if msg.Header.ID != messageID {
-				return false, fmt.Errorf("inbox holds %s under the claimed name but its header id is %s", rel, msg.Header.ID)
-			}
-			return true, nil
-		}
-		if os.IsNotExist(err) {
-			continue
-		}
-		return false, fmt.Errorf("the claimed inbox entry %s is not a readable message: %w", rel, err)
-	}
-	return false, nil
-}
-
-// writeToInbox delivers an already-serialized message into the recipient
-// inbox and reports what the write proves; a CommittedDurabilityError stays
 // uncertain egress, on the first attempt and on a replay alike.
 func writeToInbox(cfg Config, root *fsq.DeliveryRoot, claim *eventRecord, created time.Time, data []byte) (Delivery, error) {
 	if claim == nil {
