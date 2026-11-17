@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.153.0](https://github.com/avivsinai/agent-message-queue/compare/v0.152.0...v0.153.0) (2026-11-17)
+
+
+### Features
+
+* **remote:** doctor notes an endpoint that runs another version ([#1533](https://github.com/avivsinai/agent-message-queue/issues/1533)) ([0719986](https://github.com/avivsinai/agent-message-queue/commit/07199860c8345d5472edcc8a7f557027de1929f8))
+* **remote:** the machine agent engine has one transport ([#1532](https://github.com/avivsinai/agent-message-queue/issues/1532)) ([8a37c06](https://github.com/avivsinai/agent-message-queue/commit/8a37c06019c8d70acfbf0c4654f9b975aa462651))
+
 ## [0.152.0](https://github.com/avivsinai/agent-message-queue/compare/v0.151.0...v0.152.0) (2026-11-16)
 
 
