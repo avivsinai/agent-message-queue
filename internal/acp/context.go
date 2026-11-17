@@ -82,9 +82,10 @@ type Config struct {
 // an unusable handle, or a session pin that cannot be authenticated all refuse;
 // there is no fallback to a guessed root.
 func LoadConfig() (Config, error) {
-	// No value of EnvRemote selects a mode.
+	// No value of EnvRemote selects a mode: the machine agent is not an
+	// amq-acp process.
 	if mode := strings.TrimSpace(os.Getenv(EnvRemote)); mode != "" {
-		return Config{}, contextError("invalid %s=%q: no value is allowed; set %s or %s", EnvRemote, mode, EnvTo, EnvRemoteTarget)
+		return Config{}, contextError("invalid %s=%q: no value is allowed; set %s or %s. The machine agent runs inside `amq-remote serve`; `amq-remote machine request` starts its one-time setup", EnvRemote, mode, EnvTo, EnvRemoteTarget)
 	}
 	root := strings.TrimSpace(os.Getenv(EnvRoot))
 	if root == "" {

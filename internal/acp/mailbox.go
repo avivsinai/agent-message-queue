@@ -27,7 +27,8 @@ import (
 // binding. The bound agent answers it with `amq reply`.
 const mailboxSender = "buzz"
 
-// mailboxSubject labels Buzz prompts in the bound agent's inbox.
+// mailboxSubject labels Buzz prompts in the bound agent's inbox. Agents and
+// the amq-remote skill match on it, so it is a fixed routing key.
 const mailboxSubject = "Buzz DM"
 
 // mailboxClaim is the durable first-delivery record of one event in a
@@ -461,7 +462,7 @@ func publishOnce(b binding.Binding, threadID, id, eventID string, signed map[str
 		Labels:  []string{"acp", "buzz", "nostr:" + eventID},
 		Context: signed,
 		Body: strings.TrimRight(text, "\n") + "\n\n" +
-			"This came from the owner's Buzz DM. Answer with `amq reply --id " + id + "`; your reply is shown in that DM. " +
+			"This came from the owner in this session's Buzz channel. Answer with `amq reply --id " + id + "`; your reply is shown there. " +
 			"A reply with `--kind status` shows as progress; any other reply is the final answer.",
 	})
 }
