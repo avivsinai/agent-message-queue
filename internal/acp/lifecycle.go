@@ -52,20 +52,17 @@ const agentMarkerRefresh = 2 * time.Minute
 const (
 	// AgentRunning: the marker's worker runs.
 	AgentRunning = "running"
-	// AgentIdle: the worker is gone, but the parent it recorded still runs.
-	AgentIdle = "idle"
-	// AgentOffline: neither process runs.
+	// AgentOffline: the marker's worker does not run.
 	AgentOffline = "offline"
 )
 
 // AgentState reports what a marker says at now, from its update time and
-// the worker and parent identities it records. A worker proven alive is
-// running; a fresh marker whose worker cannot be checked either way is
-// running too, as is a marker with no identity that is fresh. A worker
-// proven gone is idle while its recorded parent is alive with the same
-// start, else offline at once, however fresh the marker is. A stale marker
-// with no identity is offline.
-func AgentState(updated string, worker, parent launch.HolderIdentity, now time.Time) string {
+// the worker identity it records. A worker proven alive is running; a
+// fresh marker whose worker cannot be checked either way is running too,
+// as is a marker with no identity that is fresh. A worker proven gone is
+// offline at once, however fresh the marker is. A stale marker with no
+// identity is offline.
+func AgentState(updated string, worker launch.HolderIdentity, now time.Time) string {
 	at, err := time.Parse(time.RFC3339, updated)
 	fresh := err == nil && now.Sub(at) <= agentMarkerFresh
 	if worker.PID <= 0 {
@@ -77,11 +74,6 @@ func AgentState(updated string, worker, parent launch.HolderIdentity, now time.T
 	switch state, _ := launch.InspectHolder(worker); {
 	case state == launch.LeaseValid, state == launch.LeaseUnverified && fresh:
 		return AgentRunning
-	}
-	if parent.PID > 0 {
-		if state, _ := launch.InspectHolder(parent); state == launch.LeaseValid {
-			return AgentIdle
-		}
 	}
 	return AgentOffline
 }

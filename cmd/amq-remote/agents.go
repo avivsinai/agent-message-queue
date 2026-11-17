@@ -144,7 +144,6 @@ func machineMarkerOf(now time.Time) agentInfo {
 			DisplayName string                `json:"display_name"`
 			Updated     string                `json:"updated"`
 			Worker      launch.HolderIdentity `json:"worker"`
-			Parent      launch.HolderIdentity `json:"parent"`
 			RelayKey    string                `json:"relay_key"`
 			Host        string                `json:"host"`
 		}
@@ -155,7 +154,7 @@ func machineMarkerOf(now time.Time) agentInfo {
 		if err != nil {
 			continue
 		}
-		state := acp.AgentState(m.Updated, m.Worker, m.Parent, now)
+		state := acp.AgentState(m.Updated, m.Worker, now)
 		if stateRank[state] > stateRank[info.State] {
 			info.State = state
 		}

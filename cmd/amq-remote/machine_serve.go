@@ -458,8 +458,8 @@ func machineOutboxDir(state, relayKey, agent string) string {
 	return filepath.Join(state, "ops", relayKey, agent)
 }
 
-// newMachineRun builds the agent's server. Its state is the binding mode
-// state directory, as the engine's; the outbox is <state>/ops/<relay
+// newMachineRun builds the agent's server. Its state is <binding dir>/acp,
+// the engine's state directory; the outbox is <state>/ops/<relay
 // key>/<agent>.
 func newMachineRun(home, agent string, cred machinecred.Credential, self string, stderr io.Writer) (*machineRun, error) {
 	path, err := binding.Path()
@@ -1055,12 +1055,11 @@ func machineMarkers(now time.Time) []machineMarker {
 			Host    string                `json:"host"`
 			Updated string                `json:"updated"`
 			Worker  launch.HolderIdentity `json:"worker"`
-			Parent  launch.HolderIdentity `json:"parent"`
 		}
 		if err != nil || json.Unmarshal(raw, &m) != nil || m.Host != hostStandalone {
 			continue
 		}
-		out = append(out, machineMarker{key: key, worker: m.Worker, state: acp.AgentState(m.Updated, m.Worker, m.Parent, now)})
+		out = append(out, machineMarker{key: key, worker: m.Worker, state: acp.AgentState(m.Updated, m.Worker, now)})
 	}
 	return out
 }

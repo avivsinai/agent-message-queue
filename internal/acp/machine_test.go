@@ -797,7 +797,7 @@ func TestMachineLeaderReplacesTheMarkerOfADepartedNewerWorker(t *testing.T) {
 	workerIdentity.self = self
 	departed := self
 	departed.PID, departed.ProcessStart = 1<<30, laterStart(t, self.ProcessStart)
-	dir := s.agentMarkerDir(machineName)
+	dir := s.agentMarkerDir()
 	raw, _ := json.Marshal(agentMarker{Name: machineName, PubKey: s.id.Agent, Worker: departed, Updated: time.Now().UTC().Format(time.RFC3339)})
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)

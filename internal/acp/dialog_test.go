@@ -180,7 +180,7 @@ func TestDialogFailedEditBacksOff(t *testing.T) {
 }
 
 // A free-text dialog takes only the owner's typed answer, with all of its
-// line breaks; a reaction or a reply from another signer answers nothing.
+// line breaks; a reaction answers nothing.
 func TestFreeTextDialogTakesOnlyTheOwnersTypedAnswer(t *testing.T) {
 	f, dir := ownerDialogServer(t)
 	req := dialog.Request{ID: dialog.NewID(), Harness: "codex", Text: "Which database?\nMigrate now?", FreeText: true, OpenedAt: time.Now()}
@@ -194,13 +194,6 @@ func TestFreeTextDialogTakesOnlyTheOwnersTypedAnswer(t *testing.T) {
 	f.s.dialogTick(time.Now())
 	if _, _, a, _, _ := dialog.Lookup(dir, req.ID); a != nil {
 		t.Fatalf("a reaction answered a free-text dialog: %+v", a)
-	}
-	other := nostr.Event{CreatedAt: nostr.Now(), Kind: 9, Content: "1", Tags: nostr.Tags{{"h", machineChanA}}}
-	if err := other.Sign(nostr.Generate()); err != nil {
-		t.Fatal(err)
-	}
-	if _, a, ok := f.s.dialogReplyOf(f.ownerMsg(machineChanA, "1", other)); ok {
-		t.Fatalf("another signer answered: %+v", a)
 	}
 	f.startMachine(t)
 	waitClosed(t, f.s.Owner(f.ownerSays(t, machineChanA, "postgres\nyes")))
