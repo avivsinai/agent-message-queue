@@ -94,12 +94,3 @@ func resolveEventID(meta json.RawMessage) (string, *rpcError) {
 func eventJournalPath(me, eventID string) string {
 	return filepath.Join("agents", me, "outbox", "acp-events", eventID+".json")
 }
-
-// lookupEventID is eventID when it is the Nostr id of the Buzz event that
-// triggered a turn, else "".
-func lookupEventID(eventID, _ string) string {
-	if nostrEventIDRe.MatchString(eventID) {
-		return eventID
-	}
-	return ""
-}

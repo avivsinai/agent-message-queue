@@ -75,15 +75,7 @@ type mailboxOutcome struct {
 // the handle notices the message (a wake, a built-in consumer, monitor, or
 // its next drain) is the handle owner's business, not this bridge's.
 func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, turn *turnState, emit func(any) error) (any, *rpcError) {
-	nostrID := lookupEventID(eventID, text)
-	if eventID == "" {
-		key, err := s.localEvent(b)
-		if err != nil {
-			return nil, newRPCError(codeInternalError, "mailbox event: %v", err)
-		}
-		eventID = key
-	}
-	r := &remoteTurn{s: s, sessionID: sessionID, eventID: eventID, nostrID: nostrID, emit: emit, turn: turn, meta: remoteMeta{Target: b.Handle}}
+	r := &remoteTurn{s: s, sessionID: sessionID, eventID: eventID, emit: emit, turn: turn, meta: remoteMeta{Target: b.Handle}}
 	// A machine agent's turn holds its verified event.
 	if turn.event != nil {
 		r.signed = eventContext(*turn.event)
@@ -129,12 +121,7 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 			// This attempt published nothing, but a replay may follow an
 			// earlier delivery. A timeout before acquiring the lock has not
 			// even read the claim, so absence is never proven for an event.
-			// A local event is never replayed.
-			if !isLocalEvent(eventID) {
-				return r.failed(remoteUncertain, errors.New("the turn ran out of time before delivery could be confirmed"))
-			}
-			r.meta.Reason = string(turnTimedOut)
-			return r.say(postStatus, turnTimedOut, StopReasonRefusal, fmt.Sprintf("Not delivered to %s: the turn ran out of time before the message could be published.", b.Handle))
+			return r.failed(remoteUncertain, errors.New("the turn ran out of time before delivery could be confirmed"))
 		}
 		var refused *notDeliveredError
 		if errors.As(err, &refused) {
@@ -390,23 +377,16 @@ func (s *Server) mailboxAnswered(eventID string) (mailboxOutcome, bool) {
 	return out, true
 }
 
-// mailboxClaim returns the message id and time for this prompt, and whether
-// this call created the claim. With an event id it is claimed exclusively
-// under the publish lock, and a redelivery reuses it. A local event's key is
-// the message id.
+// mailboxClaim returns the message id and time for the event's prompt, and
+// whether this call created the claim. The claim is created exclusively
+// under the publish lock, and a redelivery reuses it.
 func (s *Server) mailboxClaim(eventID, threadID, channel string, deadline time.Time) (mailboxClaim, bool, error) {
 	now := time.Now()
-	id := eventID
-	if !isLocalEvent(eventID) {
-		var err error
-		if id, err = format.NewMessageID(now); err != nil {
-			return mailboxClaim{}, false, err
-		}
+	id, err := format.NewMessageID(now)
+	if err != nil {
+		return mailboxClaim{}, false, err
 	}
 	fresh := mailboxClaim{MessageID: id, Created: now.UTC().Format(time.RFC3339Nano), Thread: threadID, Channel: channel, Deadline: deadline.UTC().Format(time.RFC3339Nano)}
-	if eventID == "" {
-		return fresh, true, nil
-	}
 	path := filepath.Join(s.eventDir(eventID), eventID+".mailbox.json")
 	raw, err := json.Marshal(fresh)
 	if err != nil {
@@ -428,36 +408,6 @@ func (s *Server) mailboxClaim(eventID, threadID, channel string, deadline time.T
 		return mailboxClaim{}, false, fmt.Errorf("event %s has an unreadable mailbox claim; refusing to publish", eventID)
 	}
 	return claim, created, nil
-}
-
-// isLocalEvent reports whether eventID is a local event key (localEvent), not
-// a Nostr event id.
-func isLocalEvent(eventID string) bool {
-	return eventID != "" && !nostrEventIDRe.MatchString(eventID)
-}
-
-// localEvent keys a prompt that carries no Nostr event id on the AMQ
-// message id it is forwarded as, and claims it for b and this
-// agent as turnBinding claims an event. The late-reply sweep finds the claim,
-// so a final reply that arrives after the turn ends is still posted, once. A
-// local event is never redelivered.
-func (s *Server) localEvent(b binding.Binding) (string, error) {
-	key, err := format.NewMessageID(time.Now())
-	if err != nil {
-		return "", err
-	}
-	raw, err := json.Marshal(eventClaim{Binding: b, Name: b.Name, Agent: s.id.Agent})
-	if err != nil {
-		return "", err
-	}
-	won, err := createExclusive(filepath.Join(s.eventDir(key), key+".json"), raw)
-	if err != nil {
-		return "", err
-	}
-	if !won {
-		return "", fmt.Errorf("event %s is already claimed", key)
-	}
-	return key, nil
 }
 
 // postProgress posts one status reply into channel, never after the event's
@@ -513,12 +463,11 @@ func (s *Server) publishClaimed(r *remoteTurn, budget time.Time, b binding.Bindi
 		if outcome := r.settle(turnOpen); outcome.stopped() {
 			return errStoppedBeforePublish
 		}
-		// An expired budget publishes nothing, also when the lock was free
-		// or there is no event lock at all.
+		// An expired budget publishes nothing, also when the lock was free.
 		if !time.Now().Before(budget) {
 			return lock.ErrStopped
 		}
-		err = publishOnce(b, c.Thread, c.MessageID, r.nostrID, r.signed, created, text)
+		err = publishOnce(b, c.Thread, c.MessageID, r.eventID, r.signed, created, text)
 		var refused *notDeliveredError
 		if !errors.As(err, &refused) {
 			return err
@@ -538,9 +487,6 @@ func (s *Server) publishClaimed(r *remoteTurn, budget time.Time, b binding.Bindi
 			return errEventDecided
 		}
 		return err
-	}
-	if r.eventID == "" {
-		return claim, publish()
 	}
 	if !lock.AdvisoryLockAvailable() {
 		return claim, errors.New("refusing to publish a Buzz event without an advisory file lock")
@@ -567,10 +513,10 @@ func (s *Server) publishClaimed(r *remoteTurn, budget time.Time, b binding.Bindi
 }
 
 // publishOnce delivers a binding's Buzz prompt to the handle through
-// PublishMailboxPrompt. A Nostr nostrID labels the message nostr:<nostrID>,
-// so the handle can fetch the DM event from the relay, and signed, the
-// verified event's header context, goes into the header unchanged.
-func publishOnce(b binding.Binding, threadID, id, nostrID string, signed map[string]any, created time.Time, text string) error {
+// PublishMailboxPrompt. The message is labelled nostr:<eventID>, the id of
+// the owner's event, and signed, that event's header context, goes into the
+// header unchanged.
+func publishOnce(b binding.Binding, threadID, id, eventID string, signed map[string]any, created time.Time, text string) error {
 	identity, err := fsq.SnapshotDeliveryRoot(b.Root)
 	if err != nil {
 		return err
@@ -580,16 +526,12 @@ func publishOnce(b binding.Binding, threadID, id, nostrID string, signed map[str
 		return err
 	}
 	defer func() { _ = root.Close() }()
-	labels := []string{"acp", "buzz"}
-	if nostrID != "" {
-		labels = append(labels, "nostr:"+nostrID)
-	}
 	return PublishMailboxPrompt(root, id, created, MailboxPrompt{
 		To:      b.Handle,
 		From:    mailboxSender,
 		Thread:  threadID,
 		Subject: mailboxSubject,
-		Labels:  labels,
+		Labels:  []string{"acp", "buzz", "nostr:" + eventID},
 		Context: signed,
 		Body: strings.TrimRight(text, "\n") + "\n\n" +
 			"This came from the owner's Buzz DM. Answer with `amq reply --id " + id + "`; your reply is shown in that DM. " +

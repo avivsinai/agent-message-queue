@@ -83,13 +83,12 @@ type remoteTurn struct {
 	native    string
 	sessionID string
 	eventID   string
-	// nostrID is the Buzz event a mailbox prompt names (lookupEventID), and
-	// signed its verified signed event as header context, nil when none.
-	nostrID string
-	signed  map[string]any
-	emit    func(any) error
-	turn    *turnState
-	meta    remoteMeta
+	// signed is the owner's signed event of a mailbox turn as header
+	// context, nil when there is none.
+	signed map[string]any
+	emit   func(any) error
+	turn   *turnState
+	meta   remoteMeta
 	// mailbox marks a mailbox turn; claimChannel is its claim's channel.
 	mailbox      bool
 	claimChannel string
@@ -357,9 +356,6 @@ func (s *Server) sessionBinding(sessionID string) (binding.Binding, error) {
 // so a rebind between deliveries cannot run the event twice in two sessions.
 // A first delivery records its binding before submit.
 func (s *Server) turnBinding(sessionID, eventID string) (binding.Binding, error) {
-	if eventID == "" {
-		return s.sessionBinding(sessionID)
-	}
 	path := filepath.Join(s.eventDir(eventID), eventID+".json")
 	if raw, err := readSmallRegular(path); err == nil {
 		var c eventClaim
@@ -815,8 +811,8 @@ func (r *remoteTurn) say(kind string, outcome turnOutcome, stopReason, text stri
 // key, with one exception: a mailbox answer whose post was not sent is
 // posted again by the late-reply sweep (finalUnsent). The
 // event id is 64 lowercase hex, checked when the prompt is parsed (event.go
-// eventIDsFromMeta), or a mailbox turn's own AMQ message id (localEvent), so
-// it cannot leave the state dir. Without an event id
+// eventIDsFromMeta) or the id of the owner's signed event, so it cannot
+// leave the state dir. Without an event id
 // it just posts; without a channel it posts nothing and records nothing.
 func (s *Server) postOnce(eventID, kind string, record []byte, channel, text string) string {
 	if eventID == "" || channel == "" || strings.TrimSpace(text) == "" {
