@@ -28,9 +28,8 @@ func fixSandbox(t *testing.T) (home string) {
 }
 
 // On a fresh home with Claude Code --fix installs the approval hook and the
-// wake dialog guard in the settings file of the environment, records the
-// owner's opt-in and writes the machine agent's import file; a second run
-// changes nothing and keeps the file's mtime.
+// wake dialog guard in the settings file of the environment and records the
+// owner's opt-in; a second run changes nothing and keeps the file's mtime.
 func TestDoctorFixInstallsEverythingOnceOnAFreshHome(t *testing.T) {
 	home := fixSandbox(t)
 	settings := claude.SettingsPath(home)

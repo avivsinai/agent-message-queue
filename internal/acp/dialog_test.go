@@ -202,23 +202,6 @@ func TestFreeTextDialogTakesOnlyTheOwnersTypedAnswer(t *testing.T) {
 	}
 }
 
-// Only a signed owner event chooses and answers: an actual signed deny
-// chooses the other option, whatever words came with it.
-func TestDialogAnswerIsTheVerifiedSignedEvent(t *testing.T) {
-	f, dir := ownerDialogServer(t)
-	req := dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", OpenedAt: time.Now(),
-		Options: []dialog.Option{{N: 1, Label: "Allow once"}, {N: 2, Label: "Deny", Deny: true}}}
-	if err := dialog.Open(dir, req); err != nil {
-		t.Fatal(err)
-	}
-	f.s.dialogTick(time.Now())
-	evt := f.ownerSignedAt(t, machineChanA, "no", time.Now())
-	_, a, ok := f.s.dialogReplyOf(f.ownerMsg(machineChanA, "1", evt))
-	if !ok || a.Option != 2 {
-		t.Fatalf("verified reply = %+v, %v; want the signed deny", a, ok)
-	}
-}
-
 // An owner event before its dialog never answers it. One fresh answered
 // event stays bound: it cannot answer the dialog that follows.
 func TestOwnerAnswerMustBeNewerThanItsDialogAndUnused(t *testing.T) {

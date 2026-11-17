@@ -91,8 +91,8 @@ Commands:
                            root) at login: launchd on macOS, systemd on Linux
 ` + linkUsage + `  pi bridge-path           Write this version's pi extension to
                            ~/.amq/pi/amq-bridge.ts and print its path
-  doctor [--fix]           Check every link to the owner; --fix repairs hooks,
-                           the machine agent's import file and the login service
+  doctor [--fix]           Check every link to the owner; --fix repairs hooks
+                           and the login service
   version                  Print the version
 
 Common options:

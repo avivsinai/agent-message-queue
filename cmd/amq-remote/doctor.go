@@ -31,7 +31,7 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 	fs.SetOutput(io.Discard)
 	c := addCommon(fs, probe...)
 	me := fs.String("me", amqio.DefaultHandle, "endpoint mailbox handle in the root")
-	fix := fs.Bool("fix", false, "repair what doctor can repair (hooks, the machine agent's import file, the login service), then check")
+	fix := fs.Bool("fix", false, "repair what doctor can repair (hooks, the login service), then check")
 	if err := fs.Parse(args); err != nil {
 		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
