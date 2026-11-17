@@ -1153,14 +1153,3 @@ func setMirror(name string, on bool, at time.Time) string {
 	}
 	return mirrorOffReply
 }
-
-// answerMirrorSwitch switches the mirror, tells the owner, and ends the
-// prompt without delivering it to the session.
-func (s *Server) answerMirrorSwitch(sessionID, channel, name string, on bool, at time.Time, emit func(any) error) (any, *rpcError) {
-	text := setMirror(name, on, at)
-	meta := remoteMeta{State: "answered", Posted: s.publish(channel, text)}
-	if err := emitText(emit, sessionID, "agent_message_chunk", text); err != nil {
-		return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
-	}
-	return remotePromptResult{StopReason: StopReasonEndTurn, Meta: remotePromptMeta{Remote: meta}}, nil
-}

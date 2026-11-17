@@ -20,7 +20,7 @@ import (
 const routeSessionPrefix = "route/"
 
 // Owner takes one owner message of a standalone server. The message is
-// decided as the ACP path decides a prompt (decideOwner): a mirror switch,
+// decided first (decideOwner): a mirror switch,
 // a slash command or a dialog answer is carried out at once, never behind
 // a turn, and its acknowledgement is posted once per event (postOnce). Any
 // other message is a turn: it waits in its route's queue, and each route
@@ -45,14 +45,9 @@ const routeSessionPrefix = "route/"
 // for every decision in flight, so nothing is posted after it. A message
 // that arrives outside them, a turn cut by their stop, or one still queued
 // at the stop is not handled: its channel stays open, and a later delivery
-// handles it (a turn's claim lets it run again). On a server
-// that is not standalone, Owner does nothing and returns a closed channel.
+// handles it (a turn's claim lets it run again).
 func (s *Server) Owner(in buzzop.Inbound) <-chan struct{} {
 	done := make(chan struct{})
-	if s.direct == nil {
-		close(done)
-		return done
-	}
 	r, routed := s.channelRoute(in.Channel)
 	if !routed {
 		close(done)
@@ -235,8 +230,8 @@ func closed(quit <-chan struct{}) bool {
 	}
 }
 
-// runOwnerTurn runs evt as a turn of route ch's session, set up as an ACP
-// prompt of that channel is (beginPrompt), with no client to emit to. The
+// runOwnerTurn runs evt as a turn of route ch's session: its route and
+// reply channel are ch, and it has no client to emit to. The
 // route's worker is the only one that begins turns on its session, so the
 // turn is never refused. When quit closes, the turn is cut as a client
 // that left (turnDisconnected), which records nothing; cut reports that.

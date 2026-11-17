@@ -60,11 +60,6 @@ func run(args []string) int {
 	}
 
 	runFromVersionStore()
-	id, err := acp.PrepareWorkerEnv()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "amq-acp:", err)
-		return exitUsage
-	}
 
 	cfg, err := acp.LoadConfig()
 	if err != nil {
@@ -75,7 +70,6 @@ func run(args []string) int {
 		}
 		return exitGeneral
 	}
-	cfg.Identity = id
 
 	if err := acp.NewServer(cfg, version).Serve(os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "amq-acp:", err)

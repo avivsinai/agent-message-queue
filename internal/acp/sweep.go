@@ -13,10 +13,9 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
-	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
 )
 
-// lateReplyInterval is how often an open ACP stream sweeps for late replies.
+// lateReplyInterval is how often the sweep worker sweeps for late replies.
 const lateReplyInterval = 30 * time.Second
 
 // lateReplyHorizon bounds the sweep to recent mailbox claims, so it never
@@ -110,18 +109,13 @@ func (s *Server) startLateReplySweep() (stop func()) {
 	} else {
 		close(machineDone)
 	}
-	// The dialogs of a machine agent or a pinned agent are posted in a
-	// worker of their own, so a dialog never waits behind the sweep or the
-	// machine lifecycle, and neither waits behind a dialog. A pinned agent's
-	// worker passes every machineScanInterval.
+	// The dialogs of a machine agent are posted in a worker of their own, so
+	// a dialog never waits behind the sweep or the machine lifecycle, and
+	// neither waits behind a dialog.
 	dialogDone := make(chan struct{})
-	if s.dialogPin() != "" {
+	if s.cfg.Machine {
 		s.dialogs.quit = quit
-		wake := polling("dialog", machineScanInterval)
-		if s.cfg.Machine {
-			wake = newWakeup("dialog", machineScanInterval, idlePoll)
-		}
-		go s.paced(quit, dialogDone, wake, func(now time.Time) pace {
+		go s.paced(quit, dialogDone, newWakeup("dialog", machineScanInterval, idlePoll), func(now time.Time) pace {
 			// With no relay connection nothing is posted or read.
 			if !s.dialogLead() || s.offline() {
 				return pace{next: now.Add(machineScanInterval)}
@@ -145,17 +139,12 @@ func (s *Server) startLateReplySweep() (stop func()) {
 	} else {
 		close(mirrorDone)
 	}
-	// A standalone server's owner turns run until the same quit.
-	if s.direct != nil {
-		s.owners.start(quit)
-	}
+	// The owner turns run until the same quit.
+	s.owners.start(quit)
 	go func() {
 		defer close(done)
 		tick := time.NewTicker(lateReplyInterval)
 		defer tick.Stop()
-		// The same worker keeps a pinned agent archived or not; it starts
-		// with a tick, so a restarted agent catches up at once.
-		s.lifecycleTick(time.Now())
 		for {
 			select {
 			case <-quit:
@@ -164,7 +153,6 @@ func (s *Server) startLateReplySweep() (stop func()) {
 			case <-kick:
 			}
 			s.sweepLateReplies(time.Now())
-			s.lifecycleTick(time.Now())
 		}
 	}()
 	return func() {
@@ -423,7 +411,7 @@ func (s *Server) loadLateClaim(eventID string, now time.Time) (*lateClaim, bool)
 // resendFinal posts an answer that is its event's outcome but was never
 // posted. Under the event's post lock it renames the unsent marker to
 // sending before the post, so a crash during the post leaves the answer
-// uncertain, never unsent. Only a post proved not started renames it back
+// uncertain, never unsent. Only a post proved not sent renames it back
 // for the next sweep.
 func (s *Server) resendFinal(c *lateClaim) {
 	text := ""
@@ -448,7 +436,7 @@ func (s *Server) resendFinal(c *lateClaim) {
 			return err
 		}
 		result, err := s.post(finalKey(c.eventID), c.channel, text)
-		if buzzcli.NeverSent(err) || notSent(err) {
+		if notSent(err) {
 			if err := os.Rename(sending, unsent); err != nil {
 				return err
 			}

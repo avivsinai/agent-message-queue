@@ -4,16 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"os"
 
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 )
 
-// A standalone machine agent runs outside Buzz Desktop: the same server in
-// machine mode, with a relay transport in place of the buzz CLI. The relay
-// lets the agent choose each channel id and key each write, so one
+// A machine agent is the server in machine mode on a relay transport. The
+// relay lets the agent choose each channel id and key each write, so one
 // intention is one signed event, and lets it read the relay-signed state
 // of a channel. Only an observation of that state proves a channel usable;
 // an acknowledged write never does.
@@ -46,7 +44,7 @@ type Standalone struct {
 }
 
 // NewStandalone builds a machine agent's server on sa.Transport. Its state
-// is the binding mode state directory, beside the binding file. The marker
+// directory is BindingStateDir, beside the binding file. The marker
 // it writes records this process as the worker and no parent.
 func NewStandalone(sa Standalone, version string) *Server {
 	s := NewServer(Config{RemoteBinding: true, Machine: true, Identity: sa.Identity}, version)
@@ -91,7 +89,7 @@ func (s *Server) bound(ctx context.Context) (context.Context, context.CancelFunc
 	return context.WithTimeout(ctx, s.cfg.PostTimeout)
 }
 
-// boundedPosts are posts on the direct transport, each bounded by bound.
+// boundedPosts are posts on the transport, each bounded by bound.
 type boundedPosts struct {
 	s *Server
 	t Transport
@@ -121,12 +119,10 @@ type lifecycle interface {
 	AddMember(ctx context.Context, key buzzop.Key, channel, pubkey, role string) buzzop.Result
 	SetArchived(ctx context.Context, key buzzop.Key, channel string, archived bool) buzzop.Result
 	Send(context.Context, buzzop.Message) buzzop.Result
-	FindChannels(ctx context.Context, name string) ([]string, error)
 }
 
-// directOps are the lifecycle operations on the direct transport. As call
-// does for the CLI, each is bounded by PostTimeout and is not sent once
-// ctx, the machine worker's, has ended.
+// directOps are the lifecycle operations on the transport. Each is bounded
+// by PostTimeout and is not sent once ctx, the machine worker's, has ended.
 type directOps struct {
 	s *Server
 	t Transport
@@ -170,13 +166,7 @@ func (d directOps) Send(ctx context.Context, m buzzop.Message) buzzop.Result {
 	return d.t.Send(ctx, m)
 }
 
-// FindChannels is never called on the direct transport: a channel is found
-// by its chosen id (findChosen).
-func (directOps) FindChannels(context.Context, string) ([]string, error) {
-	return nil, errors.New("the direct transport finds a channel only by its chosen id")
-}
-
-// offline reports whether the direct transport is known to have no relay
+// offline reports whether the transport is known to have no relay
 // connection, so no step can be sent or observed.
 func (s *Server) offline() bool { return s.online != nil && !s.online() }
 
@@ -222,7 +212,7 @@ func routeReady(f buzzop.ChannelFacts, id buzzop.Identity) bool {
 	return f.Private == buzzop.TriYes && f.Roles[id.Agent] == "owner" && ownerSeated(f, id) && f.Archived == buzzop.TriNo
 }
 
-// findChosen is findChannels on the direct transport: the record's chosen
+// findChosen finds the channel a create of r made: the record's chosen
 // channel when its relay-signed state names this agent as the creator,
 // none when it does not. ok is false when the state could not be read,
 // which proves nothing.
@@ -240,8 +230,8 @@ func (s *Server) findChosen(r channelRecord) (ids []string, ok bool) {
 	return nil, true
 }
 
-// lookupChosen resolves an uncertain create of r on the direct transport.
-// The observation comes first: the chosen channel, when the relay shows it,
+// lookupChosen resolves an uncertain create of r. The observation comes
+// first: the chosen channel, when the relay shows it,
 // is adopted. Otherwise the create is made again under the same key: the
 // transport sends the event it stored for that key, or signs the first one
 // when none was prepared, so a registration never has two creates. A

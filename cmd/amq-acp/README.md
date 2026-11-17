@@ -16,7 +16,7 @@ ACP **version 2**. `initialize` answers `protocolVersion: 2`.
 | --- | --- |
 | `initialize` | Answers `protocolVersion: 2`. Unknown top-level params are rejected. |
 | `session/new` | Returns a `sessionId` and the durable thread. |
-| `session/set_model` | Accepts the sole advertised model: the mailbox recipient, `amq-remote:<target>`, or a named binding in binding mode. |
+| `session/set_model` | Accepts the sole advertised model: the mailbox recipient or `amq-remote:<target>`. |
 | `session/prompt` | Queues a prompt on the cockpit thread and holds it open for a bounded reply. |
 | `_session/steering` | Delivers steering as untrusted task guidance, urgent during a turn and normal while idle. |
 | `session/cancel` | Ends the in-flight turn. The queued prompt is not retracted. |
@@ -50,7 +50,6 @@ links only; image, audio and embedded resources are refused.
 | `AM_ME` | Sender handle. |
 | `AMQ_ACP_TO` | Recipient handle for every prompt. |
 | `AMQ_ACP_REMOTE_TARGET` | Submit each prompt to an `amq-remote` target. |
-| `AMQ_ACP_REMOTE` | `binding`: follow the binding from `amq-remote attach --self`. |
 | `AMQ_ACP_REMOTE_NATIVE_SESSION` | Native session shared by the owner. |
 | `AM_BASE_ROOT` | Pinned base root. |
 | `AM_SESSION` | Pinned session name. |

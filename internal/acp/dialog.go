@@ -15,23 +15,20 @@ import (
 	"unicode/utf8"
 
 	"fiatjaf.com/nostr"
-	"fiatjaf.com/nostr/nip19"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
-	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
-	"github.com/avivsinai/agent-message-queue/internal/remote/buzzcli"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzevent"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 )
 
-// The Buzz agent mirrors every harness dialog of the sessions it serves.
+// The machine agent mirrors every harness dialog of the sessions it serves.
 // A harness seam opens a request under the binding's dialogs directory
 // (package dialog); the worker that leads this agent posts it once into the
-// session's channel (machine agent) or DM (pinned agent), turns the owner's
+// session's channel, turns the owner's
 // ✅ or ❌ reaction or typed reply into the answer file, and edits the post
 // with the outcome once the dialog is resolved, by Buzz or in the terminal.
 // The first answer wins: answers and resolutions are create-exclusive.
@@ -58,91 +55,14 @@ const (
 
 // reactionPollGap is the gap between reaction reads of a dialog open for
 // age: reactionPollInterval while it is fresh, then doubling every
-// reactionPollFresh up to reactionPollMax. Each read starts a process, and
-// a dialog left open for long is seldom answered from Buzz.
+// reactionPollFresh up to reactionPollMax. Each read is a relay round trip,
+// and a dialog left open for long is seldom answered from Buzz.
 func reactionPollGap(age time.Duration) time.Duration {
 	gap := reactionPollInterval
 	for n := age / reactionPollFresh; n > 0 && gap < reactionPollMax; n-- {
 		gap *= 2
 	}
 	return min(gap, reactionPollMax)
-}
-
-// agentOwner is the owner that Buzz Desktop gave this agent: the NIP-OA
-// BUZZ_AUTH_TAG ["auth", owner, conditions, sig], verified against the
-// agent's own key as buzz-acp verifies it (resolve_agent_owner), else
-// BUZZ_ACP_AGENT_OWNER, which Desktop sets only for an agent with no auth
-// tag. A tag that does not verify yields no owner.
-func agentOwner(authTag, secret, fallback string) string {
-	if authTag = strings.TrimSpace(authTag); authTag != "" {
-		var tag []string
-		if json.Unmarshal([]byte(authTag), &tag) != nil {
-			return ""
-		}
-		t, err := bodykey.ParseAuthTag(tag)
-		if err != nil {
-			return ""
-		}
-		agent, err := agentPubKey(strings.TrimSpace(secret))
-		if err != nil || t.Verify(agent) != nil {
-			return ""
-		}
-		return t.OwnerPubKey
-	}
-	if fallback = strings.ToLower(strings.TrimSpace(fallback)); len(fallback) == 64 {
-		if _, err := nostr.PubKeyFromHex(fallback); err == nil {
-			return fallback
-		}
-	}
-	return ""
-}
-
-// agentPubKey is the hex public key of a hex or nsec secret.
-func agentPubKey(secret string) (string, error) {
-	sk, err := agentSecret(secret)
-	if err != nil {
-		return "", err
-	}
-	return sk.Public().Hex(), nil
-}
-
-// agentSecret parses a hex or nsec secret.
-func agentSecret(secret string) (nostr.SecretKey, error) {
-	if strings.HasPrefix(secret, "nsec1") {
-		prefix, val, err := nip19.Decode(secret)
-		sk, ok := val.(nostr.SecretKey)
-		if err != nil || prefix != "nsec" || !ok {
-			return nostr.SecretKey{}, errors.New("invalid nsec")
-		}
-		return sk, nil
-	}
-	return nostr.SecretKeyFromHex(secret)
-}
-
-// reaction is one emoji on a message and who reacted with it.
-type reaction struct {
-	Emoji   string   `json:"emoji"`
-	PubKeys []string `json:"pubkeys"`
-}
-
-// readReactions reads the reactions on one event. A variable so tests can
-// supply reactions without a relay.
-var readReactions = reactionsWithBuzzCLI
-
-// reactionsWithBuzzCLI runs `buzz reactions get --event <id>`, which prints
-// {"reactions":[{"emoji","count","pubkeys"}]}.
-func reactionsWithBuzzCLI(eventID string, budget time.Duration) ([]reaction, error) {
-	out, err := buzzPort.Run(budget, nil, "reactions", "get", "--event", eventID)
-	if err != nil {
-		return nil, err
-	}
-	var got struct {
-		Reactions []reaction `json:"reactions"`
-	}
-	if err := json.Unmarshal(out, &got); err != nil {
-		return nil, fmt.Errorf("buzz reactions get: %v", err)
-	}
-	return got.Reactions, nil
 }
 
 // reacted reports whether owner reacted with emoji.
@@ -153,18 +73,6 @@ func reacted(rs []buzzop.Reaction, owner, emoji string) bool {
 		}
 	}
 	return false
-}
-
-// editMessage replaces the content of a message this agent posted. A
-// variable so tests can record edits without a relay.
-var editMessage = editWithBuzzCLI
-
-// editWithBuzzCLI runs `buzz messages edit --event <id> --content <text>`.
-// A refused edit (accepted:false on exit 0) returns a
-// *buzzcli.NotAcceptedError.
-func editWithBuzzCLI(eventID, content string, budget time.Duration) error {
-	out, err := buzzPort.Run(budget, nil, "messages", "edit", "--event", eventID, "--content", content)
-	return buzzcli.WriteError(buzzcli.ShapeAccepted, out, err)
 }
 
 // dialogPost is the record of one posted dialog.
@@ -198,7 +106,7 @@ type dialogState struct {
 	quiet map[string]dialogQuiet
 	// quit closes when the dialog worker stops; nil outside it.
 	quit <-chan struct{}
-	// release drops a pinned agent's dialog lead; nil when not held.
+	// release drops the dialog lead; nil when not held.
 	release func()
 }
 
@@ -427,37 +335,12 @@ func (s *Server) machineTargets() []dialogTarget {
 }
 
 // dialogTargets are the bindings this worker posts dialogs for: a machine
-// agent's live channels, or a pinned agent's live binding and its latest DM.
+// agent's live channels.
 func (s *Server) dialogTargets() []dialogTarget {
-	if s.id.Agent == "" {
+	if !s.cfg.Machine || s.id.Agent == "" || s.id.RelayKey == "" || s.id.Owner == "" {
 		return nil
 	}
-	if s.cfg.Machine {
-		if s.id.RelayKey == "" || s.id.Owner == "" {
-			return nil
-		}
-		return s.machineTargets()
-	}
-	if s.cfg.Helper || s.cfg.Pin == "" || s.cfg.PinErr != nil {
-		return nil
-	}
-	b, err := binding.ReadNamed(s.cfg.Pin)
-	if err != nil || !s.live(b) {
-		return nil
-	}
-	channel := ""
-	if raw, err := readSmallRegular(filepath.Join(s.agentMarkerDir(s.cfg.Pin), s.id.Agent+".dm")); err == nil {
-		channel = strings.TrimSpace(string(raw))
-	}
-	if channel == "" {
-		s.mu.Lock()
-		channel = s.lastChannel
-		s.mu.Unlock()
-	}
-	if channel == "" {
-		return nil
-	}
-	return []dialogTarget{{name: s.cfg.Pin, channel: channel, label: sessionAgentName(b), binding: b}}
+	return s.machineTargets()
 }
 
 // live reports whether b's session may still run: it is not proven ended.
@@ -471,10 +354,8 @@ func (s *Server) live(b binding.Binding) bool {
 // ended, except the bindings this tick served (judged live at most
 // machineScanInterval ago, so one that just ended is dropped a tick later),
 // edits their posts, and removes the binding's dialogs once their
-// seams left (seamsLeft). A machine
-// agent does this for every binding, a pinned agent for its own. waiting
-// reports whether a gone binding's dialogs stay for a seam that may still
-// read them.
+// seams left (seamsLeft). waiting reports whether a gone binding's dialogs
+// stay for a seam that may still read them.
 func (s *Server) dropGoneDialogs(served map[string]bool, now time.Time) (waiting bool) {
 	root, err := dialog.Root()
 	if err != nil {
@@ -488,8 +369,6 @@ func (s *Server) dropGoneDialogs(served map[string]bool, now time.Time) (waiting
 				names = append(names, e.Name())
 			}
 		}
-	} else if s.cfg.Pin != "" {
-		names = []string{s.cfg.Pin}
 	}
 	snap := s.snapshot()
 	for _, name := range names {
@@ -859,21 +738,8 @@ func outcomeLine(r dialog.Resolved) string {
 	return "→ " + label + " (Buzz)"
 }
 
-// dialogPin is the marker directory name whose dialog lock elects the
-// worker that posts dialogs: the machine agent's, or a pinned agent's pin;
-// "" when this agent posts none.
-func (s *Server) dialogPin() string {
-	switch {
-	case s.cfg.Machine:
-		return machineName
-	case !s.cfg.Helper && s.cfg.Pin != "" && s.cfg.PinErr == nil:
-		return s.cfg.Pin
-	}
-	return ""
-}
-
 // dialogLead reports whether this worker posts its agent's dialogs: the
-// worker that holds <dialogPin>/<self>.dialog.lock.
+// worker that holds _machine/<self>.dialog.lock.
 func (s *Server) dialogLead() bool {
 	if s.dialogs.release != nil || !lock.AdvisoryLockAvailable() {
 		return true
@@ -881,7 +747,7 @@ func (s *Server) dialogLead() bool {
 	if s.id.Agent == "" {
 		return false
 	}
-	dir := s.agentMarkerDir(s.dialogPin())
+	dir := s.agentMarkerDir(machineName)
 	if os.MkdirAll(dir, 0o700) != nil {
 		return false
 	}
@@ -900,15 +766,6 @@ func (s *Server) dialogLead() bool {
 type ownerMsg struct {
 	channel, words string
 	verified       func() (nostr.Event, error)
-}
-
-// acpOwner is the owner message of an ACP prompt or steer: its words are
-// ownerWords of the prompt, and its event is fetched from the relay
-// (ownerEvent).
-func (s *Server) acpOwner(channel, eventID, prompt string) ownerMsg {
-	return ownerMsg{channel: channel, words: ownerWords(prompt), verified: func() (nostr.Event, error) {
-		return ownerEvent(s.id.Owner, eventID, prompt, channel)
-	}}
 }
 
 // The kinds of owner decision, as a claim records them.
@@ -990,16 +847,14 @@ func (s *Server) dialogReplyOf(m ownerMsg) (string, dialog.Answer, bool) {
 	if channel == "" || s.id.Owner == "" {
 		return "", dialog.Answer{}, false
 	}
-	name := s.cfg.Pin
-	if s.cfg.Machine {
-		r, ok := s.channelRoute(channel)
-		if !ok {
-			return "", dialog.Answer{}, false
-		}
-		name = r.Name
-	} else if s.cfg.Helper || name == "" || s.cfg.PinErr != nil {
+	if !s.cfg.Machine {
 		return "", dialog.Answer{}, false
 	}
+	r, ok := s.channelRoute(channel)
+	if !ok {
+		return "", dialog.Answer{}, false
+	}
+	name := r.Name
 	dir, err := dialog.DirFor(name)
 	if err != nil {
 		return "", dialog.Answer{}, false
@@ -1078,55 +933,6 @@ func signedWithin(evt nostr.Event, floor, now time.Time) bool {
 	return !at.Before(floor) && !at.After(now.Add(ownerSkew))
 }
 
-// answerDialog writes a typed answer, tells the owner it was taken, and ends
-// the prompt without delivering it to the session.
-func (s *Server) answerDialog(sessionID, channel, dir string, a dialog.Answer, emit func(any) error) (any, *rpcError) {
-	text, _ := writeAnswer(dir, a)
-	meta := remoteMeta{State: "answered", Posted: s.publish(channel, text)}
-	if err := emitText(emit, sessionID, "agent_message_chunk", text); err != nil {
-		return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
-	}
-	return remotePromptResult{StopReason: StopReasonEndTurn, Meta: remotePromptMeta{Remote: meta}}, nil
-}
-
-// buzzEvent returns the one <buzz-event> block of a buzz-acp prompt, or "".
-func buzzEvent(prompt string) string {
-	start := strings.Index(prompt, "<buzz-event")
-	if start < 0 || strings.Count(prompt, "<buzz-event") != 1 {
-		return ""
-	}
-	end := strings.Index(prompt[start:], "</buzz-event>")
-	if end < 0 {
-		return ""
-	}
-	return prompt[start : start+end]
-}
-
-// ownerWords is the text a buzz-acp prompt shows the owner typed: the
-// Content of its one Buzz event, else what follows the <context> block, with
-// leading mentions dropped. It only says whether a prompt may be an owner
-// decision; the decision itself reads the verified event (ownerEvent).
-func ownerWords(prompt string) string {
-	text := prompt
-	if evt := buzzEvent(prompt); evt != "" {
-		_, content, ok := strings.Cut(evt, "\nContent: ")
-		if !ok {
-			return ""
-		}
-		var lines []string
-		for line := range strings.SplitSeq(content, "\n") {
-			if strings.HasPrefix(line, "Tags: ") || strings.HasPrefix(line, "Parsed: ") {
-				break
-			}
-			lines = append(lines, line)
-		}
-		text = strings.Join(lines, "\n")
-	} else if _, after, ok := strings.Cut(prompt, "</context>"); ok {
-		text = after
-	}
-	return dropMentions(text)
-}
-
 // dropMentions trims text and drops its leading mentions
 // (buzzevent.DropMentions).
 func dropMentions(text string) string { return buzzevent.DropMentions(text) }
@@ -1136,28 +942,6 @@ var errNotOwner = errors.New("the event is not the owner's")
 
 // errNoEventID is a prompt that names no Nostr event to verify.
 var errNoEventID = errors.New("the message names no signed event")
-
-// ownerEvent is the one source of an owner decision: the prompt's
-// triggering event (lookupEventID of its _meta id eventID and its text) as
-// the relay serves it to this agent, accepted by buzzevent.Fetch as the
-// plaintext message in channel, and signed by the owner. A decision acts on
-// its content and tags, never on the prompt text. errNotOwner means it
-// verified but another key signed it; any other error means there is no
-// verified event.
-func ownerEvent(owner, eventID, prompt, channel string) (nostr.Event, error) {
-	id := lookupEventID(eventID, prompt)
-	if id == "" {
-		return nostr.Event{}, errNoEventID
-	}
-	evt, err := buzzevent.Fetch(context.Background(), buzzRelay, id, channel)
-	if err != nil {
-		return nostr.Event{}, err
-	}
-	if owner == "" || evt.PubKey.Hex() != owner {
-		return nostr.Event{}, errNotOwner
-	}
-	return evt, nil
-}
 
 // unverifiedNoticeEvery is how often one decision may say why it was not
 // taken.

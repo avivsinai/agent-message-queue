@@ -49,27 +49,19 @@ func (s *Server) ownerCommandOf(m ownerMsg) (cmd ownerCommand, ok bool) {
 	if channel == "" || s.id.Owner == "" || !strings.HasPrefix(m.words, "/") {
 		return cmd, false
 	}
-	name := s.cfg.Pin
-	var b binding.Binding
-	var err error
-	switch {
-	case s.cfg.Machine:
-		r, found := s.channelRoute(channel)
-		if !found {
-			return cmd, false
-		}
-		// The channel commands only the session it was made for, never a
-		// later binding of the same name.
-		name = r.Name
-		if b, err = binding.ReadNamed(name); err != nil || !s.serves(r, b) {
-			return cmd, false
-		}
-	case s.cfg.Helper || name == "" || s.cfg.PinErr != nil:
+	if !s.cfg.Machine {
 		return cmd, false
-	default:
-		if b, err = binding.ReadNamed(name); err != nil || !s.live(b) {
-			return cmd, false
-		}
+	}
+	r, found := s.channelRoute(channel)
+	if !found {
+		return cmd, false
+	}
+	// The channel commands only the session it was made for, never a
+	// later binding of the same name.
+	name := r.Name
+	b, err := binding.ReadNamed(name)
+	if err != nil || !s.serves(r, b) {
+		return cmd, false
 	}
 	evt, err := m.verified()
 	if err != nil {
@@ -178,15 +170,4 @@ func (s *Server) awaitCommand(cmd ownerCommand, wait time.Duration, skip string)
 		}
 		time.Sleep(commandPoll)
 	}
-}
-
-// answerCommand tells the owner what became of a command and ends the
-// prompt without delivering it to the session as a message.
-func (s *Server) answerCommand(sessionID, channel string, cmd ownerCommand, emit func(any) error) (any, *rpcError) {
-	text := s.commandReply(channel, cmd)
-	meta := remoteMeta{State: "answered", Posted: s.publish(channel, text)}
-	if err := emitText(emit, sessionID, "agent_message_chunk", text); err != nil {
-		return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
-	}
-	return remotePromptResult{StopReason: StopReasonEndTurn, Meta: remotePromptMeta{Remote: meta}}, nil
 }
