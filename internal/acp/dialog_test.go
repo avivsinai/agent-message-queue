@@ -208,11 +208,11 @@ func TestOwnerAnswerMustBeNewerThanItsDialogAndUnused(t *testing.T) {
 	f, dir := ownerDialogServer(t)
 	old := f.ownerSignedAt(t, machineChanA, "yes", time.Now().Add(-time.Hour))
 	first := openPostedDialog(t, f.s, dir, "1")
-	if _, a, ok := f.s.dialogReplyOf(f.ownerMsg(machineChanA, "yes", old)); ok {
+	if _, a, ok := f.s.dialogReplyOf(f.ownerMsg(machineChanA, old)); ok {
 		t.Fatalf("an hour-old owner event answered a new dialog: %+v", a)
 	}
 	used := f.ownerSignedAt(t, machineChanA, "yes", time.Now())
-	_, a, ok := f.s.dialogReplyOf(f.ownerMsg(machineChanA, "yes", used))
+	_, a, ok := f.s.dialogReplyOf(f.ownerMsg(machineChanA, used))
 	if !ok {
 		t.Fatal("a fresh owner yes did not answer the only open dialog")
 	}
@@ -223,7 +223,7 @@ func TestOwnerAnswerMustBeNewerThanItsDialogAndUnused(t *testing.T) {
 		t.Fatal(err)
 	}
 	openPostedDialog(t, f.s, dir, "2")
-	if _, a, ok := f.s.dialogReplyOf(f.ownerMsg(machineChanA, "yes", used)); ok {
+	if _, a, ok := f.s.dialogReplyOf(f.ownerMsg(machineChanA, used)); ok {
 		t.Fatalf("the event that answered one dialog answered the next: %+v", a)
 	}
 }
@@ -252,7 +252,7 @@ func TestOwnerAnswerTargetsTheOneDialogItRepliesTo(t *testing.T) {
 			f, dir := ownerDialogServer(t)
 			reqs := []dialog.Request{openPostedDialog(t, f.s, dir, "1"), openPostedDialog(t, f.s, dir, "2")}
 			evt := f.ownerSignedAt(t, machineChanA, "yes", time.Now(), tc.tags(f.agentMessages(machineChanA))...)
-			_, a, ok := f.s.dialogReplyOf(f.ownerMsg(machineChanA, "yes", evt))
+			_, a, ok := f.s.dialogReplyOf(f.ownerMsg(machineChanA, evt))
 			if tc.want == 0 && ok || tc.want != 0 && (!ok || a.ID != reqs[tc.want-1].ID) {
 				t.Fatalf("dialogReply = %+v, %v; want dialog %d", a, ok, tc.want)
 			}
@@ -281,7 +281,7 @@ func TestPendingPromptEventDoesNotMoveToTheNextDialog(t *testing.T) {
 	f, dir := ownerDialogServer(t)
 	first := openPostedDialog(t, f.s, dir, "1")
 	evt := f.ownerSignedAt(t, machineChanA, "yes", time.Now())
-	if _, a, ok := f.s.dialogReplyOf(f.ownerMsg(machineChanA, "yes", evt)); !ok {
+	if _, a, ok := f.s.dialogReplyOf(f.ownerMsg(machineChanA, evt)); !ok {
 		t.Fatal("the prompt did not choose its dialog")
 	} else if _, err := dialog.WriteAnswer(dir, a); err != nil {
 		t.Fatal(err)
@@ -290,7 +290,7 @@ func TestPendingPromptEventDoesNotMoveToTheNextDialog(t *testing.T) {
 		t.Fatal(err)
 	}
 	second := openPostedDialog(t, f.s, dir, "2")
-	if _, a, ok := f.s.dialogReplyOf(f.ownerMsg(machineChanA, "yes", evt)); ok {
+	if _, a, ok := f.s.dialogReplyOf(f.ownerMsg(machineChanA, evt)); ok {
 		t.Fatalf("the event chosen for the first dialog answered the second: %+v (dialog %v)", a, second.ID)
 	}
 }

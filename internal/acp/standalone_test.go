@@ -450,10 +450,10 @@ func (f *standaloneFixture) startMachine(t *testing.T) {
 	t.Cleanup(stop)
 }
 
-// ownerMsg is the owner message of the signed event evt, selected by the
-// words of text.
-func (f *standaloneFixture) ownerMsg(channel, text string, evt nostr.Event) ownerMsg {
-	return ownerMsg{channel: channel, words: dropMentions(text), event: evt}
+// ownerMsg is the owner message of the signed event evt, built the way
+// Owner builds it: its words are the event's content.
+func (f *standaloneFixture) ownerMsg(channel string, evt nostr.Event) ownerMsg {
+	return ownerMsg{channel: channel, words: dropMentions(evt.Content), event: evt}
 }
 
 // signedBy is a plaintext channel message with any tags a test gives it.
