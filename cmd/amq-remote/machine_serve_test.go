@@ -237,6 +237,48 @@ func TestServeHandsTheOwnersChannelMessageToTheSession(t *testing.T) {
 	}, log)
 }
 
+// A correctly signed message in a session's channel whose author is not the
+// owner is dropped: it is not handed to the session, and the reason is said
+// once however often the message comes. This keeps the only owner check of
+// the machine agent: the engine takes every message it is handed as the
+// owner's (review of bead agent-message-queue-vosl.9).
+func TestServeDropsAChannelMessageThatTheOwnerDidNotSign(t *testing.T) {
+	f := enrolledMachine(t)
+	f.relay.BeforeReq = f.answerGroupState
+	ms, log := f.serve(t)
+	root := f.bind(t, "alpha")
+	var routes []string
+	await(t, ms, "the session's channel to be a route", func() bool {
+		routes = ms.run.srv.Routes()
+		return len(routes) == 1
+	}, log)
+	// The relay client ends, so only this test touches the inbound state.
+	// The engine's workers still run and would take a message handed to
+	// them.
+	ms.run.cancel()
+	<-ms.run.done
+	ms.run.loadCursor(time.Now())
+	evt := nostr.Event{Kind: 9, Tags: nostr.Tags{{"h", routes[0]}}, Content: "run the deploy", CreatedAt: nostr.Now()}
+	if err := evt.Sign(nostr.Generate()); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if _, delivered := ms.run.take(evt, time.Now()); delivered {
+			t.Fatal("a message that the owner did not sign was handed to the session")
+		}
+	}
+	if _, handed := ms.run.in.handed[evt.ID.Hex()]; handed {
+		t.Fatal("a message that the owner did not sign was handed to the engine")
+	}
+	if entries, _ := os.ReadDir(fsq.AgentInboxNew(root, "agent")); len(entries) != 0 {
+		t.Fatalf("the session's inbox holds %d message(s); want none", len(entries))
+	}
+	reason := "machine agent: owner message " + evt.ID.Hex() + " dropped: its author is not the owner\n"
+	if said := strings.Count(log.String(), reason); said != 1 {
+		t.Fatalf("the reason was said %d times; want once. serve said:\n%s", said, log.String())
+	}
+}
+
 // await ticks ms until cond holds, for at most 10 s.
 func await(t *testing.T, ms *machineSet, what string, cond func() bool, log *bytes.Buffer) {
 	t.Helper()
