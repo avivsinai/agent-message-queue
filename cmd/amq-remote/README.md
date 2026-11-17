@@ -375,7 +375,7 @@ exports none.
 
 The endpoint socket also serves a local, read-only `activity` stream of one
 request while it runs, under the request's native pin. `amq-acp` remote mode
-reads it to show a Buzz-started turn live in Desktop (see
+reads it to show the turn to its ACP client while it runs (see
 [the amq-acp companion](../amq-acp/README.md#remote-mode)).
 
 ### Owner DM commands

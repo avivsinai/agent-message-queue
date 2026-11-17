@@ -131,12 +131,10 @@ command's own message. Do not work around a refusal.
    Codex app-server (the `--native` Codex path below); a plain `codex` TUI
    session answers approvals in the terminal.
 5. Add one line for the carrier:
-   - Default: "Buzz messages arrive in this agent's AMQ inbox. Stop in Buzz
-     stops waiting; a delivered message may still be acted on."
+   - Default: "Buzz messages arrive in this agent's AMQ inbox."
    - Claude in mailbox mode: "In Buzz, a line starting with / is typed into
      the session like Remote Control; it waits while a dialog is open."
-   - `--native`: "A message sent while this session is busy waits. Buzz Stop
-     cannot interrupt a Claude turn."
+   - `--native`: "A message sent while this session is busy waits."
    - Claude with the hook installed: "Every approval dialog of this session
      shows in its Buzz channel with its options. ✅ or ❌, or a reply with the option
      number, answers it. A question with one single-select question shows
@@ -152,8 +150,8 @@ command's own message. Do not work around a refusal.
 Codex with `--native`: attach needs `CODEX_THREAD_ID` and a thread loaded in
 the Codex app-server daemon. A session started with plain `codex` is not in
 the daemon; start it with `codex app-server daemon start`, then
-`codex --remote unix://`. Run `amq-remote` and `amq-acp` outside Codex's
-sandbox (request escalation): the sandbox blocks the daemon socket.
+`codex --remote unix://`. Run `amq-remote` outside Codex's sandbox (request
+escalation): the sandbox blocks the daemon socket.
 
 ## Answering a Buzz message (default mailbox)
 
@@ -163,9 +161,9 @@ Do the work, then answer with `amq reply --id <that message id>`. Use
 `--kind status` for an interim update. Keep the final answer short; it is
 read in a chat.
 
-An image the owner sent arrives as a line `[image: <absolute path>]`: open
-that file to see it. `[image not attached: <reason>]` means the image did not
-arrive; say so in the answer and ask the owner to send it again if it matters.
+An image the owner sent is not downloaded: the message has a line
+`[image not attached: <name>: <reason>]` for it. Say so in the answer, and ask
+the owner to describe the image if it matters.
 
 ## `/amq-remote off`
 
