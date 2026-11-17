@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.153.2](https://github.com/avivsinai/agent-message-queue/compare/v0.153.1...v0.153.2) (2026-11-17)
+
+
+### Bug Fixes
+
+* **remote:** detach by name removes the entry of every ended session ([#1539](https://github.com/avivsinai/agent-message-queue/issues/1539)) ([1169286](https://github.com/avivsinai/agent-message-queue/commit/11692860e23384054f0c7f02379fd70ac55d17a2))
+
 ## [0.153.1](https://github.com/avivsinai/agent-message-queue/compare/v0.153.0...v0.153.1) (2026-11-17)
 
 
