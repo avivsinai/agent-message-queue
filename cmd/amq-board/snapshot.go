@@ -17,6 +17,23 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/board/source"
 )
 
+func readPublishedSnapshot() (board.Snapshot, board.FileConfig, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return board.Snapshot{}, board.FileConfig{}, err
+	}
+	cfg, warnings := loadConfig(dir)
+	for _, w := range warnings {
+		fmt.Fprintln(os.Stderr, "amq-board: config:", w)
+	}
+	store, err := resolveStore(context.Background(), newEnv(dir, execRunner{}))
+	if err != nil {
+		return board.Snapshot{}, cfg, err
+	}
+	state, err := store.Read()
+	return state, cfg, err
+}
+
 func runSync(args []string) int {
 	flags := flag.NewFlagSet("amq-board sync", flag.ContinueOnError)
 	init := flags.Bool("init", false, "initialize the project store for the first time")
