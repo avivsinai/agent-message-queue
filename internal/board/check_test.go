@@ -28,8 +28,8 @@ func TestCheck(t *testing.T) {
 		{name: "idle owner with activity has not moved card in two hours", state: StationIdle, stage: StageInProgress, want: ProblemNotWorked, card: "one"},
 		{name: "a seat with ready work and one in progress is not free", state: StationIdle},
 		{name: "working owner is clean", state: StationWorking, stage: StageInProgress, card: "one"},
-		// PR #1548 review: older obligations disappeared and timed owner todos triggered defaults.
-		{name: "old overdue agent question is reported while a timed owner todo stays on the board", want: ProblemReplyOverdue, replyOverdue: true, requestKey: "/base#ask", full: "s1/amit owes a reply to reviewer in s1 for 1h: a decision"},
+		// Expired asks and timed owner todos do not raise overdue problems.
+		{name: "expired agent question and timed owner todo leave the check clear", replyOverdue: true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			c := Card{ID: "one", Title: "First card", Stage: row.stage}
@@ -55,6 +55,9 @@ func TestCheck(t *testing.T) {
 				todo := requestMessage("owner-todo", "todo", "other", "reviewer", []string{reservedHuman}, "s1", now.Add(-2*time.Hour))
 				todo.ReplyBy = ask.ReplyBy
 				m = requestSnapshot(ask, todo).Project(DefaultConfig(), now, "test")
+				if len(m.Asks) != 1 || m.Asks[0].Key != todo.Key || m.Requests.Older[0].Open {
+					t.Fatalf("asks = %+v, older = %+v", m.Asks, m.Requests.Older)
+				}
 				m.PublishedAt = now
 			}
 			got, err := Check(m, DefaultConfig(), now)

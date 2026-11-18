@@ -191,6 +191,7 @@ with `--kind answer` closes the question. An answer that you hear anywhere
 else: close the request the same way, with the answer in the body.
 `amq thread open --all-sessions --include-base --max-age 0 --owed-by user`
 lists everything the owner still owes in this project.
+A question that is still open after 14 days expires from the board by default; ask it again if it still matters.
 
 ## Route the task
 

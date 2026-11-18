@@ -4,6 +4,8 @@ import (
 	"cmp"
 	"slices"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/thread"
 )
 
 // Ask is one open obligation of the snapshot: who owes a reply to whom,
@@ -20,12 +22,25 @@ type Ask struct {
 	ReplyBy time.Time   `json:"reply_by,omitzero"`
 }
 
+func (cfg Config) obligationCutoff(now time.Time) time.Time {
+	maxAge := thread.DefaultObligationMaxAge
+	if cfg.ObligationMaxAge != "" {
+		if age, err := ParseDuration(cfg.ObligationMaxAge); err == nil {
+			maxAge = age
+		}
+	}
+	if maxAge == 0 {
+		return time.Time{}
+	}
+	return now.Add(-maxAge)
+}
+
 // projectAsks records whether any recipient still owes on each opener.
 // Only human obligations and timed agent obligations go on the board.
-func (s Snapshot) projectAsks() (map[string]bool, []Ask) {
+func (s Snapshot) projectAsks(cutoff time.Time) (map[string]bool, []Ask) {
 	open := map[string]bool{}
 	asks := []Ask{}
-	for key, ob := range s.openObligations {
+	for key, ob := range s.openObligations(cutoff) {
 		open[key] = true
 		m := s.Messages[key]
 		human := ob.Owner.Handle == reservedHuman

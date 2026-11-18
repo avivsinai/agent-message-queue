@@ -2,6 +2,7 @@ package board
 
 import (
 	"encoding/json"
+	"iter"
 	"slices"
 	"sort"
 	"strings"
@@ -207,9 +208,9 @@ func (s Snapshot) requestNamespaces() map[string]*requestNamespace {
 	return namespaces
 }
 
-func (ns *requestNamespace) obligations(s Snapshot) []*thread.Obligation {
+func (ns *requestNamespace) obligations(s Snapshot, cutoff time.Time) []*thread.Obligation {
 	// No roots: the reduction judges the snapshot and reads no mailbox.
-	return thread.ReduceObligations(nil, ns.entries, time.Time{}, s.Pruned).Obligations
+	return thread.ReduceObligations(nil, ns.entries, cutoff, s.Pruned).Obligations
 }
 
 // openRequests are the keys of the messages that open an obligation the
@@ -218,18 +219,20 @@ func (ns *requestNamespace) obligations(s Snapshot) []*thread.Obligation {
 // message from its mailbox.
 func (s Snapshot) openRequests() map[string]bool {
 	open := map[string]bool{}
-	for key := range s.openObligations {
+	for key := range s.openObligations(time.Time{}) {
 		open[key] = true
 	}
 	return open
 }
 
 // openObligations yields the message key and the debt of each remaining owner.
-func (s Snapshot) openObligations(yield func(string, *thread.Obligation) bool) {
-	for _, ns := range s.requestNamespaces() {
-		for _, ob := range ns.obligations(s) {
-			if ob.Open() && !yield(ns.keys[ob.Opener.ID], ob) {
-				return
+func (s Snapshot) openObligations(cutoff time.Time) iter.Seq2[string, *thread.Obligation] {
+	return func(yield func(string, *thread.Obligation) bool) {
+		for _, ns := range s.requestNamespaces() {
+			for _, ob := range ns.obligations(s, cutoff) {
+				if ob.Open() && !yield(ns.keys[ob.Opener.ID], ob) {
+					return
+				}
 			}
 		}
 	}

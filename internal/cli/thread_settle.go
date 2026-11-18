@@ -102,8 +102,8 @@ func runThreadSettle(args []string) error {
 	// another project or session with the same handle is someone else.
 	mine := thread.Participant{Session: scanRoots[0].Session, Handle: me}
 	now := time.Now().UTC()
-	// Same window as `thread open` uses on this root (336h cutoff).
-	_, red, err := reduceObligations(scanRoots, now.Add(-336*time.Hour), func(path string, _ error) error { return nil })
+	// Settle within the default window used by thread open.
+	_, red, err := reduceObligations(scanRoots, now.Add(-thread.DefaultObligationMaxAge), func(path string, _ error) error { return nil })
 	if err != nil {
 		return err
 	}

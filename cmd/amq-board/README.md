@@ -31,6 +31,8 @@ scan mailboxes itself or fall back to a different source.
 - `in_progress_not_worked`: a card is in progress longer than the liveness window, and its owner's last observed activity is older than that window. A seat with no observed activity is not listed.
 - `reply_overdue` covers overdue agent replies, owner questions and owner rulings. For owner questions and rulings the sender reads the thread before taking the default or closing the ruling. Owner todos and review requests stay under Needs you.
 
+An unclosed request older than `obligation_max_age` (14 days by default) expires, as in `amq thread open`. It leaves Needs you and the overdue check. Set `obligation_max_age` to `0` to disable expiry.
+
 A seat whose harness records no activity (for example a pi seat) can only show as stalled or as free with ready work.
 
 Exit `0` when no floor problem exists, `6` when at least one exists, and `1` when the snapshot cannot decide (including stale or missing data). `--json` emits the same rows in `amq/board-check/v1`.

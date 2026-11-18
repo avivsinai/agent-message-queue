@@ -414,3 +414,23 @@ func renderedOwnerPanels(t *testing.T, m Model) []string {
 	panel, _, _ = strings.Cut(panel, "</section>")
 	return []string{section, panel}
 }
+
+// The first real project run of 0.154.0 showed 13 owner requests from two to
+// four months ago that the ordinary workflow could no longer close.
+func TestExpiredOwnerQuestionLeavesNeedsYouAndHeadline(t *testing.T) {
+	q := requestMessage("expired", "question", "work", "lead", []string{reservedHuman}, "s1", requestNow.Add(-60*24*time.Hour))
+	m := requestSnapshot(q).Project(DefaultConfig(), requestNow, "test")
+	for _, panel := range renderedOwnerPanels(t, m) {
+		if strings.Contains(panel, q.Subject) {
+			t.Errorf("expired owner question visible: %s", panel)
+		}
+	}
+	var text strings.Builder
+	if err := WriteText(&text, m); err != nil {
+		t.Fatal(err)
+	}
+	headline, _, _ := strings.Cut(text.String(), "\n")
+	if !strings.Contains(headline, "needs you 0") {
+		t.Errorf("headline: %s", headline)
+	}
+}
