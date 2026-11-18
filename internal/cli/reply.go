@@ -28,6 +28,7 @@ func runReply(args []string) error {
 	contextFlag := fs.String("context", "", "JSON context object or @file.json")
 	waitForFlag := fs.String("wait-for", "", "Wait for receipt stage after reply (e.g., drained)")
 	waitTimeoutFlag := fs.Duration("wait-timeout", 120*time.Second, "Timeout for --wait-for")
+	followUpFlag := fs.Duration("follow-up", 0, followUpHelp)
 	ignoreSessionPinFlag := fs.Bool("ignore-session-pin", false, "With explicit --root, ignore a conflicting AM_SESSION source pin")
 
 	usage := usageWithFlags(fs, "amq reply --me <agent> --id <msg_id> [options]",
@@ -79,6 +80,10 @@ func runReply(args []string) error {
 		if err := validateStage(waitFor); err != nil {
 			return UsageError("--wait-for: %v", err)
 		}
+	}
+
+	if *followUpFlag < 0 {
+		return UsageError("--follow-up must be >= 0")
 	}
 
 	labels := splitList(*labelsFlag)
@@ -356,6 +361,7 @@ func runReply(args []string) error {
 		peerConfigPresent:    peerConfigPresent,
 		waitFor:              waitFor,
 		waitTimeout:          *waitTimeoutFlag,
+		followUp:             *followUpFlag,
 		json:                 common.JSON,
 		displaySession:       targetDisplay,
 		sourceSessionDisplay: session,

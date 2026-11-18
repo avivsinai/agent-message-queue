@@ -14,6 +14,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/execidentity"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
+	"github.com/avivsinai/agent-message-queue/internal/remote/pi"
 	"github.com/avivsinai/agent-message-queue/internal/roster"
 )
 
@@ -367,6 +368,34 @@ func ageCodexStore(t *testing.T, age time.Duration) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPiLiveBridgeNamesSeatConversation(t *testing.T) {
+	base := makeSessionBase(t)
+	root, err := provisionCoopSession(base, "pi-seat", []string{"alice"}, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "agents", "alice", "extensions", "pi-bridge")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const id = "3b3d8b96-c4e1-4179-8039-66951ada578c"
+	now := time.Now().UTC()
+	record := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"rpc","session_generation":"gen-1","bridge_revision":5,"session_id":%q}`,
+		pi.ProtocolV1, now.Format(time.RFC3339Nano), os.Getpid(), id)
+	path := filepath.Join(dir, "bridge.liveness")
+	if err := os.WriteFile(path, []byte(record), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, now, now); err != nil {
+		t.Fatal(err)
+	}
+	out := (conversationSources{now: now}).forSession(root, []string{"alice"})
+	want := []sessionConversation{{Handle: "alice", Provider: launch.PiProvider, ID: id, State: conversationReady, Source: "pi-bridge"}}
+	if !reflect.DeepEqual(out, want) {
+		t.Fatalf("conversations = %#v, want %#v", out, want)
 	}
 }
 

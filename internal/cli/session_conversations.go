@@ -14,14 +14,16 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/pi"
 )
 
 // sessionConversation is one harness session that exact AMQ evidence ties to
 // an agent of a session. Source names the evidence: launch (a managed launch
 // conversation record), codex-thread (the Codex thread coop exec created),
 // exec-pid (the Claude Code process coop exec became, joined with Claude's
-// sessions/<pid>.json), or remote (an amq-remote binding whose harness
-// process is that exec record). State is ready, revoked (a later coop exec
+// sessions/<pid>.json), remote (an amq-remote binding whose harness
+// process is that exec record), or pi-bridge (a live pi bridge in the agent's
+// mailbox that names its session). State is ready, revoked (a later coop exec
 // replaced it), or uncertain. Nothing is inferred from a cwd.
 type sessionConversation struct {
 	Handle   string `json:"handle"`
@@ -79,6 +81,20 @@ func (sources conversationSources) forSession(sessionRoot string, agents []strin
 	if rootID, err := resolveTreeIdentityToken(sessionRoot); err == nil {
 		out = append(out, sources.codexConversations(rootID)...)
 		out = append(out, sources.execConversations(rootID)...)
+	}
+	seen := map[[3]string]struct{}{}
+	for _, conv := range out {
+		seen[[3]string{conv.Handle, conv.Provider, conv.ID}] = struct{}{}
+	}
+	for _, handle := range agents {
+		_, sessionID, _, ok := pi.LiveBridge(sessionRoot, handle, sources.now)
+		if ok && sessionID != "" {
+			key := [3]string{handle, harness.Pi, sessionID}
+			if _, exists := seen[key]; !exists {
+				out = append(out, sessionConversation{Handle: handle, Provider: harness.Pi, ID: sessionID, State: conversationReady, Source: "pi-bridge"})
+				seen[key] = struct{}{}
+			}
+		}
 	}
 	sort.Slice(out, func(i, j int) bool {
 		a, b := out[i], out[j]

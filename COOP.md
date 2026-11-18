@@ -317,11 +317,13 @@ Replace `<message-id>` with the ID returned by `list` or `drain`. When a live
 wake is already running, drain after its notification rather than blocking in a
 second consumer.
 
-`amq send --follow-up 30m` delivers one notice to the sender's own inbox if the
-recipient has not replied to that message when the time passes; a live wake,
-the wait hook, or the next `drain`, `read`, or `monitor` checks it, and any
-reply from the recipient cancels it. The request carries the expected reply time
-as `reply_by`, shown in the recipient's drain output as `Reply by:`.
+Use `--follow-up 30m` on a send or reply to get one notice in the sender's
+inbox when the time passes. A follow-up needs one recipient. For a todo,
+question or review request, the reply that closes it cancels the timer. A
+progress reply leaves it armed. For any other message, any reply from the
+recipient cancels it. A live wake, the wait hook, or the next `drain`,
+`read` or `monitor` checks the timer. The recipient sees the due time in
+drain output as `Reply by:`.
 
 Use `watch` only when no live wake is delivering notifications:
 

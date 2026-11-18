@@ -91,12 +91,40 @@ func TestSendFollowUpArmsTimerAndReportsDue(t *testing.T) {
 	}
 }
 
+func TestReplyFollowUpArmsTimerForReply(t *testing.T) {
+	root := initFollowUpRootForTest(t)
+	id := deliverOriginalForReply(t, root, "bob", format.Header{
+		From: "alice", To: []string{"bob"}, Thread: "review", Kind: format.KindReviewRequest,
+	})
+	if err := runReply([]string{"--root", root, "--me", "bob", "--id", id,
+		"--follow-up", "30m", "--body", "Please update the parser."}); err != nil {
+		t.Fatal(err)
+	}
+	reply := soleDeliveredMessage(t, root, "alice")
+	dir := fsq.AgentFollowUps(root, "bob")
+	files, err := os.ReadDir(dir)
+	if err != nil || len(files) != 1 {
+		t.Fatalf("reply timer files = %v, %v; want one", files, err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, files[0].Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var timer followup.Timer
+	if err := json.Unmarshal(data, &timer); err != nil {
+		t.Fatal(err)
+	}
+	if timer.RequestID != reply.Header.ID || timer.To != "alice" || timer.Due.Sub(timer.Sent) != 30*time.Minute {
+		t.Fatalf("timer = %+v, want a 30m follow-up for reply %s to alice", timer, reply.Header.ID)
+	}
+}
+
 func TestDrainShowsDueFollowUpNotice(t *testing.T) {
 	root := initFollowUpRootForTest(t)
 	timer := armFollowUpForTest(t, root, "alice", "bob", time.Now().Add(-time.Hour), 30*time.Minute)
 
 	result := runDrainJSON(t, root, "alice", 0, false)
-	if result.Count != 1 || result.Drained[0].ID != timer.NoticeID || result.Drained[0].Subject != "No reply from bob: Review the parser" {
+	if result.Count != 1 || result.Drained[0].ID != timer.NoticeID || result.Drained[0].Subject != "Still open with bob: Review the parser" {
 		t.Fatalf("drained = %+v, want the one follow-up notice %s", result.Drained, timer.NoticeID)
 	}
 	if _, err := os.Stat(filepath.Join(fsq.AgentFollowUps(root, "alice"), timer.RequestID+".json")); !os.IsNotExist(err) {
