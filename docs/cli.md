@@ -274,7 +274,7 @@ Options:
   -context string
         JSON context object or @file.json
   -follow-up duration
-        Notify me if the recipient has not replied after this duration (e.g. 30m); the recipient sees the reply time
+        Notify me if the recipient has not closed this request, or for another kind of message not replied, after this duration (e.g. 30m); the recipient sees the reply time
   -from-session string
         Source session for setup-terminal cross-session sends
   -ignore-session-pin
@@ -660,6 +660,8 @@ Options:
         Body string, @file, or - / empty to read stdin
   -context string
         JSON context object or @file.json
+  -follow-up duration
+        Notify me if the recipient has not closed this request, or for another kind of message not replied, after this duration (e.g. 30m); the recipient sees the reply time
   -id string
         Message ID to reply to (a bridged message may be addressed by its header ID even though it is stored under a transfer filename)
   -ignore-session-pin

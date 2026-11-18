@@ -1,7 +1,7 @@
-// Package followup keeps a sender's follow-up timers: a promise to tell the
-// sender, in its own inbox, when one recipient has not replied to a request
-// by a due time. A timer is a file in the sender's mailbox; whoever next
-// drains, reads, or rings for that mailbox promotes the due ones.
+// Package followup notifies the sender when a request remains open or another
+// kind of message remains unanswered at its due time. A timer is a file in the
+// sender's mailbox. Draining, reading, or ringing for that mailbox promotes
+// its due timers.
 package followup
 
 import (
@@ -121,9 +121,14 @@ func List(root *fsq.DeliveryRoot, me string) ([]Timer, error) {
 	return timers, err
 }
 
-// Notice is the message that tells me no reply arrived for t.
+// Notice builds the reminder for an unsettled timer.
 func Notice(t Timer, me string) format.Message {
 	subject := "No reply from " + t.To
+	firstLine := "No reply to this request arrived before its follow-up time."
+	if slices.Contains(thread.OpenerKinds, t.RequestKind) {
+		subject = "Still open with " + t.To
+		firstLine = "This request was still open at its follow-up time."
+	}
 	if t.Subject != "" {
 		subject += ": " + t.Subject
 	}
@@ -147,16 +152,16 @@ func Notice(t Timer, me string) format.Message {
 				"due":        t.Due.UTC().Format(time.RFC3339Nano),
 			}},
 		},
-		Body: "No reply to this request arrived before its follow-up time.\n\namq trace " + t.RequestID + " --follow\n",
+		Body: firstLine + "\n\namq trace " + t.RequestID + " --follow\n",
 	}
 }
 
 // Promote delivers the notice of every timer in me's mailbox that is due at
 // now and unanswered, and drops every due timer it settles.
 //
-// A request is answered by a message in me's inbox (new or cur) from the
-// recipient, compared by handle, whose refs name the request: amq reply
-// always adds the replied id to refs. Thread is never used, because the
+// A recipient response in my inbox must reference the message. For a
+// request its kind or labels must also close the obligation. For other
+// kinds, any referenced reply suffices. Thread is never used, because the
 // default thread is shared by every message between the two agents. A
 // message in me's outbox/sent whose refs name the request and whose labels
 // close it for the requester (withdrawn, done, closed) also settles it.
@@ -253,8 +258,12 @@ type mailbox struct {
 }
 
 func (m mailbox) settles(t Timer) bool {
+	request := slices.Contains(thread.OpenerKinds, t.RequestKind)
 	for _, h := range m.inbox {
-		if h.ID != t.RequestID && sameHandle(h.From, t.To) && slices.Contains(h.Refs, t.RequestID) {
+		if h.ID == t.RequestID || !sameHandle(h.From, t.To) || !slices.Contains(h.Refs, t.RequestID) {
+			continue
+		}
+		if !request || thread.OwnerCloses(t.RequestKind, h.Kind, h.Labels) {
 			return true
 		}
 	}

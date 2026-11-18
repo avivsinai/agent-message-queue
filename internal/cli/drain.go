@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -172,6 +173,15 @@ func outputDrainItems(jsonOutput bool, me string, includeBody bool, items []inbo
 					return err
 				}
 			} else if err := writeStdout("  Reply by: %s (%s)\n", item.ReplyBy, relative); err != nil {
+				return err
+			}
+		}
+		if recipe := item.Completion; recipe != nil {
+			labels := ""
+			if len(recipe.Labels) > 0 {
+				labels = " --labels " + strings.Join(recipe.Labels, ",")
+			}
+			if err := writeStdout("  Close with: amq reply --id %s --kind %s%s --body @<file>\n", shellQuoteArg(item.ID), recipe.Kind, labels); err != nil {
 				return err
 			}
 		}

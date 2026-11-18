@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -13,7 +14,10 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
 	"github.com/avivsinai/agent-message-queue/internal/receipt"
+	"github.com/avivsinai/agent-message-queue/internal/thread"
 )
+
+const followUpHelp = "Notify me if the recipient has not closed this request, or for another kind of message not replied, after this duration (e.g. 30m); the recipient sees the reply time"
 
 // outgoingMessage is a send or reply whose route, capabilities, and rosters
 // are authorized. deliverOutgoing owns every step from there to the report.
@@ -284,7 +288,11 @@ func deliverOutgoing(m outgoingMessage) error {
 		return err
 	}
 	if followUp != nil && followUp.Due != "" {
-		if err := writeStdout("Follow-up due %s if %s has not replied.\n", followUp.Due, m.recipients[0]); err != nil {
+		line := "Follow-up due %s if %s has not replied.\n"
+		if slices.Contains(thread.OpenerKinds, m.kind) {
+			line = "Follow-up due %s unless %s closes it.\n"
+		}
+		if err := writeStdout(line, followUp.Due, m.recipients[0]); err != nil {
 			return err
 		}
 	}

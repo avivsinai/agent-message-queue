@@ -625,28 +625,34 @@ func isTerminal(msg *Entry) bool {
 // RequesterCloses reports whether a message the requester sent with labels
 // closes its own request of openerKind, as a withdrawn request does.
 func RequesterCloses(openerKind string, labels []string) bool {
-	return closesObligation(openerKind, false, &Entry{Labels: labels})
+	if openerKind == format.KindReviewRequest {
+		return hasClosingLabel(labels, SettledThrough, "withdrawn", "done", "merged", "closed")
+	}
+	return hasClosingLabel(labels, SettledThrough, "withdrawn", "done", "closed")
 }
 
 // closesObligation applies the closer table: which kinds and labels from the
 // owner or the requester close an opener of the given kind.
 func closesObligation(openerKind string, fromOwner bool, msg *Entry) bool {
-	hasLabel := func(labels ...string) bool {
-		return slices.ContainsFunc(msg.Labels, func(label string) bool { return slices.Contains(labels, label) })
+	if fromOwner {
+		return OwnerCloses(openerKind, msg.Kind, msg.Labels)
 	}
-	if !fromOwner {
-		if openerKind == format.KindReviewRequest {
-			return hasLabel(SettledThrough, "withdrawn", "done", "merged", "closed")
-		}
-		return hasLabel(SettledThrough, "withdrawn", "done", "closed")
-	}
+	return RequesterCloses(openerKind, msg.Labels)
+}
+
+func hasClosingLabel(labels []string, closing ...string) bool {
+	return slices.ContainsFunc(labels, func(label string) bool { return slices.Contains(closing, label) })
+}
+
+// OwnerCloses reports whether the recipient's response closes this kind of request.
+func OwnerCloses(openerKind, kind string, labels []string) bool {
 	switch openerKind {
 	case format.KindReviewRequest:
-		return msg.Kind == format.KindReviewResponse || hasLabel("done", "merged", "closed")
+		return kind == format.KindReviewResponse || hasClosingLabel(labels, "done", "merged", "closed")
 	case format.KindQuestion:
-		return msg.Kind == format.KindAnswer || hasLabel("done", "closed")
+		return kind == format.KindAnswer || hasClosingLabel(labels, "done", "closed")
 	case format.KindTodo:
-		return hasLabel("done", "merged", "closed", "wontfix")
+		return hasClosingLabel(labels, "done", "merged", "closed", "wontfix")
 	}
 	return false
 }
