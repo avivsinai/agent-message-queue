@@ -8,6 +8,19 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.154.0](https://github.com/avivsinai/agent-message-queue/compare/v0.153.2...v0.154.0) (2026-11-18)
+
+
+### Features
+
+* **board:** amq-board check lists floor problems ([#1544](https://github.com/avivsinai/agent-message-queue/issues/1544)) ([26773d1](https://github.com/avivsinai/agent-message-queue/commit/26773d1b54ee67d52532d9da260607dafb0e2e7e))
+* **board:** amq-board retro prints the measured history of requests ([#1546](https://github.com/avivsinai/agent-message-queue/issues/1546)) ([d96d96b](https://github.com/avivsinai/agent-message-queue/commit/d96d96b2dc8e3134c161d843822831244100d9e3))
+* **board:** owner questions and requests show their reply time; amq-lead skill ([#1548](https://github.com/avivsinai/agent-message-queue/issues/1548)) ([3e48a00](https://github.com/avivsinai/agent-message-queue/commit/3e48a001db6eedccb5ba5fe04c404d8c0fe08b76))
+* **cli:** a drained request says how to close it; a follow-up on a request is a completion clock ([#1549](https://github.com/avivsinai/agent-message-queue/issues/1549)) ([9f50f25](https://github.com/avivsinai/agent-message-queue/commit/9f50f25f33e01f3c8bcde0054e563f0a6b65248e))
+* **remote:** link tool calls name their session ([#1543](https://github.com/avivsinai/agent-message-queue/issues/1543)) ([1be8798](https://github.com/avivsinai/agent-message-queue/commit/1be8798eeed1407ce8ef948a4b1f422c90325b44))
+* **send:** a request with a follow-up shows its reply time to the recipient ([#1545](https://github.com/avivsinai/agent-message-queue/issues/1545)) ([fb12bd7](https://github.com/avivsinai/agent-message-queue/commit/fb12bd77aee5040d74f9f5fb68506184b6e4b624))
+* **session:** a pi seat's live bridge names its conversation ([#1547](https://github.com/avivsinai/agent-message-queue/issues/1547)) ([833b332](https://github.com/avivsinai/agent-message-queue/commit/833b332b4c576875a5a246585a66e7579e80d584))
+
 ## [0.153.2](https://github.com/avivsinai/agent-message-queue/compare/v0.153.1...v0.153.2) (2026-11-17)
 
 
