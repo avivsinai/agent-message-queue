@@ -46,7 +46,7 @@ type retroSamples struct {
 }
 
 // Retro measures the requests opened at or after since. It is pure.
-func (s Snapshot) Retro(since, now time.Time) RetroView {
+func (s Snapshot) Retro(since time.Time) RetroView {
 	view := RetroView{Since: since, Seats: []RetroSeat{}}
 	type seatKey struct{ session, handle string }
 	seats := map[seatKey]*retroSamples{}

@@ -37,7 +37,7 @@ func runRetro(args []string) int {
 		return exitGeneral
 	}
 	now := time.Now()
-	view := state.Retro(now.Add(-period), now)
+	view := state.Retro(now.Add(-period))
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
