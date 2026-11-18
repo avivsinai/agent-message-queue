@@ -5,8 +5,7 @@ import (
 	"time"
 )
 
-// replyByRelative translates a reply deadline to the sender's description.
-// It computes at print time and requires valid RFC 3339 for a relative hint.
+// replyByRelative says how far a reply time is from now; "" when the value is not RFC 3339.
 func replyByRelative(replyBy string, now time.Time) string {
 	t, err := time.Parse(time.RFC3339, replyBy)
 	if err != nil {
@@ -20,7 +19,7 @@ func replyByRelative(replyBy string, now time.Time) string {
 	var unit string
 	switch {
 	case delta < time.Minute:
-		unit = "now"
+		return "now"
 	case delta < time.Hour:
 		unit = fmt.Sprintf("%dm", int(delta/time.Minute))
 	case delta < 48*time.Hour:

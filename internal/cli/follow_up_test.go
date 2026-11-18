@@ -2,7 +2,6 @@ package cli
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -160,9 +159,6 @@ func TestDrainShowsTheReplyTimeOfARequestWithFollowUp(t *testing.T) {
 	hint := replyByRelative(base.Add(30*time.Minute).UTC().Format(time.RFC3339), base)
 	if hint != "in 30m" {
 		t.Fatalf("relative = %q; want in 30m", hint)
-	}
-	if got := fmt.Sprintf("Reply by: %s (%s)", timer.Due.Format(time.RFC3339), replyByRelative(base.Add(30*time.Minute).UTC().Format(time.RFC3339), base)); got != "Reply by: "+base.Add(30*time.Minute).UTC().Format(time.RFC3339)+" (in 30m)" {
-		t.Fatalf("text drain = %q; want exact Reply by timestamp and in 30m", got)
 	}
 	line, err := captureStdout(t, func() error { return outputDrainItems(false, "bob", true, result.Drained) })
 	if err != nil {

@@ -124,7 +124,7 @@ func deliverOutgoing(m outgoingMessage) error {
 		},
 		Body: m.body,
 	}
-	if m.followUp > 0 {
+	if m.followUp > 0 && !m.silent {
 		msg.Header.ReplyBy = now.Add(m.followUp).UTC().Format(time.RFC3339)
 	}
 	data, err := msg.Marshal()

@@ -196,9 +196,8 @@ that receipt unwritten.
 **Follow-ups**: `amq send --follow-up 30m` delivers one notice to the sender's
 own inbox if the recipient has not replied to that message when the time
 passes; a live wake, the wait hook, or the next `drain`, `read`, or `monitor`
-checks it, and any reply from the recipient cancels it. A request carries the
-expected reply time in its `reply_by` header and the recipient's drain shows
-`Reply by:` plus a relative hint computed at print time only.
+checks it, and any reply from the recipient cancels it. The request carries
+the time as `reply_by`, and the recipient's drain shows it as `Reply by:`.
 
 **Sessions**: Named sessions are child queue roots. A participating shell is
 pinned by `AM_ROOT`, `AM_BASE_ROOT`, and `AM_SESSION`; AMQ-managed identity
