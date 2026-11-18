@@ -134,10 +134,8 @@ type Mention struct {
 
 // ObligationFacts are the validated-later inputs of the AMQ answer actions.
 type ObligationFacts struct {
-	OpenerID string
-	Thread   string
-	// ReplyBy is when the requester expects a reply; zero when none was named.
-	ReplyBy          time.Time `json:"reply_by,omitzero"`
+	OpenerID         string
+	Thread           string
 	OwnerSession     string
 	Destination      *Destination
 	CompletionKind   string

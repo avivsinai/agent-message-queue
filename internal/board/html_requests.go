@@ -109,6 +109,7 @@ func buildRequestsPage(m Model, now time.Time) pageRequests {
 func requestRow(r Request, bay string, named map[string][]Card, now time.Time) pageRequest {
 	msg := r.Message
 	row := olderRow(r, now)
+	row.Kind = clean(requestKind(r))
 	sum := sha256.Sum256([]byte(msg.Key))
 	row.ID = "req-" + bay + "-" + base64.RawURLEncoding.EncodeToString(sum[:12])
 	row.Full = r.NoDirectReply
@@ -171,6 +172,9 @@ func olderRow(r Request, now time.Time) pageRequest {
 	row.To = clean(strings.Join(to, ", "))
 	if at, ok := messageTime(msg); ok {
 		row.Age, row.AgeAt = age(now.Sub(at))+" ago", at.UTC().Format(time.RFC3339)
+	}
+	if !r.ReplyBy.IsZero() {
+		row.Facts = append(row.Facts, requestFact{State: "default", Text: strings.TrimPrefix(requestDeadline(r), " · ")})
 	}
 	if actions := messageActions(msg); len(actions) > 0 {
 		row.Read = &actions[0]

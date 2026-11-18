@@ -23,6 +23,7 @@ type Problem struct {
 	Session string      `json:"session,omitempty"`
 	Handle  string      `json:"handle,omitempty"`
 	CardID  string      `json:"card_id,omitempty"`
+	Request string      `json:"request,omitempty"`
 	Text    string      `json:"text"`
 }
 
@@ -103,30 +104,34 @@ func Check(m Model, cfg Config, now time.Time) ([]Problem, error) {
 			}
 		}
 	}
-	for _, col := range m.Columns {
-		for _, c := range col.Cards {
-			for _, item := range c.Items {
-				if item.Obligation == nil || item.Obligation.ReplyBy.IsZero() || !item.Obligation.ReplyBy.Before(now) {
-					continue
-				}
-				requester := "unknown requester"
-				if item.Requester != nil {
-					requester = item.Requester.Display
-				}
-				problem := Problem{Kind: ProblemReplyOverdue, CardID: c.ID}
-				if item.Owner.Kind == OwnerHuman {
-					problem.Text = fmt.Sprintf("the default time of a question to the owner passed %s ago; %s takes the default: %s",
-						age(now.Sub(item.Obligation.ReplyBy)), requester, c.Title)
-				} else {
-					problem.Handle = item.Owner.Handle
-					problem.Session = item.Owner.Session
-					problem.Text = fmt.Sprintf("%s owes a reply to %s for %s: %s",
-						ownerLabel(item.Owner, nil), requester, age(now.Sub(item.Obligation.ReplyBy)), c.Title)
-				}
-				problems = append(problems, problem)
-				break
+	for _, r := range m.Requests.Recent {
+		if !r.Open || r.ReplyBy.IsZero() || !r.ReplyBy.Before(now) {
+			continue
+		}
+		human := false
+		var recipient *RequestRecipient
+		for i := range r.Recipients {
+			rec := &r.Recipients[i]
+			human = human || rec.Handle == reservedHuman
+			if rec.Scoped && rec.Handle != reservedHuman && recipient == nil {
+				recipient = rec
 			}
 		}
+		sender := r.Message.From
+		if r.Sender != nil {
+			sender = participantLabel(*r.Sender)
+		}
+		problem := Problem{Kind: ProblemReplyOverdue, Request: r.Message.Key}
+		if human {
+			problem.Text = fmt.Sprintf("the default time of a question to the owner passed %s ago; %s takes the default: %s",
+				age(now.Sub(r.ReplyBy)), sender, r.Message.Subject)
+		} else if recipient != nil {
+			problem.Handle = recipient.Handle
+			problem.Session = recipient.Session
+			problem.Text = fmt.Sprintf("%s owes a reply to %s for %s: %s",
+				participantLabel(recipient.participant()), sender, age(now.Sub(r.ReplyBy)), r.Message.Subject)
+		}
+		problems = append(problems, problem)
 	}
 	return problems, nil
 }

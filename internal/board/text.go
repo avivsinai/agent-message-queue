@@ -12,6 +12,46 @@ import (
 	"unicode/utf8"
 )
 
+func requestKind(r Request) string {
+	if r.Ruling {
+		return "ruling"
+	}
+	return strings.ReplaceAll(r.Message.Kind, "_", " ")
+}
+
+func requestToOwner(r Request) bool {
+	for _, rec := range r.Recipients {
+		if rec.Handle == reservedHuman {
+			return true
+		}
+	}
+	return false
+}
+
+func requestDeadline(r Request) string {
+	if r.ReplyBy.IsZero() {
+		return ""
+	}
+	prefix := " · reply by "
+	if requestToOwner(r) {
+		prefix = " · default at "
+	}
+	return prefix + r.ReplyBy.UTC().Format(time.RFC3339)
+}
+
+func ownerRequests(v RequestView) []Request {
+	out := []Request{}
+	for _, r := range v.Recent {
+		if r.Open && requestToOwner(r) {
+			out = append(out, r)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return askNewer(out[i].Message, out[j].Message)
+	})
+	return out
+}
+
 // WriteText renders the model for a terminal, in the page's order: header,
 // sources, Waiting on you, the other columns, roster, footer.
 func WriteText(w io.Writer, m Model) error {
@@ -90,6 +130,20 @@ func WriteText(w io.Writer, m Model) error {
 			}
 			if owner, _ := requestCounts(m.Requests); owner > 0 {
 				fmt.Fprintf(&b, "  %s; see Requests\n", requestHeadline(m.Requests))
+				requests := ownerRequests(m.Requests)
+				for _, r := range requests[:min(len(requests), viewLimit)] {
+					from := r.Message.From
+					if r.Sender != nil {
+						from = participantLabel(*r.Sender)
+					}
+					deadline := requestDeadline(r)
+					if deadline == "" {
+						deadline = " · no default"
+					}
+					fmt.Fprintf(&b, "    %s · %s · from %s%s\n",
+						clean(requestKind(r)), cleanTitle(r.Message.Subject), clean(from), deadline)
+				}
+				writeOmitted(&b, len(requests)-viewLimit, "open request")
 			}
 		}
 		if len(c.Cards) == 0 {
@@ -378,7 +432,7 @@ func writeRequest(b *strings.Builder, r Request, named map[string][]Card, now ti
 	if r.Sender != nil {
 		from = participantLabel(*r.Sender)
 	}
-	fmt.Fprintf(b, "    %s · %s · from %s · %s\n", clean(strings.ReplaceAll(m.Kind, "_", " ")), cleanTitle(m.Subject), clean(from), when)
+	fmt.Fprintf(b, "    %s · %s · from %s · %s%s\n", clean(requestKind(r)), cleanTitle(m.Subject), clean(from), when, requestDeadline(r))
 	for _, fact := range requestFacts(r) {
 		fmt.Fprintf(b, "      %s\n", clean(fact.Text))
 	}

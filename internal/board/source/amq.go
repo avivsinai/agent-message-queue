@@ -501,14 +501,6 @@ func parseThreadOpen(data []byte) ([]board.Item, board.Coverage, string, error) 
 		if d := o.ReplyDestination; d != nil {
 			it.Obligation.Destination = &board.Destination{Handle: d.Handle, Session: d.Session, Project: d.Project}
 		}
-		if deadline, err := time.Parse(time.RFC3339, o.Opener.ReplyBy); err == nil {
-			it.Obligation.ReplyBy = deadline.UTC()
-			suffix := " · reply by "
-			if owner.Kind == board.OwnerHuman {
-				suffix = " · default at "
-			}
-			it.Reason.Text += suffix + deadline.UTC().Format(time.RFC3339)
-		}
 		if la := o.LastActivity; la != nil {
 			if t, err := time.Parse(time.RFC3339Nano, la.Created); err == nil {
 				it.UpdatedAt = t
@@ -522,9 +514,6 @@ func parseThreadOpen(data []byte) ([]board.Item, board.Coverage, string, error) 
 			it.Mentions = append(it.Mentions, board.Mention{Token: tok, Basis: "subject mention"})
 		}
 		for _, l := range o.Opener.Labels {
-			if l == "ruling" {
-				it.Reason.Text = "ruling" + strings.TrimPrefix(it.Reason.Text, o.Opener.Kind)
-			}
 			for _, tok := range board.BeadTokens(l) {
 				it.Mentions = append(it.Mentions, board.Mention{Token: tok, Basis: "label"})
 			}

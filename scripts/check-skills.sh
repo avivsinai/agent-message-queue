@@ -15,3 +15,19 @@ for dest in .claude .agents .grok; do
 	done
 done
 echo "✓ Skill symlinks valid"
+
+# Regression check: an unquoted colon in a description made a skill unloadable.
+# Ruby is the platform's YAML parser; no package install is needed.
+for skill in skills/*/SKILL.md; do
+	[[ -f "$skill" ]] || fail "$skill is missing"
+	ruby -ryaml -e '
+		text = File.read(ARGV.fetch(0), encoding: "UTF-8")
+		match = text.match(/\A---\r?\n(.+?)\r?\n---\r?\n/m)
+		abort "invalid front matter boundaries" unless match
+		data = YAML.safe_load(match[1], permitted_classes: [], aliases: false)
+		unless data.is_a?(Hash) && data["name"].is_a?(String) && data["description"].is_a?(String)
+			abort "front matter must contain name and description"
+		end
+	' "$skill" || fail "$skill has unparsable or incomplete YAML front matter"
+done
+echo "✓ Skill YAML front matter parses"

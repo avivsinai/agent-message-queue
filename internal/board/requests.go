@@ -121,6 +121,9 @@ type Request struct {
 	// NoDirectReply is set when some scoped recipient sent no direct reply.
 	// It does not mean the request is unfinished.
 	NoDirectReply  bool             `json:"no_direct_reply"`
+	ReplyBy        time.Time        `json:"reply_by,omitzero"`
+	Open           bool             `json:"open"`
+	Ruling         bool             `json:"ruling,omitempty"`
 	Tasks          []RequestTask    `json:"tasks,omitempty"`
 	EvidenceDigest string           `json:"evidence_digest"`
 	Opinions       []RequestOpinion `json:"opinions,omitempty"`
@@ -337,7 +340,10 @@ func messageTime(m Message) (time.Time, bool) {
 // opinions.
 func (x requestIndex) request(key string, now time.Time) Request {
 	m := x.s.Messages[key]
-	r := Request{Message: m, Summary: Sentence(m.Body), Age: RequestUndated, Recipients: []RequestRecipient{}, Tasks: x.tasks[key]}
+	r := Request{Message: m, Summary: Sentence(m.Body), Age: RequestUndated, Recipients: []RequestRecipient{}, Tasks: x.tasks[key], Ruling: slices.Contains(m.Labels, "ruling")}
+	if deadline, err := time.Parse(time.RFC3339, m.ReplyBy); err == nil {
+		r.ReplyBy = deadline.UTC()
+	}
 	created, dated := messageTime(m)
 	if dated && !created.After(now) {
 		r.Age = RequestOlder
@@ -488,9 +494,11 @@ func (x requestIndex) digest(r Request) string {
 // ordered no-direct-reply first, then newest first.
 func (s Snapshot) RequestView(now time.Time) RequestView {
 	x := newRequestIndex(s)
+	open := s.openRequests()
 	v := RequestView{Recent: []Request{}, Older: []Request{}, Undated: []Request{}, Coverage: x.coverage}
 	for _, key := range x.candidates() {
 		r := x.request(key, now)
+		r.Open = open[key]
 		switch r.Age {
 		case RequestRecent:
 			v.Recent = append(v.Recent, r)

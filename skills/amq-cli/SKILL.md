@@ -170,16 +170,20 @@ recommend, what happens if the answer comes late, and `Default: <option>`.
 The body of a ruling says what you decided, why, and how to undo it.
 
 The follow-up time is the default time: the board shows it on the card, and
-when it passes with no answer you get one notice. Then take the default (a
-ruling stands) and close the request:
+when it passes with no answer you get one notice. Read the thread first: an
+answer may have come. No answer: take the default (a ruling stands) and close
+the request:
 
 ```bash
 amq reply --id <id of the question> --kind decision --labels closed \
   --body "No answer by the default time: took <option>."
 ```
 
-The owner answers in a chat, from the phone, or with a reply. When you hear
-the answer, close the request the same way, with the answer in the body.
+The owner answers in a chat, from the phone (a session connected with
+`/amq-remote` has a channel), or with a reply as `user`. A reply as `user`
+with `--kind answer` closes the question. An answer that you hear anywhere
+else: close the request the same way, with the answer in the body.
+`amq thread open --owed-by user` lists what the owner still owes.
 
 ## Route the task
 

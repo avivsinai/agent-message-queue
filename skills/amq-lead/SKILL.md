@@ -1,7 +1,7 @@
 ---
 name: amq-lead
 version: 0.153.2 # x-release-please-version
-description: Lead a group of coding agents over AMQ: keep every seat on ready work, see who is stuck, review what comes back, decide on a clock, and ask the owner without stopping. Use when this session briefs or reviews other agents, or when the user asks who is doing what. Not for sending one message (use amq-cli) or for reading the board alone (use amq-board).
+description: "Lead an AMQ fleet when assigning work, checking stalled seats, reviewing a worker result, deciding whether to merge, running a retrospective, or escalating a decision to the owner. Not for sending one message (use amq-cli) or for reading the board alone (use amq-board)."
 metadata:
   short-description: The lead's loop for a fleet of agents on AMQ
   compatibility: claude-code, codex-cli, grok-cli, antigravity-cli
@@ -19,8 +19,9 @@ not hold your turn open to wait.
 
 ## The loop
 
-Run it when a turn ends with nothing urgent, when a doorbell brings a report,
-and at least each hour while work runs.
+Run it when a doorbell brings a report and before you end a turn. A lead that
+must also run with no event uses its harness's own schedule; AMQ starts no
+turn.
 
 1. **Owner first.** Read new owner messages. Record each instruction where it
    stays: a task for work, a ruling for a decision. Act on it before agent
@@ -31,11 +32,13 @@ and at least each hour while work runs.
 3. **Free seat, ready work: dispatch.** Give the seat the highest-priority
    ready task with a brief (below). Do not start a new task to keep a seat
    busy when a started one waits for review: review first.
-4. **Silent seat: ask one time, then replace.** A follow-up notice or a
-   `check` line is a question to ask, not proof that a process stopped. Look
-   at the seat's own evidence (its worktree, its branch, its last message).
-   It works: leave it. It does not answer one direct question: give the task
-   to another seat and say so in the task record.
+4. **Late or silent seat: ask one time, then replace.** A follow-up notice
+   says a request is still open at its time; a `check` line says a seat or a
+   card does not move. Neither proves that a process stopped. Look at the
+   seat's own evidence (its worktree, its branch, its last message). It
+   works: leave it. It does not answer one direct question by the time you
+   name: give the task to another seat, with a scope the first seat no longer
+   edits, and say so in the task record.
 5. **A wait that landed: release it.** For each task that waits for
    something outside the queue (a review by a person, a deploy, another
    team), read that thing one time. Never report "it waits" from memory.
@@ -57,7 +60,8 @@ When the work takes design, write the design yourself and brief the build.
 
 - No person reads the code. So the builder never reviews its own work: you
   review it, or a seat that did not build it does, on another model when one
-  is there. The owner gets outcomes and proof, never a diff to read.
+  is there. What you built yourself goes to another seat. The owner gets
+  outcomes and proof, never a diff to read.
 - Read the diff, not the report. Run or read the real output.
 - Findings go back in one message, as exact edits. A third round on one
   change means the brief was wrong: rewrite the brief.
@@ -75,9 +79,9 @@ Needs you until it is closed. The exact commands are in the amq-cli skill,
 - **A question** is one decision: the options with the cost of each, the one
   you recommend, what happens if the answer comes late, and the default.
   Send it with `--follow-up` of the default time (48 hours for a design
-  choice) and go on with other work. When the notice comes with no answer,
-  take the default, and close the question with a line that says it was a
-  default, not the owner's decision.
+  choice) and go on with other work. When the notice comes, read the thread
+  first: an answer may have come. No answer: take the default, and close the
+  question with a line that says it was a default, not the owner's decision.
 - **A ruling** is a question that you answer yourself first. Take it when
   the work would stop and the action can be undone. Label it `ruling`, say
   what you decided, why, and how to undo it, give it 24 hours, and act now.
@@ -95,5 +99,7 @@ Needs you until it is closed. The exact commands are in the amq-cli skill,
 - A task with nothing merged for a week: cut its scope or close it.
 - Hand off your own session at a step boundary before its context is large:
   write the open tasks, rulings and waits where the next session reads them.
-- A rule broken two times becomes a check or a hook, not a longer rule text.
-  A rule or a tool that nobody used for a month goes.
+- Each two weeks, or after a bad day, run `amq-board retro`: take the worst
+  number and make one owned fix for it. A rule broken two times becomes a
+  check or a hook, not a longer rule text. A rule or a tool that nobody used
+  for a month goes.

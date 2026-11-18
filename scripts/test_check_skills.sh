@@ -10,11 +10,11 @@ trap cleanup EXIT INT TERM
 
 mkdir -p "$FIX/skills/amq-cli" "$FIX/skills/amq-spec" "$FIX/skills/amq-remote" "$FIX/skills/amq-board" "$FIX/skills/amq-lead" \
 	"$FIX/.claude/skills" "$FIX/.agents/skills" "$FIX/.grok/skills"
-printf 'cli\n' >"$FIX/skills/amq-cli/SKILL.md"
-printf 'spec\n' >"$FIX/skills/amq-spec/SKILL.md"
-printf 'remote\n' >"$FIX/skills/amq-remote/SKILL.md"
-printf 'board\n' >"$FIX/skills/amq-board/SKILL.md"
-printf 'lead\n' >"$FIX/skills/amq-lead/SKILL.md"
+printf -- '---\nname: amq-cli\ndescription: cli\n---\n' >"$FIX/skills/amq-cli/SKILL.md"
+printf -- '---\nname: amq-spec\ndescription: spec\n---\n' >"$FIX/skills/amq-spec/SKILL.md"
+printf -- '---\nname: amq-remote\ndescription: remote\n---\n' >"$FIX/skills/amq-remote/SKILL.md"
+printf -- '---\nname: amq-board\ndescription: board\n---\n' >"$FIX/skills/amq-board/SKILL.md"
+printf -- '---\nname: amq-lead\ndescription: lead\n---\n' >"$FIX/skills/amq-lead/SKILL.md"
 for dest in .claude .agents .grok; do
 	ln -s ../../skills/amq-cli "$FIX/$dest/skills/amq-cli"
 	ln -s ../../skills/amq-spec "$FIX/$dest/skills/amq-spec"

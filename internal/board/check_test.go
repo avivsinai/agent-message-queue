@@ -12,8 +12,10 @@ func TestCheck(t *testing.T) {
 		state        StationState
 		stage        Stage
 		want         ProblemKind
+		sender       string
 		card         string
 		full         string
+		requestKey   string
 		replyOverdue bool
 	}{
 		{name: "a stalled seat has unread mail", state: StationStalled, want: ProblemSeatStalled},
@@ -27,7 +29,7 @@ func TestCheck(t *testing.T) {
 		{name: "idle owner with activity has not moved card in two hours", state: StationIdle, stage: StageInProgress, want: ProblemNotWorked, card: "one"},
 		{name: "a seat with ready work and one in progress is not free", state: StationIdle},
 		{name: "working owner is clean", state: StationWorking, stage: StageInProgress, card: "one"},
-		{name: "owner with an overdue reply", want: ProblemReplyOverdue, card: "one", replyOverdue: true, full: "amit in s1 owes a reply to reviewer for 1h: First card"},
+		{name: "recipient with an overdue reply", want: ProblemReplyOverdue, replyOverdue: true, card: "", requestKey: "/base#ask", full: "amit in s1 owes a reply to reviewer in s1 for 1h: a decision"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			c := Card{ID: "one", Title: "First card", Stage: row.stage}
@@ -46,11 +48,15 @@ func TestCheck(t *testing.T) {
 				m.Stations[0].LastActivity = now.Add(-2 * time.Hour)
 			}
 			if row.replyOverdue {
-				m.Columns[0].Cards[0].Items = []Item{{
-					Owner:      Owner{Kind: OwnerAgent, Handle: "amit", Session: "s1", Display: "amit"},
-					Requester:  &Owner{Kind: OwnerAgent, Handle: "reviewer", Display: "reviewer"},
-					Obligation: &ObligationFacts{ReplyBy: now.Add(-time.Hour)},
-				}}
+				m.Requests = RequestView{
+					Recent: []Request{{
+						Message:    Message{Key: "/base#ask", Subject: "a decision", From: "reviewer"},
+						ReplyBy:    now.Add(-time.Hour),
+						Open:       true,
+						Recipients: []RequestRecipient{{Handle: "amit", Session: "s1", Scoped: true}},
+						Sender:     &Participant{Handle: "reviewer", Session: "s1"},
+					}},
+				}
 			}
 			got, err := Check(m, DefaultConfig(), now)
 			if err != nil {
@@ -59,8 +65,8 @@ func TestCheck(t *testing.T) {
 			if row.want == "" && len(got) == 0 {
 				return
 			}
-			if len(got) != 1 || got[0].Kind != row.want || got[0].CardID != row.card || got[0].Handle != "amit" {
-				t.Fatalf("problems = %+v, want one %s with card %q owned by amit", got, row.want, row.card)
+			if len(got) != 1 || got[0].Kind != row.want || got[0].CardID != row.card || got[0].Handle != "amit" || got[0].Request != row.requestKey {
+				t.Fatalf("problems = %+v, want one %s with card %q and request %q, owned by amit", got, row.want, row.card, row.requestKey)
 			}
 			if row.full != "" && got[0].Text != row.full {
 				t.Fatalf("text = %q; want %q", got[0].Text, row.full)

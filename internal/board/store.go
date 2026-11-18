@@ -147,6 +147,7 @@ type Message struct {
 	Kind         string         `json:"kind"`
 	Body         string         `json:"body,omitempty"`
 	Priority     string         `json:"priority,omitempty"`
+	ReplyBy      string         `json:"reply_by,omitempty"`
 	Labels       []string       `json:"labels,omitempty"`
 	Refs         []string       `json:"refs,omitempty"`
 	ReplyTo      string         `json:"reply_to,omitempty"`
@@ -1583,7 +1584,7 @@ func messageActions(message Message) []Action {
 // MessageFromEntry preserves the complete exported source facts. Root/session
 // scope belongs to acquisition; the content itself remains immutable.
 func MessageFromEntry(base, root, session string, entry thread.Entry, hash string) Message {
-	return Message{Namespace: base, Copies: []MessageCopy{{Root: root, Session: session}}, Key: base + "#" + entry.ID, Root: root, Session: session, ID: entry.ID, Thread: entry.Thread, From: entry.From, To: entry.To, Subject: entry.Subject, Kind: entry.Kind, Body: entry.Body, Created: entry.Created, Priority: entry.Priority, Labels: entry.Labels, Refs: entry.Refs, ReplyTo: entry.ReplyTo, ReplyProject: entry.ReplyProject, FromProject: entry.FromProject, Context: entry.Context, EvidenceHash: hash}
+	return Message{Namespace: base, Copies: []MessageCopy{{Root: root, Session: session}}, Key: base + "#" + entry.ID, Root: root, Session: session, ID: entry.ID, Thread: entry.Thread, From: entry.From, To: entry.To, Subject: entry.Subject, Kind: entry.Kind, Body: entry.Body, Created: entry.Created, Priority: entry.Priority, Labels: entry.Labels, Refs: entry.Refs, ReplyTo: entry.ReplyTo, ReplyProject: entry.ReplyProject, FromProject: entry.FromProject, ReplyBy: entry.ReplyBy, Context: entry.Context, EvidenceHash: hash}
 }
 
 func (s Store) verifyMessages(ctx context.Context, state *Snapshot) error {

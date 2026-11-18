@@ -352,6 +352,8 @@ func TestDigestCoversReplySenderScope(t *testing.T) {
 // agents' count stays in the Requests section.
 func TestRequestHeadlineCountsOnlyRequestsToTheOwner(t *testing.T) {
 	toOwner := requestMessage("ask-owner", "question", "", "lead", []string{reservedHuman}, "s1", requestNow.Add(-time.Hour))
+	toOwner.Labels = []string{"ruling"}
+	toOwner.ReplyBy = "2026-11-09T10:00:00Z"
 	toAgent := requestMessage("ask-agent", "review_request", "", "lead", []string{"worker"}, "s1", requestNow.Add(-time.Hour))
 	m := requestSnapshot(toOwner, toAgent).Project(DefaultConfig(), requestNow, "test")
 	text, page := renderFaces(t, m)
@@ -362,5 +364,9 @@ func TestRequestHeadlineCountsOnlyRequestsToTheOwner(t *testing.T) {
 	agents := "1 recent request to agents has no direct reply observed. Agents often answer with a new message instead of a reply, so this is their bookkeeping, not work for you."
 	if !strings.Contains(page, `<p class="request-note">`+agents+`</p>`) || !strings.Contains(text, "== Requests (outside task counts) ==\n  1 recent request to you with no direct reply observed\n    "+agents+"\n") {
 		t.Errorf("the Requests section does not keep the agents' count apart from the owner's")
+	}
+	row := "ruling · subject ask-owner · from lead in s1 · 1h ago · default at 2026-11-09T10:00:00Z"
+	if !strings.Contains(text, row) || !strings.Contains(text, "== Needs you (") || !strings.Contains(text, "    ruling · subject ask-owner · from lead in s1 · default at 2026-11-09T10:00:00Z") {
+		t.Errorf("the owner request does not show its ruling and clock under Needs you and Requests:\n%s", text)
 	}
 }
