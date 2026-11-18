@@ -11,7 +11,7 @@ amq-board --json                  # complete model, schema amq/board/v3
 amq-board --pane-json             # bounded native pane, amq/board-pane/v1
 amq-board --html --out board.html  # one self-contained page
 amq-board serve                   # live view on 127.0.0.1
-amq-board check                 # one line per floor problem (exit 6 when any)
+amq-board check                    # one line per floor problem (exit 6 when any)
 amq-board classify --classifier NAME --next 8 --json  # export requests to label
 amq-board classify --file labels.json                 # import labels
 ```
@@ -24,10 +24,12 @@ scan mailboxes itself or fall back to a different source.
 
 `amq-board check` reads the published snapshot, not sources. After `amq-board sync`:
 
-- `seat_stalled`: unread mail arrived without activity since then.
-- `seat_at_limit`: the seat is at its plan limit and owns current work.
-- `ready_not_started`: idle work is assigned to an idle or off seat.
-- `in_progress_not_worked`: a card in progress is past the seat's liveness window.
+- `seat_stalled`: a seat has unread mail and shows no activity since it arrived.
+- `seat_at_limit`: a seat is at its plan limit and owns current work.
+- `ready_not_started`: a seat with nothing in progress is idle or off and has ready work assigned.
+- `in_progress_not_worked`: a card is in progress longer than the liveness window, and its owner's last observed activity is older than that window. A seat with no observed activity is not listed.
+
+A seat whose harness records no activity (for example a pi seat) can only show as stalled or as free with ready work.
 
 Exit `0` when no floor problem exists, `6` when at least one exists, and `1` when the snapshot cannot decide (including stale or missing data). `--json` emits the same rows in `amq/board-check/v1`. Owner actions are not in this report.
 

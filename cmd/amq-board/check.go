@@ -13,7 +13,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/board"
 )
 
-// exitActionRequired matches the CLI's reported-problem action code.
+// exitActionRequired is the exit code for a floor that needs action.
 const exitActionRequired = 6
 
 type checkDocument struct {
@@ -65,7 +65,9 @@ func runCheck(args []string) int {
 		return exitGeneral
 	}
 	if *asJSON {
-		err = json.NewEncoder(os.Stdout).Encode(checkDocument{Schema: "amq/board-check/v1", GeneratedAt: now, PublishedAt: model.PublishedAt, Problems: problems})
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		err = enc.Encode(checkDocument{Schema: "amq/board-check/v1", GeneratedAt: now, PublishedAt: model.PublishedAt, Problems: problems})
 	} else {
 		for _, p := range problems {
 			_, err = fmt.Fprintf(os.Stdout, "%s: %s\n", p.Kind, p.Text)

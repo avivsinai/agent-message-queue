@@ -57,7 +57,7 @@ func Check(m Model, cfg Config, now time.Time) ([]Problem, error) {
 	}
 	for _, st := range m.Stations {
 		seat := st.Handle
-		if st.Session != "" {
+		if st.HandleSessions == 0 && st.Session != "" {
 			seat = st.Session + "/" + seat
 		}
 		switch st.State {
@@ -73,7 +73,19 @@ func Check(m Model, cfg Config, now time.Time) ([]Problem, error) {
 				add(st, ProblemSeatAtLimit, first, fmt.Sprintf("%s is at its plan limit and owns %d current card(s), first: %s", seat, len(st.Now), title))
 			}
 		case StationIdle, StationOff:
+			// A free seat has no card in progress. Cards whose owner works
+			// need activity evidence to count as neglected.
+			hasStarted := false
+			for _, id := range st.Now {
+				if row, ok := cards[id]; ok && row.card.Stage == StageInProgress {
+					hasStarted = true
+				}
+			}
 			state := string(st.State)
+			seat := st.Handle
+			if st.Session != "" && st.HandleSessions == 0 {
+				seat = st.Session + "/" + seat
+			}
 			for _, id := range st.Now {
 				row, ok := cards[id]
 				if !ok {
@@ -83,10 +95,12 @@ func Check(m Model, cfg Config, now time.Time) ([]Problem, error) {
 				title := card.Title
 				switch card.Stage {
 				case StageReady:
-					add(st, ProblemReadyNotBegun, id, fmt.Sprintf("%s is %s and has ready work that is not started: %s", seat, state, title))
+					if !hasStarted {
+						add(st, ProblemReadyNotBegun, id, fmt.Sprintf("%s is %s and has ready work that is not started: %s", seat, state, title))
+					}
 				case StageInProgress:
-					if !card.StageSince.IsZero() && now.Sub(card.StageSince) > cfg.LivenessWindow {
-						add(st, ProblemNotWorked, id, fmt.Sprintf("%s is in progress for %s, and its owner %s is %s (%s)", title, age(now.Sub(card.StageSince)), seat, state, st.StateWhy))
+					if !st.LastActivity.IsZero() && !card.StageSince.IsZero() && now.Sub(card.StageSince) > cfg.LivenessWindow {
+						add(st, ProblemNotWorked, id, fmt.Sprintf("%s is in progress for %s, and its owner %s shows no activity for %s (%s)", title, age(now.Sub(card.StageSince)), seat, age(now.Sub(st.LastActivity)), st.StateWhy))
 					}
 				}
 			}
