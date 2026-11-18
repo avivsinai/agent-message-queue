@@ -50,6 +50,12 @@ actions stay under Needs you, not here. A seat whose harness records no
 activity (for example a pi seat) can only show as stalled or as free with
 ready work.
 
+## Retro
+
+Run `amq-board retro` every two weeks, or after a bad day.
+The lead takes the worst number and assigns one fix to an owner.
+A rule nobody needed in the period is a candidate for removal.
+
 ## Classify recent requests
 
 Use the current host harness model. Choose a classifier name that records

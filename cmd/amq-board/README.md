@@ -12,6 +12,7 @@ amq-board --pane-json             # bounded native pane, amq/board-pane/v1
 amq-board --html --out board.html  # one self-contained page
 amq-board serve                   # live view on 127.0.0.1
 amq-board check                    # one line per floor problem (exit 6 when any)
+amq-board retro [--since DUR] [--json]  # request history per seat
 amq-board classify --classifier NAME --next 8 --json  # export requests to label
 amq-board classify --file labels.json                 # import labels
 ```
@@ -37,6 +38,18 @@ Exit `0` when no floor problem exists, `6` when at least one exists, and `1` whe
 amq-board check
 amq-board check --json
 ```
+
+### Retro
+
+`amq-board retro --since 14d` measures requests opened during the last 14 days, the default period. Add `--json` for durations in seconds. The numbers measure recorded messages and cannot tell you how well an agent worked.
+
+- **Seat** identifies the recipient by session and handle. Your seat appears as `you`.
+- **Requests** counts one request for each recipient of a question, review request, or todo that opens an obligation.
+- **Open** counts requests still open under the rules of `amq thread open`.
+- **First reply** gives the median and longest time from opening to the recipient's first reply in the conversation.
+- **Done** gives the median and longest time from opening to the message that closed the request.
+- **Follow-ups** counts follow-up notices that fired for the request.
+- **Rework rounds** gives the total requester replies and the largest count on one request, excluding follow-up notices and the closing message.
 
 ## Tasks
 

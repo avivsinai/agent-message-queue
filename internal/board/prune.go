@@ -181,35 +181,45 @@ func (s *Snapshot) heldMessages() map[string]bool {
 	return held
 }
 
-// openRequests are the keys of the messages that open an obligation the
-// thread reduction, the one that amq thread open uses, holds open. A ref to
-// a pruned message counts as a settled root, as thread open reads that
-// message from its mailbox.
-func (s Snapshot) openRequests() map[string]bool {
+type requestNamespace struct {
+	entries []thread.Entry
+	keys    map[string]string
+}
+
+// requestNamespaces groups entries by the base root in which their ids resolve.
+func (s Snapshot) requestNamespaces() map[string]*requestNamespace {
 	project := ""
 	for _, nr := range s.Input.Results {
 		if nr.Name == "amq" && nr.Result.AMQ != nil {
 			project = nr.Result.AMQ.Project
 		}
 	}
-	type namespace struct {
-		entries []thread.Entry
-		keys    map[string]string
-	}
-	namespaces := map[string]*namespace{}
+	namespaces := map[string]*requestNamespace{}
 	for key, m := range s.Messages {
 		ns := namespaces[m.Namespace]
 		if ns == nil {
-			ns = &namespace{keys: map[string]string{}}
+			ns = &requestNamespace{keys: map[string]string{}}
 			namespaces[m.Namespace] = ns
 		}
 		ns.entries = append(ns.entries, obligationEntry(m, project))
 		ns.keys[m.ID] = key
 	}
+	return namespaces
+}
+
+func (ns *requestNamespace) obligations(s Snapshot) []*thread.Obligation {
+	// No roots: the reduction judges the snapshot and reads no mailbox.
+	return thread.ReduceObligations(nil, ns.entries, time.Time{}, s.Pruned).Obligations
+}
+
+// openRequests are the keys of the messages that open an obligation the
+// thread reduction, the one that amq thread open uses, holds open. A ref to
+// a pruned message counts as a settled root, as thread open reads that
+// message from its mailbox.
+func (s Snapshot) openRequests() map[string]bool {
 	open := map[string]bool{}
-	for _, ns := range namespaces {
-		// No roots: the reduction judges the snapshot and reads no mailbox.
-		for _, ob := range thread.ReduceObligations(nil, ns.entries, time.Time{}, s.Pruned).Obligations {
+	for _, ns := range s.requestNamespaces() {
+		for _, ob := range ns.obligations(s) {
 			if ob.Open() {
 				open[ns.keys[ob.Opener.ID]] = true
 			}

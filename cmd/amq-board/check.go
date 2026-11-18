@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -38,21 +37,7 @@ func runCheck(args []string) int {
 		fmt.Fprintf(os.Stderr, "amq-board check: unexpected arguments: %s\n", strings.Join(flags.Args(), " "))
 		return exitUsage
 	}
-	dir, err := os.Getwd()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "amq-board check:", err)
-		return exitGeneral
-	}
-	cfg, warnings := loadConfig(dir)
-	for _, w := range warnings {
-		fmt.Fprintln(os.Stderr, "amq-board: config:", w)
-	}
-	store, err := resolveStore(context.Background(), newEnv(dir, execRunner{}))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "amq-board check:", err)
-		return exitGeneral
-	}
-	state, err := store.Read()
+	state, cfg, err := readPublishedSnapshot()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "amq-board check:", err)
 		return exitGeneral
