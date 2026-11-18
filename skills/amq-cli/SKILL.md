@@ -170,7 +170,8 @@ amq send --to user --kind question \
 ```
 
 The body of a question gives the options with the cost of each, the one you
-recommend, what happens if the answer comes late, and `Default: <option>`.
+recommend, what happens if the answer comes late, and `Default: <option>`
+(`Default: none` for a question with no default).
 The body of a ruling says what you decided, why, and how to undo it.
 
 The follow-up time is the default time: the board shows it on the card, and
@@ -184,10 +185,12 @@ amq reply --id <id of the question> --kind decision --labels closed \
 ```
 
 The owner answers in a chat, from the phone (a session connected with
-`/amq-remote` has a channel), or with a reply as `user`. A reply as `user`
+`/amq-remote` in Claude Code or `$amq-remote` in Codex has a channel), or
+with a reply as `user`. A reply as `user`
 with `--kind answer` closes the question. An answer that you hear anywhere
 else: close the request the same way, with the answer in the body.
-`amq thread open --owed-by user` lists what the owner still owes.
+`amq thread open --all-sessions --include-base --max-age 0 --owed-by user`
+lists everything the owner still owes in this project.
 
 ## Route the task
 

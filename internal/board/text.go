@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -12,44 +13,73 @@ import (
 	"unicode/utf8"
 )
 
-func requestKind(r Request) string {
-	if r.Ruling {
+func kindWord(kind string, ruling bool) string {
+	if ruling {
 		return "ruling"
 	}
-	return strings.ReplaceAll(r.Message.Kind, "_", " ")
+	return strings.ReplaceAll(kind, "_", " ")
 }
 
-func requestToOwner(r Request) bool {
-	for _, rec := range r.Recipients {
-		if rec.Handle == reservedHuman {
-			return true
+// deadlineSuffix includes its separator so an untimed agent request adds no text.
+func deadlineSuffix(kind string, human bool, due time.Time) string {
+	takesDefault := human && (kind == "question" || kind == "ruling")
+	if due.IsZero() {
+		if takesDefault {
+			return " · no default"
 		}
-	}
-	return false
-}
-
-func requestDeadline(r Request) string {
-	if r.ReplyBy.IsZero() {
 		return ""
 	}
 	prefix := " · reply by "
-	if requestToOwner(r) {
+	if takesDefault {
 		prefix = " · default at "
 	}
-	return prefix + r.ReplyBy.UTC().Format(time.RFC3339)
+	return prefix + due.UTC().Format(time.RFC3339)
 }
 
-func ownerRequests(v RequestView) []Request {
-	out := []Request{}
-	for _, r := range v.Recent {
-		if r.Open && requestToOwner(r) {
-			out = append(out, r)
+func requestDeadline(r Request) string {
+	human := slices.Contains(r.Message.To, reservedHuman)
+	return deadlineSuffix(kindWord(r.Message.Kind, r.Ruling), human, r.ReplyBy)
+}
+
+// ownerAttention holds the waiting cards and a bounded display of human asks.
+type ownerAttention struct {
+	cards []Card
+	rows  []string
+	more  string
+	count int
+}
+
+func (v ownerAttention) columnCount(c ColumnView) int {
+	if c.ID == ColumnWaiting {
+		return v.count
+	}
+	return len(c.Cards)
+}
+
+func needsYou(m Model) ownerAttention {
+	var view ownerAttention
+	for _, col := range m.Columns {
+		if col.ID == ColumnWaiting {
+			view.cards = col.Cards
+			break
 		}
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		return askNewer(out[i].Message, out[j].Message)
-	})
-	return out
+	human := 0
+	for _, a := range m.Asks {
+		if !a.Human {
+			continue
+		}
+		human++
+		if human <= viewLimit {
+			kind := kindWord(a.Kind, a.Ruling)
+			view.rows = append(view.rows, clean(kind)+" · "+cleanTitle(a.Subject)+" · from "+clean(participantLabel(a.From))+deadlineSuffix(kind, true, a.ReplyBy))
+		}
+	}
+	view.count = len(view.cards) + human
+	if human > viewLimit {
+		view.more = omittedLine(human-viewLimit, "open request")
+	}
+	return view
 }
 
 // WriteText renders the model for a terminal, in the page's order: header,
@@ -62,9 +92,11 @@ func WriteText(w io.Writer, m Model) error {
 	if project == "" {
 		project = m.Dir
 	}
+	attention := needsYou(m)
 	var counts []string
 	for _, c := range m.Columns {
-		counts = append(counts, fmt.Sprintf("%s %d", strings.ToLower(c.Title), len(c.Cards)))
+		count := attention.columnCount(c)
+		counts = append(counts, fmt.Sprintf("%s %d", strings.ToLower(c.Title), count))
 	}
 	fmt.Fprintf(&b, "%s · %d session%s · %s · generated %s\n", clean(project), len(m.Sessions), plural(len(m.Sessions)), strings.Join(counts, " · "), now.Format(time.RFC3339))
 
@@ -123,30 +155,20 @@ func WriteText(w io.Writer, m Model) error {
 	writeFloor(&b, m, now)
 
 	for _, c := range m.Columns {
-		fmt.Fprintf(&b, "\n== %s (%d) ==\n", c.Title, len(c.Cards))
+		count := attention.columnCount(c)
+		fmt.Fprintf(&b, "\n== %s (%d) ==\n", c.Title, count)
 		if c.ID == ColumnWaiting {
 			for _, g := range m.Gates {
 				fmt.Fprintf(&b, "  %s: %d unread for user (oldest %s)\n", g.Session, g.OpenCount, age(seconds(g.OldestAgeSeconds)))
 			}
-			if owner, _ := requestCounts(m.Requests); owner > 0 {
-				fmt.Fprintf(&b, "  %s; see Requests\n", requestHeadline(m.Requests))
-				requests := ownerRequests(m.Requests)
-				for _, r := range requests[:min(len(requests), viewLimit)] {
-					from := r.Message.From
-					if r.Sender != nil {
-						from = participantLabel(*r.Sender)
-					}
-					deadline := requestDeadline(r)
-					if deadline == "" {
-						deadline = " · no default"
-					}
-					fmt.Fprintf(&b, "    %s · %s · from %s%s\n",
-						clean(requestKind(r)), cleanTitle(r.Message.Subject), clean(from), deadline)
-				}
-				writeOmitted(&b, len(requests)-viewLimit, "open request")
+			for _, line := range attention.rows {
+				fmt.Fprintf(&b, "    %s\n", line)
+			}
+			if attention.more != "" {
+				fmt.Fprintf(&b, "  %s\n", attention.more)
 			}
 		}
-		if len(c.Cards) == 0 {
+		if count == 0 {
 			fmt.Fprintf(&b, "  %s\n", clean(c.Empty))
 		}
 		for _, card := range c.Cards {
@@ -383,9 +405,13 @@ const viewLimit = 25
 // jsonPointer names where the complete records are.
 const jsonPointer = "run amq-board --json for every record and message body"
 
+func omittedLine(n int, noun string) string {
+	return pluralize(n, noun) + " not shown; " + jsonPointer
+}
+
 func writeOmitted(b *strings.Builder, n int, noun string) {
 	if n > 0 {
-		fmt.Fprintf(b, "  %s not shown; %s\n", pluralize(n, noun), jsonPointer)
+		fmt.Fprintf(b, "  %s\n", omittedLine(n, noun))
 	}
 }
 
@@ -432,7 +458,7 @@ func writeRequest(b *strings.Builder, r Request, named map[string][]Card, now ti
 	if r.Sender != nil {
 		from = participantLabel(*r.Sender)
 	}
-	fmt.Fprintf(b, "    %s · %s · from %s · %s%s\n", clean(requestKind(r)), cleanTitle(m.Subject), clean(from), when, requestDeadline(r))
+	fmt.Fprintf(b, "    %s · %s · from %s · %s%s\n", clean(kindWord(m.Kind, r.Ruling)), cleanTitle(m.Subject), clean(from), when, requestDeadline(r))
 	for _, fact := range requestFacts(r) {
 		fmt.Fprintf(b, "      %s\n", clean(fact.Text))
 	}

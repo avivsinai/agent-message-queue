@@ -12,6 +12,8 @@ for dest in .claude .agents .grok; do
 	for skill in amq-cli amq-spec amq-remote amq-board amq-lead; do
 		[[ -L "$dest/skills/$skill" ]] || fail "$dest/skills/$skill is not a symlink"
 		[[ "$(readlink "$dest/skills/$skill")" == "../../skills/$skill" ]] || fail "$dest/skills/$skill target wrong"
+		file="$dest/skills/$skill/SKILL.md"
+		[[ -f "$file" && -r "$file" ]] || fail "$file is not a readable regular file"
 	done
 done
 echo "✓ Skill symlinks valid"

@@ -12,7 +12,6 @@ func TestCheck(t *testing.T) {
 		state        StationState
 		stage        Stage
 		want         ProblemKind
-		sender       string
 		card         string
 		full         string
 		requestKey   string
@@ -29,7 +28,8 @@ func TestCheck(t *testing.T) {
 		{name: "idle owner with activity has not moved card in two hours", state: StationIdle, stage: StageInProgress, want: ProblemNotWorked, card: "one"},
 		{name: "a seat with ready work and one in progress is not free", state: StationIdle},
 		{name: "working owner is clean", state: StationWorking, stage: StageInProgress, card: "one"},
-		{name: "recipient with an overdue reply", want: ProblemReplyOverdue, replyOverdue: true, card: "", requestKey: "/base#ask", full: "amit in s1 owes a reply to reviewer in s1 for 1h: a decision"},
+		// PR #1548 review: older obligations disappeared and timed owner todos triggered defaults.
+		{name: "old overdue agent question is reported while a timed owner todo stays on the board", want: ProblemReplyOverdue, replyOverdue: true, requestKey: "/base#ask", full: "s1/amit owes a reply to reviewer in s1 for 1h: a decision"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			c := Card{ID: "one", Title: "First card", Stage: row.stage}
@@ -48,15 +48,14 @@ func TestCheck(t *testing.T) {
 				m.Stations[0].LastActivity = now.Add(-2 * time.Hour)
 			}
 			if row.replyOverdue {
-				m.Requests = RequestView{
-					Recent: []Request{{
-						Message:    Message{Key: "/base#ask", Subject: "a decision", From: "reviewer"},
-						ReplyBy:    now.Add(-time.Hour),
-						Open:       true,
-						Recipients: []RequestRecipient{{Handle: "amit", Session: "s1", Scoped: true}},
-						Sender:     &Participant{Handle: "reviewer", Session: "s1"},
-					}},
-				}
+				opened := now.Add(-RequestWindow - time.Hour)
+				ask := requestMessage("ask", "question", "decision", "reviewer", []string{"amit"}, "s1", opened)
+				ask.Subject = "a decision"
+				ask.ReplyBy = now.Add(-time.Hour).Format(time.RFC3339)
+				todo := requestMessage("owner-todo", "todo", "other", "reviewer", []string{reservedHuman}, "s1", now.Add(-2*time.Hour))
+				todo.ReplyBy = ask.ReplyBy
+				m = requestSnapshot(ask, todo).Project(DefaultConfig(), now, "test")
+				m.PublishedAt = now
 			}
 			got, err := Check(m, DefaultConfig(), now)
 			if err != nil {

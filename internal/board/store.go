@@ -1452,7 +1452,9 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 			}
 		}
 	}
-	m.Requests = s.RequestView(now)
+	open, asks := s.projectAsks()
+	m.Asks = asks
+	m.Requests = s.requestView(now, open)
 	var unattached []Message
 	for _, list := range [][]Request{m.Requests.Recent, m.Requests.Older, m.Requests.Undated} {
 		for _, r := range list {

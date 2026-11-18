@@ -104,35 +104,28 @@ func Check(m Model, cfg Config, now time.Time) ([]Problem, error) {
 			}
 		}
 	}
-	for _, r := range m.Requests.Recent {
-		if !r.Open || r.ReplyBy.IsZero() || !r.ReplyBy.Before(now) {
+	for _, ask := range m.Asks {
+		if ask.ReplyBy.IsZero() || !ask.ReplyBy.Before(now) {
 			continue
 		}
-		human := false
-		var recipient *RequestRecipient
-		for i := range r.Recipients {
-			rec := &r.Recipients[i]
-			human = human || rec.Handle == reservedHuman
-			if rec.Scoped && rec.Handle != reservedHuman && recipient == nil {
-				recipient = rec
+		wait := age(now.Sub(ask.ReplyBy))
+		from := clean(participantLabel(ask.From))
+		subject := cleanTitle(ask.Subject)
+		problem := Problem{Kind: ProblemReplyOverdue, Request: ask.Key}
+		switch {
+		case !ask.Human:
+			problem.Handle, problem.Session = ask.Owner.Handle, ask.Owner.Session
+			owner := ask.Owner.Handle
+			if ask.Owner.Session != "" {
+				owner = ask.Owner.Session + "/" + owner
 			}
-		}
-		if !human && recipient == nil {
+			problem.Text = fmt.Sprintf("%s owes a reply to %s for %s: %s", clean(owner), from, wait, subject)
+		case ask.Ruling:
+			problem.Text = fmt.Sprintf("a ruling passed its overrule time %s ago; %s reads the thread, then closes it: %s", wait, from, subject)
+		case ask.Kind == "question":
+			problem.Text = fmt.Sprintf("a question to the owner passed its default time %s ago; %s reads the thread, then takes the default: %s", wait, from, subject)
+		default:
 			continue
-		}
-		sender := r.Message.From
-		if r.Sender != nil {
-			sender = participantLabel(*r.Sender)
-		}
-		problem := Problem{Kind: ProblemReplyOverdue, Request: r.Message.Key}
-		if human {
-			problem.Text = fmt.Sprintf("the default time of a question to the owner passed %s ago; %s takes the default: %s",
-				age(now.Sub(r.ReplyBy)), sender, r.Message.Subject)
-		} else if recipient != nil {
-			problem.Handle = recipient.Handle
-			problem.Session = recipient.Session
-			problem.Text = fmt.Sprintf("%s owes a reply to %s for %s: %s",
-				participantLabel(recipient.participant()), sender, age(now.Sub(r.ReplyBy)), r.Message.Subject)
 		}
 		problems = append(problems, problem)
 	}

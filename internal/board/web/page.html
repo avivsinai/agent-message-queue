@@ -46,9 +46,11 @@
 <section class="view view-flow" id="view-flow" data-view="flow" aria-labelledby="heading-flow">
   <div class="view-heading"><h1 id="heading-flow">Flow</h1></div>
   <section class="attention" aria-labelledby="needs-you">
-    <h2 class="attention-head" id="needs-you"><span class="flag flag-you"><span class="mark mark-flag" aria-hidden="true"></span>Needs you</span> <span class="stage-count">{{len .NeedsYou}}</span></h2>
-    {{if .NeedsYou}}<ul class="tiles">{{range .NeedsYou}}<li class="tile"><a class="tile-title" href="#{{.Anchor}}" data-open="{{.Anchor}}">{{template "title" .}}</a>{{if .Summary}}<p class="tile-summary">{{.Summary}}</p>{{end}}<p class="tile-why"><span>{{.Reason}}</span> <span class="tile-age">{{if .SinceAt}}<time datetime="{{.SinceAt}}">{{.Waited}}</time>{{else}}{{.Waited}}{{end}}</span></p></li>{{end}}</ul>{{else}}<p class="attention-empty">No card waits on you.</p>{{end}}
-    {{if or .Gates .Requests}}<div class="attention-foot">{{if .Gates}}<p class="gates"><span class="gates-head">Unread for you</span>{{range .Gates}} <span>{{.}}</span>{{end}}</p>{{end}}{{if .Requests}}<a class="attention-requests" href="#view-requests">{{.Requests}}</a>{{end}}</div>{{end}}
+    <h2 class="attention-head" id="needs-you"><span class="flag flag-you"><span class="mark mark-flag" aria-hidden="true"></span>Needs you</span> <span class="stage-count">{{.AttentionCount}}</span></h2>
+    {{if .NeedsYou}}<ul class="tiles">{{range .NeedsYou}}<li class="tile"><a class="tile-title" href="#{{.Anchor}}" data-open="{{.Anchor}}">{{template "title" .}}</a>{{if .Summary}}<p class="tile-summary">{{.Summary}}</p>{{end}}<p class="tile-why"><span>{{.Reason}}</span> <span class="tile-age">{{if .SinceAt}}<time datetime="{{.SinceAt}}">{{.Waited}}</time>{{else}}{{.Waited}}{{end}}</span></p></li>{{end}}</ul>{{else if not .AttentionCount}}<p class="attention-empty">No card waits on you.</p>{{end}}
+    {{if .AskRows}}<ul class="tiles">{{range .AskRows}}<li class="tile">{{.}}</li>{{end}}</ul>{{end}}
+    {{if .AskMore}}<p class="request-note">{{.AskMore}}</p>{{end}}
+    {{if .Gates}}<div class="attention-foot"><p class="gates"><span class="gates-head">Unread for you</span>{{range .Gates}} <span>{{.}}</span>{{end}}</p></div>{{end}}
   </section>
   {{template "coverage" .Coverage}}
   <div class="flow-tools">
@@ -298,6 +300,7 @@
   <div class="item-main">
     <h2 class="title">{{template "title" .}}</h2>
     <div class="item-meta"><span class="item-state">{{.Kind}}</span><span class="c-owner">from {{.From}} to {{.To}}</span><span>Sent {{if .AgeAt}}<time datetime="{{.AgeAt}}">{{.Age}}</time>{{else}}{{.Age}}{{end}}</span></div>
+    {{if .Deadline}}<p class="request-note">{{.Deadline}}</p>{{end}}
     <span class="c-ref sr-only">{{.MessageID}}</span>
   </div>
 </article>

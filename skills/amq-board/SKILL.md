@@ -45,8 +45,8 @@ ask the seat once, then replace it. It is not proof that a process stopped.
 
 `seat_stalled`, `seat_at_limit`, `ready_not_started`,
 `in_progress_not_worked` and `reply_overdue` are the kinds. `reply_overdue`
-means a request passed the reply time its sender set; for a question to the
-owner, its sender takes the default. The command exits 0 on an empty list, 6
+covers overdue agent replies, owner questions and owner rulings. The sender
+reads the thread before taking a default or closing a ruling. The command exits 0 on an empty list, 6
 on problems, and 1 on a stale or absent snapshot. A seat whose harness records
 no activity cannot produce `in_progress_not_worked` without that evidence.
 

@@ -28,6 +28,14 @@ if ! (cd "$FIX" && bash "$SCRIPT" >/dev/null); then
 	exit 1
 fi
 
+# PR #1548 review: a missing canonical skill passed through a valid link.
+mv "$FIX/skills/amq-lead/SKILL.md" "$FIX/lead.md"
+if (cd "$FIX" && bash "$SCRIPT" >/dev/null 2>&1); then
+	echo "FAIL: missing canonical SKILL.md passed" >&2
+	exit 1
+fi
+mv "$FIX/lead.md" "$FIX/skills/amq-lead/SKILL.md"
+
 rm -f "$FIX/.grok/skills/amq-cli"
 ln -s ../../skills/not-amq-cli "$FIX/.grok/skills/amq-cli"
 if (cd "$FIX" && bash "$SCRIPT" >/dev/null 2>&1); then

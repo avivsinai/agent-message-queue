@@ -341,9 +341,7 @@ func messageTime(m Message) (time.Time, bool) {
 func (x requestIndex) request(key string, now time.Time) Request {
 	m := x.s.Messages[key]
 	r := Request{Message: m, Summary: Sentence(m.Body), Age: RequestUndated, Recipients: []RequestRecipient{}, Tasks: x.tasks[key], Ruling: slices.Contains(m.Labels, "ruling")}
-	if deadline, err := time.Parse(time.RFC3339, m.ReplyBy); err == nil {
-		r.ReplyBy = deadline.UTC()
-	}
+	r.ReplyBy = replyTime(m)
 	created, dated := messageTime(m)
 	if dated && !created.After(now) {
 		r.Age = RequestOlder
@@ -493,8 +491,11 @@ func (x requestIndex) digest(r Request) string {
 // cancelled. Recent requests are grouped by the renderers; here they are
 // ordered no-direct-reply first, then newest first.
 func (s Snapshot) RequestView(now time.Time) RequestView {
+	return s.requestView(now, s.openRequests())
+}
+
+func (s Snapshot) requestView(now time.Time, open map[string]bool) RequestView {
 	x := newRequestIndex(s)
-	open := s.openRequests()
 	v := RequestView{Recent: []Request{}, Older: []Request{}, Undated: []Request{}, Coverage: x.coverage}
 	for _, key := range x.candidates() {
 		r := x.request(key, now)

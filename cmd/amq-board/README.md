@@ -29,7 +29,7 @@ scan mailboxes itself or fall back to a different source.
 - `seat_at_limit`: a seat is at its plan limit and owns current work.
 - `ready_not_started`: a seat with nothing in progress is idle or off and has ready work assigned.
 - `in_progress_not_worked`: a card is in progress longer than the liveness window, and its owner's last observed activity is older than that window. A seat with no observed activity is not listed.
-- `reply_overdue`: a request passed the reply time its sender set. For a question to the owner, its sender takes the default.
+- `reply_overdue` covers overdue agent replies, owner questions and owner rulings. For owner questions and rulings the sender reads the thread before taking the default or closing the ruling. Owner todos and review requests stay under Needs you.
 
 A seat whose harness records no activity (for example a pi seat) can only show as stalled or as free with ready work.
 
@@ -130,8 +130,9 @@ handle.
 Requests from the last 14 days, by recorded message time, are Recent; the
 rest are Older, or Undated when the time is missing, unreadable, or in the
 future. Age never completes a request. Recent requests are grouped by scoped
-addressee, with requests that have no direct reply first. The owner-facing
-headline is "N recent requests to you with no direct reply observed": a
+addressee, with requests that have no direct reply first. Needs you lists open
+obligations owed by the owner across the retained history, alongside waiting cards.
+The Requests headline is "N recent requests to you with no direct reply observed": a
 request addressed to the owner handle `user`, in any root, with no direct
 reply from it. The Requests section states the rest in one sentence, "N
 recent requests to agents have no direct reply observed", and calls it the
