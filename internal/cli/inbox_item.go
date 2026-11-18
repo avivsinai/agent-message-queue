@@ -3,26 +3,27 @@ package cli
 import "time"
 
 type inboxItem struct {
-	ID            string         `json:"id"`
-	From          string         `json:"from"`
-	To            []string       `json:"to"`
-	Thread        string         `json:"thread"`
-	Subject       string         `json:"subject"`
-	Created       string         `json:"created"`
-	Body          string         `json:"body,omitempty"`
-	Priority      string         `json:"priority,omitempty"`
-	Kind          string         `json:"kind,omitempty"`
-	Labels        []string       `json:"labels,omitempty"`
-	Context       map[string]any `json:"context,omitempty"`
-	FromProject   string         `json:"from_project,omitempty"`
-	ReplyProject  string         `json:"reply_project,omitempty"`
-	MovedToCur    bool           `json:"moved_to_cur"`
-	MovedToDLQ    bool           `json:"moved_to_dlq,omitempty"`
-	ParseError    string         `json:"parse_error,omitempty"`
-	ReplyBy       string         `json:"reply_by,omitempty"`
-	FailureReason string         `json:"-"`
-	Filename      string         `json:"-"` // actual filename on disk
-	SortKey       time.Time      `json:"-"`
+	ID            string            `json:"id"`
+	From          string            `json:"from"`
+	To            []string          `json:"to"`
+	Thread        string            `json:"thread"`
+	Subject       string            `json:"subject"`
+	Created       string            `json:"created"`
+	Body          string            `json:"body,omitempty"`
+	Priority      string            `json:"priority,omitempty"`
+	Kind          string            `json:"kind,omitempty"`
+	Labels        []string          `json:"labels,omitempty"`
+	Context       map[string]any    `json:"context,omitempty"`
+	FromProject   string            `json:"from_project,omitempty"`
+	ReplyProject  string            `json:"reply_project,omitempty"`
+	MovedToCur    bool              `json:"moved_to_cur"`
+	MovedToDLQ    bool              `json:"moved_to_dlq,omitempty"`
+	ParseError    string            `json:"parse_error,omitempty"`
+	ReplyBy       string            `json:"reply_by,omitempty"`
+	Completion    *threadOpenRecipe `json:"completion,omitempty"`
+	FailureReason string            `json:"-"`
+	Filename      string            `json:"-"` // actual filename on disk
+	SortKey       time.Time         `json:"-"`
 }
 
 func (i inboxItem) GetCreated() string {

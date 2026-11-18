@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/receipt"
+	"github.com/avivsinai/agent-message-queue/internal/thread"
 )
 
 var claimInboxNewToCur = fsq.MoveNewToCur
@@ -438,6 +440,10 @@ func readInboxItem(
 		item.FromProject = header.FromProject
 		item.ReplyProject = header.ReplyProject
 		item.ReplyBy = header.ReplyBy
+		if slices.Contains(thread.OpenerKinds, header.Kind) {
+			recipe := completionRecipe(header.Kind)
+			item.Completion = &recipe
+		}
 		if includeBody {
 			item.Body = body
 		}

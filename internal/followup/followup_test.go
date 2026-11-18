@@ -89,7 +89,7 @@ func TestPromoteDeliversOneNoticeWhenDueAndUnanswered(t *testing.T) {
 	if h.From != "alice" || !slices.Equal(h.To, []string{"alice"}) || h.Thread != "p2p/alice__bob" ||
 		!slices.Equal(h.Refs, []string{timer.RequestID}) || h.Kind != format.KindStatus ||
 		h.Priority != format.PriorityNormal || !slices.Equal(h.Labels, []string{Label}) ||
-		h.Subject != "No reply from bob: Review the parser" || h.Created != timer.Due.Format(time.RFC3339Nano) {
+		h.Subject != "Still open with bob: Review the parser" || h.Created != timer.Due.Format(time.RFC3339Nano) {
 		t.Fatalf("notice header = %+v", h)
 	}
 	if timers, err := List(root, "alice"); err != nil || len(timers) != 0 {
@@ -104,13 +104,30 @@ func TestPromoteDeliversOneNoticeWhenDueAndUnanswered(t *testing.T) {
 	}
 }
 
+// In the 2026-11-18 docs audit (C3), a worker's ETA silenced the reminder for an open todo.
+func TestPromoteStillOpenTodoAfterProgressReply(t *testing.T) {
+	base, root := openTestRoot(t)
+	timer := armTestTimer(t, root, time.Now())
+	progress := testMessage(t, timer, "bob", "alice", format.KindStatus, nil)
+	progress.Body = "ETA ten minutes"
+	if _, err := fsq.DeliverToInbox(root, "alice", progress.Header.ID+".md", marshal(t, progress)); err != nil {
+		t.Fatal(err)
+	}
+	if err := Promote(root, "alice", timer.Due); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(inboxNames(t, base), timer.NoticeID+".md") {
+		t.Fatal("open todo received no follow-up notice after a progress reply")
+	}
+}
+
 func TestPromoteDropsTimerWhenRequestSettled(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		settle func(t *testing.T, root *fsq.DeliveryRoot, timer Timer)
 	}{
-		{"recipient replied by refs", func(t *testing.T, root *fsq.DeliveryRoot, timer Timer) {
-			reply := testMessage(t, timer, "bob", "alice", format.KindStatus, nil)
+		{"recipient closed the todo", func(t *testing.T, root *fsq.DeliveryRoot, timer Timer) {
+			reply := testMessage(t, timer, "bob", "alice", format.KindStatus, []string{"done"})
 			if _, err := fsq.DeliverToInbox(root, "alice", reply.Header.ID+".md", marshal(t, reply)); err != nil {
 				t.Fatal(err)
 			}

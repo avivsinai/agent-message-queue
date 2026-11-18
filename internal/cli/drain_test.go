@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -170,6 +171,41 @@ func TestRunDrainWithBody(t *testing.T) {
 			t.Errorf("expected body, got %q", result.Drained[0].Body)
 		}
 	})
+}
+
+func TestDrainShowsHowToCloseTodo(t *testing.T) {
+	root := initFollowUpRootForTest(t)
+	todo := format.Header{From: "alice", To: []string{"bob"}, Thread: "work", Kind: format.KindTodo}
+	deliverOriginalForReply(t, root, "bob", todo)
+	out, err := captureStdout(t, func() error {
+		return runDrain([]string{"--root", root, "--me", "bob", "--json"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Drained []struct {
+			Completion threadOpenRecipe `json:"completion"`
+		} `json:"drained"`
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil || len(result.Drained) != 1 {
+		t.Fatalf("unexpected drain JSON %q: %v", out, err)
+	}
+	if got := result.Drained[0].Completion; got.Kind != "status" || !slices.Equal(got.Labels, []string{"done"}) {
+		t.Fatalf("todo completion = %+v, want status with done label", got)
+	}
+
+	id := deliverOriginalForReply(t, root, "bob", todo)
+	out, err = captureStdout(t, func() error {
+		return runDrain([]string{"--root", root, "--me", "bob", "--include-body"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "  Close with: amq reply --id " + id + " --kind status --labels done --body @<file>"
+	if !slices.Contains(strings.Split(string(out), "\n"), want) {
+		t.Fatalf("drain output %q is missing %q", out, want)
+	}
 }
 
 func TestRunDrainLimit(t *testing.T) {
