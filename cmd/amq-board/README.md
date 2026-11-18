@@ -29,10 +29,11 @@ scan mailboxes itself or fall back to a different source.
 - `seat_at_limit`: a seat is at its plan limit and owns current work.
 - `ready_not_started`: a seat with nothing in progress is idle or off and has ready work assigned.
 - `in_progress_not_worked`: a card is in progress longer than the liveness window, and its owner's last observed activity is older than that window. A seat with no observed activity is not listed.
+- `reply_overdue`: a request passed the reply time its sender set. For a question to the owner, its sender takes the default.
 
 A seat whose harness records no activity (for example a pi seat) can only show as stalled or as free with ready work.
 
-Exit `0` when no floor problem exists, `6` when at least one exists, and `1` when the snapshot cannot decide (including stale or missing data). `--json` emits the same rows in `amq/board-check/v1`. Owner actions are not in this report.
+Exit `0` when no floor problem exists, `6` when at least one exists, and `1` when the snapshot cannot decide (including stale or missing data). `--json` emits the same rows in `amq/board-check/v1`.
 
 ```sh
 amq-board check

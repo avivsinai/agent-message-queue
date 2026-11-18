@@ -8,12 +8,13 @@ import (
 func TestCheck(t *testing.T) {
 	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
 	for _, row := range []struct {
-		name  string
-		state StationState
-		stage Stage
-		want  ProblemKind
-		card  string
-		full  string
+		name         string
+		state        StationState
+		stage        Stage
+		want         ProblemKind
+		card         string
+		full         string
+		replyOverdue bool
 	}{
 		{name: "a stalled seat has unread mail", state: StationStalled, want: ProblemSeatStalled},
 		{name: "seat at limit owns one card", state: StationLimit, want: ProblemSeatAtLimit, card: "one"},
@@ -26,6 +27,7 @@ func TestCheck(t *testing.T) {
 		{name: "idle owner with activity has not moved card in two hours", state: StationIdle, stage: StageInProgress, want: ProblemNotWorked, card: "one"},
 		{name: "a seat with ready work and one in progress is not free", state: StationIdle},
 		{name: "working owner is clean", state: StationWorking, stage: StageInProgress, card: "one"},
+		{name: "owner with an overdue reply", want: ProblemReplyOverdue, card: "one", replyOverdue: true, full: "amit in s1 owes a reply to reviewer for 1h: First card"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			c := Card{ID: "one", Title: "First card", Stage: row.stage}
@@ -42,6 +44,13 @@ func TestCheck(t *testing.T) {
 			}
 			if row.stage == StageInProgress && row.want == ProblemNotWorked {
 				m.Stations[0].LastActivity = now.Add(-2 * time.Hour)
+			}
+			if row.replyOverdue {
+				m.Columns[0].Cards[0].Items = []Item{{
+					Owner:      Owner{Kind: OwnerAgent, Handle: "amit", Session: "s1", Display: "amit"},
+					Requester:  &Owner{Kind: OwnerAgent, Handle: "reviewer", Display: "reviewer"},
+					Obligation: &ObligationFacts{ReplyBy: now.Add(-time.Hour)},
+				}}
 			}
 			got, err := Check(m, DefaultConfig(), now)
 			if err != nil {

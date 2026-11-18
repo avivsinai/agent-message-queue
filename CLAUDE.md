@@ -435,7 +435,7 @@ ships.
 ## Skill Development
 
 Canonical skills live in `skills/amq-board/`, `skills/amq-cli/`,
-`skills/amq-remote/`, and `skills/amq-spec/`.
+`skills/amq-lead/`, `skills/amq-remote/`, and `skills/amq-spec/`.
 `.claude/skills/`, `.agents/skills/`, and `.grok/skills/` are symlinks to those
 directories so local runs use repository changes. Project skills take
 precedence over user installations.

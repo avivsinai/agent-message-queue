@@ -9,7 +9,7 @@ fail() {
 
 echo "Checking skill symlinks..."
 for dest in .claude .agents .grok; do
-	for skill in amq-cli amq-spec amq-remote amq-board; do
+	for skill in amq-cli amq-spec amq-remote amq-board amq-lead; do
 		[[ -L "$dest/skills/$skill" ]] || fail "$dest/skills/$skill is not a symlink"
 		[[ "$(readlink "$dest/skills/$skill")" == "../../skills/$skill" ]] || fail "$dest/skills/$skill target wrong"
 	done

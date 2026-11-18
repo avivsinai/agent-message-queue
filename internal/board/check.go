@@ -14,6 +14,7 @@ const (
 	ProblemSeatAtLimit   ProblemKind = "seat_at_limit"
 	ProblemReadyNotBegun ProblemKind = "ready_not_started"
 	ProblemNotWorked     ProblemKind = "in_progress_not_worked"
+	ProblemReplyOverdue  ProblemKind = "reply_overdue"
 )
 
 // Problem is one floor problem: a seat or a card that does not move.
@@ -99,6 +100,31 @@ func Check(m Model, cfg Config, now time.Time) ([]Problem, error) {
 						add(st, ProblemNotWorked, id, fmt.Sprintf("%s is in progress for %s, and its owner %s shows no activity for %s (%s)", title, age(now.Sub(card.StageSince)), seat, age(now.Sub(st.LastActivity)), st.StateWhy))
 					}
 				}
+			}
+		}
+	}
+	for _, col := range m.Columns {
+		for _, c := range col.Cards {
+			for _, item := range c.Items {
+				if item.Obligation == nil || item.Obligation.ReplyBy.IsZero() || !item.Obligation.ReplyBy.Before(now) {
+					continue
+				}
+				requester := "unknown requester"
+				if item.Requester != nil {
+					requester = item.Requester.Display
+				}
+				problem := Problem{Kind: ProblemReplyOverdue, CardID: c.ID}
+				if item.Owner.Kind == OwnerHuman {
+					problem.Text = fmt.Sprintf("the default time of a question to the owner passed %s ago; %s takes the default: %s",
+						age(now.Sub(item.Obligation.ReplyBy)), requester, c.Title)
+				} else {
+					problem.Handle = item.Owner.Handle
+					problem.Session = item.Owner.Session
+					problem.Text = fmt.Sprintf("%s owes a reply to %s for %s: %s",
+						ownerLabel(item.Owner, nil), requester, age(now.Sub(item.Obligation.ReplyBy)), c.Title)
+				}
+				problems = append(problems, problem)
+				break
 			}
 		}
 	}

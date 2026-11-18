@@ -57,6 +57,10 @@
         {
           "type": "generic",
           "path": "skills/amq-board/SKILL.md"
+        },
+        {
+          "type": "generic",
+          "path": "skills/amq-lead/SKILL.md"
         }
       ]
     }

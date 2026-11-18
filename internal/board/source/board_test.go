@@ -220,6 +220,11 @@ func TestBoardPlacesCapturedAMQAndBeadsPayloads(t *testing.T) {
 		t.Error("mentioned bead merged into the obligation card")
 	}
 
+	// Owner questions show their ruling and the sender's deadline.
+	if got := cards[refT5].Reason.Text; got != "ruling from alpha · default at 2026-10-22T10:00:00Z" {
+		t.Errorf("question reason = %q, want ruling and reply time", got)
+	}
+
 	// Pro finding 4: the complete action answers T5 in s1, where the
 	// requester is, with --kind from completion; a todo completes with
 	// --labels done, and acknowledge is a separate command.

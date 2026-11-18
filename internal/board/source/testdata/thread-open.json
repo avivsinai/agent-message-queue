@@ -23,7 +23,8 @@
         "subject": "Which port for the relay?",
         "created": "2026-10-22T08:00:00.000Z",
         "priority": "normal",
-        "labels": []
+        "labels": ["ruling"],
+        "reply_by": "2026-10-22T10:00:00Z"
       },
       "owed_by": {
         "project": "",
