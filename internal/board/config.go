@@ -40,7 +40,6 @@ type FileConfig struct {
 	BeadsAssignees     []string
 	GitHubLogins       []string
 	GitHubIdentities   map[string]string // login -> AMQ handle
-	ObligationMaxAge   string            // passed to amq thread open --max-age
 	SourceBeads        bool
 	SourceGitHub       bool
 	GitHubRepos        []string // owner/repo
@@ -271,7 +270,7 @@ func applyShared(cfg *FileConfig, raw rawConfig, path string, warn func(string, 
 		if _, err := ParseDuration(*v); err != nil {
 			warn("%s: obligation_max_age %q is not a duration; ignored", path, *v)
 		} else {
-			cfg.ObligationMaxAge = *v
+			cfg.Board.ObligationMaxAge = *v
 		}
 	}
 	if s := raw.Sources; s != nil {

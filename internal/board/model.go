@@ -13,8 +13,10 @@ const Schema = "amq/board/v3"
 
 // Config holds the board's display settings.
 type Config struct {
-	LivenessWindow time.Duration
-	StaleAfter     time.Duration
+	// ObligationMaxAge is the validated thread-open duration. Empty selects the default.
+	ObligationMaxAge string
+	LivenessWindow   time.Duration
+	StaleAfter       time.Duration
 	// ShippedWindow is how long finished work stays in the Flow Shipped
 	// stage before it is only in History.
 	ShippedWindow time.Duration

@@ -177,6 +177,7 @@ else: if you asked, close the request the same way, with the answer in the
 body; if another session asked, send it the answer and the question's ID.
 `amq thread open --all-sessions --include-base --max-age 0 --owed-by user`
 lists everything the owner still owes in this project.
+A question that is still open after 14 days expires from the board by default; ask it again if it still matters.
 
 ## Route the task
 

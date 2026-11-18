@@ -1452,7 +1452,7 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 			}
 		}
 	}
-	open, asks := s.projectAsks()
+	open, asks := s.projectAsks(cfg.obligationCutoff(now))
 	m.Asks = asks
 	m.Requests = s.requestView(now, open)
 	var unattached []Message

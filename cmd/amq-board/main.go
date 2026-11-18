@@ -244,7 +244,7 @@ func acquireBoard(ctx context.Context, env board.Env, cfg board.FileConfig, opt 
 		Timeout:                  opt.githubTimeout,
 		Account:                  opt.ghAccount,
 	}
-	sources := []board.Source{source.AMQ{MaxAge: cfg.ObligationMaxAge}}
+	sources := []board.Source{source.AMQ{MaxAge: cfg.Board.ObligationMaxAge}}
 	if cfg.SourceBeads {
 		beads := source.Beads{Humans: cfg.BeadsAssignees}
 		// A bead's external_ref gh-<n> names a PR only when exactly one

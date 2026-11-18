@@ -31,6 +31,8 @@ scan mailboxes itself or fall back to a different source.
 - `in_progress_not_worked`: a card is in progress longer than the liveness window, and its owner's last observed activity is older than that window. A seat with no observed activity is not listed.
 - `reply_overdue` covers overdue agent replies, owner questions and owner rulings. For owner questions and rulings the sender reads the thread before taking the default or closing the ruling. Owner todos and review requests stay under Needs you.
 
+An unclosed request older than `obligation_max_age` (14 days by default) expires, as in `amq thread open`. It leaves Needs you and the overdue check. Set `obligation_max_age` to `0` to disable expiry.
+
 The in-progress inactivity rule requires an observed activity time. Other rules
 use their own evidence, including unread mail, ready assignments and observed
 account limits.

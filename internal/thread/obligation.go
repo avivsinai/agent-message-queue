@@ -36,6 +36,9 @@ const UnsettledParent = "parent lineage not settled at created time"
 // requester-closer table.
 const SettledThrough = "settled-through"
 
+// DefaultObligationMaxAge is the default window for reporting open obligations.
+const DefaultObligationMaxAge = 14 * 24 * time.Hour
+
 // OpenerKinds are the kinds that open an obligation for each recipient.
 var OpenerKinds = []string{format.KindReviewRequest, format.KindQuestion, format.KindTodo}
 
