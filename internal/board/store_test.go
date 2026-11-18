@@ -346,6 +346,59 @@ func TestPublishedTasksKeepIdentityAndOwnerCorrections(t *testing.T) {
 	}
 }
 
+// Seen in the live run of PR #1548 on 2026-11-18: the old snapshot's
+// message had no reply_by, but its evidence had one. The checked evidence
+// supplies that field instead of rejecting the entire old snapshot.
+func TestOldSnapshotWithoutReplyByReadsDeadlineFromEvidence(t *testing.T) {
+	base := t.TempDir()
+	identity, err := fsq.StableTreeIdentity(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(base, identity, "host-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const deadline = "2026-11-18T17:35:00Z"
+	entry := thread.Entry{ID: "clock", Thread: "clock", Subject: "a question", Kind: "question", ReplyBy: deadline}
+	raw, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(raw)
+	hash := hex.EncodeToString(sum[:])
+	message := MessageFromEntry(state.BaseRoot, base, "", entry, hash)
+	message.ReplyBy = ""
+	state.Messages = map[string]Message{message.Key: message}
+	if err = os.MkdirAll(filepath.Join(store.Dir, "evidence"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(store.Dir, "evidence", message.EvidenceHash+".json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stateBytes, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(store.Dir, "snapshot.json"), stateBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	read, err := store.Read()
+	if err != nil {
+		t.Fatalf("old snapshot with a deadline only in evidence: %v", err)
+	}
+	if got := read.Messages[message.Key].ReplyBy; got != deadline {
+		t.Fatalf("reply_by = %q, want %q from evidence", got, deadline)
+	}
+}
+
 // The ratified design review observed that cache loss would allocate fresh
 // task IDs. An initialized store with missing state must require recovery.
 func TestMissingPublishedStateRequiresRecovery(t *testing.T) {

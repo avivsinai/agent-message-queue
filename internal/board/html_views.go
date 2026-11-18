@@ -81,10 +81,10 @@ type pageFlow struct {
 	NeedsYou []pageStrip
 	// Gates are the unread messages for the owner, one line per session
 	// with its oldest age, kept apart from the cards.
-	Gates []string
-	// Requests is the count of requests to the owner without a direct
-	// reply, linked to the Requests view; empty when there is none.
-	Requests string
+	Gates          []string
+	AskRows        []string
+	AskMore        string
+	AttentionCount int
 }
 
 type pageStage struct {
@@ -116,17 +116,16 @@ func buildFlowPage(m Model, now time.Time, live map[[2]string]string) pageFlow {
 			c := cards[id]
 			s := flowStrip(c, now, live)
 			st.Cards = append(st.Cards, s)
-			if s.NeedsYou {
-				f.NeedsYou = append(f.NeedsYou, s)
-			}
 		}
 		if v.Omitted > 0 {
 			st.More = "+" + strconv.Itoa(v.Omitted) + " older shipped"
 		}
 		f.Stages = append(f.Stages, st)
 	}
-	if owner, _ := requestCounts(m.Requests); owner > 0 {
-		f.Requests = requestHeadline(m.Requests)
+	attention := needsYou(m)
+	f.AskRows, f.AskMore, f.AttentionCount = attention.rows, attention.more, attention.count
+	for _, c := range attention.cards {
+		f.NeedsYou = append(f.NeedsYou, flowStrip(c, now, live))
 	}
 	f.Coverage = coverageGaps(m.Sources, func(SourceView) bool { return true })
 	return f

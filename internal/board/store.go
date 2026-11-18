@@ -147,6 +147,7 @@ type Message struct {
 	Kind         string         `json:"kind"`
 	Body         string         `json:"body,omitempty"`
 	Priority     string         `json:"priority,omitempty"`
+	ReplyBy      string         `json:"reply_by,omitempty"`
 	Labels       []string       `json:"labels,omitempty"`
 	Refs         []string       `json:"refs,omitempty"`
 	ReplyTo      string         `json:"reply_to,omitempty"`
@@ -1451,7 +1452,9 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 			}
 		}
 	}
-	m.Requests = s.RequestView(now)
+	open, asks := s.projectAsks()
+	m.Asks = asks
+	m.Requests = s.requestView(now, open)
 	var unattached []Message
 	for _, list := range [][]Request{m.Requests.Recent, m.Requests.Older, m.Requests.Undated} {
 		for _, r := range list {
@@ -1583,7 +1586,7 @@ func messageActions(message Message) []Action {
 // MessageFromEntry preserves the complete exported source facts. Root/session
 // scope belongs to acquisition; the content itself remains immutable.
 func MessageFromEntry(base, root, session string, entry thread.Entry, hash string) Message {
-	return Message{Namespace: base, Copies: []MessageCopy{{Root: root, Session: session}}, Key: base + "#" + entry.ID, Root: root, Session: session, ID: entry.ID, Thread: entry.Thread, From: entry.From, To: entry.To, Subject: entry.Subject, Kind: entry.Kind, Body: entry.Body, Created: entry.Created, Priority: entry.Priority, Labels: entry.Labels, Refs: entry.Refs, ReplyTo: entry.ReplyTo, ReplyProject: entry.ReplyProject, FromProject: entry.FromProject, Context: entry.Context, EvidenceHash: hash}
+	return Message{Namespace: base, Copies: []MessageCopy{{Root: root, Session: session}}, Key: base + "#" + entry.ID, Root: root, Session: session, ID: entry.ID, Thread: entry.Thread, From: entry.From, To: entry.To, Subject: entry.Subject, Kind: entry.Kind, Body: entry.Body, Created: entry.Created, Priority: entry.Priority, Labels: entry.Labels, Refs: entry.Refs, ReplyTo: entry.ReplyTo, ReplyProject: entry.ReplyProject, FromProject: entry.FromProject, ReplyBy: entry.ReplyBy, Context: entry.Context, EvidenceHash: hash}
 }
 
 func (s Store) verifyMessages(ctx context.Context, state *Snapshot) error {
@@ -1620,6 +1623,12 @@ func (s Store) verifyMessages(ctx context.Context, state *Snapshot) error {
 		metadata.Body = ""
 		expectedMetadata := expected
 		expectedMetadata.Body = ""
+		// A snapshot written before the projection carried reply_by has none;
+		// its absence is not a mismatch, and the projection of the checked
+		// evidence then supplies it.
+		if metadata.ReplyBy == "" {
+			expectedMetadata.ReplyBy = ""
+		}
 		a, _ := json.Marshal(metadata)
 		b, _ := json.Marshal(expectedMetadata)
 		if string(a) != string(b) || (message.Body != "" && message.Body != entry.Body) {

@@ -53,6 +53,8 @@ type Model struct {
 	Schema               string               `json:"schema"`
 	Generation           uint64               `json:"generation,omitempty"`
 	PublishedAt          time.Time            `json:"published_at,omitempty"`
+	// Asks are the open human obligations and timed agent obligations.
+	Asks []Ask `json:"asks"`
 	// Requests are the recorded request messages with their observations
 	// and attributed opinions, outside task and work counts.
 	Requests    RequestView     `json:"requests"`
@@ -180,6 +182,7 @@ func Build(in Input) Model {
 		Version:     in.Version,
 		Dir:         in.Dir,
 		Sessions:    []string{},
+		Asks:        []Ask{},
 		Gates:       []Gate{},
 		Roster:      []RosterSession{},
 	}

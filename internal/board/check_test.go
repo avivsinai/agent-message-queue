@@ -8,12 +8,14 @@ import (
 func TestCheck(t *testing.T) {
 	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
 	for _, row := range []struct {
-		name  string
-		state StationState
-		stage Stage
-		want  ProblemKind
-		card  string
-		full  string
+		name         string
+		state        StationState
+		stage        Stage
+		want         ProblemKind
+		card         string
+		full         string
+		requestKey   string
+		replyOverdue bool
 	}{
 		{name: "a stalled seat has unread mail", state: StationStalled, want: ProblemSeatStalled},
 		{name: "seat at limit owns one card", state: StationLimit, want: ProblemSeatAtLimit, card: "one"},
@@ -26,6 +28,8 @@ func TestCheck(t *testing.T) {
 		{name: "idle owner with activity has not moved card in two hours", state: StationIdle, stage: StageInProgress, want: ProblemNotWorked, card: "one"},
 		{name: "a seat with ready work and one in progress is not free", state: StationIdle},
 		{name: "working owner is clean", state: StationWorking, stage: StageInProgress, card: "one"},
+		// PR #1548 review: older obligations disappeared and timed owner todos triggered defaults.
+		{name: "old overdue agent question is reported while a timed owner todo stays on the board", want: ProblemReplyOverdue, replyOverdue: true, requestKey: "/base#ask", full: "s1/amit owes a reply to reviewer in s1 for 1h: a decision"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			c := Card{ID: "one", Title: "First card", Stage: row.stage}
@@ -43,6 +47,16 @@ func TestCheck(t *testing.T) {
 			if row.stage == StageInProgress && row.want == ProblemNotWorked {
 				m.Stations[0].LastActivity = now.Add(-2 * time.Hour)
 			}
+			if row.replyOverdue {
+				opened := now.Add(-RequestWindow - time.Hour)
+				ask := requestMessage("ask", "question", "decision", "reviewer", []string{"amit"}, "s1", opened)
+				ask.Subject = "a decision"
+				ask.ReplyBy = now.Add(-time.Hour).Format(time.RFC3339)
+				todo := requestMessage("owner-todo", "todo", "other", "reviewer", []string{reservedHuman}, "s1", now.Add(-2*time.Hour))
+				todo.ReplyBy = ask.ReplyBy
+				m = requestSnapshot(ask, todo).Project(DefaultConfig(), now, "test")
+				m.PublishedAt = now
+			}
 			got, err := Check(m, DefaultConfig(), now)
 			if err != nil {
 				t.Fatal(err)
@@ -50,8 +64,8 @@ func TestCheck(t *testing.T) {
 			if row.want == "" && len(got) == 0 {
 				return
 			}
-			if len(got) != 1 || got[0].Kind != row.want || got[0].CardID != row.card || got[0].Handle != "amit" {
-				t.Fatalf("problems = %+v, want one %s with card %q owned by amit", got, row.want, row.card)
+			if len(got) != 1 || got[0].Kind != row.want || got[0].CardID != row.card || got[0].Handle != "amit" || got[0].Request != row.requestKey {
+				t.Fatalf("problems = %+v, want one %s with card %q and request %q, owned by amit", got, row.want, row.card, row.requestKey)
 			}
 			if row.full != "" && got[0].Text != row.full {
 				t.Fatalf("text = %q; want %q", got[0].Text, row.full)

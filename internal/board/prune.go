@@ -218,14 +218,21 @@ func (ns *requestNamespace) obligations(s Snapshot) []*thread.Obligation {
 // message from its mailbox.
 func (s Snapshot) openRequests() map[string]bool {
 	open := map[string]bool{}
+	for key := range s.openObligations {
+		open[key] = true
+	}
+	return open
+}
+
+// openObligations yields the message key and the debt of each remaining owner.
+func (s Snapshot) openObligations(yield func(string, *thread.Obligation) bool) {
 	for _, ns := range s.requestNamespaces() {
 		for _, ob := range ns.obligations(s) {
-			if ob.Open() {
-				open[ns.keys[ob.Opener.ID]] = true
+			if ob.Open() && !yield(ns.keys[ob.Opener.ID], ob) {
+				return
 			}
 		}
 	}
-	return open
 }
 
 // obligationEntry is the obligation reduction's view of m on a board of

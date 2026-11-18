@@ -42,7 +42,7 @@ type pageRequest struct {
 	Full                                      bool
 	ID, Key, MessageID, Kind, Title, From, To string
 	Prefix, Summary                           string
-	Age, AgeAt                                string
+	Age, AgeAt, Deadline                      string
 	Facts                                     []requestFact
 	Opinions                                  []pageOpinion
 	Tasks, Mentions                           []string
@@ -115,6 +115,9 @@ func requestRow(r Request, bay string, named map[string][]Card, now time.Time) p
 	for _, rec := range r.Recipients {
 		row.Full = row.Full || !rec.Scoped
 	}
+	if row.Deadline != "" {
+		row.Facts = append(row.Facts, requestFact{State: "default", Text: row.Deadline})
+	}
 	for _, f := range requestFacts(r) {
 		row.Facts = append(row.Facts, requestFact{f.State, clean(f.Text)})
 	}
@@ -152,7 +155,7 @@ func requestRow(r Request, bay string, named map[string][]Card, now time.Time) p
 // of whom, and when, with the thread command. Bodies stay in --json.
 func olderRow(r Request, now time.Time) pageRequest {
 	msg := r.Message
-	row := pageRequest{Key: clean(msg.Key), MessageID: clean(msg.ID), Kind: clean(strings.ReplaceAll(msg.Kind, "_", " ")), Title: cleanTitle(msg.Subject), From: clean(msg.From), Age: "time unknown", Summary: clean(r.Summary)}
+	row := pageRequest{Key: clean(msg.Key), MessageID: clean(msg.ID), Kind: clean(kindWord(msg.Kind, r.Ruling)), Title: cleanTitle(msg.Subject), From: clean(msg.From), Age: "time unknown", Summary: clean(r.Summary)}
 	if row.Title == "" {
 		row.Title = "(no subject)"
 	}
@@ -172,6 +175,7 @@ func olderRow(r Request, now time.Time) pageRequest {
 	if at, ok := messageTime(msg); ok {
 		row.Age, row.AgeAt = age(now.Sub(at))+" ago", at.UTC().Format(time.RFC3339)
 	}
+	row.Deadline = strings.TrimPrefix(requestDeadline(r), " · ")
 	if actions := messageActions(msg); len(actions) > 0 {
 		row.Read = &actions[0]
 	}

@@ -149,10 +149,54 @@ A request with a `Reply by:` line states when its sender expects an answer.
 If the work takes longer, reply with `--kind status` and your own time
 before that moment; a late answer with no status reads as a stopped seat.
 
+## Ask the owner without stopping
+
+The owner's handle is `user`. A request to `user` is an obligation like any
+other: it shows on the board under Needs you until it is closed. Do not hold
+a turn open for the answer.
+
+```bash
+# A question with a default: one decision per message.
+amq send --to user --kind question --follow-up 48h \
+  --subject "Question: <the decision in a few words>" --body @question.md
+
+# A ruling: you decided and acted; the owner can overrule for 24 hours.
+amq send --to user --kind question --labels ruling --follow-up 24h \
+  --subject "Ruling: <what you decided>" --body @ruling.md
+
+# No default: a destructive, public, deploy or spending action.
+amq send --to user --kind question \
+  --subject "Question (no default): <the decision>" --body @question.md
+```
+
+The body of a question gives the options with the cost of each, the one you
+recommend, what happens if the answer comes late, and `Default: <option>`
+(`Default: none` for a question with no default).
+The body of a ruling says what you decided, why, and how to undo it.
+
+The follow-up time is the default time: the board shows it on the card, and
+when it passes with no answer you get one notice. Read the thread first: an
+answer may have come. No answer: take the default (a ruling stands) and close
+the request:
+
+```bash
+amq reply --id <id of the question> --kind decision --labels closed \
+  --body "No answer by the default time: took <option>."
+```
+
+The owner answers in a chat, from the phone (a session connected with
+`/amq-remote` in Claude Code or `$amq-remote` in Codex has a channel), or
+with a reply as `user`. A reply as `user`
+with `--kind answer` closes the question. An answer that you hear anywhere
+else: close the request the same way, with the answer in the body.
+`amq thread open --all-sessions --include-base --max-age 0 --owed-by user`
+lists everything the owner still owes in this project.
+
 ## Route the task
 
 | Need | Read or run |
 |---|---|
+| Leading other agents | Use the amq-lead skill. |
 | Send, reply, drain, inspect receipts, or diagnose | Use [the operations guide](references/operations.md). |
 | Two-agent research and design, or a received message labeled `workflow:spec` | Use the `amq-spec` skill: do your own research before you read the partner's, then follow the `spec/<topic>` thread. |
 | Co-op roles and phased collaboration | Read [co-op mode](references/coop-mode.md). |

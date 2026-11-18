@@ -43,12 +43,12 @@ After `amq-board sync`, run `amq-board check` (`--json` for the same rows).
 Each line is one problem for the lead to act on: dispatch what is ready,
 ask the seat once, then replace it. It is not proof that a process stopped.
 
-`seat_stalled`, `seat_at_limit`, `ready_not_started` and
-`in_progress_not_worked` are the only kinds. The command exits 0 on
-an empty list, 6 on problems, and 1 on a stale or absent snapshot. Owner
-actions stay under Needs you, not here. A seat whose harness records no
-activity (for example a pi seat) can only show as stalled or as free with
-ready work.
+`seat_stalled`, `seat_at_limit`, `ready_not_started`,
+`in_progress_not_worked` and `reply_overdue` are the kinds. `reply_overdue`
+covers overdue agent replies, owner questions and owner rulings. The sender
+reads the thread before taking a default or closing a ruling. The command exits 0 on an empty list, 6
+on problems, and 1 on a stale or absent snapshot. A seat whose harness records
+no activity cannot produce `in_progress_not_worked` without that evidence.
 
 ## Retro
 

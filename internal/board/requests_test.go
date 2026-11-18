@@ -352,15 +352,65 @@ func TestDigestCoversReplySenderScope(t *testing.T) {
 // agents' count stays in the Requests section.
 func TestRequestHeadlineCountsOnlyRequestsToTheOwner(t *testing.T) {
 	toOwner := requestMessage("ask-owner", "question", "", "lead", []string{reservedHuman}, "s1", requestNow.Add(-time.Hour))
+	toOwner.Labels = []string{"ruling"}
+	toOwner.ReplyBy = "2026-11-09T10:00:00Z"
 	toAgent := requestMessage("ask-agent", "review_request", "", "lead", []string{"worker"}, "s1", requestNow.Add(-time.Hour))
 	m := requestSnapshot(toOwner, toAgent).Project(DefaultConfig(), requestNow, "test")
 	text, page := renderFaces(t, m)
-	strip := `<a class="attention-requests" href="#view-requests">1 recent request to you with no direct reply observed</a>`
-	if !strings.Contains(page, strip) {
-		t.Errorf("the Needs you strip does not count the one request to the owner alone")
+	if !strings.Contains(page, "ruling · subject ask-owner · from lead in s1 · default at 2026-11-09T10:00:00Z") {
+		t.Error("the HTML Needs you panel lacks the open ruling and its default time")
 	}
 	agents := "1 recent request to agents has no direct reply observed. Agents often answer with a new message instead of a reply, so this is their bookkeeping, not work for you."
 	if !strings.Contains(page, `<p class="request-note">`+agents+`</p>`) || !strings.Contains(text, "== Requests (outside task counts) ==\n  1 recent request to you with no direct reply observed\n    "+agents+"\n") {
 		t.Errorf("the Requests section does not keep the agents' count apart from the owner's")
 	}
+	row := "ruling · subject ask-owner · from lead in s1 · 1h ago · default at 2026-11-09T10:00:00Z"
+	if !strings.Contains(text, row) || !strings.Contains(text, "== Needs you (") || !strings.Contains(text, "    ruling · subject ask-owner · from lead in s1 · default at 2026-11-09T10:00:00Z") {
+		t.Errorf("the owner request does not show its ruling and clock under Needs you and Requests:\n%s", text)
+	}
+}
+
+// PR #1548 review: answering a shared question left the human listed while
+// the worker still owed. Each rendered owner panel must follow the reducer.
+func TestAnsweredOwnerLeavesOnlyWorkersObligation(t *testing.T) {
+	q := requestMessage("shared", "question", "work", "lead", []string{reservedHuman, "worker"}, "s1", requestNow.Add(-time.Hour))
+	q.ReplyBy = requestNow.Format(time.RFC3339)
+	answer := requestMessage("answer", "answer", "work", reservedHuman, []string{"lead"}, "s1", requestNow, q.ID)
+	m := requestSnapshot(q, answer).Project(DefaultConfig(), requestNow, "test")
+	if len(m.Asks) != 1 || m.Asks[0].Key != q.Key || m.Asks[0].Owner != (Participant{Session: "s1", Handle: "worker"}) || !m.Requests.Recent[0].Open {
+		t.Fatalf("asks = %+v, request open = %v", m.Asks, m.Requests.Recent[0].Open)
+	}
+	for _, panel := range renderedOwnerPanels(t, m) {
+		if strings.Contains(panel, q.Subject) {
+			t.Errorf("answered owner still has a row for %q: %s", q.Subject, panel)
+		}
+	}
+}
+
+// PR #1548 review: a progress reply removed an open question from Needs you.
+func TestOwnerProgressKeepsQuestionInNeedsYou(t *testing.T) {
+	q := requestMessage("pending", "question", "work", "lead", []string{reservedHuman}, "s1", requestNow.Add(-time.Hour))
+	progress := requestMessage("progress", "status", "work", reservedHuman, []string{"lead"}, "s1", requestNow, q.ID)
+	m := requestSnapshot(q, progress).Project(DefaultConfig(), requestNow, "test")
+	for _, panel := range renderedOwnerPanels(t, m) {
+		if !strings.Contains(panel, "question · subject pending · from lead in s1 · no default") {
+			t.Errorf("open owner question missing: %s", panel)
+		}
+	}
+}
+
+func renderedOwnerPanels(t *testing.T, m Model) []string {
+	t.Helper()
+	text, html := renderFaces(t, m)
+	_, section, found := strings.Cut(text, "== Needs you (")
+	if !found {
+		t.Fatal("missing Needs you text section")
+	}
+	section, _, _ = strings.Cut(section, "\n== ")
+	_, panel, found := strings.Cut(html, `id="needs-you"`)
+	if !found {
+		t.Fatal("missing Needs you HTML panel")
+	}
+	panel, _, _ = strings.Cut(panel, "</section>")
+	return []string{section, panel}
 }

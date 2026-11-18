@@ -14,6 +14,7 @@ const (
 	ProblemSeatAtLimit   ProblemKind = "seat_at_limit"
 	ProblemReadyNotBegun ProblemKind = "ready_not_started"
 	ProblemNotWorked     ProblemKind = "in_progress_not_worked"
+	ProblemReplyOverdue  ProblemKind = "reply_overdue"
 )
 
 // Problem is one floor problem: a seat or a card that does not move.
@@ -22,6 +23,7 @@ type Problem struct {
 	Session string      `json:"session,omitempty"`
 	Handle  string      `json:"handle,omitempty"`
 	CardID  string      `json:"card_id,omitempty"`
+	Request string      `json:"request,omitempty"`
 	Text    string      `json:"text"`
 }
 
@@ -101,6 +103,31 @@ func Check(m Model, cfg Config, now time.Time) ([]Problem, error) {
 				}
 			}
 		}
+	}
+	for _, ask := range m.Asks {
+		if ask.ReplyBy.IsZero() || !ask.ReplyBy.Before(now) {
+			continue
+		}
+		wait := age(now.Sub(ask.ReplyBy))
+		from := clean(participantLabel(ask.From))
+		subject := cleanTitle(ask.Subject)
+		problem := Problem{Kind: ProblemReplyOverdue, Request: ask.Key}
+		switch {
+		case !ask.Human:
+			problem.Handle, problem.Session = ask.Owner.Handle, ask.Owner.Session
+			owner := ask.Owner.Handle
+			if ask.Owner.Session != "" {
+				owner = ask.Owner.Session + "/" + owner
+			}
+			problem.Text = fmt.Sprintf("%s owes a reply to %s for %s: %s", clean(owner), from, wait, subject)
+		case ask.Ruling:
+			problem.Text = fmt.Sprintf("a ruling passed its overrule time %s ago; %s reads the thread, then closes it: %s", wait, from, subject)
+		case ask.Kind == "question":
+			problem.Text = fmt.Sprintf("a question to the owner passed its default time %s ago; %s reads the thread, then takes the default: %s", wait, from, subject)
+		default:
+			continue
+		}
+		problems = append(problems, problem)
 	}
 	return problems, nil
 }

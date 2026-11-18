@@ -383,6 +383,7 @@ type threadOpenDoc struct {
 			Subject string   `json:"subject"`
 			Created string   `json:"created"`
 			Labels  []string `json:"labels"`
+			ReplyBy string   `json:"reply_by"`
 		} `json:"opener"`
 		OwedBy           participant `json:"owed_by"`
 		OwedByKind       string      `json:"owed_by_kind"`
