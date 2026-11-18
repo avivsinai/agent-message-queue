@@ -152,7 +152,10 @@ func TestDrainShowsTheReplyTimeOfARequestWithFollowUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := runDrainJSON(t, root, "bob", 0, false)
-	if result.Count != 1 || result.Drained[0].ReplyBy != timer.Due.Format(time.RFC3339) {
+	if result.Count != 1 {
+		t.Fatalf("drained %d items; want exactly one", result.Count)
+	}
+	if result.Drained[0].ReplyBy != timer.Due.Format(time.RFC3339) {
 		t.Fatalf("recipient's ReplyBy = %q, want the timer's due %s", result.Drained[0].ReplyBy, timer.Due.Format(time.RFC3339))
 	}
 	base := time.Now().Truncate(time.Second)

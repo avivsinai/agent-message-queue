@@ -168,7 +168,7 @@ func outputDrainItems(jsonOutput bool, me string, includeBody bool, items []inbo
 		if item.ReplyBy != "" {
 			relative := replyByRelative(item.ReplyBy, time.Now())
 			if relative == "" {
-				if err := writeStdout("  Reply by: %s\n", item.ReplyBy); err != nil {
+				if err := writeStdout("  Reply by: %s\n", sanitizeForTTY(item.ReplyBy)); err != nil {
 					return err
 				}
 			} else if err := writeStdout("  Reply by: %s (%s)\n", item.ReplyBy, relative); err != nil {
