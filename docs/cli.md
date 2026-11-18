@@ -40,6 +40,7 @@ options not repeated here.
 - [amq completion](#amq-completion)
 - [amq thread open](#amq-thread-open)
 - [amq thread list](#amq-thread-list)
+- [amq thread settle](#amq-thread-settle)
 - [amq presence set](#amq-presence-set)
 - [amq presence list](#amq-presence-list)
 - [amq dlq list](#amq-dlq-list)
@@ -1288,6 +1289,36 @@ Options:
         Root directory for the queue (default ".agent-mail")
   -strict
         Error on unknown handles (default: send and reply warn)
+```
+
+## amq thread settle
+
+```text
+$ amq thread settle --help
+Usage:
+  amq thread settle --older-than <dur> [--owed-by <handles>] [--thread <id>] [--dry-run] [--json] [--me <h>] [--root <path>]
+
+Send one decision labelled settled-through from me to each owner of my open requests older than the bound, per (thread, owner). Only the requester of those obligations can settle them. Owners in another session are not settled. A follow-up timer on the anchor cancels with the marker; a timer on an older settled request may still fire one true notice.
+
+Options:
+  -dry-run
+        Report but do not send markers
+  -json
+        Emit JSON output
+  -json-schema int
+        JSON schema 1
+  -me string
+        Agent handle (or AM_ME)
+  -older-than string
+
+  -owed-by string
+        Restrict to these owner handles
+  -root string
+        Root directory for the queue (default ".agent-mail")
+  -strict
+        Error on unknown handles (default: send and reply warn)
+  -thread string
+        Restrict to one thread id
 ```
 
 ## amq presence set
