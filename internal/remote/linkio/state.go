@@ -67,6 +67,9 @@ type Pin struct {
 	DeviceName string `json:"device_name"`
 	RPID       string `json:"rp_id"`
 	Origin     string `json:"origin"`
+	// DefaultToolProfile is the profile the server's link info names for a
+	// new share; empty when it names none.
+	DefaultToolProfile string `json:"default_tool_profile,omitempty"`
 	// ToolProfiles are the tool profile names the server grants, as its link
 	// info last said; nil when it does not say. attach checks --tools
 	// against them.

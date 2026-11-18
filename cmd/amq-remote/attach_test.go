@@ -27,6 +27,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
+	"github.com/avivsinai/agent-message-queue/internal/remote/linkio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/machinecred"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/pi"
@@ -1073,6 +1074,80 @@ func TestDetachSelfRemovesABindingMadeThroughALinkRoot(t *testing.T) {
 				t.Errorf("detach --self printed %q; binding %s (root %s) is still present", strings.TrimSpace(out.String()), all[0].Name, all[0].Root)
 			}
 		})
+	}
+}
+
+// An omitted --tools takes the server's declared default profile rather
+// than assuming read, and the actual share carries that choice.
+func TestAttachLinkUsesTheServerDefaultProfileWhenToolsIsOmitted(t *testing.T) {
+	home := shortHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	for _, k := range []string{"AM_ROOT", "AM_ME", "AM_BASE_ROOT", "AM_SESSION", "AM_ROOT_ID", "AM_BASE_ROOT_ID"} {
+		_ = os.Unsetenv(k)
+	}
+	root, err := binding.EnsureMachineRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	configDir := canonicalTempDir(t)
+	if err := os.MkdirAll(filepath.Join(configDir, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pid := os.Getpid()
+	record := map[string]any{"pid": pid, "sessionId": "session-7", "cwd": "/work/project", "kind": "interactive", "peerProtocol": 1, "version": "test", "updatedAt": time.Now().UnixMilli()}
+	raw, _ := json.Marshal(record)
+	if err := os.WriteFile(filepath.Join(configDir, "sessions", strconv.Itoa(pid)+".json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	stateDir := filepath.Join(root, stateDirName)
+	profiles := []string{"work"}
+	var file = manifest.File{SchemaVersion: manifest.RelaySchemaVersion, Layer: manifest.Layer,
+		Links: []manifest.Link{{Name: "example", URL: "wss://link.example.test/link"}}}
+	if err := manifest.Write(manifest.DefaultPath(stateDir), file); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := linkio.MintDeviceKey(stateDir, "example"); err != nil {
+		t.Fatal(err)
+	}
+	if err := linkio.WritePin(stateDir, "example", linkio.Pin{ServerID: "server", DefaultToolProfile: "work", ToolProfiles: &profiles}); err != nil {
+		t.Fatal(err)
+	}
+	var store *requests.Store
+	store, err = requests.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep := core.New(core.Config{Store: store})
+	srv, err := ipc.Listen(stateDir, ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.SetRegistrar(liveRegistrar(root, stateDir, "remote", ep))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = srv.Serve(ctx) }()
+	t.Cleanup(func() { cancel(); <-done; _ = ep.Close(); _ = store.Close() })
+
+	savedFind, savedCwd, savedHolder, savedHook := findSelf, processCwd, processHolder, claudeStopHookState
+	t.Cleanup(func() {
+		findSelf, processCwd, processHolder, claudeStopHookState = savedFind, savedCwd, savedHolder, savedHook
+	})
+	claudeStopHookState = func() (string, error) { return "installed", nil }
+	findSelf = func(string, string) (registry.Candidate, error) {
+		return registry.Candidate{Kind: "claude", Target: "claude:" + strconv.Itoa(pid), NativeSession: "session-7", Config: json.RawMessage(`{"config_dir":"` + configDir + `","pid":` + strconv.Itoa(pid) + `}`)}, nil
+	}
+	processCwd = func(int) (string, error) { return "/work/pi-proj", nil }
+	processHolder = func(pid int) (launch.HolderIdentity, error) {
+		return launch.HolderIdentity{PID: pid, ProcessStart: "1"}, nil
+	}
+	if code, err := attach([]string{"--self", "--link", "example"}, io.Discard, io.Discard); code != 0 || err != nil {
+		t.Fatalf("attach = %d, %v; want a link share using the profile", code, err)
+	}
+	mf, err := manifest.Load(manifest.DefaultPath(stateDir))
+	if err != nil || len(mf.Links) != 1 || len(mf.Links[0].Shares) != 1 || mf.Links[0].Shares[0].Tools != "work" {
+		t.Fatalf("shares = %+v, %v; want one default-profile share", mf.Links, err)
 	}
 }
 

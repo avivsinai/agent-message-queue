@@ -561,6 +561,22 @@ type linkInfo struct {
 	// ToolProfiles are the tool profile names the server grants; nil when
 	// the server does not say.
 	ToolProfiles *[]string `json:"tool_profiles,omitempty"`
+	// DefaultToolProfile is the server's default for a new share, when it
+	// names one and grants that same profile.
+	DefaultToolProfile string `json:"default_tool_profile,omitempty"`
+}
+
+// defaultProfile accepts the profile the server declares as a new share's
+// default only when it names a valid profile and grants that same profile.
+func (i linkInfo) defaultProfile() string {
+	p := i.DefaultToolProfile
+	if p == "" || manifest.ValidLinkShare(manifest.LinkShare{Binding: "session", Consent: "passkey", Tools: p}) != nil {
+		return ""
+	}
+	if i.ToolProfiles != nil && !slices.Contains(*i.ToolProfiles, p) {
+		return ""
+	}
+	return p
 }
 
 // grantedProfiles is the server's profile list with every name that is not
@@ -612,7 +628,7 @@ func (ls *linkSet) refreshToolProfiles(ctx context.Context, name string) {
 	if err != nil || now.DeviceID != pin.DeviceID || now.ServerID != pin.ServerID {
 		return
 	}
-	now.ToolProfiles = info.grantedProfiles()
+	now.ToolProfiles, now.DefaultToolProfile = info.grantedProfiles(), info.defaultProfile()
 	if err := linkio.RewritePin(ls.stateDir, name, now); err != nil && !errors.Is(err, os.ErrNotExist) {
 		say(ls.stderr, "link %s: record the server's tool profiles: %v", name, err)
 	}
@@ -725,7 +741,7 @@ func linkAdd(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe)
 		return nil, protocol.ExitActionRequired, err
 	}
 	pin := linkio.Pin{API: base, URL: info.LinkURL, ServerID: info.ServerID, DeviceID: rep.DeviceID, User: rep.User,
-		DeviceName: *deviceName, RPID: ck.RPID, Origin: ck.Origin, ToolProfiles: info.grantedProfiles()}
+		DeviceName: *deviceName, RPID: ck.RPID, Origin: ck.Origin, ToolProfiles: info.grantedProfiles(), DefaultToolProfile: info.defaultProfile()}
 	if err := linkio.WritePin(stateDir, name, pin); err != nil {
 		return nil, protocol.ExitError, err
 	}

@@ -57,7 +57,7 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	name := fs.String("name", "", "binding name (default <handle>-<project>-<session>, or the native target)")
 	linkName := fs.String("link", "", "share this session with the linked server of that name (implies --native)")
 	consent := fs.String("consent", "passkey", "with --link: passkey, or local to also confirm each task on this machine")
-	tools := fs.String("tools", "read", "with --link: the server tool profile agents in this session may call; empty for none")
+	tools := fs.String("tools", "read", "with --link: the server tool profile agents in this session may call (default: the server's default profile, else read); empty for none")
 	if err := fs.Parse(args); err != nil {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
@@ -68,7 +68,11 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "attach needs --self")
 	}
 	linkFlags := false
-	fs.Visit(func(f *flag.Flag) { linkFlags = linkFlags || f.Name == "consent" || f.Name == "tools" })
+	toolsGiven := false
+	fs.Visit(func(f *flag.Flag) {
+		linkFlags = linkFlags || f.Name == "consent" || f.Name == "tools"
+		toolsGiven = toolsGiven || f.Name == "tools"
+	})
 	if *linkName == "" && linkFlags {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--consent and --tools apply only with --link")
 	}
@@ -143,6 +147,9 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		pin, err := linkio.LoadPin(stateDir, *linkName)
 		if err != nil {
 			return protocol.ExitActionRequired, fmt.Errorf("link %s is not linked on this machine (%v); run amq-remote link add again", *linkName, err)
+		}
+		if !toolsGiven && pin.DefaultToolProfile != "" {
+			*tools = pin.DefaultToolProfile
 		}
 		if err := checkToolProfile(pin, *linkName, *tools); err != nil {
 			return protocol.ExitUsage, err

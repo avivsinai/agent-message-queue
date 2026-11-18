@@ -103,7 +103,10 @@ type LinkRequest struct {
 	Tool           string          `json:"tool,omitempty"`
 	Arguments      json.RawMessage `json:"arguments,omitempty"`
 	IdempotencyKey string          `json:"idempotency_key,omitempty"`
-	WaitMS         int64           `json:"wait_ms,omitempty"`
+	// Binding names the calling session's native binding. The endpoint
+	// sends it only while that binding belongs to this link's shares.
+	Binding string `json:"binding,omitempty"`
+	WaitMS  int64  `json:"wait_ms,omitempty"`
 	// Page asks the endpoint for one of its local pages, register or
 	// confirm (ConfirmID names the held task). Token names a page for
 	// page_result. No operation carries an assertion: only the endpoint's own

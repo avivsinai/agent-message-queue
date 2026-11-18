@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/linkio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
@@ -91,10 +92,26 @@ func (ls *linkSet) request(ctx context.Context, req ipc.LinkRequest) (json.RawMe
 	case "held":
 		return json.Marshal(run.carrier.HeldTasks())
 	}
+	pin := linkio.Pin{}
+	shared := false
+	if req.Binding != "" {
+		if p, err := linkio.LoadPin(ls.stateDir, run.link.Name); err == nil {
+			pin = p
+			for _, b := range ls.bindings(run, pin) {
+				if b.Binding == req.Binding {
+					shared = true
+					break
+				}
+			}
+		}
+	}
 	var body any
 	switch req.Op {
 	case "tools":
-		body = map[string]string{"schema": "amq.remote.link.tools/1"}
+		body = map[string]any{"schema": "amq.remote.link.tools/1"}
+		if shared && pin.DefaultToolProfile != "" {
+			body.(map[string]any)["binding"] = req.Binding
+		}
 	case "call":
 		args := req.Arguments
 		if len(args) == 0 {
@@ -103,6 +120,9 @@ func (ls *linkSet) request(ctx context.Context, req ipc.LinkRequest) (json.RawMe
 		body = map[string]any{
 			"schema": "amq.remote.link.call/1", "call_id": req.CallID, "tool": req.Tool,
 			"arguments": args, "idempotency_key": req.IdempotencyKey,
+		}
+		if shared {
+			body.(map[string]any)["binding"] = req.Binding
 		}
 	case "call_get":
 		wait := min(max(req.WaitMS, 0), linkGetWait.Milliseconds()) // the contract's 0..30000
@@ -162,9 +182,29 @@ func callKey(given string) (key, callID string) {
 	return key, "c_" + key
 }
 
+// selfShareName is the native binding of the invoking session, if AMQ
+// proves its identity. A command from another process names no session.
+func selfShareName(c *common) string {
+	match, _, err := selfMatch(c)
+	if err != nil {
+		return ""
+	}
+	all, err := binding.List()
+	if err != nil {
+		return ""
+	}
+	for _, b := range all {
+		if !b.Mailbox() && match(b) {
+			return b.Name
+		}
+	}
+	return ""
+}
+
 // caller reads one call over this root's endpoint.
 type caller struct {
 	stateDir, link string
+	binding        string
 }
 
 // send runs one link.v1 call or call_get. Busy, from the server or from the
@@ -245,7 +285,7 @@ func linkCall(args []string, stderr io.Writer, probe *jsonProbe) (any, int, erro
 	if err != nil {
 		return nil, protocol.ExitCode(err), err
 	}
-	cl := caller{stateDir: filepath.Join(root, stateDirName), link: name}
+	cl := caller{stateDir: filepath.Join(root, stateDirName), link: name, binding: selfShareName(c)}
 	ctx, cancel := context.WithTimeout(context.Background(), linkCallWait)
 	if *wait {
 		ctx, cancel = context.WithCancel(context.Background())
@@ -265,7 +305,7 @@ func linkCall(args []string, stderr io.Writer, probe *jsonProbe) (any, int, erro
 		}
 		say(stderr, "call key %s (resume with: amq-remote link call resume %s)", key, key)
 		reply, err = cl.send(ctx, ipc.LinkRequest{Name: name, Op: "call", CallID: callID, Tool: pos[0],
-			Arguments: json.RawMessage(*argsJSON), IdempotencyKey: key, WaitMS: linkCallWait.Milliseconds()})
+			Arguments: json.RawMessage(*argsJSON), IdempotencyKey: key, WaitMS: linkCallWait.Milliseconds(), Binding: cl.binding})
 	}
 	if err == nil && *wait {
 		reply, err = cl.follow(ctx, reply, false)
@@ -293,7 +333,7 @@ func linkTools(args []string, probe *jsonProbe) (any, int, error) {
 	if err != nil {
 		return nil, protocol.ExitCode(err), err
 	}
-	raw, err := linkIPC(filepath.Join(root, stateDirName), ipc.LinkRequest{Name: name, Op: "tools", WaitMS: linkCallWait.Milliseconds()})
+	raw, err := linkIPC(filepath.Join(root, stateDirName), ipc.LinkRequest{Name: name, Op: "tools", WaitMS: linkCallWait.Milliseconds(), Binding: selfShareName(c)})
 	if err != nil {
 		return nil, 0, err
 	}
@@ -317,7 +357,7 @@ func mcpServe(args []string, stdin io.Reader, stdout, stderr io.Writer, probe *j
 	if err != nil {
 		return protocol.ExitCode(err), err
 	}
-	m := &mcpServer{cl: caller{stateDir: filepath.Join(root, stateDirName), link: name}, out: json.NewEncoder(stdout), stderr: stderr,
+	m := &mcpServer{cl: caller{stateDir: filepath.Join(root, stateDirName), link: name, binding: selfShareName(c)}, out: json.NewEncoder(stdout), stderr: stderr,
 		cancels: map[string]context.CancelFunc{}}
 	sc := bufio.NewScanner(stdin)
 	sc.Buffer(make([]byte, 64*1024), ipc.LinkRecordBytes)
@@ -428,7 +468,7 @@ func (m *mcpServer) reply(id json.RawMessage, result any, e *rpcError) {
 }
 
 func (m *mcpServer) toolsList(id json.RawMessage) {
-	raw, err := linkIPC(m.cl.stateDir, ipc.LinkRequest{Name: m.cl.link, Op: "tools", WaitMS: linkCallWait.Milliseconds()})
+	raw, err := linkIPC(m.cl.stateDir, ipc.LinkRequest{Name: m.cl.link, Op: "tools", WaitMS: linkCallWait.Milliseconds(), Binding: m.cl.binding})
 	var cat struct {
 		Tools []struct {
 			Name        string          `json:"name"`
@@ -468,7 +508,7 @@ func (m *mcpServer) toolsCall(ctx context.Context, id json.RawMessage, params js
 	}
 	key, callID := callKey("")
 	reply, err := m.cl.send(ctx, ipc.LinkRequest{Name: m.cl.link, Op: "call", CallID: callID, Tool: p.Name,
-		Arguments: p.Arguments, IdempotencyKey: key, WaitMS: linkCallWait.Milliseconds()})
+		Arguments: p.Arguments, IdempotencyKey: key, WaitMS: linkCallWait.Milliseconds(), Binding: m.cl.binding})
 	if err == nil {
 		reply, err = m.cl.follow(ctx, reply, true)
 	}
