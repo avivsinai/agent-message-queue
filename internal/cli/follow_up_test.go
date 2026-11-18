@@ -2,8 +2,10 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,5 +128,47 @@ func TestDoctorOpsReportsPendingFollowUps(t *testing.T) {
 	due, _ := time.Parse(time.RFC3339, alice.NextFollowUpDue)
 	if note := followUpRowNote(*alice, due.Add(-12*time.Minute)); note != ", 2 follow-ups (next due in 12m)" {
 		t.Fatalf("text row note = %q", note)
+	}
+}
+
+// The one message that arms a follow-up carries that same due to whoever
+// receives it; the drain explains it as a time, not an enforcement.
+func TestDrainShowsTheReplyTimeOfARequestWithFollowUp(t *testing.T) {
+	root := initFollowUpRootForTest(t)
+	if _, err := captureStdout(t, func() error {
+		return runSend([]string{"--root", root, "--me", "alice", "--to", "bob", "--kind", "todo", "--follow-up", "30m", "--body", "review the parser", "--json"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var timer followup.Timer
+	files, err := os.ReadDir(fsq.AgentFollowUps(root, "alice"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("timer files = %v, %v; want exactly one timer", files, err)
+	}
+	data, err := os.ReadFile(filepath.Join(fsq.AgentFollowUps(root, "alice"), files[0].Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &timer); err != nil {
+		t.Fatal(err)
+	}
+	result := runDrainJSON(t, root, "bob", 0, false)
+	if result.Count != 1 || result.Drained[0].ReplyBy != timer.Due.Format(time.RFC3339) {
+		t.Fatalf("recipient's ReplyBy = %q, want the timer's due %s", result.Drained[0].ReplyBy, timer.Due.Format(time.RFC3339))
+	}
+	base := time.Now().Truncate(time.Second)
+	hint := replyByRelative(base.Add(30*time.Minute).UTC().Format(time.RFC3339), base)
+	if hint != "in 30m" {
+		t.Fatalf("relative = %q; want in 30m", hint)
+	}
+	if got := fmt.Sprintf("Reply by: %s (%s)", timer.Due.Format(time.RFC3339), replyByRelative(base.Add(30*time.Minute).UTC().Format(time.RFC3339), base)); got != "Reply by: "+base.Add(30*time.Minute).UTC().Format(time.RFC3339)+" (in 30m)" {
+		t.Fatalf("text drain = %q; want exact Reply by timestamp and in 30m", got)
+	}
+	line, err := captureStdout(t, func() error { return outputDrainItems(false, "bob", true, result.Drained) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(line), "  Reply by: "+timer.Due.Format(time.RFC3339)+" (") {
+		t.Fatalf("actual drain output = %q; want Reply by timestamp and relative hint", line)
 	}
 }

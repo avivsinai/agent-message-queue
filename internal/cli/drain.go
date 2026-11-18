@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"os"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
@@ -163,6 +164,16 @@ func outputDrainItems(jsonOutput bool, me string, includeBody bool, items []inbo
 		if err := writeStdout("- From: %s\n  Thread: %s\n  ID: %s\n  Subject: %s\n  Priority: %s\n  Kind: %s\n  Created: %s\n",
 			fromDisplay, item.Thread, item.ID, subject, priority, kind, item.Created); err != nil {
 			return err
+		}
+		if item.ReplyBy != "" {
+			relative := replyByRelative(item.ReplyBy, time.Now())
+			if relative == "" {
+				if err := writeStdout("  Reply by: %s\n", item.ReplyBy); err != nil {
+					return err
+				}
+			} else if err := writeStdout("  Reply by: %s (%s)\n", item.ReplyBy, relative); err != nil {
+				return err
+			}
 		}
 		if includeBody && item.Body != "" {
 			if err := writeStdout("  Body:\n%s\n", item.Body); err != nil {

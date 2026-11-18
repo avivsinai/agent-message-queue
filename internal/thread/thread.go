@@ -27,6 +27,7 @@ type Entry struct {
 	ReplyTo      string         `json:"reply_to,omitempty"`
 	ReplyProject string         `json:"reply_project,omitempty"`
 	FromProject  string         `json:"from_project,omitempty"`
+	ReplyBy      string         `json:"reply_by,omitempty"`
 	Context      map[string]any `json:"context,omitempty"`
 	RawTime      time.Time      `json:"-"`
 	// Occurrences lists every copy of the message that a scan saw. Only
@@ -74,6 +75,7 @@ func entryFromHeader(header format.Header) Entry {
 		ReplyProject: header.ReplyProject,
 		FromProject:  header.FromProject,
 		Context:      header.Context,
+		ReplyBy:      header.ReplyBy,
 	}
 	if ts, err := time.Parse(time.RFC3339Nano, header.Created); err == nil {
 		entry.RawTime = ts

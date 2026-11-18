@@ -437,6 +437,7 @@ func readInboxItem(
 		item.Context = header.Context
 		item.FromProject = header.FromProject
 		item.ReplyProject = header.ReplyProject
+		item.ReplyBy = header.ReplyBy
 		if includeBody {
 			item.Body = body
 		}

@@ -88,6 +88,9 @@ type Header struct {
 	// sends so receivers can distinguish same-handle senders from different
 	// projects (e.g., "claude" in project A vs "claude" in project B).
 	FromProject string `json:"from_project,omitempty"` // e.g., "homelab-ai"
+	// ReplyBy is when the sender expects a reply, RFC 3339 UTC; advisory,
+	// set only by a send that arms a follow-up.
+	ReplyBy string `json:"reply_by,omitempty"`
 }
 
 // Message is the in-memory representation of a message file.

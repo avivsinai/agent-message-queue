@@ -33,7 +33,7 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 	refsFlag := fs.String("refs", "", "Comma-separated related message ids")
 	waitForFlag := fs.String("wait-for", "", "Wait for receipt stage after send (drained, dlq)")
 	waitTimeoutFlag := fs.Duration("wait-timeout", 120*time.Second, "Timeout for --wait-for (0 = wait forever)")
-	followUpFlag := fs.Duration("follow-up", 0, "Notify me if the recipient has not replied after this duration (e.g. 30m)")
+	followUpFlag := fs.Duration("follow-up", 0, "Notify me if the recipient has not replied after this duration (e.g. 30m); the recipient sees the reply time")
 
 	// Co-op mode flags
 	priorityFlag := fs.String("priority", "", "Message priority: urgent, normal, low (default when --kind is set: low for status, normal otherwise)")

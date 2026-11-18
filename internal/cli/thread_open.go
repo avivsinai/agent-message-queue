@@ -67,6 +67,7 @@ type threadOpenOpener struct {
 	ReplyTo      string   `json:"reply_to"`
 	ReplyProject string   `json:"reply_project"`
 	FromProject  string   `json:"from_project"`
+	ReplyBy      string   `json:"reply_by,omitempty"`
 	Subject      string   `json:"subject"`
 	Created      string   `json:"created"`
 	Priority     string   `json:"priority"`
@@ -507,6 +508,7 @@ func obligationJSON(ob *thread.Obligation, now time.Time) threadOpenObligation {
 			ReplyTo:      opener.ReplyTo,
 			ReplyProject: opener.ReplyProject,
 			FromProject:  opener.FromProject,
+			ReplyBy:      opener.ReplyBy,
 			Subject:      opener.Subject,
 			Created:      opener.Created,
 			Priority:     opener.Priority,
