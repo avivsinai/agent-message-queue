@@ -408,7 +408,10 @@ a limit with no reset time shows when it was read. Claude Code error turns
 (`isApiErrorMessage`, model `<synthetic>`) are not spend or activity. `--json` carries `stations` and
 `dormant_mailboxes`; harness, note, notifier mode and reason, and doorbell
 parked come from `amq who --json` and `amq doctor --ops --json` at sync.
-Roster agents carry their usage and reached account limit in every view.
+Roster agents carry their usage and reached account limit in every view. A pi
+seat joins through its live bridge's `session_id`, so its spend and last
+activity attach to the seat. To read a pi home outside `~/.pi`, add
+`{"usage":{"homes":{"pi":["~/other-home"]}}}` to `~/.amq/board.json`.
 A request that names a current card's bead ID appears on that card as
 related context, with a count and the newest request's thread command. Text
 shows at most 25 Recent requests per addressee and the 25 most recently
