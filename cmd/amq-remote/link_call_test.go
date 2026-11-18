@@ -16,10 +16,14 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/core"
+	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/linkio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
+	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
 // toolServer is a linked server that offers one tool. A call to "slow"
@@ -32,6 +36,7 @@ type toolServer struct {
 	mu         sync.Mutex
 	calls      map[string]map[string]any // call_id -> final reply
 	busyOnce   map[string]bool           // call_id -> the next call_get answers busy
+	requests   []map[string]any          // bodies seen through the actual link
 }
 
 func newToolServer(t *testing.T) *toolServer {
@@ -73,6 +78,9 @@ func (ts *toolServer) serve(w http.ResponseWriter, r *http.Request) {
 		var reply any
 		switch body["schema"] {
 		case "amq.remote.link.tools/1":
+			ts.mu.Lock()
+			ts.requests = append(ts.requests, body)
+			ts.mu.Unlock()
 			reply = map[string]any{"tools": []any{map[string]any{"name": "get_issue", "description": "Read one issue.", "write": false,
 				"input_schema": map[string]any{"type": "object"}}}}
 		case "amq.remote.link.call/1":
@@ -81,6 +89,7 @@ func (ts *toolServer) serve(w http.ResponseWriter, r *http.Request) {
 			final := map[string]any{"call_id": id, "status": "ok", "result": map[string]any{"text": strings.Repeat("x", int(num(args["size"])))}}
 			ts.mu.Lock()
 			ts.calls[id] = final
+			ts.requests = append(ts.requests, body)
 			ts.mu.Unlock()
 			reply = final
 			switch body["tool"] {
@@ -116,7 +125,7 @@ func (ts *toolServer) serve(w http.ResponseWriter, r *http.Request) {
 func num(v any) float64 { n, _ := v.(float64); return n }
 
 // linkEndpoint runs the IPC face of a root whose one link is connected to ts.
-func linkEndpoint(t *testing.T, ts *toolServer) string {
+func linkEndpoint(t *testing.T, ts *toolServer, options ...func(*linkSet, *core.Endpoint)) string {
 	t.Helper()
 	root, err := os.MkdirTemp("", "arl")
 	if err != nil {
@@ -124,6 +133,10 @@ func linkEndpoint(t *testing.T, ts *toolServer) string {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	stateDir := filepath.Join(root, stateDirName)
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	key, err := linkio.MintDeviceKey(stateDir, "example")
 	if err != nil {
 		t.Fatal(err)
@@ -138,6 +151,14 @@ func linkEndpoint(t *testing.T, ts *toolServer) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var store *requests.Store
+	store, err = requests.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep := core.New(core.Config{Store: store})
+	ep.Register(fake.New("pi:s1", "e_1"))
+	t.Cleanup(func() { _ = ep.Close(); _ = store.Close() })
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go func() { _ = c.Run(ctx) }()
@@ -146,8 +167,11 @@ func linkEndpoint(t *testing.T, ts *toolServer) string {
 			t.Fatal("link never online")
 		}
 	}
-	ls := &linkSet{running: map[string]*linkRun{"example": {carrier: c, link: manifest.Link{Name: "example"}}}}
-	srv, err := ipc.Listen(stateDir, nil)
+	ls := &linkSet{root: root, stateDir: stateDir, ep: ep, running: map[string]*linkRun{"example": {carrier: c, link: manifest.Link{Name: "example"}}}}
+	for _, option := range options {
+		option(ls, ep)
+	}
+	srv, err := ipc.Listen(stateDir, ep)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,5 +318,55 @@ func TestLinkCallRefusesNullArgs(t *testing.T) {
 	_, code, err := linkCall([]string{"--root", root, "get_issue", "--args", "null"}, io.Discard, &jsonProbe{})
 	if code != protocol.ExitUsage || protocol.RefusalCode(err) != protocol.CodeInvalid {
 		t.Fatalf("--args null = %d, %v; want a usage refusal", code, err)
+	}
+}
+
+// A shared binding appears in the request bodies the endpoint sends, so
+// the linked server can apply that session's own profile rather than inheriting
+// a machine-wide one.
+func TestLinkRequestNamesSharedBindingForCallsAndTools(t *testing.T) {
+	ts := newToolServer(t)
+	var ls *linkSet
+	root := linkEndpoint(t, ts, func(s *linkSet, _ *core.Endpoint) { ls = s })
+	t.Setenv(binding.EnvPath, filepath.Join(root, "binding.json"))
+	native := binding.Binding{Root: root, Target: "pi:s1", NativeSession: "pi:s1", Name: "session"}
+	if err := binding.WriteNamed(native); err != nil {
+		t.Fatal(err)
+	}
+	profiles := []string{"work"}
+	if err := linkio.WritePin(filepath.Join(root, stateDirName), "example", linkio.Pin{URL: "ws" + strings.TrimPrefix(ts.srv.URL, "http"), ServerID: "srv_example", DefaultToolProfile: "work", ToolProfiles: &profiles}); err != nil {
+		t.Fatal(err)
+	}
+	if err := shareWithLink(filepath.Join(root, stateDirName), "example", manifest.LinkShare{Binding: "session", Consent: "passkey", Tools: "work"}); err != nil {
+		t.Fatal(err)
+	}
+	// This test invokes the endpoint directly, so the carrier's next frame
+	// must present the share just written, as the endpoint's manifest sweep
+	// would otherwise learn on its next tick.
+	ls.running["example"].link.Shares = []manifest.LinkShare{{Binding: "session", Consent: "passkey", Tools: "work"}}
+	for _, op := range []string{"tools", "call"} {
+		req := ipc.LinkRequest{Op: op, Binding: "session", Tool: "get_issue", CallID: "one"}
+		if op == "call" {
+			req.Arguments = json.RawMessage(`{"size":1}`)
+			req.IdempotencyKey = "one"
+		}
+		if _, err := ls.request(context.Background(), req); err != nil {
+			t.Fatalf("%s request = %v; this share and profile should be accepted", op, err)
+		}
+	}
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	matches := 0
+	for _, body := range ts.requests {
+		switch body["schema"] {
+		case "amq.remote.link.tools/1", "amq.remote.link.call/1":
+			matches++
+			if body["binding"] != "session" || body["schema"] == nil {
+				t.Fatalf("the request body lost the binding or schema: %+v", body)
+			}
+		}
+	}
+	if matches != 2 {
+		t.Fatalf("%d matching request bodies, want tools and call: %v", matches, ts.requests)
 	}
 }

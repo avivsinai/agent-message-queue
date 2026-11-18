@@ -507,9 +507,14 @@ Protocol: [`amq.remote.link/1`](../../docs/remote-link-protocol.md).
    add one. The manifest gains a `links` entry (`schema_version` 2), and the
    endpoint for that root starts when none runs. It prints the commands that
    share a session and use the server's tools (`link tools`, `mcp --link`).
+  A server's optional `default_tool_profile` applies when `--tools` is
+  omitted (otherwise `read`). `link tools`, `link call` and `mcp --link`
+  name the calling native binding when it is shared; an unshared caller
+  receives the server's read tools.
 3. In the session to share, from any AMQ root or none, run
    `amq-remote attach --self --link NAME` (`--consent passkey` by default, or
-   `local`; `--tools read` by default). The share names the session's
+  `local`; `--tools read` by default; the server's `default_tool_profile`
+  takes precedence when it is set). The share names the session's
    binding and runs through the endpoint of the link's root. One link in the
    machine root serves every session on the machine: a pi session in another
    AMQ root is registered with its own root and is named
@@ -728,7 +733,7 @@ successful release exits 0.
 | `--native` | `attach` | false | Drive the exact native session through the endpoint, not the AMQ mailbox. |
 | `--link NAME` | `attach` | empty | Share this session with linked server `NAME`. Implies `--native`. |
 | `--consent passkey\|local` | `attach` | `passkey` | With `--link`: `local` also holds each signed task for a confirmation on this machine. |
-| `--tools PROFILE` | `attach` | `read` | With `--link`: the server tool profile agents in this session may call. Empty for none. |
+| `--tools PROFILE` | `attach` | server default, else `read` | With `--link`: the server tool profile agents in this session may call. Defaults to the server's `default_tool_profile`, else `read`. Empty for none. |
 | `--me HANDLE` | `attach` | `AM_ME` | AMQ handle of this session. |
 | `--name NAME` | `attach`, `detach` | see below | `attach`: the binding name. `detach`: remove only the binding with this name. |
 | `--all` | `detach` | false | Remove every binding. |

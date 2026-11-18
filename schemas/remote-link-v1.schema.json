@@ -197,7 +197,10 @@
       "type": "object",
       "required": ["schema"],
       "additionalProperties": false,
-      "properties": { "schema": { "const": "amq.remote.link.tools/1" } }
+      "properties": {
+        "schema": { "const": "amq.remote.link.tools/1" },
+        "binding": { "$ref": "#/$defs/opaque", "description": "The shared binding the calling session runs in, when known. Sent only to a server whose link info states default_tool_profile." }
+      }
     },
     "tools_reply": {
       "type": "object",

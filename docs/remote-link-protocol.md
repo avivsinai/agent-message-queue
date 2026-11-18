@@ -118,6 +118,21 @@ digest). After a confirmation the request has a record and revisions like
 any other. A task whose deadline passes, or that a restart drops, has no
 record and no revision; the next hello omits its digest.
 
+## Link info
+
+Before linking, the endpoint reads the server's public link info: `server_id`,
+`link_url`, optional `tool_profiles` and optional `default_tool_profile`.
+`tool_profiles` lists the profiles the link grants; the default names the
+profile a new share takes when `attach --tools` is omitted.
+
+A server that states `default_tool_profile` accepts `binding` in a `tools`
+request. The endpoint includes the calling session's binding only while that
+native binding is actually shared with this link. A caller without a share is
+unnamed and receives the server's read tools instead of an inherited share.
+`link tools`, `link call` and `mcp --link` name a shared session in their
+`call` bodies; `call_get` and all consent operations do not name a session.
+`tools` carries `binding` only on this newer contract, never to an older server.
+
 ## Tool calls
 
 A call that ended without a result is `{"status": "error", "error": {"code"}}`
