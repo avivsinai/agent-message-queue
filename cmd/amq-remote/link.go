@@ -148,9 +148,9 @@ func (ls *linkSet) tick() {
 // wait on; only the map swap holds it.
 func (ls *linkSet) sync(mf manifest.File) {
 	ls.mu.Lock()
-	ready := ls.ctx != nil
+	parent := ls.ctx
 	ls.mu.Unlock()
-	if !ready {
+	if parent == nil {
 		return
 	}
 	retired, err := linkio.Retired(ls.stateDir)
@@ -183,8 +183,10 @@ func (ls *linkSet) sync(mf manifest.File) {
 	}
 	ls.mu.Unlock()
 	for _, l := range missing {
-		run, err := ls.newRun(l)
+		ctx, cancel := context.WithCancel(parent)
+		run, err := ls.newRun(ctx, l)
 		if err != nil {
+			cancel()
 			if !errors.Is(err, os.ErrNotExist) {
 				say(ls.stderr, "link %s: %v", l.Name, err)
 			}
@@ -193,9 +195,9 @@ func (ls *linkSet) sync(mf manifest.File) {
 		ls.mu.Lock()
 		if ls.running[l.Name] != nil || ls.retired[run.carrier.Host()] {
 			ls.mu.Unlock()
+			cancel()
 			continue
 		}
-		ctx, cancel := context.WithCancel(ls.ctx)
 		run.cancel = cancel
 		ls.running[l.Name] = run
 		ls.byHost[run.carrier.Host()] = run.carrier
@@ -206,11 +208,10 @@ func (ls *linkSet) sync(mf manifest.File) {
 				say(ls.stderr, "link %s: the server revoked this device; the link is retired", name)
 			}
 		}()
-		go ls.refreshToolProfiles(ctx, name)
 	}
 }
 
-func (ls *linkSet) newRun(l manifest.Link) (*linkRun, error) {
+func (ls *linkSet) newRun(ctx context.Context, l manifest.Link) (*linkRun, error) {
 	key, err := linkio.LoadDeviceKey(ls.stateDir, l.Name)
 	if err != nil {
 		return nil, err
@@ -228,7 +229,8 @@ func (ls *linkSet) newRun(l manifest.Link) (*linkRun, error) {
 	name := l.Name
 	c, err := linkio.New(linkio.Config{
 		Name: name, Pin: pin, StoreID: storeID, Key: key, Version: ls.version,
-		Bindings: func() []linkio.Binding { return ls.bindings(run, pin) },
+		Connected: func() { go ls.refreshToolProfiles(ctx, name) },
+		Bindings:  func() []linkio.Binding { return ls.bindings(run, pin) },
 		ConsentKeyRevoked: func(id string) {
 			if _, err := linkio.DropConsentKey(ls.stateDir, name, id); err != nil {
 				say(ls.stderr, "link %s: drop consent key: %v", name, err)
@@ -602,9 +604,9 @@ func linkHTTPClient() *http.Client {
 }
 
 // refreshToolProfiles rereads the tool profiles the server grants into the
-// link's pin, where attach checks --tools. It runs once per link run, beside
-// the carrier, so a slow server never holds up the link, and ends with the
-// run. An answer from another server id, any error, or a link removed or
+// link's pin, where attach checks --tools. It runs after each connection of the link,
+// alongside the carrier so a slow server never holds up the link, and ends
+// with the run. An answer from another server id, any error, or a link removed or
 // added again meanwhile keeps the pin as it is.
 func (ls *linkSet) refreshToolProfiles(ctx context.Context, name string) {
 	pin, err := linkio.LoadPin(ls.stateDir, name)
