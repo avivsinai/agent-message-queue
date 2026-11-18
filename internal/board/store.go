@@ -1621,6 +1621,12 @@ func (s Store) verifyMessages(ctx context.Context, state *Snapshot) error {
 		metadata.Body = ""
 		expectedMetadata := expected
 		expectedMetadata.Body = ""
+		// A snapshot written before the projection carried reply_by has none;
+		// its absence is not a mismatch, and the projection of the checked
+		// evidence then supplies it.
+		if metadata.ReplyBy == "" {
+			expectedMetadata.ReplyBy = ""
+		}
 		a, _ := json.Marshal(metadata)
 		b, _ := json.Marshal(expectedMetadata)
 		if string(a) != string(b) || (message.Body != "" && message.Body != entry.Body) {

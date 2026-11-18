@@ -117,6 +117,9 @@ func Check(m Model, cfg Config, now time.Time) ([]Problem, error) {
 				recipient = rec
 			}
 		}
+		if !human && recipient == nil {
+			continue
+		}
 		sender := r.Message.From
 		if r.Sender != nil {
 			sender = participantLabel(*r.Sender)
