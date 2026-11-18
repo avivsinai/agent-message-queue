@@ -50,6 +50,8 @@ reads the thread before taking a default or closing a ruling. The command exits 
 on problems, and 1 on a stale or absent snapshot. A seat whose harness records
 no activity cannot produce `in_progress_not_worked` without that evidence.
 
+An unclosed request older than `obligation_max_age` (14 days by default) expires, as in `amq thread open`. It leaves Needs you and the overdue check. Set `obligation_max_age` to `0` to disable expiry.
+
 ## Retro
 
 Run `amq-board retro` every two weeks, or after a bad day.

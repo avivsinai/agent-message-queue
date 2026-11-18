@@ -491,7 +491,8 @@ func (x requestIndex) digest(r Request) string {
 // cancelled. Recent requests are grouped by the renderers; here they are
 // ordered no-direct-reply first, then newest first.
 func (s Snapshot) RequestView(now time.Time) RequestView {
-	return s.requestView(now, s.openRequests())
+	open, _ := s.projectAsks(DefaultConfig().obligationCutoff(now))
+	return s.requestView(now, open)
 }
 
 func (s Snapshot) requestView(now time.Time, open map[string]bool) RequestView {

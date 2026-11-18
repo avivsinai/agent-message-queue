@@ -62,7 +62,7 @@ func (s Snapshot) Retro(since time.Time) RetroView {
 				}
 			}
 		}
-		for _, ob := range ns.obligations(s) {
+		for _, ob := range ns.obligations(s, time.Time{}) {
 			if ob.Opener.RawTime.IsZero() || ob.Opener.RawTime.Before(since) {
 				continue
 			}

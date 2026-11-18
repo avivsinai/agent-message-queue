@@ -149,7 +149,7 @@ func runThreadOpen(args []string) error {
 	owedByFlag := fs.String("owed-by", "", "Comma-separated handles that owe a reply")
 	owedToFlag := fs.String("owed-to", "", "Comma-separated handles that are owed a reply")
 	kindFlag := fs.String("kind", "", "Comma-separated opener kinds: review_request, question, todo")
-	maxAgeFlag := fs.String("max-age", "14d", "Ignore openers older than this (e.g. 14d, 36h; 0 = read every file)")
+	maxAgeFlag := fs.String("max-age", fmt.Sprintf("%dd", thread.DefaultObligationMaxAge/(24*time.Hour)), "Ignore openers older than this (e.g. 14d, 36h; 0 = read every file)")
 	limitFlag := fs.Int("limit", 0, "List at most N obligations, oldest first, after the whole window is reduced (0 = no limit)")
 	schemaFlag := fs.Int("json-schema", 1, "JSON schema version: 1 (requires --json)")
 	followFlag := fs.Bool("follow", false, "Follow each listed request and each request routed outside the scan, as trace --follow does")
