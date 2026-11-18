@@ -92,13 +92,16 @@ func (ls *linkSet) request(ctx context.Context, req ipc.LinkRequest) (json.RawMe
 	case "held":
 		return json.Marshal(run.carrier.HeldTasks())
 	}
-	pin, pinErr := linkio.LoadPin(ls.stateDir, run.link.Name)
+	pin, pinErr := linkio.Pin{}, error(nil)
 	shared := false
-	if pinErr == nil && req.Binding != "" {
-		for _, b := range ls.bindings(run, pin) {
-			if b.Binding == req.Binding {
-				shared = true
-				break
+	if req.Binding != "" {
+		if p, err := linkio.LoadPin(ls.stateDir, run.link.Name); err == nil {
+			pin = p
+			for _, b := range ls.bindings(run, pin) {
+				if b.Binding == req.Binding {
+					shared = true
+					break
+				}
 			}
 		}
 	}

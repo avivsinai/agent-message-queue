@@ -361,7 +361,7 @@ func TestLinkRequestNamesSharedBindingForCallsAndTools(t *testing.T) {
 		switch body["schema"] {
 		case "amq.remote.link.tools/1", "amq.remote.link.call/1":
 			matches++
-			if body["binding"] != "session" || body["schema"] == nil {
+			if body["binding"] != "session" {
 				t.Fatalf("the request body lost the binding or schema: %+v", body)
 			}
 		}
