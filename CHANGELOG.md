@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.154.1](https://github.com/avivsinai/agent-message-queue/compare/v0.154.0...v0.154.1) (2026-11-18)
+
+
+### Bug Fixes
+
+* **board:** a request older than the obligation max age is expired on the board too ([#1551](https://github.com/avivsinai/agent-message-queue/issues/1551)) ([9c51d86](https://github.com/avivsinai/agent-message-queue/commit/9c51d86c9fabec863a2085091d62b8d0a3d28d04))
+* **remote:** the endpoint reads a server's link info again at each connect ([#1553](https://github.com/avivsinai/agent-message-queue/issues/1553)) ([304c771](https://github.com/avivsinai/agent-message-queue/commit/304c771f57d9aba3fbb4cf8d87f96ddebc03cafc))
+
 ## [0.154.0](https://github.com/avivsinai/agent-message-queue/compare/v0.153.2...v0.154.0) (2026-11-18)
 
 
