@@ -33,7 +33,9 @@ scan mailboxes itself or fall back to a different source.
 
 An unclosed request older than `obligation_max_age` (14 days by default) expires, as in `amq thread open`. It leaves Needs you and the overdue check. Set `obligation_max_age` to `0` to disable expiry.
 
-A seat whose harness records no activity (for example a pi seat) can only show as stalled or as free with ready work.
+The in-progress inactivity rule requires an observed activity time. Other rules
+use their own evidence, including unread mail, ready assignments and observed
+account limits.
 
 Exit `0` when no floor problem exists, `6` when at least one exists, and `1` when the snapshot cannot decide (including stale or missing data). `--json` emits the same rows in `amq/board-check/v1`.
 
@@ -437,8 +439,9 @@ view lists up to 25 Recent requests without a direct reply, with their
 commands in Details, and the newest 5 with a direct reply from every scoped
 recipient as compact rows; the rest are counted. The searchable Older
 requests view lists the newest 200 and counts the rest. An opinion's quote names its sender and
-age, never a message key. Neither face shows message bodies; `--json` and
-`model.json` keep every record and body.
+age. The text and HTML views withhold bodies. `--json` and `model.json` include
+the published request records and their bodies. Inspect the original thread when
+you need the text of a reply referenced by key.
 
 Static HTML is self-contained and escapes source content. The live server binds
 127.0.0.1 on a free port. Its random token protects every route; Host checks
@@ -456,8 +459,8 @@ last rendered snapshot with a visible source error. `~/.amq/board/serve.json`
 
 The optional `amq-board` Claude Code panel reads `amq/board-pane/v1` from the
 live server's token-protected `pane.json` or `amq-board --pane-json`. Both use
-one bounded projection of the published model. Full `--json` and `model.json`
-remain complete evidence exports.
+one bounded projection of the published model. `--json` and `model.json` export
+the full published model, including its source coverage.
 
 The pane shows all current task totals and up to 100 waiting tasks, with omitted
 row counts. It includes up to 32 source summaries and states any omissions.

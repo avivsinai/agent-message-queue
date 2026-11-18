@@ -128,9 +128,13 @@ and daemon-free.
 
 Peer exchange carries v3 transfer records
 ([format](../../docs/adr-bridge-protocol.md#transfer-record-v3)).
-`amq-bridge sync --stdio` runs the initiator side and
-`amq-bridge listen --stdio` the responder side. The initiator offers records
-from `bridge/tx/<peer>/`. The receiver stages each wanted record under
+On the initiating host, run
+`amq-bridge sync --root "$AM_ROOT" --peer "$responder_host" --stdio`. On the
+responding host, run
+`amq-bridge listen --root "$AM_ROOT" --peer "$initiator_host" --stdio`. The
+operator connects their standard streams through a duplex pipe. Use one exchange
+per peer. The initiator offers records from `bridge/tx/<peer>/`. The receiver
+stages each wanted record under
 `bridge/rx/<peer>/`, files it into its Maildir, and answers with a signed
 `STORED` receipt. The sender removes a record from `bridge/tx/<peer>/` only
 after it verifies that receipt. Peer exchange never uses `sent/`; that

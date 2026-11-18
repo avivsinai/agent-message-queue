@@ -12,9 +12,9 @@ AMQ accepts focused fixes, features, and documentation improvements.
 Use the Go toolchain in `go.mod`. `make lint` requires the version of
 `golangci-lint` pinned in the Makefile. Documentation generation uses Python 3.
 
-Start by installing the git hooks so every push runs the static checks
-locally. Run this in your primary clone before creating worktrees, so the
-hook lands in the shared `.git/hooks` path that all worktrees use:
+Install the pre-push hook from the primary checkout or a linked worktree. The
+script writes to their common hooks directory. If `core.hooksPath` is configured,
+check which hook Git will invoke.
 
 ```bash
 ./scripts/install-hooks.sh
@@ -33,9 +33,10 @@ make fmt
 go test ./internal/format  # Example: check the package you changed.
 ```
 
-Run the tests of the packages you changed locally. CI runs the full `make ci`
-gate: `make check` plus all tests, race tests, and smoke checks. Do not run
-installation or shared-home tests against a working agent environment.
+Run the tests for the packages you changed. `make ci` runs static checks, the
+package suite, smoke, contract and hook-environment checks. Hosted CI runs a
+separate race check for `./internal/remote/activity/`. Run installation and
+shared-home tests in an isolated environment.
 
 When command help changes, run `make docs-cli` and include the regenerated
 [CLI reference](docs/cli.md). Edit canonical agent skills under `skills/` and

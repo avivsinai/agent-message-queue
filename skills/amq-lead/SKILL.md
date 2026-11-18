@@ -74,8 +74,8 @@ When the work takes design, write the design yourself and brief the build.
 ## Decide on a clock
 
 The owner's handle is `user`. A question to `user` shows on the board under
-Needs you until it is closed. The exact commands are in the amq-cli skill,
-"Ask the owner without stopping".
+Needs you until it is closed or 14 days old. The exact commands are in the
+amq-cli skill, "Ask the owner without stopping".
 
 - **A question** is one decision: the options with the cost of each, the one
   you recommend, what happens if the answer comes late, and the default.
@@ -91,7 +91,9 @@ Needs you until it is closed. The exact commands are in the amq-cli skill,
   spends, or speaks for the owner. Ask with no follow-up time, say "no
   default", and work on something else.
 - The owner answers where they like: in a chat, from the phone, or with a
-  reply. The session that hears the answer closes the question with it.
+  reply. The session that asked closes the question with the answer; a
+  session that only heard it sends the answer and the question's ID to the
+  one that asked.
 - Never stop a turn on a question when other work is ready.
 
 ## Limits you keep

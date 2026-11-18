@@ -154,10 +154,12 @@ the relay and checks it itself. AMQ verifies nothing for the layer.
 }
 ```
 
-The receipt is the only admission proof. pi's `sendUserMessage` returns
-nothing and reports failures out of band, so no other signal proves that a
-request reached the session. The extension writes the receipt create-new
-(temporary file, hard link, directory fsync) immediately before it hands the
+The receipt is durable evidence of admission for this ref before a terminal
+outcome exists. A retained `completed`, `failed` or `cancelled` event for a
+tracked run also proves it ran. Use the
+[recovery table](#adapter-recovery-and-evidence) for refusals and uncertain
+outcomes. The extension writes the receipt create-new (temporary file, hard link,
+directory fsync) immediately before it hands the
 text to pi, in the same synchronous step. A link that fails because the
 receipt exists means another bridge process claimed the ref; the extension
 then does not deliver. This ordering makes delivery at-most-once.
@@ -499,9 +501,9 @@ never redispatches. A lookup of an unseen ref reads the same files.
 | `refused` | rejected with the mapped code; admitted only if a receipt exists. `Submit` returns a refusal it observes during its receipt wait at once. |
 | Unreadable or foreign receipt, or refused event stream | error for that ref; the adapter keeps the record uncertain. |
 
-`Inspect` advertises submit evidence `submitted` and completion evidence
-`run_terminal`. The adapter never advertises `admitted` for the session:
-admission is proven per ref by its receipt, not by a session capability.
+`Inspect` advertises session-level submit evidence `submitted` and completion
+evidence `run_terminal`. Interpret admission and completion for an individual ref
+using the table above.
 
 ## The acp-host wire
 

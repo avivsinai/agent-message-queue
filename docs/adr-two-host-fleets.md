@@ -51,11 +51,10 @@ Bidirectional exchange means all of:
 3. **Reply on the same opaque thread ID** — the reply uses that thread ID
    as an opaque correlation key, not as routing authority.
 
-The peer-exchange courier runs `amq-bridge sync --stdio` on the initiator and
-`amq-bridge listen --stdio` on the responder, over a pipe the operator
-provides; `amq-bridge` does not dial or listen. The session is duplex, so mail
-and signed outcomes move in both directions. The peer courier does not require
-inbound SSH to the initiator. The signed envelope and local apply path are
+The operator connects an initiating and responding peer over a duplex pipe. Use
+the exact [peer exchange commands](../cmd/amq-bridge/README.md#peer-exchange) on
+the two hosts. Mail and signed outcomes travel in both directions. The initiator
+needs no inbound network login. The signed envelope and local apply path are
 frozen in [the companion bridge protocol ADR](adr-bridge-protocol.md).
 The manually operated `amq-bridge apply-file` path remains available for
 recovery and file-based exchange.
