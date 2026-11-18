@@ -16,9 +16,11 @@ own worktrees, dependency scheduling, task decomposition, and PR landing.
   lifecycle.
 - **Robust.** Delivery is crash-safe. Uncertain state fails closed with a
   typed refusal that names the reason; there is no silent fallback.
-- **Harness integration.** An explicit launch can start the configured harness. An
-  attachment uses the identified running session. Require the requested wake
-  capability and report an unavailable capability with the operator's next action.
+- **Harness-agnostic.** AMQ works the same across harnesses and terminals
+  through the seams they already expose. It starts a harness only on the
+  user's explicit launch command, and it never restarts or reconfigures a
+  user's harness. When a capability is missing, it falls back and prints a
+  one-line reason.
 
 ## Release Contract
 

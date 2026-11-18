@@ -137,8 +137,8 @@ before that moment; a late answer with no status reads as a stopped seat.
 ## Ask the owner without stopping
 
 The owner's handle is `user`. A request to `user` is an obligation like any
-other: it shows on the board under Needs you until it is closed. Do not hold
-a turn open for the answer.
+other: it shows on the board under Needs you until it is closed or 14 days old. Do
+not hold a turn open for the answer.
 
 ```bash
 # A question with a default: one decision per message.
@@ -173,7 +173,8 @@ The owner answers in a chat, from the phone (a session connected with
 `/amq-remote` in Claude Code or `$amq-remote` in Codex has a channel), or
 with a reply as `user`. A reply as `user`
 with `--kind answer` closes the question. An answer that you hear anywhere
-else: close the request the same way, with the answer in the body.
+else: if you asked, close the request the same way, with the answer in the
+body; if another session asked, send it the answer and the question's ID.
 `amq thread open --all-sessions --include-base --max-age 0 --owed-by user`
 lists everything the owner still owes in this project.
 
