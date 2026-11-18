@@ -37,6 +37,19 @@ counts only recent requests to the owner with no direct reply observed. The
 Requests section counts requests to agents with no direct reply as the
 agents' bookkeeping, with its coverage notes.
 
+## Check the floor
+
+After `amq-board sync`, run `amq-board check` (`--json` for the same rows).
+Each line is one problem for the lead to act on: dispatch what is ready,
+ask the seat once, then replace it. It is not proof that a process stopped.
+
+`seat_stalled`, `seat_at_limit`, `ready_not_started` and
+`in_progress_not_worked` are the only kinds. The command exits 0 on
+an empty list, 6 on problems, and 1 on a stale or absent snapshot. Owner
+actions stay under Needs you, not here. A seat whose harness records no
+activity (for example a pi seat) can only show as stalled or as free with
+ready work.
+
 ## Classify recent requests
 
 Use the current host harness model. Choose a classifier name that records

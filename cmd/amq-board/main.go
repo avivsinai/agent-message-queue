@@ -40,6 +40,7 @@ const usage = `Usage: amq-board [--json | --pane-json | --html [--out FILE]]
        amq-board adopt-suggestion --suggestion ID --choice ID --generation N [--confirm-independent]
        amq-board ignore-suggestion --suggestion ID --generation N
        amq-board serve
+       amq-board check [--json]
        amq-board classify --classifier NAME [--next N] --json
        amq-board classify --file LABELS.json
        amq-board admit --message KEY --title OUTCOME [--anchor ANCHOR]
@@ -59,7 +60,9 @@ const usage = `Usage: amq-board [--json | --pane-json | --html [--out FILE]]
 Views read the published project snapshot. Only sync reads sources.
 Suggestion workers examine one whole message per iteration (up to eight units),
 prefer current messages, and skip unchanged attempts. Select an exact message with
-suggest --message KEY when you need a specific episode.
+suggest --message KEY when you need a specific episode. The board check command
+prints one line per floor problem from the published snapshot and exits 6 when
+there is one; it refuses a snapshot older than the liveness window.
 First initialization is explicit; an existing or interrupted store needs
 recovery and is never replaced. Native Beads and admitted AMQ outcomes
 have permanent task IDs. Requests are outside task counts; classify exports
@@ -77,6 +80,8 @@ func run(args []string) int {
 		switch args[0] {
 		case "suggest", "suggestions", "adopt-suggestion", "ignore-suggestion":
 			return runSuggestions(args[0], args[1:])
+		case "check":
+			return runCheck(args[1:])
 		case "sync":
 			return runSync(args[1:])
 		case "classify":
