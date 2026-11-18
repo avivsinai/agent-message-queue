@@ -41,6 +41,9 @@ the enrolled machine agent credential (see
 [Machine agent credential](#machine-agent-credential)), and `amq-acp` reads
 `~/.amq/acp.settings` at the start of each turn.
 
+Each time a link connects, `amq-remote serve` rereads the server's link info
+to refresh the granted tool profiles and the default profile.
+
 - A change applies without a restart.
 - A refused edit (bad syntax, unknown key, failed validation, failed trust
   check) keeps the last good value and is reported once, not on every check.

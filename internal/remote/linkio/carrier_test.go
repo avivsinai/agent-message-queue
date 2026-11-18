@@ -281,6 +281,26 @@ func TestLostAckIsResent(t *testing.T) {
 	waitPublished(t, c, snaps[1])
 }
 
+// On 2026-11-18 a server's link info changed, but the endpoint did not
+// read it on reconnect until it was restarted.
+func TestConnectedOnEachWelcome(t *testing.T) {
+	fs := newFakeServer(t)
+	calls := 0
+	_, wait := startCarrier(t, fs, newClock(), func(cfg *Config) {
+		cfg.Connected = func() { calls++ }
+	})
+	fs.waitWelcome()
+	fs.close(closeServerRestart)
+	fs.waitWelcome()
+	fs.close(CloseRevoked)
+	if err := wait(); !errors.Is(err, ErrRevoked) {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("Connected called %d times for two connections, want 2", calls)
+	}
+}
+
 // A reconnect starts a new generation with an empty cache: every revision
 // still owed is offered again, and an answer from the old generation counts
 // for nothing.

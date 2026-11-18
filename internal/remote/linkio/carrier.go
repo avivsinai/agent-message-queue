@@ -76,6 +76,9 @@ type Config struct {
 	Bindings func() []Binding
 	// ConsentKeyRevoked drops a consent key the server says was removed.
 	ConsentKeyRevoked func(credentialID string)
+	// Connected runs once after each connection reaches welcome, outside the
+	// carrier's lock. It must not block the connection.
+	Connected func()
 	// Revoked retires the sink after a permanent revoke (close 4010).
 	Revoked func()
 	// Handle runs an admitted command (core.Endpoint.Handle).
@@ -623,6 +626,9 @@ func (c *Carrier) serveOnce(ctx context.Context) error {
 	c.maxCalls = welcome.Limits.ToolCallsInFlight
 	c.status = Status{State: "online", Gen: gen}
 	c.mu.Unlock()
+	if c.cfg.Connected != nil {
+		c.cfg.Connected()
+	}
 	if c.logged != "online" {
 		c.logged = "online"
 		c.cfg.Logf("link %s: online", c.cfg.Name)

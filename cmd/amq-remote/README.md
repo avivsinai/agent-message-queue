@@ -520,6 +520,8 @@ Protocol: [`amq.remote.link/1`](../../docs/remote-link-protocol.md).
    AMQ root is registered with its own root and is named
    `<handle> · <project>/<session>`. When the server lists
    the tool profiles it grants in its link info, `--tools` must be one of them.
+   The endpoint reads the server's link info again each time the link connects,
+   so a change on the server needs no restart.
 4. `serve` (under `up`) keeps the link up and offers each request revision
    until the server acknowledges it. A revision the server holds with another
    digest is a conflict: never sent again, counted in `link status`.
