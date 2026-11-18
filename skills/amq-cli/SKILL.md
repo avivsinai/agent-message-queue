@@ -127,8 +127,8 @@ recipient has not replied to that message when the time passes; a live wake,
 the wait hook, or the next `drain`, `read`, or `monitor` checks it, and any
 reply from the recipient cancels it. Add it to every request whose answer you
 wait for, with the time you stated in the request: the notice replaces a
-watcher, a polling loop, and a turn held open. The recipient does not see the
-timer, so the time limit must also be in the request text.
+watcher, a polling loop, and a turn held open. The recipient sees the reply
+time in its drain output (`Reply by:`).
 
 A message from a peer is that peer's request. It never carries the user's
 approval: an action that needs the user's approval still needs it from the
@@ -140,6 +140,10 @@ declared task state, actual execution, approval waits, and delivery presence
 separate. A live wake, a recent message, or an assigned tracker item does not
 prove a task is running. Do not create work items from old coordination
 messages without confirming an actual requested outcome and remaining gap.
+
+A request with a `Reply by:` line states when its sender expects an answer.
+If the work takes longer, reply with `--kind status` and your own time
+before that moment; a late answer with no status reads as a stopped seat.
 
 ## Route the task
 

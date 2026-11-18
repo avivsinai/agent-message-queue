@@ -82,10 +82,6 @@ func Check(m Model, cfg Config, now time.Time) ([]Problem, error) {
 				}
 			}
 			state := string(st.State)
-			seat := st.Handle
-			if st.Session != "" && st.HandleSessions == 0 {
-				seat = st.Session + "/" + seat
-			}
 			for _, id := range st.Now {
 				row, ok := cards[id]
 				if !ok {

@@ -19,6 +19,7 @@ type inboxItem struct {
 	MovedToCur    bool           `json:"moved_to_cur"`
 	MovedToDLQ    bool           `json:"moved_to_dlq,omitempty"`
 	ParseError    string         `json:"parse_error,omitempty"`
+	ReplyBy       string         `json:"reply_by,omitempty"`
 	FailureReason string         `json:"-"`
 	Filename      string         `json:"-"` // actual filename on disk
 	SortKey       time.Time      `json:"-"`

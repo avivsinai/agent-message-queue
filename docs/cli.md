@@ -274,7 +274,7 @@ Options:
   -context string
         JSON context object or @file.json
   -follow-up duration
-        Notify me if the recipient has not replied after this duration (e.g. 30m)
+        Notify me if the recipient has not replied after this duration (e.g. 30m); the recipient sees the reply time
   -from-session string
         Source session for setup-terminal cross-session sends
   -ignore-session-pin

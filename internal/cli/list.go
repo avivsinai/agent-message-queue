@@ -18,6 +18,7 @@ type listItem struct {
 	Subject  string    `json:"subject"`
 	Thread   string    `json:"thread"`
 	Created  string    `json:"created"`
+	ReplyBy  string    `json:"reply_by,omitempty"`
 	Box      string    `json:"box"`
 	Path     string    `json:"path"`
 	Priority string    `json:"priority,omitempty"`
@@ -274,6 +275,7 @@ func runList(args []string) error {
 			Subject:  header.Subject,
 			Thread:   header.Thread,
 			Created:  header.Created,
+			ReplyBy:  header.ReplyBy,
 			Box:      box,
 			Path:     path,
 			Priority: header.Priority,
