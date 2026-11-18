@@ -248,14 +248,14 @@ STAGE_DIR=""
 
 ### Build from source
 
-Requires Go 1.26 or newer:
+Use the Go toolchain specified by `go.mod` in the checkout you are building.
 
 ```sh
 git clone https://github.com/avivsinai/agent-message-queue.git
 cd agent-message-queue
 make build
 mkdir -p ~/.local/bin
-mv amq ~/.local/bin/
+install -m 0755 amq amq-board amq-remote amq-owner-sign ~/.local/bin/
 ```
 
 ## Skills
@@ -266,22 +266,30 @@ Install the AMQ skills for Claude Code or Codex:
 npx skills add avivsinai/agent-message-queue -g -y
 ```
 
-Without npm, copy the canonical skill directory from a clone:
+Without npm, copy the canonical directories from a source checkout. Set
+`skills_home` to the user skill directory of the harness you are installing for.
+For example, a Codex installation uses `${CODEX_HOME:-$HOME/.codex}/skills`. Run
+the following for each chosen harness. The other user directories shown here are
+`~/.claude/skills` and `~/.gemini/config/skills`.
 
 ```sh
-git clone https://github.com/avivsinai/agent-message-queue.git amq-src
-for target in ~/.claude/skills/amq-cli ~/.codex/skills/amq-cli ~/.gemini/config/skills/amq-cli; do
+: "${skills_home:?set skills_home to your harness skill directory}"
+mkdir -p "$skills_home" || exit 1
+for skill_file in skills/*/SKILL.md; do
+  skill_dir=${skill_file%/SKILL.md}
+  target="$skills_home/${skill_dir##*/}"
   if [ -e "$target" ] || [ -L "$target" ]; then
-    echo "Skill target already exists: $target (remove it to replace it)" >&2
-  else
-    mkdir -p "$(dirname "$target")" && cp -R amq-src/skills/amq-cli "$target"
+    echo "Keeping existing $target" >&2
+    continue
   fi
+  cp -R "$skill_dir" "$target" || exit 1
 done
 ```
 
 agy (Antigravity CLI) reads `~/.gemini/config/skills` and the project
-`.agents/skills`; the `~/.gemini/config/skills/amq-cli` target above covers it.
-`npx skills add` does not: its Antigravity CLI target writes
+`.agents/skills`. Set `skills_home` to `"$HOME/.gemini/config/skills"` for a user
+install with the loop above.
+The Antigravity CLI target in `npx skills add` writes
 `~/.gemini/antigravity-cli/skills`, which agy does not read.
 
 Restart the agent after installing a skill.
@@ -298,7 +306,7 @@ and `arm64`. `amq-keepalive` is only a release asset.
 | `amq-bridge` | Signed cross-host courier. See [amq-bridge](cmd/amq-bridge/README.md). |
 | `amq-acp` | ACP v2 companion: `amq-acp host`, and the ACP v2 stdio server for the mailbox and remote modes. See [amq-acp](cmd/amq-acp/README.md). |
 | `amq-remote` | Remote-session companion. See [amq-remote](cmd/amq-remote/README.md). |
-| `amq-board` | Read-only fleet board: what waits on you, what is in flight, blocked, or unclaimed, and each agent's liveness. See [amq-board](cmd/amq-board/README.md). |
+| `amq-board` | Shows a published fleet snapshot. Sync and explicit operator commands write project-local board state. The board reads its upstream sources. See [the board guide](cmd/amq-board/README.md). |
 | `amq-owner-sign` | The owner's signer for a strict relay share or the machine agent's grant; the owner key stays in its process. See [the strict share](cmd/amq-remote/README.md#strict-share-in-one-owner-step). |
 
 One machine agent per machine runs inside `amq-remote serve`; set it up

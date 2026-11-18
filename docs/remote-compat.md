@@ -66,13 +66,13 @@ files from the pi-bridge directory and calls the extension API; a claim marked
 | Row | Mechanism | Evidence class | Citation |
 | --- | --- | --- | --- |
 | Submit entry | The bridge extension calls `pi.sendUserMessage(text, {deliverAs: "followUp"})` for each request file | delivered (queues natively; not itself a receipt) | (source: pi `src/core/extensions/types.ts` `sendUserMessage`; `docs/extensions.md` "Choose an integration point") |
-| Acceptance evidence | None native — `sendUserMessage` returns `void` | delivered only | (source: pi `src/core/extensions/types.ts` `sendUserMessage`) |
-| Native run identity | `unavailable` — the extension API returns no run id for a sent message. The bridge owns the input boundary best-effort: admission requires `ctx.isIdle()` and no `ctx.hasPendingMessages()` (otherwise the request is refused `busy`) and is serialized to one remote request in flight, but a local message submitted in the same instant can still race it; correlation is by exact `message_start` user-message text (duplicate texts are indistinguishable) plus the persisted entry id from `ctx.sessionManager.getEntries()`. **Unverified:** that pi reports a `sendUserMessage` failure only as an error event, never to the caller, and that the entry id appears only at `message_end` | submitted (extension-owned boundary; not the design's admitted, and `Known=false` is not proof of non-admission here), completed (`turn_end`) | (source: pi `src/core/extensions/types.ts` `isIdle`, `message_start`, `message_end`, `turn_end`, `getEntries`) |
-| Completion evidence | `agent_end`/`agent_settled` extension events, or the session JSONL's `message`/`custom` entries | completed (via bridge correlation only) | (source: pi `docs/extensions.md` "Respect the runtime lifecycle"; `docs/session-format.md`) |
-| Exact cancellation gate | `ctx.abort()` aborts the current agent operation; the extension context has no clear-queue or dequeue-by-item method (`hasPendingMessages()` only). The bridge exposes no cancel request, so the adapter answers `unsupported`. **Unverified:** that `ctx.abort()` keeps queued follow-ups | `unsupported` | (source: pi `src/core/extensions/types.ts` `abort`, `hasPendingMessages`) |
+| Acceptance evidence | The native send returns no acknowledgment. The bridge creates a per-request receipt. See [adapter recovery and evidence](pi-bridge-protocol.md#adapter-recovery-and-evidence) for how the adapter interprets it. | submitted at session level, evidence per request | `Attachment.Inspect` and the bridge protocol |
+| Native run identity | The native send returns no run ID. The bridge serializes remote requests, checks idle state and correlates the request by message text and the persisted entry. Duplicate text can be ambiguous. | per-request observation | [Extension processing rules](pi-bridge-protocol.md#extension-processing-rules) |
+| Completion evidence | Read the terminal event for the request ref. For a running request, the reference extension collects the assistant output and records the outcome on `agent_settled`. A `turn_end` can occur at each model round. | terminal event | [Per-request events](pi-bridge-protocol.md#eventsrefjsonl) |
+| Exact cancellation gate | When the live bridge advertises revision 5 or later, cancel the named request by its ref. Read the terminal event for its outcome. Earlier bridges cannot cancel a running request. | cancel requested, then terminal evidence | [Exact cancel](pi-bridge-protocol.md#bridge-revision-5-exact-cancel) |
 | Steer | `pi.sendUserMessage(text, {deliverAs: "steer"})`, or the `steer` RPC command | submitted | (source: pi `src/core/extensions/types.ts` `sendUserMessage`; `docs/rpc-commands.md` "steer") |
 | Approvals/questions | `ctx.ui.select(...)` is an in-process await and `pi.events` is an in-process bus between extensions. Stock pi raises no tool approval that an extension can answer from outside. The reference bridge shows each prompt in Buzz with "answer in the terminal" | approvals: none from Buzz | (source: pi `src/core/extensions/types.ts` `select`, `events`; `docs/extensions.md` "Choose an integration point") |
-| Native session identity | `ctx.sessionManager.getSessionId()`: the session header id, kept when a session file is loaded again (reload, resume; compaction only appends entries) and new on `newSession` and on a branched (forked) session. A bridge of revision 4 publishes it as `session_id` in `bridge.liveness`; the adapter reports it as the native session id a relay share pins | delivered (revision 4 only) | (source: pi `src/core/extensions/types.ts` `sessionManager`; `src/core/session-manager.ts` `ReadonlySessionManager`, `getSessionId`, `newSession`) |
+| Native session identity | The live bridge publishes `ctx.sessionManager.getSessionId()` as `session_id` starting at revision 4. Reload, resume and compaction keep the identity. A new or forked session gets another identity. | delivered (revision 4 or later) | [Session identity](pi-bridge-protocol.md#bridge-revision-4-session-identity) |
 | Turn observation | The session mirror reads the bridge's `activity/<session_id>.jsonl` (activity version 2) for the session id the live bridge publishes; a live bridge without `activity: 2` in liveness gets the one "not available" note. One post is one run, from `run_start` to `settled`: `turn_start`/`turn_end` mark one model round each and `agent_end` can repeat inside one prompt when pi retries, while `agent_settled` is emitted once, in a `finally`, after the run's last `agent_before_settle`, whose `outcome` is `completed`, `aborted` or `error`. A request's own user record carries its `ref`, so a Buzz run shows no answer text twice. pi persists nothing at a settle, so its own session JSONL is not read. **Unverified:** that a skill prompt's user message holds its expanded text, and that the pi doorbell text equals the AMQ doorbell | observed (bridge record only) | (source: pi `src/core/agent-session.ts` `_emitAgentSettled`, `_runBeforeSettleBoundary`; `src/core/extensions/types.ts` `AgentStartEvent`, `AgentBeforeSettleEvent`, `AgentSettledEvent`); `internal/remote/mirror` |
 | Session-switch/reload epoch triggers | `session_before_switch`, `session_before_fork`, `session_before_compact`, `session_shutdown`, `session_before_tree` extension events | delivered | (source: pi `src/core/extensions/types.ts` event declarations) |
 | Local draft access (must not submit) | `ctx.ui.getEditorText()` reads the input editor text; the bridge does not read it. The `clear_queue` RPC command returns already-queued text, not an unsent draft | n/a | (source: pi `src/core/extensions/types.ts` `getEditorText`; `docs/rpc-commands.md` "clear_queue") |
@@ -133,12 +133,11 @@ of its agent. ACP facts are from agentclientprotocol.com.
 These observations constrain the adapters and remain part of the compatibility
 contract:
 
-- **Codex busy admission:** `turn/start` on an active thread returns the
-  existing turn and silently discards the new caller input. The adapter must
-  check status inside its admission boundary or use `thread/queue/add` when
-  queueing is explicitly requested. A returned `turnId` alone is not proof
-  that the caller's input was admitted; the matching `userMessage` item is.
-  (`[live]`; `Attachment.Submit`, `Attachment.confirmRun`)
+- **Busy admission:** The v1 endpoint accepts `busy=reject` and `deliver=turn`. It
+  refuses `busy=queue` and `deliver=steer` before a durable write. At the adapter
+  boundary, check that the thread is idle before `turn/start` and confirm the
+  matching `userMessage`. A busy thread can return an existing `turnId` while
+  discarding the new input. (`Attachment.Submit` and `Attachment.confirmRun`.)
 - **Codex transport and fanout:** the Unix socket is a WebSocket control
   socket; only `--stdio`/`stdio://` uses plain framing. Observed on codex-cli
   0.160: `codex app-server daemon start` makes the default control socket
@@ -216,11 +215,8 @@ Reasons for every `false` (source: as cited per row in §3):
   terminal refuses permission options on a daemon resume.
 - `codex.answer_question`: user-input requests are not projected.
 - `codex.terminal`: the app-server protocol has no PTY concept.
-- `pi.cancel_request`: the reference bridge (revision 3) has no cancel
-  request, and the adapter advertises it only for a live bridge of revision
-  5. `ctx.abort()` aborts the current operation, not one request, and the
-  extension context has no dequeue primitive for a queued request that has
-  not started (source: §3.2 "Exact cancellation gate").
+- `pi.cancel_request` follows the live bridge revision. See the exact cancellation
+  row in section 3.2 and the capability returned by `amq-remote inspect`.
 - `pi.approve_tool`: pi has no extension API that answers a prompt from
   outside, so Buzz shows the prompt and the owner answers in the terminal.
 - `pi.answer_question`: the bridge has no external decision seam for the

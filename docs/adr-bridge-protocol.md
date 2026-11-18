@@ -27,12 +27,10 @@ existing Maildir `publishTmpNoReplace` on a stable transfer filename.
 The wire unit is the signed envelope below. Local apply is the same
 `ApplyEnvelope` path in every hop.
 
-The supported peer courier class is **peer exchange over an
-operator-provided pipe**. `amq-bridge sync --stdio` runs the initiator side
-and `amq-bridge listen --stdio` the responder side. Each side speaks the
-session on its standard input and output, and the operator connects the two
-ends. `amq-bridge` does not dial, listen, or start the pipe, and both commands
-refuse to run without `--stdio`. The initiator opens the Noise handshake
+The peer courier exchanges records over an operator-provided duplex pipe. Both
+ends use standard input and output, and each names the pinned host at the other
+end. See [peer exchange](../cmd/amq-bridge/README.md#peer-exchange) for the
+commands. The initiator opens the handshake
 against the responder's pinned key. The session is duplex, so records and
 signed outcomes move in both directions. `amq` Core remains local and
 daemon-free; no socket is added to it.

@@ -16,11 +16,11 @@ the team mechanism.
 
 ## Co-op workflow
 
-The [README getting started guide](README.md#getting-started) owns installation,
-`amq setup`, and `amq launch`. This guide starts after launch. The `commands`
-backend prints one complete `coop exec` command per configured agent and exits
-with code `6` until an operator starts those commands. Managed launchers create
-their panes or windows themselves.
+The [Getting started guide](README.md#getting-started) covers installation and
+declared launch. To start a lead, builder and reviewer, follow
+[Run a fleet](#run-a-fleet). With a configured `commands` launcher, run each
+complete command it emits in its own terminal. The launcher returns 6 while
+operator action is required. Managed launchers create their own panes or windows.
 
 ### Running co-op mode
 
@@ -286,16 +286,106 @@ Codex runs it after each turn. It reads the mailbox named by `AM_ROOT` and
 raises one desktop notification for a set of unread messages, and another
 only when that set changes.
 
-## Roles and phase flow
+## Run a fleet
 
-The initiator starts the task, owns decisions, and receives updates. A leader
-may coordinate phases; workers execute assigned work. The collaboration phases
-are research, design, code, review, and test. Split code ownership by file or
-module to avoid concurrent edits.
+Start with three seats in one Git project. The lead assigns the work and names
+who may merge. The builder returns a tested commit. A different seat reviews
+that commit. Install `amq` and `amq-board` on your PATH first
+([Install](INSTALL.md)).
 
-At work start, send a `kind=status` message with an ETA to the initiator. Send
-updates at phase changes, preserve the existing thread, and finish by replying
-with the changes and verification. Ask decisions from the initiator.
+### Start three seats
+
+For a fresh project, run these commands once in the project directory:
+
+```sh
+amq coop init --root .agent-mail --agents lead,builder,reviewer
+amq session create factory
+```
+
+For a hands-on run, open three terminals in that directory and run one line in
+each. These are ordinary shells with the AMQ identity of their seat. You
+drain them explicitly at the handoffs below.
+
+```sh
+amq coop exec --session factory --me lead --no-wake sh
+amq coop exec --session factory --me builder --no-wake sh
+amq coop exec --session factory --me reviewer --no-wake sh
+```
+
+For coding agents, use the installed harness command in place of `sh` and
+omit `--no-wake` for doorbell delivery. If a launcher already starts your
+seats, declare the three handles there and follow [Running co-op mode](#running-co-op-mode).
+In each seat, run `amq env --json` and check `me` and `session_name`, then
+run `amq drain --include-body` once.
+
+### Brief the builder and check the floor
+
+**Lead.** Write the outcome, permitted files and worktree, expected completion
+time, and proof to return in `brief.md`. Dispatch one assignment:
+
+```sh
+amq send --to builder --kind todo --follow-up 30m \
+  --subject "Build the requested change" --body @brief.md
+```
+
+**Builder.** Run `amq drain --include-body` and copy the assignment's `ID`
+into the shell variable `brief_id`. Acknowledge with an ETA. Once the work
+passes its checks, put the commit ID and observed result in `result.md` and
+send the closing reply.
+
+```sh
+amq reply --id "$brief_id" --kind status --body "Started. ETA 15 minutes."
+# After the build and its checks:
+amq reply --id "$brief_id" --kind status --labels done --body @result.md
+```
+
+A progress reply keeps the completion timer armed. The closing reply cancels
+it. The drain's `Close with:` line gives the command for that request kind.
+
+**Lead.** Drain the result. Run `amq-board sync --init` once to initialize
+this project's board. At each later check:
+
+```sh
+amq-board sync
+amq-board
+amq-board check
+amq thread open
+```
+
+Read the board's source ages and coverage. Exit 6 from `amq-board check`
+means there are problems to investigate, 0 means none were detected, and
+1 means the snapshot could not answer. `amq thread open` lists obligations
+in this seat's current root and age window.
+
+### Review, merge and measure
+
+**Lead.** Put the exact base and proposed head, checkout location, expected
+user-visible result and checks in `review.md`:
+
+```sh
+amq send --to reviewer --kind review_request --follow-up 30m \
+  --subject "Review the proposed head" --body @review.md
+```
+
+**Reviewer.** Run `amq drain --include-body` and set `review_id` to the review
+request's ID. Inspect that revision and run the requested checks. Record the
+reviewed head, verdict, findings and checks in `verdict.md`:
+
+```sh
+amq reply --id "$review_id" --kind review_response --body @verdict.md
+```
+
+**Lead.** Drain the verdict. Send findings to the builder and request another
+review if the head changes. The authorized merger compares the current head
+with the reviewed head, confirms required checks and approvals on that
+revision, then merges through the project's normal process. Record the
+resulting revision and observed outcome.
+
+At the end of a reporting period, run `amq-board sync` and
+`amq-board retro --since 14d`. Read time to first reply, time to closure
+and the count still open alongside history coverage. Give any follow-up
+improvement an owner. For a decision or a reversible ruling, follow
+[Ask the owner without stopping](skills/amq-cli/SKILL.md#ask-the-owner-without-stopping).
 
 ## CLI commands
 

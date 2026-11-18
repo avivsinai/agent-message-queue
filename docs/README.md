@@ -8,8 +8,9 @@ syntax comes from the [generated CLI reference](cli.md).
 
 - [Install and update](../INSTALL.md) — binary and skill installation,
   platform support, and companion binaries.
-- [Co-op operations](../COOP.md) — launch agents, use sessions, exchange
-  messages, and run supervised notifications.
+- [Run a fleet](../COOP.md#run-a-fleet) — start three seats, dispatch work, review
+  it and record the result. [Co-op operations](../COOP.md) covers session and
+  notification setup.
 - [Configuration](configuration.md) — where configuration lives, per-key
   precedence, and the hot-reload contract.
 - [Session routing](session-routing.md) — identities, roots, cross-session

@@ -16,10 +16,9 @@ own worktrees, dependency scheduling, task decomposition, and PR landing.
   lifecycle.
 - **Robust.** Delivery is crash-safe. Uncertain state fails closed with a
   typed refusal that names the reason; there is no silent fallback.
-- **Harness-agnostic.** AMQ works the same across harnesses and terminals
-  through the seams they already expose. It never starts, restarts, or
-  reconfigures a user's harness. When a capability is missing, it falls back
-  and prints a one-line reason.
+- **Harness integration.** An explicit launch can start the configured harness. An
+  attachment uses the identified running session. Require the requested wake
+  capability and report an unavailable capability with the operator's next action.
 
 ## Release Contract
 
@@ -80,8 +79,9 @@ own worktrees, dependency scheduling, task decomposition, and PR landing.
 
 - Handles are lowercase, match `[a-z0-9_-]+`, and do not start with `-`.
 - Use the CLI for mailbox operations. Never edit queue files directly.
-- Mailbox data (messages, receipts, DLQ) is removed only by `amq cleanup`; logs
-  and derived extension caches carry their own documented bounds.
+- Use `amq cleanup` for mailbox retention and `amq dlq purge` for an explicit
+  dead-letter purge. Logs and derived extension caches have their own documented
+  bounds.
 - AMQ remains daemon-free. Supervisors can run `wake` or `monitor`, but AMQ
   does not own their lifecycle.
 
@@ -101,8 +101,7 @@ make check-skills   # validate canonical and symlinked skill content
 Formatting and lint use the toolchain pinned in `go.mod` and the golangci-lint
 version in the Makefile; other versions are refused.
 
-Go 1.26+ is required. `golangci-lint` is optional for local development and
-required by `make lint` and `make ci`.
+`make lint` and `make ci` require the linter version pinned in the Makefile.
 
 ## Architecture
 
@@ -113,7 +112,7 @@ cmd/amq-bridge/               Cross-host courier companion (apply-file + HTTPS, 
 cmd/amq-acp/                  Preview ACP v2 stdio companion (not Core)
 cmd/amq-remote/               Remote-session companion (not Core)
 cmd/amq-owner-sign/           Owner signer for a relay share or the machine grant; the key stays in its process
-cmd/amq-board/                Read-only fleet board companion (not Core)
+cmd/amq-board/                Fleet snapshot, source reads, and explicit local board actions
 internal/acp/                 ACP v2 sessions, steering, and prompt delivery
 internal/agentidentity/       Identity record an agent leaves in its mailbox
 internal/amqhome/             The per-user AMQ home, ~/.amq
@@ -279,31 +278,13 @@ change exit codes. `--json-schema` requires `--json`.
 `send` and `reply` resolve `--body` from a literal, `@file`, or stdin. Empty or
 whitespace-only input is a usage error unless `--allow-empty` is explicit.
 
-## Message Kinds
+## Message kinds
 
-| Kind | Reply kind | Default priority | Purpose |
-| --- | --- | --- | --- |
-| `review_request` | `review_response` | normal | Request review. |
-| `review_response` | - | normal | Return review findings. |
-| `question` | `answer` | normal | Ask for a decision or fact. |
-| `answer` | - | normal | Answer a question. |
-| `decision` | - | normal | Record a decision. |
-| `brainstorm` | - | normal | Explore options. |
-| `status` | - | low | Report progress or state. |
-| `todo` | `status` | normal | Assign work. |
-
-A todo is finished with `amq reply --kind status --labels done`; the requester
-cancels a request with `--kind decision --labels withdrawn`.
-A requester settles its requests to one owner in one thread up to and
-including one of them, with one `--kind decision --labels settled-through`
-reply to that request; `amq thread settle --older-than <dur>` sends one per
-thread and owner.
-
-When work starts, reply with `kind=status` and an ETA. Review responses remain
-`normal` by default. Use `--priority urgent` on `send` or `reply` for a
-time-critical verdict or unblocking request that must bypass an optional wake
-hold. Urgent priority alone does not trigger an interrupt notice; that also
-requires the configured interrupt label.
+For kinds and default priorities, see
+[message kinds](skills/amq-cli/references/message-format.md#message-kinds). For
+progress, completion, cancellation and settlement, follow
+[send useful handoffs](skills/amq-cli/SKILL.md#send-useful-handoffs). Send the
+initiator the result and the evidence for the specific request.
 
 ## Dead Letter Queue
 
