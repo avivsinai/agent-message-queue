@@ -8,6 +8,18 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.156.0](https://github.com/avivsinai/agent-message-queue/compare/v0.155.0...v0.156.0) (2026-11-19)
+
+
+### Features
+
+* **remote:** doctor names the channels an earlier machine agent key left ([#1562](https://github.com/avivsinai/agent-message-queue/issues/1562)) ([2ce33fe](https://github.com/avivsinai/agent-message-queue/commit/2ce33fe73f5c5fe8d3fa0f5f547db857a0699740))
+
+
+### Bug Fixes
+
+* **remote:** the machine agent names the cause when its relay does not answer ([#1560](https://github.com/avivsinai/agent-message-queue/issues/1560)) ([fb38be3](https://github.com/avivsinai/agent-message-queue/commit/fb38be330de60ea0657b79189eb0cfb7505e4766))
+
 ## [0.155.0](https://github.com/avivsinai/agent-message-queue/compare/v0.154.1...v0.155.0) (2026-11-19)
 
 
