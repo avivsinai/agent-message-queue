@@ -3,10 +3,12 @@ package cli
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/roster"
 	"github.com/avivsinai/agent-message-queue/internal/sessionguard"
+	"github.com/avivsinai/agent-message-queue/internal/update"
 )
 
 type doctorCheck struct {
@@ -1004,7 +1007,7 @@ func checkSkill(agent string) doctorCheck {
 			filepath.Join(home, ".gemini", "config", "skills", "amq-cli"),
 		}
 		return skillCandidatesResult(check, candidates,
-			"not installed (run: mkdir -p ~/.gemini/config/skills && cp -R <amq clone>/skills/amq-cli ~/.gemini/config/skills/)")
+			"mkdir -p ~/.gemini/config/skills && cp -R <amq clone>/skills/amq-cli ~/.gemini/config/skills/")
 	}
 	candidates := []string{
 		filepath.Join(agentDir, "skills", "amq-cli"),        // project-local, agent-specific
@@ -1014,17 +1017,71 @@ func checkSkill(agent string) doctorCheck {
 	}
 
 	return skillCandidatesResult(check, candidates,
-		"not installed (run: npx skills add avivsinai/agent-message-queue -g -y)")
+		"npx skills add avivsinai/agent-message-queue -g -y")
 }
 
-// skillCandidatesResult reports ok for the first candidate that holds a
-// SKILL.md, warns on a partial install, and otherwise warns with the remedy.
-func skillCandidatesResult(check doctorCheck, candidates []string, remedy string) doctorCheck {
+// skillVersion is the version in a SKILL.md frontmatter, or "" when the
+// file has no frontmatter or no version line.
+func skillVersion(path string) string {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = file.Close() }()
+	data, err := io.ReadAll(io.LimitReader(file, 64<<10))
+	if err != nil {
+		return ""
+	}
+	contents := strings.ReplaceAll(string(data), "\r\n", "\n")
+	lines := strings.Split(contents, "\n")
+	if lines[0] != "---" {
+		return ""
+	}
+	frontmatter := lines[1:]
+	end := slices.Index(frontmatter, "---")
+	if end == -1 {
+		return ""
+	}
+	for _, line := range frontmatter[:end] {
+		value, ok := strings.CutPrefix(line, "version:")
+		if !ok {
+			continue
+		}
+		value, _, _ = strings.Cut(value, "#")
+		value = strings.TrimSpace(value)
+		if len(value) >= 2 && (value[0] == '"' || value[0] == '\'') && value[len(value)-1] == value[0] {
+			value = value[1 : len(value)-1]
+		}
+		return value
+	}
+	return ""
+}
+
+// skillCandidatesResult uses the first candidate that holds a SKILL.md and
+// warns if its version is older than the binary. With no file it warns of a
+// partial install or gives the install command.
+func skillCandidatesResult(check doctorCheck, candidates []string, install string) doctorCheck {
 	// Check project-local candidates first, then user-level, in order.
 	for _, dir := range candidates {
-		if fileExists(filepath.Join(dir, "SKILL.md")) {
+		path := filepath.Join(dir, "SKILL.md")
+		if fileExists(path) {
+			local := strings.HasPrefix(dir, ".")
+			v := skillVersion(path)
+			if cmp, ok := update.CompareVersions(v, cliVersion); ok && cmp < 0 {
+				check.Status = "warn"
+				if local {
+					check.Message = fmt.Sprintf("installed (project-local), but its version %s is older than amq %s; update the project's copy, then restart the agent", v, cliVersion)
+				} else {
+					check.Message = fmt.Sprintf("installed, but its version %s is older than amq %s (run: %s, then restart the agent)", v, cliVersion, install)
+				}
+				return check
+			}
 			check.Status = "ok"
-			if strings.HasPrefix(dir, ".") {
+			if local {
 				check.Message = "installed (project-local)"
 			} else {
 				check.Message = "installed"
@@ -1044,6 +1101,6 @@ func skillCandidatesResult(check doctorCheck, candidates []string, remedy string
 	}
 
 	check.Status = "warn"
-	check.Message = remedy
+	check.Message = "not installed (run: " + install + ")"
 	return check
 }
