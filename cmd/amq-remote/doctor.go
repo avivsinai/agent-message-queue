@@ -517,7 +517,7 @@ func printDoctor(w io.Writer, r doctorReport) {
 	for _, k := range keys {
 		// These are reported as FAIL and NOTE lines above, or only in JSON.
 		switch k {
-		case "failing", "notes", "fixed", "hooks", "machine_agent", "channels", "mailboxes":
+		case "failing", "notes", "fixed", "hooks", "machine_agent", "channels", "left_channels", "mailboxes":
 			continue
 		}
 		switch v := r[k].(type) {
