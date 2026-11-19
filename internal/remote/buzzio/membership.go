@@ -135,11 +135,17 @@ func VerifyDMMembership(ctx context.Context, conn *relay.Conn, relaySelf string,
 // maxNIP11Bytes bounds the relay information document.
 const maxNIP11Bytes = 64 << 10
 
+// ErrNoRelaySelf is a relay information document that was read and holds
+// no valid self key. Every other error of RelaySelf means the document was
+// not read.
+var ErrNoRelaySelf = errors.New("relay information document has no valid self key")
+
 // RelaySelf fetches the relay's NIP-11 document from the configured origin
 // and returns its self key (the key that signs NIP-29 group metadata). The
 // request goes to the same host over https for wss (http only for a
-// loopback ws test relay), and no redirect is followed. A missing or
-// malformed self key is an error: the operator must pin one instead.
+// loopback ws test relay), and no redirect is followed. A document with no
+// valid self key is ErrNoRelaySelf: the operator must pin one instead.
+// Every other error means the document was not read.
 func RelaySelf(ctx context.Context, wsURL string) (string, error) {
 	u, err := url.Parse(wsURL)
 	if err != nil {
@@ -186,7 +192,7 @@ func RelaySelf(ctx context.Context, wsURL string) (string, error) {
 	}
 	self := strings.ToLower(strings.TrimSpace(doc.Self))
 	if !validHexID(self) {
-		return "", errors.New("relay information document has no valid self key; pin relay_self in the manifest")
+		return "", fmt.Errorf("%w; pin relay_self in the manifest", ErrNoRelaySelf)
 	}
 	return self, nil
 }
