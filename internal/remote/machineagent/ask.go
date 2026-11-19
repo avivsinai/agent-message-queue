@@ -142,7 +142,7 @@ func (s *Agent) scanAsks(root string, targets []dialogTarget, now time.Time) boo
 			default:
 			}
 			byID[ob.Opener.ID] = ob
-			if ob.Open() && !s.postAsk(t, ob.Opener, now) {
+			if ob.Open() && !s.postAsk(t, ob.Opener) {
 				settled = false
 			}
 		}
@@ -155,7 +155,7 @@ func (s *Agent) scanAsks(root string, targets []dialogTarget, now time.Time) boo
 
 // A claim, including one with an unknown event, prevents a second post.
 // Only a definite refusal allows the next scan to try again.
-func (s *Agent) postAsk(t dialogTarget, opener *thread.Entry, now time.Time) bool {
+func (s *Agent) postAsk(t dialogTarget, opener *thread.Entry) bool {
 	id := opener.ID
 	if fsq.ValidateMessageFilename(id+".md") != nil {
 		return true
@@ -171,7 +171,7 @@ func (s *Agent) postAsk(t dialogTarget, opener *thread.Entry, now time.Time) boo
 	if err != nil || m.Header.ID != id {
 		return false
 	}
-	rec := askPost{Channel: t.channel, Text: askText(t.label, m.Header, m.Body, now), Root: t.binding.Root,
+	rec := askPost{Channel: t.channel, Text: askText(t.label, m.Header, m.Body), Root: t.binding.Root,
 		From: t.binding.Handle, Thread: opener.Thread, Kind: opener.Kind, Subject: opener.Subject, Created: opener.Created}
 	raw, err := json.Marshal(rec)
 	if err != nil {
@@ -330,7 +330,7 @@ func askOutcome(ob *thread.Obligation) string {
 	return "→ Closed by " + ob.Requester.Handle
 }
 
-func askText(label string, h format.Header, body string, _ time.Time) string {
+func askText(label string, h format.Header, body string) string {
 	if label == "" {
 		label = "A session"
 	}
@@ -425,7 +425,9 @@ func (a askReply) deliver() (string, error) {
 		rec := a.post
 		kind, labels := thread.ClosingReply(rec.Kind)
 		subject := rec.Subject
-		if !strings.HasPrefix(subject, "Re: ") {
+		if subject == "" {
+			subject = "Re: (no subject)"
+		} else if !strings.HasPrefix(subject, "Re: ") {
 			subject = "Re: " + subject
 		}
 		err = publishPromptAt(rec.Root, id, now, mailprompt.Prompt{To: rec.From, From: thread.HumanHandle,
