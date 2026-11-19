@@ -93,7 +93,7 @@ amq-cli skill, "Ask the owner without stopping".
 - The owner answers where they like: in a chat, from the phone, or with a
   reply. The session that asked closes the question with the answer; a
   session that only heard it sends the answer and the question's ID to the
-  one that asked.
+  one that asked. See [Tell the owner on another channel](https://github.com/avivsinai/agent-message-queue/blob/main/COOP.md#tell-the-owner-on-another-channel).
 - Never stop a turn on a question when other work is ready.
 
 ## Limits you keep
