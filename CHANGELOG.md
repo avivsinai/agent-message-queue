@@ -8,6 +8,18 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.157.0](https://github.com/avivsinai/agent-message-queue/compare/v0.156.0...v0.157.0) (2026-11-19)
+
+
+### Features
+
+* **remote:** bindings shows a session's open approval dialog ([#1564](https://github.com/avivsinai/agent-message-queue/issues/1564)) ([75004cf](https://github.com/avivsinai/agent-message-queue/commit/75004cfa41721c0c91735eecf4137897fec52e37))
+
+
+### Bug Fixes
+
+* **doctor:** name an installed skill that is older than the binary ([#1565](https://github.com/avivsinai/agent-message-queue/issues/1565)) ([f69a910](https://github.com/avivsinai/agent-message-queue/commit/f69a910ac451d7e1713c7f37a1fe15cdd1d5a4c0))
+
 ## [0.156.0](https://github.com/avivsinai/agent-message-queue/compare/v0.155.0...v0.156.0) (2026-11-19)
 
 
