@@ -604,7 +604,7 @@ func (s *Agent) dialogClose(name, dir string, open map[string]bool, now time.Tim
 		}
 		if p.Event != "" && s.posts.Edit(context.Background(), buzzop.Key("dialog/"+name+"/"+id+"/closed"),
 			p.Channel, p.Event, p.Text+"\n\n"+outcomeLine(res)).Outcome != buzzop.Accepted {
-			s.dialogEditBackOff(id, now)
+			backOffEdit(&s.dialogs.edits, id, now)
 			continue
 		}
 		delete(s.dialogs.polled, id)
@@ -617,15 +617,14 @@ func (s *Agent) dialogClose(name, dir string, open map[string]bool, now time.Tim
 	return left == 0
 }
 
-// dialogEditBackOff delays the next edit of dialog id's post.
-func (s *Agent) dialogEditBackOff(id string, now time.Time) {
-	if s.dialogs.edits == nil {
-		s.dialogs.edits = map[string]mirrorBackoff{}
+func backOffEdit(edits *map[string]mirrorBackoff, id string, now time.Time) {
+	if *edits == nil {
+		*edits = map[string]mirrorBackoff{}
 	}
-	bo := s.dialogs.edits[id]
+	bo := (*edits)[id]
 	bo.step = min(max(bo.step*2, dialogEditBackoffMin), dialogEditBackoffMax)
 	bo.until = now.Add(bo.step)
-	s.dialogs.edits[id] = bo
+	(*edits)[id] = bo
 }
 
 // DialogPosted reports whether the machine agent posted dialog id of
@@ -739,7 +738,11 @@ func outcomeLine(r dialog.Resolved) string {
 // dialogLead reports whether this worker posts its agent's dialogs: the
 // worker that holds _machine/<self>.dialog.lock.
 func (s *Agent) dialogLead() bool {
-	if s.dialogs.release != nil || !lock.AdvisoryLockAvailable() {
+	return s.workerLead("dialog", &s.dialogs.release)
+}
+
+func (s *Agent) workerLead(worker string, held *func()) bool {
+	if *held != nil || !lock.AdvisoryLockAvailable() {
 		return true
 	}
 	if s.id.Agent == "" {
@@ -749,11 +752,11 @@ func (s *Agent) dialogLead() bool {
 	if os.MkdirAll(dir, 0o700) != nil {
 		return false
 	}
-	release, ok, err := lock.TryExclusive(filepath.Join(dir, s.id.Agent+".dialog.lock"))
+	release, ok, err := lock.TryExclusive(filepath.Join(dir, s.id.Agent+"."+worker+".lock"))
 	if err != nil || !ok {
 		return false
 	}
-	s.dialogs.release = release
+	*held = release
 	return true
 }
 
@@ -767,15 +770,17 @@ type ownerMsg struct {
 
 // The kinds of owner decision, as a claim records them.
 const (
+	decidedAsk     = "ask"
 	decidedMirror  = "mirror"
 	decidedCommand = "command"
 	decidedDialog  = "dialog"
 )
 
-// decision is an owner message taken as a decision: a mirror switch, a
-// slash command, or a dialog answer. kind says which fields are set.
+// decision is an owner message handled outside the session's turn queue.
+// Its kind selects the answer, mirror switch or command to deliver.
 type decision struct {
 	kind string
+	ask  askReply
 	// A mirror switch of binding name, signed at at.
 	name string
 	on   bool
@@ -787,10 +792,14 @@ type decision struct {
 	answer dialog.Answer
 }
 
-// decideOwner reads m as a mirror switch, then a slash command, then a
+// decideOwner reads m as an ask answer, a mirror switch, a slash command or a
 // dialog answer, and returns the first that applies. ok is false when m
 // is none of them: it is a message for the session.
 func (s *Agent) decideOwner(m ownerMsg) (d decision, ok bool) {
+	// A reply in the thread of an ask post answers that ask, whatever its words.
+	if d, ok := s.askReplyOf(m); ok {
+		return d, true
+	}
 	if name, on, at, ok := s.mirrorSwitchOf(m); ok {
 		return decision{kind: decidedMirror, name: name, on: on, at: at}, true
 	}
@@ -806,9 +815,11 @@ func (s *Agent) decideOwner(m ownerMsg) (d decision, ok bool) {
 }
 
 // act carries out d in channel and returns the owner's acknowledgement;
-// err is set only when a dialog answer could not be recorded.
+// err reports a failure to deliver or record an answer.
 func (s *Agent) act(channel string, d decision) (string, error) {
 	switch d.kind {
+	case decidedAsk:
+		return d.ask.deliver()
 	case decidedMirror:
 		return setMirror(d.name, d.on, d.at), nil
 	case decidedCommand:

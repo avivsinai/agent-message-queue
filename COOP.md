@@ -386,6 +386,8 @@ At the end of a reporting period, run `amq-board sync` and
 and the count still open alongside history coverage. Give any follow-up
 improvement an owner. For a decision or a reversible ruling, follow
 [Ask the owner without stopping](skills/amq-cli/SKILL.md#ask-the-owner-without-stopping).
+With a connected AMQ mailbox, the owner can answer in the request's Buzz
+thread while the agent continues working.
 
 ## CLI commands
 

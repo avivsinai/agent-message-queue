@@ -22,6 +22,8 @@ type Prompt struct {
 	From    string   `json:"from"`
 	Thread  string   `json:"thread"`
 	Subject string   `json:"subject"`
+	Kind    string   `json:"kind,omitempty"`
+	Refs    []string `json:"refs,omitempty"`
 	Labels  []string `json:"labels,omitempty"`
 	// Context is the header's context object, written unchanged.
 	Context map[string]any `json:"context,omitempty"`
@@ -65,6 +67,8 @@ func Publish(root *fsq.DeliveryRoot, id string, created time.Time, p Prompt) err
 			Subject:  p.Subject,
 			Created:  created.UTC().Format(time.RFC3339Nano),
 			Priority: format.PriorityNormal,
+			Kind:     p.Kind,
+			Refs:     p.Refs,
 			Labels:   p.Labels,
 			Context:  p.Context,
 		},

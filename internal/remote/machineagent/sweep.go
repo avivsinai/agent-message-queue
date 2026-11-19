@@ -85,7 +85,7 @@ func (l *lateReplySweep) pendingIDs() []string {
 	return ids
 }
 
-// startLateReplySweep runs the machine agent's sweep, machine, dialog and
+// startLateReplySweep runs the machine agent's sweep, machine, ask, dialog and
 // mirror workers and its owner turns until the returned stop is called;
 // stop waits for a running sweep, so a post is never cut off.
 func (s *Agent) startLateReplySweep() (stop func()) {
@@ -115,6 +115,14 @@ func (s *Agent) startLateReplySweep() (stop func()) {
 			return pace{next: now.Add(machineScanInterval)}
 		}
 		return s.dialogTick(now)
+	})
+	askDone := make(chan struct{})
+	s.asks.quit = quit
+	go s.paced(quit, askDone, newWakeup("ask", machineScanInterval, idlePoll), func(now time.Time) pace {
+		if !s.askLead() || s.offline() {
+			return pace{next: now.Add(machineScanInterval)}
+		}
+		return s.askTick(now)
 	})
 	// A machine agent mirrors its sessions' finished turns in a worker of
 	// its own, so a slow post never delays a dialog.
@@ -148,9 +156,14 @@ func (s *Agent) startLateReplySweep() (stop func()) {
 		<-done
 		<-machineDone
 		<-dialogDone
+		<-askDone
 		<-mirrorDone
 		s.owners.stop()
 		s.resign()
+		if s.asks.release != nil {
+			s.asks.release()
+			s.asks.release = nil
+		}
 		if s.dialogs.release != nil {
 			s.dialogs.release()
 			s.dialogs.release = nil

@@ -1171,6 +1171,23 @@ form (changed <mtime>). Run `amq-remote doctor --fix`." After
 `uninstall-approval-hook` (or `uninstall-stop-hook`) it never posts about
 that hook in that file.
 
+### Requests to the owner
+
+When a connected mailbox session sends a question, ruling, task or review
+request to `user`, its Buzz channel mentions the owner and shows the request
+and its default or reply time, if set. Reply in the thread of that post to
+send the agent an AMQ reply from `user`. The agent can keep working while
+the request is open.
+
+The post gains one outcome line: `→ Answered (Buzz)` for a thread reply,
+`→ Answered` for another AMQ answer from the owner, `→ Closed by <handle>`
+when the requester closes it, or `→ Expired` after 14 days.
+
+Reactions do not answer these requests. Each post belongs to the requesting
+session's channel. There is no machine-wide channel, and requests from other
+projects or sessions stay in their own scope. Requests from disconnected
+sessions or native bindings stay on the AMQ board.
+
 ### Turns in the session's channel
 
 The machine agent's channel of a Claude, Codex or pi session also shows each
