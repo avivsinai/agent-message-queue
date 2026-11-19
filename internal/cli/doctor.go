@@ -1037,10 +1037,6 @@ func skillVersion(path string) string {
 		return ""
 	}
 	contents := strings.ReplaceAll(string(data), "\r\n", "\n")
-	if info.Size() > int64(len(data)) {
-		// A closing delimiter has to fit on a complete line.
-		contents = contents[:strings.LastIndexByte(contents, '\n')+1]
-	}
 	lines := strings.Split(contents, "\n")
 	if lines[0] != "---" {
 		return ""
