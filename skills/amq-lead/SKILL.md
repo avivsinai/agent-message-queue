@@ -39,8 +39,7 @@ turn.
    seat's own evidence (its worktree, its branch, its last message). For a
    connected session, `amq-remote bindings` shows an approval dialog that is
    open: that seat waits for the owner. Tell the owner; do not replace the seat.
-   It
-   works: leave it. It does not answer one direct question by the time you
+   It works: leave it. It does not answer one direct question by the time you
    name: give the task to another seat, with a scope the first seat no longer
    edits, and say so in the task record.
 5. **A wait that landed: release it.** For each task that waits for

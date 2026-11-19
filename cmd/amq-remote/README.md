@@ -910,12 +910,12 @@ ended, then lists the machine agent and each binding with its label, `live`
 or `unknown`, its name and its channel, with `amq-remote detach --name
 <name>` for the unknown ones. The machine agent is listed as `Machine agent:
 <name> (running in amq-remote serve)`, or `(not running: <line>)` with its
-status line. A session with a permission dialog not yet resolved shows it at the
-end of its line, for example `dialog open 13m (Bash)`: the phase, the time since
-it opened and the tool. `--json` reports `bindings` (with `channel`, `channel_name`, and
-`dialogs`: each permission dialog not yet resolved, with its `id`, `tool`,
-`phase` (`open` or `answered`), `posted` (the machine agent posted it) and
-`opened_at`), `pruned` and `machine`.
+status line. A session with a permission dialog not yet resolved shows it at
+the end of its line, for example `dialog open 13m (Bash)`: the phase, the time
+since it opened and the tool. `--json` reports `bindings` (with `channel`,
+`channel_name`, and `dialogs`: each permission dialog not yet resolved, with
+its `id`, `tool`, `phase` (`open` or `answered`), `posted` (the machine agent
+posted it) and `opened_at`), `pruned` and `machine`.
 
 `amq-remote detach` needs one scope: `--self` removes the binding that names
 this session, `--name <name>` removes the binding of that name, and `--all`
