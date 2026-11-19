@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -474,6 +475,16 @@ func TestBindingsShowsOpenDialogs(t *testing.T) {
 	if d.ID != req.ID || d.Tool != "Bash" || d.Phase != string(dialog.PhaseAnswered) || !d.Posted || !d.OpenedAt.Equal(opened) {
 		t.Fatalf("dialog row %+v; want the answered, posted Bash dialog", d)
 	}
+	out.Reset()
+	if code := run([]string{"bindings"}, nil, &out, io.Discard); code != 0 {
+		t.Fatalf("text bindings exit %d: %s", code, out.String())
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		if strings.Contains(line, " proj") && regexp.MustCompile(`  dialog answered \S+ \(Bash\)$`).MatchString(line) {
+			return
+		}
+	}
+	t.Fatalf("bindings output %q; want proj's line to end with dialog answered phase, age and Bash tool", out.String())
 }
 
 // attachMailboxAs runs attach --self --json as the AMQ handle claude of the
