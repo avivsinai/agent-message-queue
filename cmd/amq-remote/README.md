@@ -57,6 +57,7 @@ amq-remote machine enroll --grant FILE
 amq-remote attach --self [--native | --link NAME]
 amq-remote detach --self | --name NAME | --all
 amq-remote bindings
+amq-remote dialogs [--days N] [--json]
 amq-remote channel reset NAME
 amq-remote mirror on|off|status --self | --name NAME
 amq-remote link add NAME URL --code CODE
@@ -609,7 +610,7 @@ answered in the session's terminal, and a task that needs one waits there;
 
 Flags may appear before or after the positional argument.
 `amq-remote COMMAND --help` prints the flags and exits 0 for the client
-commands, `requests`, `attach`, `detach`, `bindings`, `channel reset`,
+commands, `requests`, `attach`, `detach`, `bindings`, `dialogs`, `channel reset`,
 `mirror`, the `link` commands, `mcp`, `service`, and `doctor`. `serve --help`,
 `up --help`, and `claude install-approval-hook --help` print the flags and
 exit 2.
@@ -620,8 +621,8 @@ flag list; the `share` flags are in the table below.
 
 | Flag | Default | Commands |
 | --- | --- | --- |
-| `--root DIR` | `AM_ROOT`; link commands and `mcp`: the link's root; `service`: the machine root | every command except `version`, `pi bridge-path`, `claude install-stop-hook`, `claude uninstall-stop-hook`, and `claude uninstall-approval-hook` |
-| `--json` | false | `sessions`, `inspect`, `submit`, `status`, `wait`, `cancel`, `requests`, `requests release`, `attach`, `detach`, `bindings`, `channel reset`, `mirror`, the `link` commands, `service`, `doctor`, and `mcp` (errors only; `mcp` always speaks JSON-RPC on stdout) |
+| `--root DIR` | `AM_ROOT`; link commands and `mcp`: the link's root; `service`: the machine root | every command except `dialogs`, `version`, `pi bridge-path`, `claude install-stop-hook`, `claude uninstall-stop-hook`, and `claude uninstall-approval-hook` |
+| `--json` | false | `sessions`, `inspect`, `submit`, `status`, `wait`, `cancel`, `requests`, `requests release`, `attach`, `detach`, `bindings`, `dialogs`, `channel reset`, `mirror`, the `link` commands, `service`, `doctor`, and `mcp` (errors only; `mcp` always speaks JSON-RPC on stdout) |
 
 ### `serve` and `up`
 
@@ -916,6 +917,22 @@ A defaulted name that another session holds, or held before it was detached
 or ended, is never taken: the session gets the next free `<name>-N`.
 Attaching the same session again keeps its name. An explicit `--name`
 replaces the binding of that name.
+
+### Dialog history
+
+`amq-remote dialogs` shows the last 14 days of resolved approval dialogs,
+grouped by session and ranked by time held. Each row shows the count, total,
+median and longest wait, where the dialogs were answered, and the three
+tools with the most time held. Use `--days N` to change the window or
+`--json` to see every tool and the durations in seconds.
+
+Each history line holds the dialog ID, binding, harness, tool name, opening
+and resolution times, outcome and answer source. Dialog text, tool inputs
+and option labels are never recorded in history. A dialog appears about an
+hour after resolution, or when the machine agent removes a departed session's
+dialogs. With the request already gone, the resolution counts toward the
+session's dialog count only. The dialogs directory retains up to two files of
+1 MiB each, `history.jsonl` and `history.1.jsonl`.
 
 ### `link`, `mcp`
 

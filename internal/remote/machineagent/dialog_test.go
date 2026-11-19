@@ -342,6 +342,36 @@ func openPostedDialog(t *testing.T, s *Agent, dir, text string) dialog.Request {
 	return req
 }
 
+// Pruning a resolution preserves the session's wait and outcome in history.
+func TestPrunedDialogLeavesHistory(t *testing.T) {
+	t.Setenv(binding.EnvPath, filepath.Join(t.TempDir(), "binding.json"))
+	dir, err := dialog.DirFor("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	at := now.Add(-dialogKeep - time.Minute)
+	req := dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", OpenedAt: at.Add(-10 * time.Minute)}
+	if err := dialog.Open(dir, req); err != nil {
+		t.Fatal(err)
+	}
+	res := dialog.Resolved{ID: req.ID, Outcome: dialog.OutcomeAllowed, By: dialog.ByBuzz, At: at}
+	if _, err := dialog.Resolve(dir, res); err != nil {
+		t.Fatal(err)
+	}
+	s := &Agent{stateDir: t.TempDir()}
+	s.pruneDialogs("alpha", dir, now)
+	if _, found, err := dialog.ReadResolved(dir, req.ID); err != nil || found {
+		t.Fatalf("resolution after pruning: found=%v err=%v", found, err)
+	}
+	entries, err := dialog.History(req.OpenedAt)
+	want := dialog.HistoryEntry{ID: req.ID, Binding: "alpha", Harness: req.Harness, Tool: req.Tool,
+		OpenedAt: req.OpenedAt, At: at, Outcome: res.Outcome, By: res.By}
+	if err != nil || len(entries) != 1 || entries[0] != want {
+		t.Fatalf("history = %+v, %v; want [%+v]", entries, err, want)
+	}
+}
+
 // Regression (review of the dialog poster): the dialogs of a gone binding
 // were expired and removed in one tick, so the seam still waiting never read
 // its resolution. The directory stays while the seam runs, for seamGrace.

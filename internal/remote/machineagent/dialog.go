@@ -397,7 +397,7 @@ func (s *Agent) dropGoneDialogs(served map[string]bool, now time.Time) (waiting 
 			_, _ = dialog.Resolve(dir, dialog.Resolved{ID: req.ID, Outcome: dialog.OutcomeExpired, By: dialog.ByTimeout, At: now.UTC()})
 		}
 		s.dialogClose(name, dir, nil, now)
-		if !seamsLeft(dir, now) {
+		if !seamsLeft(dir, now) || !s.keepGoneHistory(name, dir) {
 			waiting = true
 			continue
 		}
@@ -405,6 +405,39 @@ func (s *Agent) dropGoneDialogs(served map[string]bool, now time.Time) (waiting 
 		_ = os.RemoveAll(s.dialogPostDir(name))
 	}
 	return waiting
+}
+
+// A gone binding may still have resolutions younger than the normal prune age.
+func (s *Agent) keepGoneHistory(name, dir string) bool {
+	entries, err := os.ReadDir(filepath.Join(dir, "resolved"))
+	if err != nil {
+		return errors.Is(err, os.ErrNotExist)
+	}
+	for _, e := range entries {
+		id, ok := strings.CutSuffix(e.Name(), ".json")
+		if ok && e.Type().IsRegular() && !s.keepHistory(name, dir, id) {
+			return false
+		}
+	}
+	return true
+}
+
+// keepHistory preserves a readable resolution even when the request is gone.
+func (s *Agent) keepHistory(name, dir, id string) bool {
+	res, found, err := dialog.ReadResolved(dir, id)
+	if err != nil || !found {
+		return true
+	}
+	_, req, _, _, _ := dialog.Lookup(dir, id)
+	tool := req.Tool
+	if req.Harness == "acp" {
+		// History holds a tool name only from a seam whose Tool is an identifier.
+		tool = "tool call"
+	}
+	return dialog.AppendHistory(dialog.HistoryEntry{
+		ID: id, Binding: name, Harness: req.Harness, Tool: tool,
+		OpenedAt: req.OpenedAt, At: res.At, Outcome: res.Outcome, By: res.By,
+	}) == nil
 }
 
 // seamGrace is how long a resolved dialog's directory stays while its seam
@@ -457,6 +490,10 @@ func (s *Agent) pruneDialogs(name, dir string, now time.Time) (due time.Time) {
 		}
 		if now.Sub(res.At) <= dialogKeep {
 			due = earliest(due, res.At.Add(dialogKeep))
+			continue
+		}
+		if !s.keepHistory(name, dir, id) {
+			due = now
 			continue
 		}
 		if os.Remove(filepath.Join(dir, "requests", e.Name())) != nil && !notExist(filepath.Join(dir, "requests", e.Name())) {

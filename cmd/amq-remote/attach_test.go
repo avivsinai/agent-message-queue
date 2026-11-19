@@ -386,6 +386,40 @@ func TestBindingsPrunesEndedSessionsAndKeepsUnknownOnes(t *testing.T) {
 	}
 }
 
+// The dialogs command totals the session's waits and ranks its tools by time held.
+func TestDialogsReportsTimeHeldByTool(t *testing.T) {
+	t.Setenv(binding.EnvPath, filepath.Join(t.TempDir(), "binding.json"))
+	at := time.Now().UTC()
+	for _, e := range []dialog.HistoryEntry{
+		{ID: dialog.NewID(), Binding: "alpha", Tool: "Edit", OpenedAt: at.Add(-2 * time.Minute), At: at, Outcome: dialog.OutcomeTerminal, By: dialog.ByTerminal},
+		{ID: dialog.NewID(), Binding: "alpha", Tool: "Bash", OpenedAt: at.Add(-10 * time.Minute), At: at, Outcome: dialog.OutcomeAllowed, By: dialog.ByBuzz},
+	} {
+		if err := dialog.AppendHistory(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out bytes.Buffer
+	if code := run([]string{"dialogs", "--json"}, nil, &out, io.Discard); code != 0 {
+		t.Fatalf("dialogs exited %d: %s", code, out.String())
+	}
+	var report struct {
+		Schema   string
+		Sessions []struct {
+			Binding string
+			Dialogs int
+			Held    float64 `json:"held_seconds"`
+			Tools   []struct{ Tool string }
+		}
+	}
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil || report.Schema != "amq/remote-dialogs/v1" || len(report.Sessions) != 1 {
+		t.Fatalf("report = %s, %v", out.String(), err)
+	}
+	row := report.Sessions[0]
+	if row.Binding != "alpha" || row.Dialogs != 2 || row.Held != 720 || len(row.Tools) != 2 || row.Tools[0].Tool != "Bash" || row.Tools[1].Tool != "Edit" {
+		t.Fatalf("session = %+v", row)
+	}
+}
+
 // bindings --json shows each session's unresolved dialogs, so the owner or
 // an agent can see one that is stuck.
 func TestBindingsShowsOpenDialogs(t *testing.T) {

@@ -105,4 +105,5 @@ amq-cli skill, "Ask the owner without stopping".
 - Each two weeks, or after a bad day, run `amq-board retro`: take the worst
   number and make one owned fix for it. A rule broken two times becomes a
   check or a hook, not a longer rule text. A rule or a tool that nobody used
-  for a month goes.
+  for a month goes. Read `amq-remote dialogs` with it: a tool that holds a
+  session for many minutes is a candidate for a permission rule.
