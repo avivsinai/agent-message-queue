@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -30,6 +31,7 @@ import (
 // in-process relay.
 type enrolledAgent struct {
 	relay    *relaytest.Relay
+	server   *httptest.Server
 	relayKey nostr.SecretKey // the relay's self key, which signs group state
 	owner    nostr.SecretKey
 	home     string
@@ -65,7 +67,15 @@ func enrolledMachine(t *testing.T) *enrolledAgent {
 	}
 	lr, srv, url := relaytest.Start(agent, []string{"auth", tag.OwnerPubKey, tag.Conditions, tag.SigHex()})
 	t.Cleanup(srv.Close)
-	f := &enrolledAgent{relay: lr, relayKey: nostr.Generate(), owner: nostr.SecretKey(owner), home: home, agent: agent, holder: holder}
+	f := &enrolledAgent{
+		relay:    lr,
+		server:   srv,
+		relayKey: nostr.Generate(),
+		owner:    nostr.SecretKey(owner),
+		home:     home,
+		agent:    agent,
+		holder:   holder,
+	}
 	if f.owner.Public().Hex() != tag.OwnerPubKey {
 		t.Fatal("the owner's signing key is not the grant's owner")
 	}
@@ -160,6 +170,29 @@ func TestServeRunsTheEnrolledMachineAgent(t *testing.T) {
 		}
 		return false
 	}, log)
+}
+
+// A machine off its relay's network reported a missing self key when the
+// relay could not be reached (observed on 2026-11-19 in v0.155.0).
+func TestServeWaitsWhenTheMachineRelayDoesNotAnswer(t *testing.T) {
+	f := enrolledMachine(t)
+	f.server.Close()
+
+	var log bytes.Buffer
+	ms := newMachineSet(t.Context(), &log)
+	t.Cleanup(ms.close)
+	statusPath := filepath.Join(f.home, "remote", "machine", f.agent, machineStatusFile)
+	var st machineStatus
+	await(t, ms, "the status to say why the machine agent waits", func() bool {
+		raw, err := os.ReadFile(statusPath)
+		return err == nil && json.Unmarshal(raw, &st) == nil && st.Line != ""
+	}, &log)
+	if st.State != "waiting" || st.Code != "" {
+		t.Fatalf("machine status state = %q, code = %q, line = %q. Want waiting with an empty code.", st.State, st.Code, st.Line)
+	}
+	if !strings.Contains(st.Line, "the machine agent starts when the relay answers") || strings.Contains(st.Line, "publishes no self key") {
+		t.Fatalf("machine status line = %q. Want the relay wait to be reported.", st.Line)
+	}
 }
 
 // The owner's message in a session's channel reaches the session's AMQ

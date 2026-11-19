@@ -228,9 +228,12 @@ func (ms *machineSet) reconcile(now time.Time) (st machineStatus, agents []strin
 	case ms.selfMoved:
 		ms.drop()
 		return st.refused(codeRelaySelfChanged, url+" now publishes a different self key; restart amq-remote serve to adopt it."), agents, true
-	case ms.self == "" && ms.selfErr != nil:
+	case ms.self == "" && errors.Is(ms.selfErr, buzzio.ErrNoRelaySelf):
 		ms.drop()
 		return st.refused(codeRelaySelfUnknown, url+" publishes no self key, so channel state cannot be verified; nothing is created until it does."), agents, true
+	case ms.self == "" && ms.selfErr != nil:
+		ms.drop()
+		return st.waiting(fmt.Sprintf("%s: %v; the machine agent starts when the relay answers.", url, ms.selfErr)), agents, true
 	case ms.self == "":
 		return st.waiting(""), agents, true
 	}

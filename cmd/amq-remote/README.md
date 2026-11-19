@@ -485,6 +485,8 @@ authenticated), `pid` and `updated` (when the file was last written). It is a sn
 `attach`, `bindings` and `doctor` read, not a setting. The codes are
 `identity_ambiguous`, `no_authority`, `authority_expired`,
 `relay_self_unknown`, `relay_self_changed` and `auth_refused`.
+A relay that does not answer is `waiting`, with the cause in `line`; the
+agent starts when the relay answers.
 
 Limits:
 
