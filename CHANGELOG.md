@@ -8,6 +8,19 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.155.0](https://github.com/avivsinai/agent-message-queue/compare/v0.154.1...v0.155.0) (2026-11-19)
+
+
+### Features
+
+* **remote:** a request to the owner shows in the session's Buzz channel ([#1555](https://github.com/avivsinai/agent-message-queue/issues/1555)) ([3e1a5da](https://github.com/avivsinai/agent-message-queue/commit/3e1a5da51fb87fc05b16e4147706ea27526cd856))
+* **remote:** amq-remote dialogs prints what approval dialogs cost each session ([#1557](https://github.com/avivsinai/agent-message-queue/issues/1557)) ([f365d22](https://github.com/avivsinai/agent-message-queue/commit/f365d22efe3b249aa8f9d16831861134f2caef68))
+
+
+### Bug Fixes
+
+* **remote:** service install reports started only when it saw the job run ([#1556](https://github.com/avivsinai/agent-message-queue/issues/1556)) ([50fedc8](https://github.com/avivsinai/agent-message-queue/commit/50fedc8c17297a14b11dfdae059519514af23922))
+
 ## [0.154.1](https://github.com/avivsinai/agent-message-queue/compare/v0.154.0...v0.154.1) (2026-11-18)
 
 
