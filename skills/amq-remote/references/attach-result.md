@@ -75,6 +75,9 @@
    session answers approvals in the terminal.
 5. Add one line for the carrier:
    - Default: "Buzz messages arrive in this agent's AMQ inbox."
+   - Mailbox mode: "A question, a ruling or a task that this agent sends to
+     `user` shows in the channel with its default time; the owner answers with
+     a reply in that thread, and no turn waits for it."
    - Claude in mailbox mode: "In Buzz, a line starting with / is typed into
      the session like Remote Control; it waits while a dialog is open."
    - `--native`: "A message sent while this session is busy waits."

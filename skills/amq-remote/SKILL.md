@@ -68,6 +68,8 @@ Do the work, then answer with `amq reply --id <that message id>`. Use
 `--kind status` for an interim update. Keep the final answer short; it is
 read in a chat.
 
+A reply from `user` that references your own request is the owner's answer to it.
+
 An image the owner sent is not downloaded: the message has a line
 `[image not attached: <name>: <reason>]` for it. Say so in the answer, and ask
 the owner to describe the image if it matters.

@@ -26,7 +26,7 @@ import (
 const routeSessionPrefix = "route/"
 
 // Owner takes one owner message of the agent. The message is
-// decided first (decideOwner): a mirror switch,
+// decided first (decideOwner): an ask answer, a mirror switch,
 // a slash command or a dialog answer is carried out at once, never behind
 // a turn, and its acknowledgement is posted once per event (postOnce). Any
 // other message is a turn: it waits in its route's queue, and each route

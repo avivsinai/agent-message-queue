@@ -17,7 +17,6 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
-	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
@@ -228,22 +227,7 @@ func (s *Agent) mirrorStopped() bool {
 // mirrorLead reports whether this worker runs its machine agent's mirror:
 // the worker that holds <machine>/<self>.mirror.lock.
 func (s *Agent) mirrorLead() bool {
-	if s.mirrors.release != nil || !lock.AdvisoryLockAvailable() {
-		return true
-	}
-	if s.id.Agent == "" {
-		return false
-	}
-	dir := s.agentMarkerDir()
-	if os.MkdirAll(dir, 0o700) != nil {
-		return false
-	}
-	release, ok, err := lock.TryExclusive(filepath.Join(dir, s.id.Agent+".mirror.lock"))
-	if err != nil || !ok {
-		return false
-	}
-	s.mirrors.release = release
-	return true
+	return s.workerLead("mirror", &s.mirrors.release)
 }
 
 // mirrorTick mirrors every live Claude binding with a channel, then posts

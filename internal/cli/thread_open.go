@@ -454,13 +454,8 @@ func report(red *thread.Reduction, filter threadOpenFilter) ([]*thread.Obligatio
 
 // completionRecipe is the owner message that closes an opener of the kind.
 func completionRecipe(openerKind string) threadOpenRecipe {
-	switch openerKind {
-	case format.KindReviewRequest:
-		return threadOpenRecipe{Kind: format.KindReviewResponse, Labels: []string{}}
-	case format.KindQuestion:
-		return threadOpenRecipe{Kind: format.KindAnswer, Labels: []string{}}
-	}
-	return threadOpenRecipe{Kind: format.KindStatus, Labels: []string{"done"}}
+	kind, labels := thread.ClosingReply(openerKind)
+	return threadOpenRecipe{Kind: kind, Labels: labels}
 }
 
 // replyDestination derives the route back to the requester by the rules amq

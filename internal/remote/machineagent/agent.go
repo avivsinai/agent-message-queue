@@ -69,6 +69,8 @@ type Agent struct {
 	// dialogs is the dialog poster's state, used only by the worker that
 	// runs dialogTick.
 	dialogs dialogState
+	// asks belongs to the worker that posts requests to the owner.
+	asks askState
 	// mirrors is the session mirror's state, used only by the worker that
 	// runs mirrorTick.
 	mirrors mirrorState

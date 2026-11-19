@@ -429,16 +429,7 @@ func (s *Agent) publishClaimed(r *boundTurn, budget time.Time, b binding.Binding
 // the owner's event, and signed, that event's header context, goes into the
 // header unchanged.
 func publishOnce(b binding.Binding, threadID, id, eventID string, signed map[string]any, created time.Time, text string) error {
-	identity, err := fsq.SnapshotDeliveryRoot(b.Root)
-	if err != nil {
-		return err
-	}
-	root, err := fsq.OpenDeliveryRoot(b.Root, identity)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = root.Close() }()
-	return mailprompt.Publish(root, id, created, mailprompt.Prompt{
+	return publishPromptAt(b.Root, id, created, mailprompt.Prompt{
 		To:      b.Handle,
 		From:    mailboxSender,
 		Thread:  threadID,
@@ -449,6 +440,19 @@ func publishOnce(b binding.Binding, threadID, id, eventID string, signed map[str
 			"This came from the owner in this session's Buzz channel. Answer with `amq reply --id " + id + "`; your reply is shown there. " +
 			"A reply with `--kind status` shows as progress; any other reply is the final answer.",
 	})
+}
+
+func publishPromptAt(rootPath, id string, created time.Time, prompt mailprompt.Prompt) error {
+	identity, err := fsq.SnapshotDeliveryRoot(rootPath)
+	if err != nil {
+		return err
+	}
+	root, err := fsq.OpenDeliveryRoot(rootPath, identity)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	return mailprompt.Publish(root, id, created, prompt)
 }
 
 // eventContext is the header context {"buzz": {"event": <evt>}} of a

@@ -179,6 +179,11 @@ body; if another session asked, send it the answer and the question's ID.
 lists everything the owner still owes in this project.
 A question that is still open after 14 days expires from the board by default; ask it again if it still matters.
 
+When this session is connected with `/amq-remote`, the request also shows in
+its Buzz channel with its default time. The owner's reply in that thread
+arrives as a reply from `user` and closes the request; you close nothing
+more. A session that is not connected has the board only.
+
 ## Route the task
 
 | Need | Read or run |

@@ -647,6 +647,18 @@ func hasClosingLabel(labels []string, closing ...string) bool {
 	return slices.ContainsFunc(labels, func(label string) bool { return slices.Contains(closing, label) })
 }
 
+// ClosingReply is the owner message that closes an opener of the kind.
+func ClosingReply(openerKind string) (kind string, labels []string) {
+	switch openerKind {
+	case format.KindReviewRequest:
+		return format.KindReviewResponse, []string{}
+	case format.KindQuestion:
+		return format.KindAnswer, []string{}
+	default:
+		return format.KindStatus, []string{"done"}
+	}
+}
+
 // OwnerCloses reports whether the recipient's response closes this kind of request.
 func OwnerCloses(openerKind, kind string, labels []string) bool {
 	switch openerKind {
