@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -930,7 +931,8 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
-	machine := machineOf(time.Now())
+	now := time.Now()
+	machine := machineOf(now)
 	rows := make([]bindingRow, 0, len(all))
 	var unknown []string
 	width := 0
@@ -980,6 +982,15 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 		}
 		if r.TerminalOnlyReason != "" {
 			line += ": Buzz approvals: terminal only: " + r.TerminalOnlyReason
+		}
+		if n := len(r.Dialogs); n > 0 {
+			d := r.Dialogs[0] // openDialogs lists the oldest first
+			what := fmt.Sprintf("%s %s (%s)", d.Phase, heldTime(now.Sub(d.OpenedAt).Seconds()), cmp.Or(d.Tool, "question"))
+			if n == 1 {
+				line += "  dialog " + what
+			} else {
+				line += fmt.Sprintf("  %d dialogs, oldest %s", n, what)
+			}
 		}
 		say(stdout, "%s", line)
 	}

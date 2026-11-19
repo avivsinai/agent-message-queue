@@ -93,7 +93,9 @@ Codex or pi session the machine agent serves has a mirror.
 Run `amq-remote bindings` and show its output. It lists the machine agent
 (running in amq-remote serve, or not running with the next step) and each
 connected session as `live` or `unknown` with its name and its channel, and
-prunes the sessions proven ended.
+prunes the sessions proven ended. A session with a permission dialog not yet
+resolved shows it at the end of its line, for example `dialog open 13m (Bash)`:
+the phase, the time since it opened and the tool.
 
 ## Status line
 

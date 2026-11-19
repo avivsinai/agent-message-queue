@@ -36,8 +36,10 @@ turn.
 4. **Late or silent seat: ask one time, then replace.** A follow-up notice
    says a request is still open at its time; a `check` line says a seat or a
    card does not move. Neither proves that a process stopped. Look at the
-   seat's own evidence (its worktree, its branch, its last message). It
-   works: leave it. It does not answer one direct question by the time you
+   seat's own evidence (its worktree, its branch, its last message). For a
+   connected session, `amq-remote bindings` shows an approval dialog that is
+   open: that seat waits for the owner. Tell the owner; do not replace the seat.
+   It works: leave it. It does not answer one direct question by the time you
    name: give the task to another seat, with a scope the first seat no longer
    edits, and say so in the task record.
 5. **A wait that landed: release it.** For each task that waits for
