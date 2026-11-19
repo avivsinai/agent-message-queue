@@ -54,6 +54,30 @@ var serviceRunOutput = func(name string, args ...string) (string, error) {
 // before the new one is bootstrapped; a bootstrap during teardown fails.
 const launchdStopWait = 5 * time.Second
 
+// serviceStartWait bounds each wait for the service manager to show the
+// job running after a start.
+const serviceStartWait = 5 * time.Second
+
+// serviceStartSleep keeps service-start tests from waiting for a live manager.
+var serviceStartSleep = time.Sleep
+var serviceStartNow = time.Now
+
+// awaitServiceRunning waits until the service's process runs, at most
+// serviceStartWait, and returns the last reason it did not.
+func awaitServiceRunning() error {
+	deadline := serviceStartNow().Add(serviceStartWait)
+	for {
+		err := serviceRunning()
+		if err == nil {
+			return nil
+		}
+		if !serviceStartNow().Before(deadline) {
+			return err
+		}
+		serviceStartSleep(100 * time.Millisecond)
+	}
+}
+
 // service installs, removes, or reports the login service.
 func service(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error) {
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
@@ -259,8 +283,8 @@ func inspectService(root, path string) (serviceStatus, error) {
 }
 
 // serviceLoad starts the unit at path now, replacing a running one, and
-// reports whether it started: false when there is no login session to start
-// it in (macOS over SSH), so it starts at the next login.
+// reports false when no login session can start it (macOS over SSH). Its
+// started result is true only when the service's process was seen running.
 func serviceLoad(path string) (bool, error) {
 	if runtime.GOOS == "darwin" {
 		if serviceRun("launchctl", "print", launchdDomain()) != nil {
@@ -274,12 +298,24 @@ func serviceLoad(path string) (bool, error) {
 				time.Sleep(100 * time.Millisecond)
 			}
 		}
-		return true, serviceRun("launchctl", "bootstrap", launchdDomain(), path)
+		if err := serviceRun("launchctl", "bootstrap", launchdDomain(), path); err != nil {
+			return false, err
+		}
+		if err := awaitServiceRunning(); err != nil {
+			_ = serviceRun("launchctl", "kickstart", launchdTarget())
+			if err = awaitServiceRunning(); err != nil {
+				return false, fmt.Errorf("launchd loaded the job but it does not run (%v); start it with: launchctl kickstart %s", err, launchdTarget())
+			}
+		}
+		return true, nil
 	}
 	for _, args := range [][]string{{"daemon-reload"}, {"enable", loginservice.Unit}, {"restart", loginservice.Unit}} {
 		if err := serviceRun("systemctl", append([]string{"--user"}, args...)...); err != nil {
 			return false, err
 		}
+	}
+	if err := awaitServiceRunning(); err != nil {
+		return false, fmt.Errorf("systemd started the unit but it is not active (%v); see: systemctl --user status %s", err, loginservice.Unit)
 	}
 	return true, nil
 }

@@ -559,7 +559,9 @@ Protocol: [`amq.remote.link/1`](../../docs/remote-link-protocol.md).
 Nothing restarts the endpoint after a reboot unless a login service does.
 `amq-remote service install` writes one that runs `amq-remote up --root ROOT`
 at login (`ROOT` defaults to the machine root) and starts it now, replacing a
-running one:
+running one. It reports started only after it saw the service run; a loaded job
+that does not run is started one time, and if it still does not run the command
+exits 6 with the state and the command to start it.
 
 - macOS: the launchd user agent
   `~/Library/LaunchAgents/io.github.avivsinai.amq-remote.plist`, logging to

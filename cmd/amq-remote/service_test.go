@@ -3,20 +3,23 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/loginservice"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
+	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
 // serviceSandbox gives a test a temporary HOME, an installed-looking
 // amq-remote outside the temporary directory, and a service manager that
-// records its calls and reports no job loaded.
+// records its calls and moves from no job loaded to running after a start.
 func serviceSandbox(t *testing.T) *[]string {
 	t.Helper()
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
@@ -45,15 +48,93 @@ func serviceSandbox(t *testing.T) *[]string {
 		_, err := serviceRunOutput(name, args...)
 		return err
 	}
+	savedSleep, savedNow := serviceStartSleep, serviceStartNow
+	t.Cleanup(func() { serviceStartSleep, serviceStartNow = savedSleep, savedNow })
+	now := time.Now()
+	serviceStartNow = func() time.Time { return now }
+	serviceStartSleep = func(d time.Duration) { now = now.Add(d) }
+	started := false
 	serviceRunOutput = func(name string, args ...string) (string, error) {
 		call := name + " " + strings.Join(args, " ")
 		*calls = append(*calls, call)
 		if call == "launchctl print "+launchdTarget() {
+			if started {
+				return "\tstate = running\n\tpid = 7337\n", nil
+			}
 			return "", errors.New("not loaded")
+		}
+		if strings.HasPrefix(call, "launchctl bootstrap ") || call == "systemctl --user restart "+loginservice.Unit {
+			started = true
 		}
 		return "", nil
 	}
 	return calls
+}
+
+// Bead agent-message-queue-ddm2: during a real upgrade on 2026-11-18,
+// launchd loaded the job as not running while install claimed it started.
+// The command sees that state at its CLI boundary and retries once.
+func TestServiceInstallClaimsStartedOnlyWhenItSeesTheJobRun(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("launchctl shape")
+	}
+	for _, tc := range []struct {
+		name     string
+		recover  bool
+		wantCode int
+	}{
+		{name: "loaded job stays stopped", wantCode: protocol.ExitActionRequired},
+		{name: "kickstart makes job run", recover: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := serviceSandbox(t)
+			kickstarts := 0
+			bootstrapped := false
+			serviceRunOutput = func(name string, args ...string) (string, error) {
+				call := name + " " + strings.Join(args, " ")
+				*calls = append(*calls, call)
+				if call == "launchctl print "+launchdTarget() {
+					if !bootstrapped {
+						return "", errors.New("not loaded")
+					}
+					if tc.recover && kickstarts > 0 {
+						return "\tstate = running\n\tpid = 4242\n", nil
+					}
+					return "\tstate = not running\n", nil
+				}
+				if strings.HasPrefix(call, "launchctl bootstrap ") {
+					bootstrapped = true
+				}
+				if call == "launchctl kickstart "+launchdTarget() {
+					kickstarts++
+				}
+				return "", nil
+			}
+			var stdout, stderr bytes.Buffer
+			code, err := serviceInstall(canonicalTempDir(t), filepath.Join(t.TempDir(), "agent.plist"), false, &stdout)
+			if err != nil {
+				fmt.Fprint(&stderr, err)
+			}
+			if code != tc.wantCode {
+				t.Fatalf("install exit = %d, want %d; %s %s", code, tc.wantCode, stdout.String(), stderr.String())
+			}
+			if kickstarts != 1 {
+				t.Fatalf("kickstarts = %d, want exactly one; calls %v", kickstarts, *calls)
+			}
+			if tc.recover {
+				if err != nil || !strings.Contains(stdout.String(), "Installed and started") {
+					t.Fatalf("successful install error = %v; stdout = %q", err, stdout.String())
+				}
+			} else {
+				if !strings.Contains(stderr.String(), "state = not running") || !strings.Contains(stderr.String(), "launchctl kickstart") {
+					t.Fatalf("failure does not name the state and start command: %q", stderr.String())
+				}
+				if strings.Contains(stdout.String(), "Installed and started") {
+					t.Fatalf("a stopped service printed a start claim: %q", stdout.String())
+				}
+			}
+		})
+	}
 }
 
 // Issue #1064: after a reboot nothing restarted the endpoint, so a linked
