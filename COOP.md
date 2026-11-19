@@ -389,6 +389,29 @@ improvement an owner. For a decision or a reversible ruling, follow
 When the session is connected with `/amq-remote`, the owner can answer in the
 request's Buzz thread while the agent continues working.
 
+### Tell the owner on another channel
+
+A request addressed to `user` goes to that queue root's `user` mailbox. The
+board lists open requests from the past 14 days under **Needs you**. When
+the sender's mailbox is connected with `/amq-remote`, its Buzz channel also
+shows the request.
+
+For a desktop notification or chat webhook, set `queue_root` to the absolute
+path of that root. Run one wake for `user` with a local program you trust.
+See the [wake command's trust boundary](docs/cli.md#amq-wake).
+
+```sh
+amq wake --root "$queue_root" --me user --inject-via /path/to/notify-owner \
+  --inject-arg "$queue_root" --retry-until injected
+```
+
+The program receives just two arguments, the queue root and the doorbell
+text. To get the open requests, it runs
+`amq thread open --root "$1" --me user --owed-by user --json`. After sending
+its notice, it prints `AMQ_INJECT_PROGRESS=accepted` to stderr and exits 0.
+The wake then stops ringing for that group of mail. It drains nothing, so
+the request stays open until someone answers or closes it.
+
 ## CLI commands
 
 The concise command, flag, message-kind, and priority reference is
