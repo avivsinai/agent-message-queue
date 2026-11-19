@@ -476,6 +476,15 @@ channel works again, and turns that ended meanwhile are not posted.
 One machine agent serves a machine. Two enrolled keys are refused; remove
 the directory of the one you do not use.
 
+The key that creates a session channel owns it. Another key of the same
+owner has no membership and cannot read or archive it. Before replacing a
+key, run `amq-remote detach --all` while `serve` runs with the old key. The
+agent scans binding changes on its two-second scan interval, polls every
+10 seconds when idle, and sweeps retired records every 30 seconds. Confirm
+the channels are archived in Buzz before replacing the key. `amq-remote
+doctor` names channels the earlier key's records show as unarchived. The
+owner is an admin of each session channel and can archive it in Buzz.
+
 `serve` writes what the agent does to
 `~/.amq/remote/machine/<agent pubkey>/status.json`: `state` (`serving`,
 `waiting` or `refused`), the refusal `code` and its `line`, which ends with
@@ -895,7 +904,7 @@ session `<name>`. It is the only way to allow a new create after one that
 Buzz never confirmed. The machine agent applies it on its next scan: the old
 record is retired, a channel that create made is still looked for and
 archived, and a new channel is made. A lost channel may be left over in
-Buzz.
+Buzz; the owner can archive it there.
 
 `amq-remote bindings` (`/amq-remote status`) prunes the sessions proven
 ended, then lists the machine agent and each binding with its label, `live`
@@ -1043,7 +1052,9 @@ doctor reports it and does not fail. A new thread started with
 then each reported value as `INFO <key>: <value>` (such as
 `approval_reviewer`), then `OK: no failing link` when nothing fails.
 `--json` prints the report with its rows: `hooks`, `machine_agent`,
-`channels` and `mailboxes`. For a Claude target of the endpoint, the
+`channels`, `left_channels` and `mailboxes`. `left_channels` lists the
+agent key, label and channel ID for each channel recorded as unarchived
+under an earlier key. For a Claude target of the endpoint, the
 `native_capability` rows and the `claude_stop_hook` and
 `claude_approval_hook` keys stay beside the `hooks` rows for clients that
 read them.

@@ -42,8 +42,31 @@ func doctorMachine(stateDir string, all []binding.Binding, report map[string]any
 	if channels := doctorChannels(all, fail, note); len(channels) > 0 {
 		report["channels"] = channels
 	}
+	if channelStateDir, err := machineagent.BindingStateDir(); err == nil {
+		if left, dirs := machineagent.LeftChannels(channelStateDir); len(left) > 0 {
+			report["left_channels"] = left
+			noteLeftChannels(left, dirs, note)
+		}
+	}
 	if mailboxes := doctorMailboxes(all, fail, note); len(mailboxes) > 0 {
 		report["mailboxes"] = mailboxes
+	}
+}
+
+// noteLeftChannels reports one note for each earlier key with unarchived channels.
+func noteLeftChannels(left []machineagent.LeftChannel, dirs []string, note reportFunc) {
+	labelsByAgent := make(map[string][]string, len(dirs))
+	for _, channel := range left {
+		labelsByAgent[channel.Agent] = append(labelsByAgent[channel.Agent], channel.Label)
+	}
+	for _, dir := range dirs {
+		agent := filepath.Base(dir)
+		labels := labelsByAgent[agent]
+		detail := fmt.Sprintf("%d channels of an earlier machine agent key stay in Buzz, and the running key cannot archive them: %s", len(labels), strings.Join(labels, "; "))
+		if len(labels) == 1 {
+			detail = "1 channel of an earlier machine agent key stays in Buzz, and the running key cannot archive it: " + labels[0]
+		}
+		note("channel", short(agent), detail, "archive each one in Buzz (the owner is an admin of every session channel), then remove "+dir)
 	}
 }
 

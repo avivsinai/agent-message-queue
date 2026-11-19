@@ -941,14 +941,18 @@ func (s *Agent) activeRecords() []channelRecord {
 	return records
 }
 
-// readSlots reads every good record in the name slots, also by slot name.
 func (s *Agent) readSlots() ([]channelRecord, map[string]channelRecord) {
-	entries, _ := os.ReadDir(s.channelDir())
+	return readChannelSlots(s.channelDir())
+}
+
+// readChannelSlots reads the good records in dir, also by slot name.
+func readChannelSlots(dir string) ([]channelRecord, map[string]channelRecord) {
+	entries, _ := os.ReadDir(dir)
 	var out []channelRecord
 	slots := map[string]channelRecord{}
 	for _, e := range entries {
 		if name, ok := strings.CutSuffix(e.Name(), ".json"); ok && e.Type().IsRegular() {
-			if r, ok := readChannelRecord(filepath.Join(s.channelDir(), e.Name())); ok {
+			if r, ok := readChannelRecord(filepath.Join(dir, e.Name())); ok {
 				out = append(out, r)
 				slots[name] = r
 			}
@@ -957,13 +961,17 @@ func (s *Agent) readSlots() ([]channelRecord, map[string]channelRecord) {
 	return out, slots
 }
 
-// retiredRecords reads the retired store.
 func (s *Agent) retiredRecords() []channelRecord {
-	entries, _ := os.ReadDir(s.retiredDir())
+	return readRetiredRecords(s.retiredDir())
+}
+
+// readRetiredRecords reads the records in the retired store at dir.
+func readRetiredRecords(dir string) []channelRecord {
+	entries, _ := os.ReadDir(dir)
 	var out []channelRecord
 	for _, e := range entries {
 		if e.Type().IsRegular() && strings.HasSuffix(e.Name(), ".json") {
-			if r, ok := readChannelRecord(filepath.Join(s.retiredDir(), e.Name())); ok && r.State == channelRetired {
+			if r, ok := readChannelRecord(filepath.Join(dir, e.Name())); ok && r.State == channelRetired {
 				out = append(out, r)
 			}
 		}
@@ -1415,6 +1423,65 @@ func machineDirOf(stateDir string) (string, bool) {
 		return "", false
 	}
 	return channelDirFor(stateDir, newest.RelayKey, newest.PubKey), true
+}
+
+// LeftChannel is a channel that an earlier machine agent key made and did
+// not archive.
+type LeftChannel struct {
+	Agent   string `json:"agent"` // the key that made it
+	Label   string `json:"label"`
+	Channel string `json:"channel"`
+}
+
+// LeftChannels lists the channels recorded as not archived under the
+// machine agent keys of this relay other than the newest one, and the
+// record directory of each such key. No machine agent reads those records,
+// and a channel can be archived only by a member with the owner or admin
+// role, which the newest key is not.
+func LeftChannels(stateDir string) (left []LeftChannel, dirs []string) {
+	newestDir, ok := machineDirOf(stateDir)
+	if !ok {
+		return nil, nil
+	}
+	relayDir := filepath.Dir(newestDir)
+	if filepath.Dir(relayDir) != filepath.Join(stateDir, "channels") {
+		return nil, nil
+	}
+	newest := filepath.Base(newestDir)
+	entries, _ := os.ReadDir(relayDir)
+	for _, entry := range entries {
+		agent := entry.Name()
+		if !entry.IsDir() || len(agent) != 64 || strings.EqualFold(agent, newest) {
+			continue
+		}
+		if _, err := hex.DecodeString(agent); err != nil {
+			continue
+		}
+		dir := filepath.Join(relayDir, agent)
+		records, _ := readChannelSlots(dir)
+		records = append(records, readRetiredRecords(filepath.Join(dir, "retired"))...)
+		start := len(left)
+		for _, r := range records {
+			if r.ChannelID == "" || r.Archived {
+				continue
+			}
+			label := r.Label
+			if label == "" {
+				label = r.Name
+			}
+			left = append(left, LeftChannel{Agent: agent, Label: label, Channel: r.ChannelID})
+		}
+		if len(left) > start {
+			dirs = append(dirs, dir)
+		}
+	}
+	sort.SliceStable(left, func(i, j int) bool {
+		if left[i].Agent != left[j].Agent {
+			return left[i].Agent < left[j].Agent
+		}
+		return left[i].Label < left[j].Label
+	})
+	return left, dirs
 }
 
 // MachineChannelOf reads the channel record of b that this machine's

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzop"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
+	"github.com/avivsinai/agent-message-queue/internal/remote/machineagent"
 	"github.com/avivsinai/agent-message-queue/internal/remote/machinecred"
 	"github.com/avivsinai/agent-message-queue/internal/remote/outbox"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -401,5 +403,62 @@ func TestDoctorNotesASuspendedChannel(t *testing.T) {
 	})
 	if channels[b.Name] != "suspended" || len(fails) != 0 || len(notes) != 1 || !strings.Contains(notes[0].Detail, "the channel is archived") {
 		t.Fatalf("channels = %v, failures = %+v, notes = %+v", channels, fails, notes)
+	}
+}
+
+func TestDoctorNamesChannelsLeftByAnEarlierMachineKey(t *testing.T) {
+	standaloneMachineAgentFixture(t)
+	stateDir, err := machineagent.BindingStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	earlier := strings.Repeat("cd", 32)
+	dir := filepath.Join(stateDir, "channels", "rk", earlier)
+	retired := filepath.Join(dir, "retired")
+	if err := os.MkdirAll(retired, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const leftLabel, archivedLabel = "old session", "archived session"
+	const leftID = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
+	for _, record := range []struct {
+		name, label, id string
+		archived        bool
+	}{
+		{name: "old", label: leftLabel, id: leftID},
+		{name: "archived", label: archivedLabel, id: "96897d2b-8274-4237-9a73-a749c86e05b6", archived: true},
+	} {
+		raw, err := json.Marshal(map[string]any{"name": record.name, "label": record.label, "reg": record.name,
+			"state": "retired", "channel_id": record.id, "archived": record.archived})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(retired, record.name+".json"), raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out, stderr bytes.Buffer
+	if code := run([]string{"doctor", "--root", canonicalTempDir(t), "--json"}, strings.NewReader(""), &out, &stderr); code != 0 {
+		t.Fatalf("doctor exited %d.\n%s\n%s", code, &out, &stderr)
+	}
+	var got struct {
+		LeftChannels []map[string]string `json:"left_channels"`
+		Notes        []boundaryFailure   `json:"notes"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"agent": earlier, "label": leftLabel, "channel": leftID}
+	if len(got.LeftChannels) != 1 || !maps.Equal(got.LeftChannels[0], want) {
+		t.Fatalf("left_channels = %+v. Want [%+v].", got.LeftChannels, want)
+	}
+	var channels []boundaryFailure
+	for _, n := range got.Notes {
+		if n.Boundary == "channel" {
+			channels = append(channels, n)
+		}
+	}
+	if len(channels) != 1 || channels[0].Subject != short(earlier) || !strings.Contains(channels[0].Detail, leftLabel) ||
+		strings.Contains(channels[0].Detail, archivedLabel) || !strings.Contains(channels[0].Remedy, dir) {
+		t.Fatalf("channel notes = %+v. Want one note naming %q and %s.", channels, leftLabel, dir)
 	}
 }
