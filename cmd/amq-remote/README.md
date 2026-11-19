@@ -479,9 +479,8 @@ the directory of the one you do not use.
 The key that creates a session channel owns it. Another key of the same
 owner has no membership and cannot read or archive it. Before replacing a
 key, run `amq-remote detach --all` while `serve` runs with the old key. The
-agent scans binding changes on its two-second scan interval, polls every
-10 seconds when idle, and sweeps retired records every 30 seconds. Confirm
-the channels are archived in Buzz before replacing the key. `amq-remote
+agent archives the channels within about a minute; confirm in Buzz that
+they are archived before you replace the key. `amq-remote
 doctor` names channels the earlier key's records show as unarchived. The
 owner is an admin of each session channel and can archive it in Buzz.
 

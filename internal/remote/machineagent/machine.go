@@ -152,7 +152,9 @@ func channelDirFor(stateDir, relayKey, machine string) string {
 
 func (s *Agent) channelDir() string { return channelDirFor(s.stateDir, s.id.RelayKey, s.id.Agent) }
 
-func (s *Agent) retiredDir() string { return filepath.Join(s.channelDir(), "retired") }
+func retiredDirOf(channelDir string) string { return filepath.Join(channelDir, "retired") }
+
+func (s *Agent) retiredDir() string { return retiredDirOf(s.channelDir()) }
 
 // loadChannelRecord reads one record. found is false only when there is no
 // file; a file that cannot be read or parsed is an error, never first use.
@@ -941,6 +943,7 @@ func (s *Agent) activeRecords() []channelRecord {
 	return records
 }
 
+// readSlots reads every good record in the name slots, also by slot name.
 func (s *Agent) readSlots() ([]channelRecord, map[string]channelRecord) {
 	return readChannelSlots(s.channelDir())
 }
@@ -961,6 +964,7 @@ func readChannelSlots(dir string) ([]channelRecord, map[string]channelRecord) {
 	return out, slots
 }
 
+// retiredRecords reads the retired store.
 func (s *Agent) retiredRecords() []channelRecord {
 	return readRetiredRecords(s.retiredDir())
 }
@@ -1444,9 +1448,6 @@ func LeftChannels(stateDir string) (left []LeftChannel, dirs []string) {
 		return nil, nil
 	}
 	relayDir := filepath.Dir(newestDir)
-	if filepath.Dir(relayDir) != filepath.Join(stateDir, "channels") {
-		return nil, nil
-	}
 	newest := filepath.Base(newestDir)
 	entries, _ := os.ReadDir(relayDir)
 	for _, entry := range entries {
@@ -1459,7 +1460,7 @@ func LeftChannels(stateDir string) (left []LeftChannel, dirs []string) {
 		}
 		dir := filepath.Join(relayDir, agent)
 		records, _ := readChannelSlots(dir)
-		records = append(records, readRetiredRecords(filepath.Join(dir, "retired"))...)
+		records = append(records, readRetiredRecords(retiredDirOf(dir))...)
 		start := len(left)
 		for _, r := range records {
 			if r.ChannelID == "" || r.Archived {

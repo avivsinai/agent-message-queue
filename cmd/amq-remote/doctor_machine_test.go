@@ -427,12 +427,16 @@ func TestDoctorNamesChannelsLeftByAnEarlierMachineKey(t *testing.T) {
 		{name: "old", label: leftLabel, id: leftID},
 		{name: "archived", label: archivedLabel, id: "96897d2b-8274-4237-9a73-a749c86e05b6", archived: true},
 	} {
+		recordDir, state := dir, "active"
+		if record.archived {
+			recordDir, state = retired, "retired"
+		}
 		raw, err := json.Marshal(map[string]any{"name": record.name, "label": record.label, "reg": record.name,
-			"state": "retired", "channel_id": record.id, "archived": record.archived})
+			"state": state, "channel_id": record.id, "archived": record.archived})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(retired, record.name+".json"), raw, 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(recordDir, record.name+".json"), raw, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
