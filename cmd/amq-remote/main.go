@@ -79,6 +79,8 @@ Commands:
   detach --self|--name N|--all
                            Unbind; the session keeps running
   bindings                 Bound sessions: live, unknown, or ended (pruned)
+  dialogs [--days N] [--json]
+                           Report approval dialog counts and time held per session
   channel reset NAME       Give up session NAME's Buzz channel; the machine
                            agent makes a new one
   mirror on|off|status --self|--name N
@@ -135,6 +137,11 @@ type common struct {
 func addCommon(fs *flag.FlagSet, probe ...*jsonProbe) *common {
 	c := &common{root: os.Getenv("AM_ROOT")}
 	fs.Var(&rootValue{c: c}, "root", "AMQ root directory (default AM_ROOT)")
+	addJSONFlag(fs, c, probe...)
+	return c
+}
+
+func addJSONFlag(fs *flag.FlagSet, c *common, probe ...*jsonProbe) {
 	jv := &jsonValue{c: c}
 	if len(probe) > 0 && probe[0] != nil {
 		p := probe[0]
@@ -146,7 +153,6 @@ func addCommon(fs *flag.FlagSet, probe ...*jsonProbe) *common {
 		fs.Usage = func() { p.help = p.parseOut.Len() == 0 }
 	}
 	fs.Var(jv, "json", "emit JSON")
-	return c
 }
 
 // rootValue is the --root flag; it records that the flag was given.
@@ -306,6 +312,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		code, err = detach(rest, stdout, stderr, probe)
 	case "bindings":
 		code, err = bindings(rest, stdout, probe)
+	case "dialogs":
+		out, code, err = dialogs(rest, stdout, probe)
 	case "channel":
 		code, err = channelCommand(rest, stdout, probe)
 	case "mirror":
