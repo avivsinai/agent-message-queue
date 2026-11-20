@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.158.0](https://github.com/avivsinai/agent-message-queue/compare/v0.157.0...v0.158.0) (2026-11-20)
+
+
+### Bug Fixes
+
+* **remote:** give a session one owner channel when a link share adds a binding ([#1570](https://github.com/avivsinai/agent-message-queue/issues/1570)) ([61934cb](https://github.com/avivsinai/agent-message-queue/commit/61934cbeaa12ce3d6729c02848651ab6be3f2b51))
+
 ## [0.157.0](https://github.com/avivsinai/agent-message-queue/compare/v0.156.0...v0.157.0) (2026-11-19)
 
 
