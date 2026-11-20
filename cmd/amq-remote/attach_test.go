@@ -387,6 +387,50 @@ func TestBindingsPrunesEndedSessionsAndKeepsUnknownOnes(t *testing.T) {
 	}
 }
 
+func TestBindingsShowsTheChannelASessionUses(t *testing.T) {
+	dir := canonicalTempDir(t)
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	holder, err := launch.HolderOf(os.Getpid())
+	if err != nil {
+		t.Skip("no process identity on this platform")
+	}
+	const session = "s1"
+	for _, b := range []binding.Binding{
+		{Carrier: binding.CarrierMailbox, Root: dir, Handle: "agent", Name: "mailbox", Holder: holder, Harness: "pi", HarnessSession: session},
+		{Carrier: binding.CarrierNative, Root: dir, Target: "pi:agent", Name: "native", Holder: holder, Harness: "pi", NativeSession: session},
+	} {
+		if err := binding.WriteNamed(b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out bytes.Buffer
+	if code := run([]string{"bindings"}, nil, &out, io.Discard); code != 0 {
+		t.Fatalf("bindings exit %d: %s", code, out.String())
+	}
+	if !regexp.MustCompile(`(?m)  native  channel with mailbox$`).MatchString(out.String()) {
+		t.Fatalf("bindings output %q; want the native line to end with channel with mailbox", out.String())
+	}
+	out.Reset()
+	if code := run([]string{"bindings", "--json"}, nil, &out, io.Discard); code != 0 {
+		t.Fatalf("bindings exit %d: %s", code, out.String())
+	}
+	var got struct {
+		Bindings []struct {
+			Name        string `json:"name"`
+			ChannelWith string `json:"channel_with"`
+		}
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("bindings output %q: %v", out.String(), err)
+	}
+	for _, row := range got.Bindings {
+		if row.Name == "native" && row.ChannelWith == "mailbox" {
+			return
+		}
+	}
+	t.Fatalf("bindings output %s; want channel_with mailbox for the native binding", out.String())
+}
+
 // The dialogs command totals the session's waits and ranks its tools by time held.
 func TestDialogsReportsTimeHeldByTool(t *testing.T) {
 	t.Setenv(binding.EnvPath, filepath.Join(t.TempDir(), "binding.json"))

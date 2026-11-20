@@ -871,8 +871,11 @@ type bindingRow struct {
 	Target   string        `json:"target,omitempty"`
 	// Channel and ChannelName are the machine agent's channel for the
 	// session, when it has a record of one.
-	Channel            string `json:"channel,omitempty"`
-	ChannelName        string `json:"channel_name,omitempty"`
+	Channel     string `json:"channel,omitempty"`
+	ChannelName string `json:"channel_name,omitempty"`
+	// ChannelWith is the binding whose channel this session uses, for a
+	// native binding of a session that a mailbox binding also serves.
+	ChannelWith        string `json:"channel_with,omitempty"`
 	TerminalOnlyReason string `json:"terminal_only_reason,omitempty"`
 	// Dialogs are the session's permission dialogs not yet resolved.
 	Dialogs []dialogRow `json:"dialogs,omitempty"`
@@ -943,6 +946,9 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 		if ch, ok := machineagent.MachineChannelOf(b); ok {
 			row.Channel, row.ChannelName = ch.State, ch.Name
 		}
+		if with, shared := binding.SharedChannel(b, all, inspect); shared && row.Channel == "" {
+			row.ChannelWith = with.Name
+		}
 		if b.Harness == "codex" && b.Carrier == binding.CarrierMailbox && b.AppServer.Thread == "" {
 			reason, err := launch.CodexTerminalOnlyReason(b.Root, b.Handle)
 			if err != nil {
@@ -979,6 +985,9 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 		}
 		if r.Channel != "" {
 			line += fmt.Sprintf("  channel %s %q", r.Channel, r.ChannelName)
+		}
+		if r.ChannelWith != "" {
+			line += "  channel with " + r.ChannelWith
 		}
 		if r.TerminalOnlyReason != "" {
 			line += ": Buzz approvals: terminal only: " + r.TerminalOnlyReason

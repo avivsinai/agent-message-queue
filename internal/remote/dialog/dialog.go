@@ -400,8 +400,9 @@ func ReadResolved(dir, id string) (Resolved, bool, error) {
 }
 
 // FindBinding returns the live binding name that serves this seam: a
-// mailbox binding with Root==root and Handle==handle, or a binding whose
-// NativeSession or Codex app-server thread is session. ("", nil) when none
+// mailbox binding with Root==root and Handle==handle, else a binding whose
+// NativeSession or Codex app-server thread is session. A mailbox binding
+// carries its session's channel, so it is preferred. ("", nil) when none
 // does. A binding proven ended serves nothing.
 func FindBinding(root, handle, session string) (string, error) {
 	list, err := binding.List()
@@ -412,6 +413,7 @@ func FindBinding(root, handle, session string) (string, error) {
 		return "", err
 	}
 	root = canonical(root)
+	var nativeName string
 	for _, b := range list {
 		mailbox := b.Mailbox() && root != "" && handle != "" && b.Handle == handle && canonical(b.Root) == root
 		native := session != "" && (b.NativeSession == session || b.AppServer.Thread == session)
@@ -421,9 +423,14 @@ func FindBinding(root, handle, session string) (string, error) {
 		if state, _ := b.Liveness(); state == binding.Ended {
 			continue
 		}
-		return b.Name, nil
+		if mailbox {
+			return b.Name, nil
+		}
+		if nativeName == "" {
+			nativeName = b.Name
+		}
 	}
-	return "", nil
+	return nativeName, nil
 }
 
 // ParseAnswer maps a Buzz reply to an answer: "N" picks option N;

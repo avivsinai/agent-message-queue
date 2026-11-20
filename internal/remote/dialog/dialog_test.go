@@ -25,6 +25,16 @@ func TestDialogRoundTripFirstResolutionWins(t *testing.T) {
 	if err != nil || name != "proj" {
 		t.Fatalf("FindBinding = %q, %v", name, err)
 	}
+	// Review of agent-message-queue-eqzq: a matching native binding can
+	// sort before the mailbox binding that carries the dialog's channel.
+	const session = "s1"
+	if err := binding.WriteNamed(binding.Binding{Name: "native", Carrier: binding.CarrierNative, Root: root,
+		Target: "pi:agent", Harness: "pi", NativeSession: session}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := FindBinding(root, "claude", session); err != nil || got != name {
+		t.Fatalf("FindBinding with both matches = %q, %v; want %q", got, err, name)
+	}
 	dir, err := DirFor(name)
 	if err != nil {
 		t.Fatal(err)

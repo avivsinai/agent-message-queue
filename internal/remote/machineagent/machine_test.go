@@ -372,6 +372,72 @@ func TestMachineDetachArchivesAndReattachRestoresTheChannel(t *testing.T) {
 	}
 }
 
+// Regression (agent-message-queue-eqzq): a link share and a mailbox binding
+// of one running session both held active owner channels.
+func TestMachineGivesOneChannelToASessionWithTwoBindings(t *testing.T) {
+	s, rec := machineServer(t)
+	root, holder := canonicalTempDir(t), selfHolder(t)
+	const session = "s1"
+	native := binding.Binding{Carrier: binding.CarrierNative, Root: root, Target: "pi:agent", Harness: "pi",
+		NativeSession: session, Holder: holder, Name: "native", Label: "pi · native @ box"}
+	if err := binding.WriteNamed(native); err != nil {
+		t.Fatal(err)
+	}
+	activeChannel(t, s, native, machineChanA)
+	rec.f.groupState(t, machineChanA)
+	now := time.Now()
+	tick(s, now)
+
+	mailbox := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent", Harness: "pi",
+		HarnessSession: session, Holder: holder, Name: "mailbox", Label: "pi · mailbox @ box"}
+	if err := binding.WriteNamed(mailbox); err != nil {
+		t.Fatal(err)
+	}
+	tick(s, now.Add(time.Minute))
+	mailboxRecord := channelState(t, s, mailbox.Name)
+	if mailboxRecord.State != channelActive {
+		t.Fatalf("mailbox record = %+v; want active", mailboxRecord)
+	}
+	if r, exists, err := loadChannelRecord(s.slotPath(native.Name)); exists || err != nil {
+		t.Fatalf("mailbox channel is %q and native slot is %q (error %v); want no native slot", mailboxRecord.State, r.State, err)
+	}
+	r := onlyRetired(t, s)
+	if r.RetiredBy != "joined" || !r.Archived || r.ChannelID != machineChanA {
+		t.Fatalf("retired native record = %+v; want the joined, archived channel", r)
+	}
+	raw, err := os.ReadFile(s.recordPath(r))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var joined struct {
+		JoinedTo string `json:"joined_to"`
+	}
+	if err := json.Unmarshal(raw, &joined); err != nil || joined.JoinedTo != mailbox.Label {
+		t.Fatalf("retired record joined_to = %q, %v; want %q", joined.JoinedTo, err, mailbox.Label)
+	}
+	events := rec.f.relay.Events()
+	if !slices.ContainsFunc(events, func(evt nostr.Event) bool {
+		return evt.Kind == 39000 && evt.PubKey == rec.f.relayKey.Public() &&
+			writeTag(evt, "d") == machineChanA && writeTag(evt, "archived") == "true"
+	}) {
+		t.Fatal("the relay did not record the archive of the native channel")
+	}
+	message := "Joined: " + native.Label + " now uses the channel " + strconv.Quote(mailbox.Label) + ". This channel no longer reaches it."
+	if !slices.ContainsFunc(events, func(evt nostr.Event) bool {
+		return evt.Kind == 9 && writeTag(evt, "h") == machineChanA && evt.Content == message
+	}) {
+		t.Fatalf("the native channel did not receive %q", message)
+	}
+
+	if _, err := binding.Retire(binding.RemovedDetached, func(b binding.Binding) bool { return b.Name == mailbox.Name }); err != nil {
+		t.Fatal(err)
+	}
+	tick(s, now.Add(2*time.Minute))
+	if r := channelState(t, s, native.Name); r.State != channelActive || r.ChannelID != machineChanA || r.Archived {
+		t.Fatalf("restored native record = %+v; want the original active channel", r)
+	}
+}
+
 // appServerSession is a bound Codex app-server thread, with no holder, and
 // what the daemon at its socket answers: its pid and the loaded threads,
 // with the number of loaded-thread probes.
