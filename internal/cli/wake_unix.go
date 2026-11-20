@@ -1892,6 +1892,7 @@ type wakeStart struct {
 	// and the exact restart record is consumed at the readiness boundary.
 	retainLockOnRestartCleanupError *bool
 
+	inputGuard       *wakeInputGuard
 	requestedOwner   *wakeOwner
 	ownerObservation wakeOwnerObservation
 	nativeLaunch     *claudeNativeLaunch
@@ -2003,7 +2004,10 @@ var wakeUsageNotes = []string{
 	"  contain sanitized but message-derived header content.",
 	"",
 	"Input deferral (default on): wake samples terminal input only after",
-	"  a message is pending, then injects after a short quiet window.",
+	"  a message is pending on a plain seat, then waits for a short quiet window.",
+	"  Managed raw Claude Code on macOS with the submit hook guards input after",
+	"  the first submit. A later read holds until --input-stale-for (default 5m,",
+	"  0 never). The wake samples the armed terminal every 2s between arrivals.",
 	"  Collision reduction only: it cannot detect permission/approval dialogs.",
 	"  A pause longer than --input-quiet-for can still inject while a prompt",
 	"  is being composed. If input remains active through --input-max-hold,",
@@ -2731,6 +2735,8 @@ func (s *wakeStart) loadStartupSettings() error {
 	if err != nil {
 		return err
 	}
+	s.inputGuard = s.newInputGuard()
+	startupSettings.applied.inputGuard = s.inputGuard.status(startupSettings.settings)
 	s.startupSettings = startupSettings
 	s.machineSettingsPath, err = machineWakeSettingsPath()
 	if err != nil {
@@ -2869,6 +2875,8 @@ func (s *wakeStart) newLoopConfig() wakeConfig {
 		injectArgs:          []string(s.flags.injectArgs),
 		wakeOwner:           s.requestedOwner,
 		settings:            startupSettings.settings,
+		inputGuard:          s.inputGuard,
+		reportedInputGuard:  startupSettings.applied.inputGuard,
 		strict:              s.flags.common.Strict,
 		fallbackWarn:        true,
 		injectMode:          s.injectMode,

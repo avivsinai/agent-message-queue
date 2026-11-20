@@ -5,6 +5,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -54,6 +55,14 @@ func TestWakeRingsAPlainDoorbellWithoutDialogHooks(t *testing.T) {
 	if !strings.Contains(stderr, "dialog guard: plain\n") {
 		t.Fatalf("stderr = %q, want the plain dialog guard line", stderr)
 	}
+	wantInput := "input guard: plain\n"
+	if runtime.GOOS == "linux" {
+		wantInput = "input guard: plain (Linux)\n"
+	}
+	if !strings.Contains(stderr, wantInput) {
+		t.Fatalf("stderr = %q, want %q", stderr, wantInput)
+	}
+
 }
 
 // Pre-merge review of r6h PR 1: an agy marker left by a relay killed mid

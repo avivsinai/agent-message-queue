@@ -58,6 +58,8 @@ type wakeConfig struct {
 	baselineInherited         bool
 	baselineExisting          map[string]wakeFileIdentity
 	inputDelivery             wakeInputDeliveryState
+	inputGuard                *wakeInputGuard
+	reportedInputGuard        string
 	inputRecoveryRequired     bool
 	doorbell                  wakeDoorbellState
 	holds                     map[string]wakeHold // set by each inbox scan for the doorbell plan
@@ -169,9 +171,10 @@ const (
 )
 
 type wakeInputDeliveryState struct {
-	phase   wakeInputDeliveryPhase
-	mode    string
-	payload string
+	phase      wakeInputDeliveryPhase
+	mode       string
+	payload    string
+	guardInput bool // this delivery observes normal input deferral, including its owed Enter
 	// oneSubmit marks the owner's command: it sends no rescue Enter (the
 	// command can open a picker, and a second Enter would choose in it),
 	// and its Enter is sent only while the command still verifies.
@@ -1333,6 +1336,7 @@ func recordWakeAttempt(
 		cfg.doorbell.arm(currentPending)
 	}
 	if cfg.retryUntil == wakeRetryUntilInjected &&
+		!cfg.inputDelivery.guardInput &&
 		deliveryErr == nil &&
 		!cfg.lastAttemptAttention &&
 		!cfg.lastAttemptTransientAttention &&
@@ -1754,6 +1758,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 	if cfg.injectMode == wakeInjectModeClaudeNative {
 		return errors.New("native wake cannot use terminal delivery")
 	}
+	cfg.beginInputAttempt()
 	cfg.lastAttemptAttention = false
 	cfg.lastAttemptTransientAttention = false
 	cfg.lastInjectorOutcome = wakeInjectorOutcomeNone
@@ -1779,6 +1784,24 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 		return deliverWakeAttentionOnly(cfg, notice.output)
 	}
 
+	guardInput := shouldDeferBeforeInject(cfg, deferForInput)
+	pending := &cfg.inputDelivery
+	// Resume the exact drain or owed Enter. Rebuilding a stale reminder at
+	// this point would replay already accepted text.
+	resumeGuarded := guardInput && pending.guardInput && pending.pending() && pending.phase != wakeInputPayloadPending
+	if guardInput && !resumeGuarded {
+		switch cfg.inputDecision(false) {
+		case inputPlain:
+			if !waitForWakeInputQuiet(cfg) {
+				return deliverWakeTransientAttention(cfg, notice.output, nil)
+			}
+		case inputUnknown:
+			return deliverWakeTransientAttention(cfg, notice.output, nil)
+		case inputCleanSubmit, inputStale:
+			notice.submitOnly = false
+		}
+	}
+
 	inputText := notice.input.text
 	if notice.submitOnly {
 		inputText = ""
@@ -1791,12 +1814,6 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 	bell := cfg.settings.bell && !ownerBound && notice.input.provenance != wakePayloadOwnerCommand
 	if bell {
 		plainText = "\a" + plainText
-	}
-
-	if shouldDeferBeforeInject(cfg, deferForInput) {
-		if !waitForWakeInputQuiet(cfg) {
-			return deliverWakeTransientAttention(cfg, notice.output, nil)
-		}
 	}
 
 	// External injection: delegate to user-specified command instead of TIOCSTI.
@@ -1824,11 +1841,13 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 		if bell {
 			injectedText = "\a" + injectedText
 		}
-		if notice.submitOnly {
-			inputAccepted, injectErr = injectTerminalSubmitOnly(cfg, wakeInjectModeRaw)
+		if resumeGuarded {
+			inputAccepted, injectErr = resumeWakeInputDelivery(cfg)
+		} else if notice.submitOnly {
+			inputAccepted, injectErr = injectTerminalSubmitOnly(cfg, wakeInjectModeRaw, guardInput && cfg.inputGuard.status(cfg.settings) == inputGuardProper)
 		} else {
 			inputAccepted, injectErr = injectTerminalNotification(cfg, wakeInjectModeRaw, injectedText,
-				notice.input.provenance == wakePayloadOwnerCommand)
+				notice.input.provenance == wakePayloadOwnerCommand, guardInput && cfg.inputGuard.status(cfg.settings) == inputGuardProper)
 		}
 		inputAccepted = inputAccepted || cfg.inputDelivery.confirmedInput()
 
@@ -1844,13 +1863,13 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 			pasteText = "\a" + pasteText
 		}
 		if notice.submitOnly {
-			inputAccepted, injectErr = injectTerminalSubmitOnly(cfg, wakeInjectModePaste)
+			inputAccepted, injectErr = injectTerminalSubmitOnly(cfg, wakeInjectModePaste, false)
 		} else {
 			inputAccepted, injectErr = injectTerminalNotification(
 				cfg,
 				wakeInjectModePaste,
 				pasteText,
-				false,
+				false, false,
 			)
 		}
 		inputAccepted = inputAccepted || cfg.inputDelivery.confirmedInput()
@@ -1880,6 +1899,9 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 		}
 	}
 
+	if errors.Is(injectErr, errWakeInputHeld) {
+		return deliverWakeTransientAttention(cfg, notice.output, nil)
+	}
 	if injectErr != nil {
 		if isWakeTerminalPartialProgress(injectErr) {
 			return injectErr
@@ -2168,6 +2190,9 @@ func writeTerminalChunk(cfg *wakeConfig, chunk string) (bool, error) {
 	if err != nil || !allowed {
 		return false, err
 	}
+	if cfg.inputGuard != nil {
+		cfg.inputGuard.lastOwnRead = time.Time{}
+	}
 	if cfg.terminalWrite != nil {
 		if err := cfg.terminalWrite(chunk); err != nil {
 			if isWakeTerminalControlStopped(err) {
@@ -2355,15 +2380,14 @@ func reconcileWakeInputAfterInboxDrain(cfg *wakeConfig) error {
 		clearWakeInputState(cfg)
 		return nil
 	}
-	_, err := resumeWakeInputDelivery(cfg)
-	return err
+	return cfg.resumeOwedInput(wakePayload{text: coopWakeDoorbell, provenance: wakePayloadSystemFixed})
 }
 
 func injectTerminalNotification(
 	cfg *wakeConfig,
 	mode string,
 	payload string,
-	oneSubmit bool,
+	oneSubmit, guardInput bool,
 ) (bool, error) {
 	state := &cfg.inputDelivery
 	if state.acceptanceUncertain {
@@ -2384,16 +2408,17 @@ func injectTerminalNotification(
 	}
 	if !state.pending() {
 		*state = wakeInputDeliveryState{
-			phase:     wakeInputPayloadPending,
-			mode:      mode,
-			payload:   payload,
-			oneSubmit: oneSubmit,
+			phase:      wakeInputPayloadPending,
+			mode:       mode,
+			payload:    payload,
+			oneSubmit:  oneSubmit,
+			guardInput: guardInput,
 		}
 	}
 	return resumeWakeInputDelivery(cfg)
 }
 
-func injectTerminalSubmitOnly(cfg *wakeConfig, mode string) (bool, error) {
+func injectTerminalSubmitOnly(cfg *wakeConfig, mode string, guardInput bool) (bool, error) {
 	state := &cfg.inputDelivery
 	if state.acceptanceUncertain {
 		return false, &wakeInputDemotionBlockedError{
@@ -2413,8 +2438,9 @@ func injectTerminalSubmitOnly(cfg *wakeConfig, mode string) (bool, error) {
 	// target's paste-burst window. Reusing the Codex LF prelude here would put a
 	// literal blank line into an already-empty composer on every retry.
 	*state = wakeInputDeliveryState{
-		phase: wakeInputPrimarySubmitPending,
-		mode:  mode,
+		phase:      wakeInputPrimarySubmitPending,
+		guardInput: guardInput,
+		mode:       mode,
 	}
 	return resumeWakeInputDelivery(cfg)
 }
@@ -2453,7 +2479,7 @@ func resumeWakeInputDelivery(cfg *wakeConfig) (bool, error) {
 			// Text still queued has no reader: a harness that quit part way
 			// through it leaves the rest for the shell that takes the terminal
 			// back, and a submit key would run that rest as a command there.
-			waited, drained, err := waitForRawInputDrained(
+			waited, drained, err := cfg.waitRawDrain(
 				rawInjectDrainTimeout,
 				rawInjectDrainPollInterval,
 			)
@@ -2514,6 +2540,9 @@ func resumeWakeInputDelivery(cfg *wakeConfig) (bool, error) {
 				state.reset()
 				return false, nil
 			}
+			if state.guardInput && cfg.inputDecision(true) == inputUnknown {
+				return false, errWakeInputHeld
+			}
 			wrote, err := writePendingWakeInputChunk(cfg, state, "\r")
 			if err != nil {
 				if cfg.debug {
@@ -2523,6 +2552,15 @@ func resumeWakeInputDelivery(cfg *wakeConfig) (bool, error) {
 			}
 			if !wrote {
 				return false, nil
+			}
+			if state.oneSubmit && state.guardInput {
+				// An owner command gets one Enter. Retain only its drain if the
+				// reader has not taken it yet.
+				_, drained, drainErr := cfg.waitRawDrain(rawInjectCRDrainTimeout, rawInjectDrainPollInterval)
+				if drainErr == nil && !drained {
+					state.phase = wakeInputRawRescueQueued
+					return false, nil
+				}
 			}
 			if state.mode == wakeInjectModePaste || state.oneSubmit {
 				state.reset()
@@ -2534,7 +2572,7 @@ func resumeWakeInputDelivery(cfg *wakeConfig) (bool, error) {
 
 			// A repeat Enter rescues a swallowed first submit. Skip it only when
 			// the first Enter is provably still queued.
-			waited, drained, drainErr := waitForRawInputDrained(
+			waited, drained, drainErr := cfg.waitRawDrain(
 				rawInjectCRDrainTimeout,
 				rawInjectDrainPollInterval,
 			)
@@ -2550,7 +2588,7 @@ func resumeWakeInputDelivery(cfg *wakeConfig) (bool, error) {
 			state.phase = wakeInputRawRescuePending
 
 		case wakeInputRawFirstSubmitQueued:
-			waited, drained, err := waitForRawInputDrained(
+			waited, drained, err := cfg.waitRawDrain(
 				rawInjectCRDrainTimeout,
 				rawInjectDrainPollInterval,
 			)
@@ -2569,6 +2607,9 @@ func resumeWakeInputDelivery(cfg *wakeConfig) (bool, error) {
 
 		case wakeInputRawRescuePending:
 			rawInjectSleep(rawInjectSettleDelay)
+			if state.guardInput && cfg.inputDecision(true) == inputUnknown {
+				return false, errWakeInputHeld
+			}
 			wrote, err := writePendingWakeInputChunk(cfg, state, "\r")
 			if err != nil {
 				if cfg.debug {
@@ -2582,7 +2623,7 @@ func resumeWakeInputDelivery(cfg *wakeConfig) (bool, error) {
 			if cfg.debug {
 				_ = writeWakeDiagnostic(cfg, "amq wake [debug]: rescue submit injected OK\n")
 			}
-			waited, drained, drainErr := waitForRawInputDrained(
+			waited, drained, drainErr := cfg.waitRawDrain(
 				rawInjectCRDrainTimeout,
 				rawInjectDrainPollInterval,
 			)
@@ -2603,7 +2644,7 @@ func resumeWakeInputDelivery(cfg *wakeConfig) (bool, error) {
 			return true, nil
 
 		case wakeInputRawRescueQueued:
-			waited, drained, err := waitForRawInputDrained(
+			waited, drained, err := cfg.waitRawDrain(
 				rawInjectCRDrainTimeout,
 				rawInjectDrainPollInterval,
 			)

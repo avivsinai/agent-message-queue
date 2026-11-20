@@ -484,8 +484,12 @@ AskUserQuestion, ExitPlanMode, or a permission dialog is open; see
 [Dialog guard](docs/wake-operations.md#dialog-guard-claude-code) for the
 dialogs it cannot see. Use `none` when zero synthetic input is required.
 Removing Enter or sanitizing payload text does not prevent single-key approval
-shortcuts. A partially typed prompt already consumed by the app can still be
-submitted after the quiet window. Urgent interrupts bypass input deferral;
+shortcuts. On a plain seat the app can submit a draft after the quiet window.
+For Claude Code on macOS with raw typing, the current dialog hook also
+enables the input guard from the first submit of each launch. The wake
+holds after later terminal input until submission or the configured stale
+interval (default five minutes, zero to keep holding).
+[Input guard for Claude Code on macOS](docs/wake-operations.md#input-guard-for-claude-code-on-macos). Urgent interrupts bypass input deferral;
 when input remains active through `--input-max-hold`, wake emits an out-of-band
 notice instead of injecting. Unavailable input sampling remains best-effort.
 

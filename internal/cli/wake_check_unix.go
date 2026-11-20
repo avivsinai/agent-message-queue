@@ -25,6 +25,7 @@ type wakeCheckResult struct {
 	LiveWake                 bool   `json:"live_wake"`
 	StartedAt                string `json:"started_at,omitempty"`
 	BaselineAt               string `json:"baseline_at,omitempty"`
+	InputGuard               string `json:"input_guard"`
 	WakeStatus               string `json:"wake_status"`
 	HealthStatus             string `json:"health_status,omitempty"`
 	HealthDetail             string `json:"health_detail,omitempty"`
@@ -79,6 +80,7 @@ type wakeCheckObservation struct {
 	// BaselineAt is the mtime of this generation's prepared marker. It is
 	// outside the stability comparison.
 	BaselineAt string
+	InputGuard string
 }
 
 type wakeCheckSnapshot struct {
@@ -163,6 +165,7 @@ func inspectWakeCheckSnapshot(root, me string) wakeCheckSnapshot {
 	snapshot.Decision.SelfUpgrade = wakeCheckSelfUpgradeDecisionFromObservation(second.SelfUpgrade)
 	snapshot.Decision.Wake.BaselineAt = wakeCheckOptionalString(second.BaselineAt)
 	if snapshot.Decision.Wake.Live {
+		snapshot.Decision.Wake.InputGuard = second.InputGuard
 		applyWakeCheckHealth(&snapshot.Decision, probeWakeHealthPlatform(root, me, second.Inspection))
 	}
 	// Image and loop probing can take time. Re-observe afterwards so a PID
@@ -198,6 +201,9 @@ func observeWakeCheck(root, me string) (wakeCheckObservation, error) {
 			agentDir,
 			observation.Inspection,
 		)
+		if applied, ok := readWakeSettingsAppliedAt(dirfd, agentDir, observation.Inspection); ok {
+			observation.InputGuard = applied.InputGuard
+		}
 		observation.BaselineAt = observeWakeCheckBaselineAt(dirfd, agentDir, observation.Inspection)
 		var boundSelectionErr error
 		observation.Repair = assessWakeRepair(
@@ -586,6 +592,7 @@ func renderWakeCheckV1(decision wakeCheckDecision) wakeCheckResult {
 		LiveWake:                 decision.Wake.Live,
 		StartedAt:                wakeCheckStringValue(decision.Wake.StartedAt, ""),
 		BaselineAt:               wakeCheckStringValue(decision.Wake.BaselineAt, ""),
+		InputGuard:               wakeInputGuardValue(decision.Wake.InputGuard),
 		WakeStatus:               decision.Wake.Status,
 		HealthStatus:             decision.Health.Status,
 		HealthDetail:             decision.Health.Detail,

@@ -869,6 +869,7 @@ func (l *wakeLoop) run(maintenanceTicks, settingsTicks <-chan time.Time) error {
 			}
 
 		case <-settingsTicks:
+			l.cfg.observeArmedInput()
 			// The owner's command queue sits in the agent directory too, so
 			// this tick also serves it.
 			serveWakeCommands(&l.cfg)

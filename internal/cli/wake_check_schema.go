@@ -109,6 +109,7 @@ type wakeCheckStartDecision struct {
 }
 
 type wakeCheckWakeDecision struct {
+	InputGuard   string
 	Status       string
 	Live         bool
 	PID          *int
@@ -213,6 +214,7 @@ type wakeCheckStartV2 struct {
 }
 
 type wakeCheckWakeV2 struct {
+	InputGuard   string  `json:"input_guard"`
 	Status       string  `json:"status"`
 	Live         bool    `json:"live"`
 	PID          *int    `json:"pid"`
@@ -298,6 +300,7 @@ func renderWakeCheckV2(decision wakeCheckDecision) wakeCheckResultV2 {
 			Detail:     decision.Start.Detail,
 		},
 		Wake: wakeCheckWakeV2{
+			InputGuard:   wakeInputGuardValue(decision.Wake.InputGuard),
 			Status:       decision.Wake.Status,
 			Live:         decision.Wake.Live,
 			PID:          decision.Wake.PID,
