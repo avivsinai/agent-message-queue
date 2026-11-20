@@ -328,7 +328,7 @@ func runWakeDialog(args []string, stdin io.Reader) error {
 	rootFlag := fs.String("root", "", "Root directory for the queue (default: AM_ROOT, else .amqrc discovery from the hook's cwd)")
 	harness := fs.String("harness", "claude", "Hook input of claude, codex or cursor")
 	hostPID := fs.Int("host-pid", 0, "Pid of the process that ran the hook ($PPID); a Claude Code open records it as the dialog's host")
-	usage := usageWithFlags(fs, "amq wake dialog [--me <agent>] [--root <path>] [--harness claude|codex|cursor] [--host-pid <pid>] open|close",
+	usage := usageWithFlags(fs, "amq wake dialog [--me <agent>] [--root <path>] [--harness claude|codex|cursor] [--host-pid <pid>] open|close|submit",
 		"Claude Code hook receiver for the wake dialog guard; amq wake install-dialog-hook",
 		"installs it. Reads the hook input JSON on stdin.",
 		"",
@@ -338,14 +338,15 @@ func runWakeDialog(args []string, stdin io.Reader) error {
 		"stdin removes it. With --harness codex or cursor only a turn or session event",
 		"removes it; for codex without AM_* the seat is the one amq coop exec recorded for",
 		"the hook's session_id.",
+		"On macOS the Claude submit hook records the submitting host and closes the dialog.",
 		"Always exits 0 once the arguments parse and prints nothing.")
 	if handled, err := parseFlagsAllowPositionals(fs, args, usage); err != nil {
 		return err
 	} else if handled {
 		return nil
 	}
-	if fs.NArg() != 1 || (fs.Arg(0) != "open" && fs.Arg(0) != "close") {
-		return UsageError("wake dialog needs exactly one of open or close")
+	if fs.NArg() != 1 || (fs.Arg(0) != "open" && fs.Arg(0) != "close" && fs.Arg(0) != "submit") {
+		return UsageError("wake dialog needs exactly one of open, close or submit")
 	}
 	open := fs.Arg(0) == "open"
 	codex := *harness == "codex"
@@ -400,6 +401,9 @@ func runWakeDialog(args []string, stdin io.Reader) error {
 	defer func() { _ = agentDir.Close() }()
 	_ = agentDir.withFD(func(dirfd int) error {
 		if !open && !turn {
+			if fs.Arg(0) == "submit" {
+				recordWakeSubmit(dirfd, agentDir, in)
+			}
 			acknowledgeClaudeNativeHook(dirfd, agentDir, in)
 		}
 		switch {

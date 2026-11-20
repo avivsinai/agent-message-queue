@@ -741,7 +741,10 @@ External injection:
   contain sanitized but message-derived header content.
 
 Input deferral (default on): wake samples terminal input only after
-  a message is pending, then injects after a short quiet window.
+  a message is pending on a plain seat, then waits for a short quiet window.
+  Managed raw Claude Code on macOS with the submit hook guards input after
+  the first submit. A later read holds until --input-stale-for (default 5m,
+  0 never). The wake samples the armed terminal every 2s between arrivals.
   Collision reduction only: it cannot detect permission/approval dialogs.
   A pause longer than --input-quiet-for can still inject while a prompt
   is being composed. If input remains active through --input-max-hold,
@@ -842,6 +845,8 @@ Options:
         Polling interval while waiting for quiet terminal input (default 200ms)
   -input-quiet-for duration
         Quiet window before deferred injection (advisory only on Linux; tty atime granularity is ~8s) (default 1.2s)
+  -input-stale-for duration
+        Type a full doorbell after this long without another read on a guarded terminal (0 = never) (default 5m0s)
   -interrupt
         Enable interrupt injection for urgent interrupt messages (default true)
   -interrupt-cmd string
@@ -1550,6 +1555,8 @@ Options:
         Polling interval while waiting for quiet terminal input (default 200ms)
   -input-quiet-for duration
         Quiet window before deferred injection (advisory only on Linux; tty atime granularity is ~8s) (default 1.2s)
+  -input-stale-for duration
+        Type a full doorbell after this long without another read on a guarded terminal (0 = never) (default 5m0s)
   -interrupt
         Enable interrupt injection for urgent interrupt messages (default true)
   -interrupt-cooldown duration
@@ -1694,7 +1701,7 @@ Options:
 ```text
 $ amq wake dialog --help
 Usage:
-  amq wake dialog [--me <agent>] [--root <path>] [--harness claude|codex|cursor] [--host-pid <pid>] open|close
+  amq wake dialog [--me <agent>] [--root <path>] [--harness claude|codex|cursor] [--host-pid <pid>] open|close|submit
 
 Claude Code hook receiver for the wake dialog guard; amq wake install-dialog-hook
 installs it. Reads the hook input JSON on stdin.
@@ -1705,6 +1712,7 @@ of that tool call, and a close with unreadable input keeps it. A close with empt
 stdin removes it. With --harness codex or cursor only a turn or session event
 removes it; for codex without AM_* the seat is the one amq coop exec recorded for
 the hook's session_id.
+On macOS the Claude submit hook records the submitting host and closes the dialog.
 Always exits 0 once the arguments parse and prints nothing.
 
 Options:

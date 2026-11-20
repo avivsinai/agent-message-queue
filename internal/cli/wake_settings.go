@@ -22,6 +22,7 @@ const (
 	defaultWakeDebounce          = 250 * time.Millisecond
 	defaultWakePreviewLen        = 48
 	defaultWakeDeferWhileInput   = true
+	defaultWakeInputStaleFor     = 5 * time.Minute
 	defaultWakeInputQuietFor     = 1200 * time.Millisecond
 	defaultWakeInputPollInterval = 200 * time.Millisecond
 	defaultWakeInputMaxHold      = 15 * time.Second
@@ -63,6 +64,7 @@ type wakeSettings struct {
 	previewLen        int
 	bell              bool
 	deferWhileInput   bool
+	inputStaleFor     time.Duration
 	inputQuietFor     time.Duration
 	inputPollInterval time.Duration
 	inputMaxHold      time.Duration
@@ -81,6 +83,7 @@ func defaultWakeSettings() wakeSettings {
 		debounce:          defaultWakeDebounce,
 		previewLen:        defaultWakePreviewLen,
 		deferWhileInput:   defaultWakeDeferWhileInput,
+		inputStaleFor:     defaultWakeInputStaleFor,
 		inputQuietFor:     defaultWakeInputQuietFor,
 		inputPollInterval: defaultWakeInputPollInterval,
 		inputMaxHold:      defaultWakeInputMaxHold,
@@ -117,6 +120,8 @@ func (s wakeSettings) validate() (wakeSettings, error) {
 		return s, errors.New("--hold-low must be >= 0")
 	case s.interruptCooldown < 0:
 		return s, errors.New("--interrupt-cooldown must be >= 0")
+	case s.inputStaleFor < 0:
+		return s, errors.New("--input-stale-for must be >= 0")
 	case s.inputQuietFor < 0:
 		return s, errors.New("--input-quiet-for must be >= 0")
 	case s.inputPollInterval <= 0:
@@ -158,6 +163,8 @@ var wakeSettingDefs = []wakeSettingDef{
 		func(s *wakeSettings) any { return &s.bell }},
 	{"defer_while_input", "defer-while-input", "Best-effort: defer non-interrupt injection while terminal input appears active",
 		func(s *wakeSettings) any { return &s.deferWhileInput }},
+	{"input_stale_for", "input-stale-for", "Type a full doorbell after this long without another read on a guarded terminal (0 = never)",
+		func(s *wakeSettings) any { return &s.inputStaleFor }},
 	{"input_quiet_for", "input-quiet-for", "Quiet window before deferred injection (advisory only on Linux; tty atime granularity is ~8s)",
 		func(s *wakeSettings) any { return &s.inputQuietFor }},
 	{"input_poll_interval", "input-poll-interval", "Polling interval while waiting for quiet terminal input",
@@ -688,6 +695,7 @@ const (
 // .wake.settings.applied for one observed agent file digest and one
 // observed machine file digest.
 type wakeSettingsAppliedStatus struct {
+	inputGuard    string
 	status        string
 	digest        string
 	err           string
@@ -816,6 +824,9 @@ func (cfg *wakeConfig) reloadSettings() bool {
 	agentChanged := agentRead && !agent.same(cfg.settingsObserved)
 	machineChanged := machineRead && !machine.same(cfg.machineSettingsObserved)
 	if !agentChanged && !machineChanged {
+		if status := cfg.inputGuard.status(cfg.settings); cfg.inputGuard != nil && cfg.settingsObserved.seen && status != cfg.reportedInputGuard && (!cfg.settingsUnseeded || cfg.settingsObserved.exists) {
+			noteWakeSettingsApplied(cfg, cfg.settingsLayers.appliedStatus(cfg.settingsObserved, cfg.machineSettingsObserved))
+		}
 		return false
 	}
 	last := cfg.settingsLayers
@@ -924,6 +935,8 @@ func noteWakeSettingsApplied(cfg *wakeConfig, status wakeSettingsAppliedStatus) 
 	if cfg.recordSettingsApplied == nil {
 		return
 	}
+	status.inputGuard = cfg.inputGuard.status(cfg.settings)
+	cfg.reportedInputGuard = status.inputGuard
 	pending := status
 	cfg.pendingSettingsApplied = &pending
 	if err := cfg.recordSettingsApplied(status); err != nil {

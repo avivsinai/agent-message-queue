@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -683,6 +684,10 @@ func TestWakeInstallDialogHookWritesEveryEventOnce(t *testing.T) {
 	if err := json.Unmarshal(first, &settings); err != nil {
 		t.Fatal(err)
 	}
+	submitVerb := "close"
+	if runtime.GOOS == "darwin" {
+		submitVerb = `--host-pid "$PPID" submit`
+	}
 	for _, want := range []struct {
 		event, matcher, verb string
 		timeout              int
@@ -691,7 +696,7 @@ func TestWakeInstallDialogHookWritesEveryEventOnce(t *testing.T) {
 		{"PermissionRequest", "", `--host-pid "$PPID" open`, 5},
 		{"PostToolUse", "AskUserQuestion|ExitPlanMode", "close", 5},
 		{"PostToolUseFailure", "AskUserQuestion|ExitPlanMode", "close", 5},
-		{"UserPromptSubmit", "", "close", 5},
+		{"UserPromptSubmit", "", submitVerb, 5},
 		{"Stop", "", "close", 5},
 		{"SessionStart", "", "close", 5},
 		{"SessionEnd", "", "close", 1},
@@ -892,7 +897,11 @@ func TestDoctorReportsStaleOrBrokenDialogHook(t *testing.T) {
 	previousForm := func(bin string) []hookfile.CommandHook {
 		hooks := dialogguard.ClaudeHooks(bin, dialogguard.ClaudeEvents)
 		for i := range hooks {
-			hooks[i].Command = dialogguard.HookCommand(bin, "", dialogguard.ClaudeHookVerb(hooks[i].Event))
+			verb := "close"
+			if hooks[i].Event == "PreToolUse" || hooks[i].Event == "PermissionRequest" {
+				verb = "open"
+			}
+			hooks[i].Command = dialogguard.HookCommand(bin, "", verb)
 		}
 		return hooks
 	}

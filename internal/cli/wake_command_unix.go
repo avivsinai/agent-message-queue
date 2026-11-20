@@ -209,7 +209,7 @@ func (c *wakeCommands) submitHeld(cfg *wakeConfig, qfd int, now time.Time) {
 		if state, _ := cfg.dialogState(); state != wakeDialogClosed {
 			return
 		}
-		if _, err := resumeWakeInputDelivery(cfg); err != nil {
+		if err := cfg.resumeOwedInput(wakePayload{text: "AMQ: terminal input holds the owner command", provenance: wakePayloadSystemFixed}); err != nil {
 			_ = writeWakeDiagnostic(cfg, "amq wake: owner command Enter not typed: %v\n", err)
 			return
 		}

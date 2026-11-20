@@ -139,8 +139,8 @@ running wake. Both write [`.wake.settings`](#live-settings).
   A distinct urgent message can revive a parked cohort for one further
   attempt, also when both holds are 0. Ordinary urgent mail still passes through watcher debounce and
   input-quiet deferral; urgent mail with the configured interrupt label follows
-  the interrupt path. Input deferral detects typing activity, so a doorbell can
-  join and submit an idle draft after the quiet interval.
+  the interrupt path. On a plain seat a doorbell can join and submit an idle
+  draft after the quiet interval.
 - The hold changes only the first doorbell's timing. After an attempt, the
   configured retry and backoff rules apply, including the finite input-attempt
   budget for an unchanged cohort. Injection modes and recovery are unchanged.
@@ -197,6 +197,42 @@ launch.
 The guard does not change hold by priority, urgent and interrupt delivery,
 the bounded wait while the person types (at most 15 seconds, then attention
 only and a retry), or the opt-in `claude-native` injector.
+
+## Input guard for Claude Code on macOS
+
+A managed Claude Code seat using built-in raw typing can guard a draft
+between keystrokes. Install the Claude dialog hook with
+`amq wake install-dialog-hook`. An earlier installation needs the same
+command to update its submit entry. At launch `coop exec` prints
+`input guard: proper (claude)` when the stamping entry is installed.
+`amq wake check --json` reports the same installation as `input_guard`
+(`wake.input_guard` in schema v2). Each new harness process rings as a plain
+seat until its first submit, including a submit made by the wake.
+
+The submit hook records the time and host identity in
+`agents/<me>/.wake.submit`. The wake also remembers the terminal read time
+when each of its own writes drains. With an empty terminal queue and no
+read since either observation, it types immediately. Only a clean read
+since the wake's own write permits a bare reminder. With later input, the
+wake shows its usual out-of-band notice and retries on the existing schedule.
+A focus report can look just like a keystroke. After `input_stale_for`
+(default `5m`) without another read, the wake can type the full doorbell
+or finish an already presented doorbell with its owed Enter. A draft that
+old can be submitted. Set `amq wake config --input-stale-for 0` to keep
+holding while the input is unknown.
+
+macOS can assign the terminal's read time on the first stat after a read.
+The hook stats the terminal at submit, and the wake samples an armed seat
+on its existing two-second settings tick so an idle draft ages between mail
+arrivals. A human keystroke interleaved with a wake write or arriving after
+the last sample can still be submitted.
+
+Other harnesses, paste mode and Linux use plain input deferral. Linux tty
+timestamps can miss reads within an eight-second interval. Unusable terminal
+samples also use plain deferral for that attempt. Setting
+`defer_while_input=false` or `input_max_hold=0` disables both input waits.
+Labeled urgent interrupts, external injectors, native Claude delivery and
+attention-only mode keep their own delivery paths.
 
 ## Dialog guard (Claude Code)
 
@@ -756,7 +792,7 @@ A running wake has two kinds of input.
   the wake through its owning terminal or supervisor after a `wake check`.
 - Settings are policy values the wake reads each time it uses them: `debounce`,
   `hold_normal`, `hold_low`, `preview_len`, `bell`, `defer_while_input`,
-  `input_quiet_for`, `input_poll_interval`, `input_max_hold`, `interrupt`,
+  `input_quiet_for`, `input_stale_for`, `input_poll_interval`, `input_max_hold`, `interrupt`,
   `interrupt_label`, `interrupt_priority`, `interrupt_notice`,
   `interrupt_cooldown`, `inject_timeout`, `self_upgrade`, and `held_notice`.
   Each has a flag of the same name with `-` in place of `_`.

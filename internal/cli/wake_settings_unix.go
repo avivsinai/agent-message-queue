@@ -373,6 +373,7 @@ func seedWakeSettingsFile(
 // within schema 1: an older reader decodes without them, and a sidecar
 // without them comes from an image that never reads the machine file.
 type wakeSettingsAppliedFile struct {
+	InputGuard    string `json:"input_guard,omitempty"`
 	Schema        int    `json:"schema"`
 	Root          string `json:"root"`
 	Agent         string `json:"agent"`
@@ -431,6 +432,7 @@ func recordWakeSettingsApplied(
 			return fmt.Errorf("wake changed before settings status publication")
 		}
 		applied := wakeSettingsAppliedFile{
+			InputGuard:    status.inputGuard,
 			Schema:        wakeSettingsSchemaV1,
 			Root:          inspection.Root,
 			Agent:         inspection.Agent,

@@ -159,7 +159,7 @@ func (state *wakeDoorbellState) planHeld(
 	return wakeDoorbellPlan{
 		attempt:       true,
 		prompt:        coopWakeDoorbell,
-		submitOnly:    state.presentationConfirmed,
+		submitOnly:    state.presentationConfirmed, // candidate; delivery rechecks terminal input before Enter
 		contentChange: contentChange,
 		progress:      progress,
 		drained:       drained,

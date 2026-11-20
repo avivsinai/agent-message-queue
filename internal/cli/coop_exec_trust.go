@@ -340,6 +340,7 @@ func publishStartupDialogMarker(root, handle string, marker wakeDialogMarker, ho
 	} else {
 		_ = writeStderr("dialog guard: proper (%s)\n", guard)
 	}
+	_ = writeStderr("input guard: %s\n", startupInputGuard(root, handle))
 	return nil
 }
 

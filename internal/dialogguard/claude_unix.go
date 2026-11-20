@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -141,7 +142,7 @@ const claudeDialogHookHostFlag = `--host-pid "$PPID" `
 // for verb; an open names its host.
 func claudeDialogHookCommand(bin, verb string) string {
 	flags := ""
-	if verb == "open" {
+	if verb == "open" || verb == "submit" {
 		flags = claudeDialogHookHostFlag
 	}
 	return HookCommand(bin, flags, verb)
@@ -158,10 +159,13 @@ const NoMarkerTest = `{ case "${AM_ROOT-}" in */./*|*/../*|*/.|*/..) false ;; /*
 
 // ClaudeBinRe reads the binary back from claudeDialogHookCommand,
 // and from its form without the host flag, which doctor reports as stale.
-var ClaudeBinRe = regexp.MustCompile(`'((?:[^']|'\\'')*)' --no-update-check wake dialog (?:--host-pid "\$PPID" )?(?:open|close) \|\| true$`)
+var ClaudeBinRe = regexp.MustCompile(`'((?:[^']|'\\'')*)' --no-update-check wake dialog (?:--host-pid "\$PPID" )?(?:open|close|submit) \|\| true$`)
 
 // ClaudeHookVerb is the receiver verb the installer wires to event.
 func ClaudeHookVerb(event string) string {
+	if event == "UserPromptSubmit" && runtime.GOOS == "darwin" {
+		return "submit"
+	}
 	if event == "PreToolUse" || event == "PermissionRequest" {
 		return "open"
 	}
@@ -272,9 +276,35 @@ func CheckClaudeAt(path string, version ClaudeVersion, known bool) Check {
 		if _, err := os.Stat(bin); err != nil {
 			return Check{State: Incomplete, Message: fmt.Sprintf("the hook runs a missing amq binary %s; remedy: amq wake install-dialog-hook", bin)}
 		}
+		// Earlier submit entries still perform the full dialog close.
+		if hook.event == "UserPromptSubmit" && hook.command == claudeDialogHookCommand(bin, "close") {
+			continue
+		}
 		if hook.command != claudeDialogHookCommand(bin, ClaudeHookVerb(hook.event)) {
 			return Check{State: Stale, Message: fmt.Sprintf("stale form on %s; remedy: amq wake install-dialog-hook", hook.event)}
 		}
 	}
 	return Check{State: OK, Message: "installed"}
+}
+
+// ClaudeSubmitBinary names the binary of the enabled hook that stamps a
+// submit even when no dialog marker exists.
+func ClaudeSubmitBinary(path string) string {
+	commands, err := hookfile.MarkedHookCommandsAt(path, "UserPromptSubmit", HookMarker)
+	if err != nil || len(commands) != 1 {
+		return ""
+	}
+	match := ClaudeBinRe.FindStringSubmatch(commands[0])
+	if match == nil {
+		return ""
+	}
+	bin := strings.ReplaceAll(match[1], `'\''`, `'`)
+	if commands[0] != claudeDialogHookCommand(bin, "submit") {
+		return ""
+	}
+	disabled, err := claude.HooksDisabledAt(path)
+	if err != nil || disabled {
+		return ""
+	}
+	return bin
 }
