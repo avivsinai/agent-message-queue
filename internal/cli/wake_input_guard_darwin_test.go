@@ -21,6 +21,10 @@ import (
 // simulated editor and the wake. The clock advances past the quiet window
 // without sleeping or touching the user's terminal.
 func guardedClaudeDoorbell(t *testing.T) (h *wakeHoldHarness, read func(string), quietWaits *int) {
+	return guardedClaudeDoorbellMode(t, true, wakeInjectModeRaw)
+}
+
+func guardedClaudeDoorbellMode(t *testing.T, hooked bool, mode string) (h *wakeHoldHarness, read func(string), quietWaits *int) {
 	t.Helper()
 	h = newWakeHoldHarness(t, wakeHoldPolicy{})
 	home := t.TempDir()
@@ -32,8 +36,10 @@ func guardedClaudeDoorbell(t *testing.T) (h *wakeHoldHarness, read func(string),
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := claude.InstallCommandHooks(home, dialogguard.ClaudeHooks(bin, []string{"UserPromptSubmit"})); err != nil {
-		t.Fatal(err)
+	if hooked {
+		if err := claude.InstallCommandHooks(home, dialogguard.ClaudeHooks(bin, []string{"UserPromptSubmit"})); err != nil {
+			t.Fatal(err)
+		}
 	}
 	master, slave, err := pty.Open()
 	if err != nil {
@@ -42,6 +48,16 @@ func guardedClaudeDoorbell(t *testing.T) (h *wakeHoldHarness, read func(string),
 	oldStdin := os.Stdin
 	os.Stdin = slave
 	t.Cleanup(func() { os.Stdin = oldStdin; _ = master.Close(); _ = slave.Close() })
+	var pasteRead, pasteWrite *os.File
+	pastePending := 0
+	if mode == wakeInjectModePaste {
+		pasteRead, pasteWrite, err = os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		os.Stdin = pasteRead
+		t.Cleanup(func() { _ = pasteRead.Close(); _ = pasteWrite.Close() })
+	}
 	if _, err := term.MakeRaw(int(slave.Fd())); err != nil {
 		t.Fatal(err)
 	}
@@ -66,23 +82,47 @@ func guardedClaudeDoorbell(t *testing.T) (h *wakeHoldHarness, read func(string),
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = dir.Close() })
-	start := wakeStart{flags: newWakeStartFlags(), root: h.root, me: "codex", harness: "claude", injectMode: wakeInjectModeRaw,
+	start := wakeStart{flags: newWakeStartFlags(), root: h.root, me: "codex", harness: "claude", injectMode: mode,
 		flagSettings: defaultWakeSettings(), activeAgentDir: dir,
 		requestedOwner: &wakeOwner{PID: host.PID, ProcessStart: host.ProcessStart, BootID: host.BootID},
-		currentWake:    wakeLockInspection{Lock: wakeLock{PID: os.Getpid(), TTY: slave.Name(), WakeMode: wakeInjectModeRaw}}}
+		currentWake:    wakeLockInspection{Lock: wakeLock{PID: os.Getpid(), TTY: slave.Name(), WakeMode: mode}}}
 	writeWakeLockForTest(t, h.root, "codex", start.currentWake.Lock)
 	if err := start.loadStartupSettings(); err != nil {
 		t.Fatal(err)
 	}
 	cfg := start.newLoopConfig()
+	cfg.injectMode = mode
 	h.cfg = &cfg
 	h.now = time.Now().Add(3 * time.Second)
 	cfg.doorbellNow = func() time.Time { return h.now }
-	cfg.terminalWrite = func(s string) error { read(s); h.injected = append(h.injected, s); return nil }
+	if mode == wakeInjectModePaste {
+		cfg.terminalWrite = func(s string) error {
+			if _, err := pasteWrite.WriteString(s); err != nil {
+				return err
+			}
+			pastePending += len(s)
+			h.injected = append(h.injected, s)
+			return nil
+		}
+		editorRead := read
+		cfg.inputGuard.sample = func() (ttyInputState, error) {
+			input := make([]byte, pastePending)
+			if _, err := io.ReadFull(pasteRead, input); err != nil {
+				return ttyInputState{}, err
+			}
+			pastePending = 0
+			editorRead(string(input))
+			return sampleTTYInputState(slave.Fd(), slave.Fd())
+		}
+	} else {
+		cfg.terminalWrite = func(s string) error { read(s); h.injected = append(h.injected, s); return nil }
+	}
 	cfg.attentionIsTTY = func() bool { return false }
-	args := []string{"--host-pid", strconv.Itoa(host.PID), dialogguard.ClaudeHookVerb("UserPromptSubmit")}
-	if err := runWakeDialog(args, strings.NewReader(`{"hook_event_name":"UserPromptSubmit","session_id":"local"}`)); err != nil {
-		t.Fatal(err)
+	if hooked {
+		args := []string{"--host-pid", strconv.Itoa(host.PID), dialogguard.ClaudeHookVerb("UserPromptSubmit")}
+		if err := runWakeDialog(args, strings.NewReader(`{"hook_event_name":"UserPromptSubmit","session_id":"local"}`)); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	quietWaits = new(int)
@@ -140,12 +180,56 @@ func TestWakeTypesCleanAndStaleDoorbells(t *testing.T) {
 			h, read, waits := guardedClaudeDoorbell(t)
 			if stale {
 				read("draft")
-				h.advance(5 * time.Minute)
+				h.advance(2 * time.Minute)
 			}
 			h.send("pending", "normal")
 			h.scan(h.cfg)
 			if !slices.Equal(h.injected, []string{coopWakeDoorbell, "\r", "\r"}) || *waits != 0 {
 				t.Fatalf("wrote %q with %d quiet waits", h.injected, *waits)
+			}
+		})
+	}
+}
+
+// agent-message-queue-fsmt: a plain seat sent bare Enter into a draft after its own ring.
+func TestPlainDoorbellReminderAfterInputIsNotBareEnter(t *testing.T) {
+	h, read, _ := guardedClaudeDoorbellMode(t, false, wakeInjectModeRaw)
+	h.send("pending", "normal")
+	h.scan(h.cfg)
+	if !slices.Equal(h.injected, []string{coopWakeDoorbell, "\r", "\r"}) {
+		t.Fatalf("initial ring = %q", h.injected)
+	}
+	h.injected = nil
+	read("draft")
+	h.now = h.deadline()
+	notice := captureWakeStderr(t, func() { h.scan(h.cfg) })
+	if len(h.injected) != 0 || notice == "" {
+		t.Fatalf("input was read: reminder wrote %q, notice %q", h.injected, notice)
+	}
+	h.advance(2 * time.Minute)
+	h.scan(h.cfg)
+	if !slices.Equal(h.injected, []string{coopWakeDoorbell, "\r", "\r"}) {
+		t.Fatalf("stale reminder = %q, want full doorbell", h.injected)
+	}
+}
+
+func TestPlainDoorbellNeedsNoQuietWaitAfterOwnWrite(t *testing.T) {
+	for _, mode := range []string{wakeInjectModeRaw, wakeInjectModePaste} {
+		t.Run(mode, func(t *testing.T) {
+			h, _, waits := guardedClaudeDoorbellMode(t, false, mode)
+			h.send("pending", "normal")
+			h.scan(h.cfg)
+			h.send("second", "normal")
+			h.injected = nil
+			*waits = 0
+			h.now = h.deadline()
+			h.scan(h.cfg)
+			want := []string{coopWakeDoorbell, "\r"}
+			if mode == wakeInjectModeRaw {
+				want = append(want, "\r")
+			}
+			if !slices.Equal(h.injected, want) || *waits != 0 {
+				t.Fatalf("second ring = %q with %d quiet waits, want %q and none", h.injected, *waits, want)
 			}
 		})
 	}

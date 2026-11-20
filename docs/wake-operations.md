@@ -198,41 +198,44 @@ The guard does not change hold by priority, urgent and interrupt delivery,
 the bounded wait while the person types (at most 15 seconds, then attention
 only and a retry), or the opt-in `claude-native` injector.
 
-## Input guard for Claude Code on macOS
+## Input guard (macOS)
 
-A managed Claude Code seat using built-in raw typing can guard a draft
-between keystrokes. Install the Claude dialog hook with
-`amq wake install-dialog-hook`. An earlier installation needs the same
-command to update its submit entry. At launch `coop exec` prints
-`input guard: proper (claude)` when the stamping entry is installed.
-`amq wake check --json` reports the same installation as `input_guard`
-(`wake.input_guard` in schema v2). Each new harness process rings as a plain
-seat until its first submit, including a submit made by the wake.
+For every managed owner-bound seat on macOS using built-in raw or paste
+typing, the rule is: type when the editor is known empty, or when no input
+was read for `input_stale_for` (default `2m`). A seat without a submit hook
+uses the wake's own writes as proof: when nothing was read since the last
+one, it types immediately, without waiting for the first input quiet timer.
+An Enter with no text is sent only on that same proof, or when input is
+stale. After later input, the wake types nothing, emits its usual
+out-of-band notice and retries on the existing schedule. When input remains
+unknown past the stale interval, it sends the full doorbell; a draft left
+untouched that long can be typed into and submitted. Set `amq wake config
+--input-stale-for 0` to keep holding while input is unknown. Before the
+wake's first own write of a launch, `input_quiet_for` and the existing input
+deferral decide, as before.
 
+A managed Claude Code seat with the installed submit hook adds the fact
+that the editor was emptied by a submit. `amq wake install-dialog-hook`
+installs that hook, and updates an earlier installation's submit entry.
+`coop exec` prints `input guard: proper (claude)` for an armed raw Claude
+seat and `input guard: plain` for a seat without the hook. `amq wake check
+--json` records this as `input_guard` (`wake.input_guard` in schema v2).
 The submit hook records the time and host identity in
-`agents/<me>/.wake.submit`. The wake also remembers the terminal read time
-when each of its own writes drains. With an empty terminal queue and no
-read since either observation, it types immediately. Only a clean read
-since the wake's own write permits a bare reminder. With later input, the
-wake shows its usual out-of-band notice and retries on the existing schedule.
-A focus report can look just like a keystroke. After `input_stale_for`
-(default `5m`) without another read, the wake can type the full doorbell
-or finish an already presented doorbell with its owed Enter. A draft that
-old can be submitted. Set `amq wake config --input-stale-for 0` to keep
-holding while the input is unknown.
+`agents/<me>/.wake.submit`.
 
 macOS can assign the terminal's read time on the first stat after a read.
-The hook stats the terminal at submit, and the wake samples an armed seat
-on its existing two-second settings tick so an idle draft ages between mail
-arrivals. A human keystroke interleaved with a wake write or arriving after
-the last sample can still be submitted.
+The hook stats it at submit, and the wake samples guarded seats on its
+existing two-second settings tick, so an idle draft ages between mail
+arrivals. A human keystroke interleaved with a write or arriving after the
+last sample can still be submitted. The guard reduces collisions; it does
+not see drafts or approval dialogs.
 
-Other harnesses, paste mode and Linux use plain input deferral. Linux tty
-timestamps can miss reads within an eight-second interval. Unusable terminal
-samples also use plain deferral for that attempt. Setting
+Linux, external injectors, native Claude delivery, attention-only mode and
+`amq wake` with no known owner keep plain input deferral. Linux tty
+timestamps can miss reads within an eight-second interval. Unusable
+terminal samples also use plain deferral for that attempt. Setting
 `defer_while_input=false` or `input_max_hold=0` disables both input waits.
-Labeled urgent interrupts, external injectors, native Claude delivery and
-attention-only mode keep their own delivery paths.
+Labeled urgent interrupts keep their own immediate path.
 
 ## Dialog guard (Claude Code)
 

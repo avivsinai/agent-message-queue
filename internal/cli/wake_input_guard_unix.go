@@ -58,7 +58,8 @@ func recordWakeSubmit(dirfd int, dir *wakeAgentDir, in wakeDialogHookInput) {
 }
 
 func (s *wakeStart) newInputGuard() *wakeInputGuard {
-	if runtime.GOOS != "darwin" || s.harness != "claude" || s.requestedOwner == nil || s.injectVia != "" || s.currentWake.Lock.WakeMode != wakeInjectModeRaw {
+	if runtime.GOOS != "darwin" || s.requestedOwner == nil || s.injectVia != "" ||
+		(s.currentWake.Lock.WakeMode != wakeInjectModeRaw && s.currentWake.Lock.WakeMode != wakeInjectModePaste) {
 		return nil
 	}
 	dir := s.activeAgentDir
@@ -73,11 +74,17 @@ func (s *wakeStart) newInputGuard() *wakeInputGuard {
 	if err != nil {
 		return nil
 	}
-	return &wakeInputGuard{
-		installation: claudeInputGuardInstallation(claude.SettingsPath(home)),
-		submitTime:   func() time.Time { return wakeSubmitTime(dir, host, started, tty) },
-		sample:       func() (ttyInputState, error) { return sampleGuardedTTY(tty) },
+	guard := &wakeInputGuard{
+		sample: func() (ttyInputState, error) { return sampleGuardedTTY(tty) },
 	}
+	if s.harness != "claude" || s.currentWake.Lock.WakeMode != wakeInjectModeRaw {
+		guard.installation = func() string { return inputGuardPlain }
+		guard.submitTime = func() time.Time { return time.Time{} }
+		return guard
+	}
+	guard.installation = claudeInputGuardInstallation(claude.SettingsPath(home))
+	guard.submitTime = func() time.Time { return wakeSubmitTime(dir, host, started, tty) }
+	return guard
 }
 
 func claudeInputGuardInstallation(settings string) func() string {

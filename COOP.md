@@ -484,14 +484,16 @@ AskUserQuestion, ExitPlanMode, or a permission dialog is open; see
 [Dialog guard](docs/wake-operations.md#dialog-guard-claude-code) for the
 dialogs it cannot see. Use `none` when zero synthetic input is required.
 Removing Enter or sanitizing payload text does not prevent single-key approval
-shortcuts. On a plain seat the app can submit a draft after the quiet window.
-For Claude Code on macOS with raw typing, the current dialog hook also
-enables the input guard from the first submit of each launch. The wake
-holds after later terminal input until submission or the configured stale
-interval (default five minutes, zero to keep holding).
-[Input guard for Claude Code on macOS](docs/wake-operations.md#input-guard-for-claude-code-on-macos). Urgent interrupts bypass input deferral;
-when input remains active through `--input-max-hold`, wake emits an out-of-band
-notice instead of injecting. Unavailable input sampling remains best-effort.
+shortcuts. On macOS, every owner-bound raw or paste seat remembers the read
+time after the wake's own write: no subsequent read type at once; later
+input shows a notice until the configured stale interval (default two
+minutes, zero to keep holding). The full doorbell, never a bare Enter, is the
+reminder after later input. Before the wake's first own write, quiet input
+deferral decides. Claude Code's submit hook adds proof that the editor was
+emptied. [Input guard](docs/wake-operations.md#input-guard-macos). Urgent
+interrupts bypass input deferral; when input remains active through
+`--input-max-hold`, wake emits an out-of-band notice instead of injecting.
+Unavailable input sampling remains best-effort.
 
 agy runs no hooks with Google Cloud sign-in, so by default it gets the plain
 doorbell: a doorbell can answer its permission prompt, and doorbells typed
