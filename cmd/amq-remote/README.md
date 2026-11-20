@@ -526,9 +526,10 @@ Protocol: [`amq.remote.link/1`](../../docs/remote-link-protocol.md).
    `amq-remote attach --self --link NAME` (`--consent passkey` by default, or
    `local`; `--tools read` by default; the server's `default_tool_profile`
    takes precedence when it is set). The share names the session's
-   binding and runs through the endpoint of the link's root. One link in the
-   machine root serves every session on the machine: a pi session in another
-   AMQ root is registered with its own root and is named
+   binding and runs through the endpoint of the link's root. The share adds
+   no channel to a session that is connected through its AMQ mailbox. One
+   link in the machine root serves every session on the machine: a pi session
+   in another AMQ root is registered with its own root and is named
    `<handle> · <project>/<session>`. When the server lists
    the tool profiles it grants in its link info, `--tools` must be one of them.
    The endpoint reads the server's link info again each time the link connects,
@@ -822,6 +823,10 @@ connected at once. The machine agent inside `amq-remote serve` makes a private
 channel for each live session, adds the owner and mentions them, and runs
 each owner message in that channel in that session only. Attach writes only
 the binding and holds no Buzz key.
+
+A session connected through its AMQ mailbox and also shared with a link has
+one channel, the one of its mailbox binding; `amq-remote bindings` shows
+`channel with <name>` on the other binding.
 
 When a shared session's process ends and the same session comes back in a
 new process (for example a resumed conversation), its share comes back

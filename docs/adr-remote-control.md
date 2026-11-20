@@ -177,10 +177,12 @@ One machine agent per machine runs inside `amq-remote serve` with its own
 key and one owner-signed grant. It makes each private channel:
 
 - **Machine agent.** The agent makes a private channel for each live
-  session, adds the owner, and mentions them. A message reaches a session
-  only from that session's active channel, and only when the owner signed
-  it. The route is relay, machine key and channel, and the session the
-  channel names must still have the identity the channel was made for. A
+  session, adds the owner, and mentions them. A session with a mailbox
+  binding and a native binding has one channel, the mailbox binding's.
+  A message reaches a session only from that session's active channel,
+  and only when the owner signed it. The route is relay, machine key and
+  channel, and the session the channel names must still have the identity
+  the channel was made for. A
   create whose outcome is unknown is never repeated: the agent chooses the
   channel id and records it before it signs the create, so it finds the
   channel that the create may have made; the owner's `amq-remote channel

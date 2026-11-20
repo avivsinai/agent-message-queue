@@ -59,6 +59,7 @@ const (
 const (
 	retiredEnded    = "ended"    // its session is proven ended
 	retiredDetached = "detached" // the binding is gone; its session may still run
+	retiredJoined   = "joined"   // a mailbox binding of the same session carries its channel
 	retiredMoved    = "moved"    // the same session attached again under another name
 	retiredReset    = "reset"    // amq-remote channel reset
 	retiredReplaced = "replaced" // another session identity holds the name
@@ -128,6 +129,9 @@ type channelRecord struct {
 	// RetiredAt is when the record left its active slot, set once then;
 	// empty in a record retired before it was recorded.
 	RetiredAt string `json:"retired_at,omitempty"`
+	// JoinedTo is the name in Buzz of the channel the session uses, in a
+	// record retired as joined.
+	JoinedTo  string `json:"joined_to,omitempty"`
 	SaidEnded bool   `json:"said_ended,omitempty"`
 	LastError string `json:"last_error,omitempty"`
 	LastTry   string `json:"last_try,omitempty"`
@@ -334,9 +338,12 @@ func (s *Agent) machineTick(ctx context.Context, now time.Time) (p pace) {
 			if s.stopped() {
 				return p
 			}
-			if s.provisionable(b) {
+			switch with, shared := binding.SharedChannel(b, all, s.liveness); {
+			case shared:
+				s.join(b, with, now)
+			case s.provisionable(b):
 				s.provision(b, now)
-			} else if s.awaitsThread(b) {
+			case s.awaitsThread(b):
 				p.due(now.Add(machineScanInterval))
 			}
 		}
@@ -517,6 +524,20 @@ func (s *Agent) provisionable(b binding.Binding) bool {
 	}
 	state, _ := s.liveness(b)
 	return state == binding.Live
+}
+
+// join retires the channel record of b, a native binding whose session uses
+// the channel of the mailbox binding with.
+func (s *Agent) join(b, with binding.Binding, now time.Time) {
+	r, ok, err := loadChannelRecord(s.slotPath(b.Name))
+	if err != nil || !ok || r.State == channelRetired {
+		return
+	}
+	by := retiredReplaced
+	if r.Identity == b.SessionIdentity() {
+		by, r.JoinedTo = retiredJoined, sessionAgentName(with)
+	}
+	s.retire(r, by, now)
 }
 
 // provision moves b's record one or more steps toward active. A record that
@@ -901,10 +922,11 @@ func (s *Agent) goneReason(r channelRecord) string {
 	return retiredDetached
 }
 
-// left reports whether r was retired because its session left: it ended or
-// it detached. The same session attaching again gets that channel back.
+// left reports whether r was retired in a way its own binding undoes: its
+// session ended or detached, or its channel joined a mailbox binding's. The
+// same session's binding, served again, gets that channel back.
 func left(r channelRecord) bool {
-	return r.RetiredBy == retiredEnded || r.RetiredBy == retiredDetached
+	return r.RetiredBy == retiredEnded || r.RetiredBy == retiredDetached || r.RetiredBy == retiredJoined
 }
 
 // retireGone retires each record whose binding is proven gone or ended, and
@@ -1050,8 +1072,11 @@ func (s *Agent) cleanRetired(r channelRecord, now time.Time) {
 			return
 		}
 		text := "Session ended: " + r.Label + ". This channel no longer reaches it."
-		if r.RetiredBy == retiredDetached {
+		switch r.RetiredBy {
+		case retiredDetached:
 			text = "Disconnected: " + r.Label + ". This channel no longer reaches it until the session connects again."
+		case retiredJoined:
+			text = "Joined: " + r.Label + " now uses the channel " + strconv.Quote(r.JoinedTo) + ". This channel no longer reaches it."
 		}
 		_ = s.buzz.Send(ctx, buzzop.Message{Key: retiredKey("ended", r), Channel: r.ChannelID, Content: text})
 	}
@@ -1129,13 +1154,13 @@ func (s *Agent) restorable(b binding.Binding, r channelRecord) bool {
 	return err == nil && !held
 }
 
-// restore brings back the channel of the same session attaching again: the
-// newest retired record of b's name and identity that was active and ended
-// with its session. It reports whether such a record exists, so no new
-// channel is made while it is being brought back. Only an observation that
-// the channel is not archived lets it become active (unarchived), and a
-// record whose channel the owner archived (Archived without ArchiveSent) is
-// never brought back: the session gets a new channel.
+// restore brings back the channel of the same session served again: the
+// newest retired record of b's name and identity that was active and whose
+// retirement reason allows reuse (left). It reports whether such a record
+// exists, so it defers making a new channel during the restore. The channel
+// becomes active only after the relay shows it is unarchived. A channel
+// archived by the owner (Archived without ArchiveSent) stays archived and
+// the session gets a new channel.
 func (s *Agent) restore(b binding.Binding, now time.Time) bool {
 	var found *channelRecord
 	for _, r := range s.retiredRecords() {
@@ -1164,8 +1189,8 @@ func (s *Agent) restore(b binding.Binding, now time.Time) bool {
 		return true
 	}
 	retiredPath := s.recordPath(r)
-	r.State, r.RetiredBy, r.RetiredFrom, r.SaidEnded, r.LastError = channelActive, "", "", false, ""
-	r.Suspended = ""
+	r.State, r.RetiredBy, r.RetiredFrom, r.JoinedTo = channelActive, "", "", ""
+	r.SaidEnded, r.LastError, r.Suspended = false, "", ""
 	if s.save(&r, now) != nil {
 		return true
 	}
@@ -1354,6 +1379,9 @@ func (s *Agent) machineDirectory() string {
 	listed := 0
 	for _, bd := range all {
 		if state, _ := s.liveness(bd); state != binding.Live || bd.Name == binding.LegacyName {
+			continue
+		}
+		if _, shared := binding.SharedChannel(bd, all, s.liveness); shared {
 			continue
 		}
 		if listed == 0 {

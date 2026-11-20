@@ -194,6 +194,33 @@ func (b Binding) RecordedSession() string {
 	return strings.TrimSuffix(filepath.Base(b.Transcript), filepath.Ext(b.Transcript))
 }
 
+// SameSession reports whether b and o record the same running harness
+// session: the same harness and the same recorded session id. A binding that
+// records no harness or no session id is the same session as nothing.
+func (b Binding) SameSession(o Binding) bool {
+	id := b.RecordedSession()
+	return b.Harness != "" && b.Harness == o.Harness && id != "" && id == o.RecordedSession()
+}
+
+// SharedChannel returns the mailbox binding in all that carries the owner
+// channel of b's session, when b is a native binding and that mailbox binding
+// records the same session and is not proven ended. A session has one
+// channel, and its mailbox binding carries it.
+func SharedChannel(b Binding, all []Binding, inspect Inspector) (Binding, bool) {
+	if b.Mailbox() {
+		return Binding{}, false
+	}
+	for _, o := range all {
+		if !o.Mailbox() || o.Name == LegacyName || ValidName(o.Name) != nil || !o.SameSession(b) {
+			continue
+		}
+		if state, _ := inspect(o); state != Ended {
+			return o, true
+		}
+	}
+	return Binding{}, false
+}
+
 // NativeIdentity is the session identity of a native session: its harness,
 // root and working directory, symlinks resolved, not its process or native
 // session id, so the same session coming back to the same place is the same
