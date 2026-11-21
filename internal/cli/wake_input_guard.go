@@ -114,7 +114,8 @@ func (cfg *wakeConfig) inputDecision(owedEnter bool) wakeInputDecision {
 	}
 	g := cfg.inputGuard
 	armed := cfg.hasCurrentSubmit()
-	if !armed && g.lastOwnRead.IsZero() {
+	if !owedEnter && !armed && g.lastOwnRead.IsZero() {
+		// No fact about this terminal yet: the quiet window decides.
 		return inputPlain
 	}
 	state, err := g.sample()
@@ -129,6 +130,11 @@ func (cfg *wakeConfig) inputDecision(owedEnter bool) wakeInputDecision {
 		return inputPlain
 	}
 	if state.pendingBytes > 0 {
+		return inputUnknown
+	}
+	if owedEnter && g.lastOwnRead.IsZero() {
+		// The wake's last write was never seen read, so an Enter could
+		// follow bytes the reader has not taken.
 		return inputUnknown
 	}
 	if !g.lastOwnRead.After(now) && !state.lastRead.After(g.lastOwnRead) {

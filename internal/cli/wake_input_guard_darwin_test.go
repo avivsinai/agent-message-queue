@@ -302,3 +302,17 @@ func TestInputGuardOffKeepsTheEarlierReminder(t *testing.T) {
 		t.Fatalf("reminder with the guard off wrote %q, want the earlier bare Enter", h.injected)
 	}
 }
+
+// agent-message-queue-fsmt review: with a paste still queued in the terminal,
+// the wake sent its Enter anyway.
+func TestQueuedPasteHoldsTheEnter(t *testing.T) {
+	h, _, _ := guardedClaudeDoorbellMode(t, false, wakeInjectModePaste)
+	h.cfg.inputGuard.sample = func() (ttyInputState, error) {
+		return ttyInputState{pendingBytes: 1, hasLastRead: true, lastRead: h.now.Add(-time.Minute)}, nil
+	}
+	h.send("pending", "normal")
+	h.scan(h.cfg)
+	if !slices.Equal(h.injected, []string{coopWakeDoorbell}) {
+		t.Fatalf("wrote %q, want the doorbell text and no Enter", h.injected)
+	}
+}
