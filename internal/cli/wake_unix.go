@@ -3718,18 +3718,21 @@ func observeLiveWakeOwner(owner wakeOwner, context string) (wakeOwnerObservation
 // validates and prunes Darwin wake restart stages an older release wrote
 // (new stages go under ~/.amq/state/wake-stages), TERM_PROGRAM for terminal
 // detection (wake injection), and CMUX_SURFACE_ID for cmux surface
-// detection (launch backend).
+// detection (launch backend). CLAUDE_CONFIG_DIR and CODEX_HOME name the
+// directories where the wake reads each harness's hook settings.
 // All AMQ-internal vars are matched by the AMQ_ / AM_ prefixes
 // (session/identity/state, no-update-check, test re-exec helpers) so future
 // AMQ vars are covered without enumerating each one.
 var wakeChildEnvAllowlistPrefixes = []string{"AMQ_", "AM_"}
 
 var wakeChildEnvAllowlist = map[string]bool{
-	"PATH":            true,
-	"HOME":            true,
-	"XDG_STATE_HOME":  true,
-	"TERM_PROGRAM":    true,
-	"CMUX_SURFACE_ID": true,
+	"PATH":              true,
+	"HOME":              true,
+	"CLAUDE_CONFIG_DIR": true,
+	"CODEX_HOME":        true,
+	"XDG_STATE_HOME":    true,
+	"TERM_PROGRAM":      true,
+	"CMUX_SURFACE_ID":   true,
 }
 
 // scrubWakeChildEnv filters a parent env slice to the wake-child allowlist.
