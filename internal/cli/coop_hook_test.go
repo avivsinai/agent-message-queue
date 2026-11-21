@@ -14,6 +14,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -287,6 +288,12 @@ func TestCoopPromptAddsUnreadContextOnlyForAHumanPrompt(t *testing.T) {
 	if got := response.HookSpecificOutput; got.HookEventName != "UserPromptSubmit" ||
 		!strings.Contains(got.AdditionalContext, "1 unread AMQ message") || !strings.Contains(got.AdditionalContext, "session=collab") {
 		t.Fatalf("prompt response = %+v", got)
+	}
+	out.Reset()
+	// review of agent-message-queue-4tid: a long prompt lost the notice
+	longPrompt := fmt.Sprintf(`{"prompt":%q}`, strings.Repeat("a", 1<<20))
+	if err := writeCoopPrompt(strings.NewReader(longPrompt), &out); err != nil || !strings.Contains(out.String(), `"hookEventName":"UserPromptSubmit"`) {
+		t.Fatalf("long prompt: output %q, error %v", out.String(), err)
 	}
 	out.Reset()
 	if err := writeCoopPrompt(strings.NewReader(`{"prompt":"`+harness.Doorbell+`"}`), &out); err != nil || out.Len() != 0 {

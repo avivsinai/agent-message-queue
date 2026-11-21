@@ -46,7 +46,10 @@ func writeCoopPrompt(stdin io.Reader, w io.Writer) error {
 	var in struct {
 		Prompt string `json:"prompt"`
 	}
-	if err := json.NewDecoder(io.LimitReader(stdin, 1<<20)).Decode(&in); err != nil || strings.TrimSpace(in.Prompt) == harness.Doorbell {
+	// The bound can cut a long prompt. A cut prompt is not the doorbell, so a
+	// decode error only means there is no prompt to compare.
+	_ = json.NewDecoder(io.LimitReader(stdin, 1<<20)).Decode(&in)
+	if strings.TrimSpace(in.Prompt) == harness.Doorbell {
 		return nil
 	}
 	root, me, session, err := coopHookContext()
