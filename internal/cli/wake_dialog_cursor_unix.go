@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/dialogguard"
@@ -31,7 +32,7 @@ var cursorDialogHookEvents = []string{
 	"stop",
 	"sessionStart",
 	"sessionEnd",
-	"beforeSubmitPrompt", // startup only; an in-turn submission can be queued
+	"beforeSubmitPrompt", // startup close and, on macOS, a submit stamp
 	"preToolUse",
 }
 
@@ -66,9 +67,12 @@ func cursorDialogCloseMatches(marker wakeDialogMarker, in wakeDialogHookInput) b
 const cursorDialogHookFlag = "--harness cursor "
 
 // cursorDialogHookBinRe reads the binary back from a Cursor command.
-var cursorDialogHookBinRe = regexp.MustCompile(`'((?:[^']|'\\'')*)' --no-update-check wake dialog --harness cursor (?:open|close) \|\| true; printf '\{\}'$`)
+var cursorDialogHookBinRe = regexp.MustCompile(`'((?:[^']|'\\'')*)' --no-update-check wake dialog --harness cursor (?:--host-pid "\$PPID" )?(?:open|close|submit) \|\| true; printf '\{\}'$`)
 
 func cursorDialogHookVerb(event string) string {
+	if event == "beforeSubmitPrompt" && runtime.GOOS == "darwin" {
+		return "submit"
+	}
 	if event == "preToolUse" {
 		return "open"
 	}
@@ -81,7 +85,11 @@ func cursorDialogHookVerb(event string) string {
 // permission, follow-up or environment verdict. It prints on the gated path
 // too, where no amq runs.
 func cursorDialogHookCommand(bin, verb string) string {
-	return dialogguard.HookCommand(bin, cursorDialogHookFlag, verb) + "; printf '{}'"
+	flag := cursorDialogHookFlag
+	if verb == "submit" {
+		flag += `--host-pid "$PPID" `
+	}
+	return dialogguard.HookCommand(bin, flag, verb) + "; printf '{}'"
 }
 
 // cursorDialogHooks are the Cursor entries. Cursor runs a command in the
@@ -194,6 +202,11 @@ func checkCursorDialogHook() (doctorCheck, bool) {
 		if _, err := os.Stat(bin); err != nil {
 			check.Message = fmt.Sprintf("the hook runs a missing amq binary %s; %s", bin, remedy)
 			return check, true
+		}
+		// An earlier Cursor startup-only close is a valid dialog hook,
+		// but supplies no submit fact for the input guard.
+		if hook.event == "beforeSubmitPrompt" && hook.command == cursorDialogHookCommand(bin, "close") {
+			continue
 		}
 		if hook.command != cursorDialogHookCommand(bin, cursorDialogHookVerb(hook.event)) {
 			check.Message = fmt.Sprintf("stale form on %s; %s", hook.event, remedy)

@@ -18,8 +18,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/dialogguard"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
+
+	"github.com/avivsinai/agent-message-queue/internal/dialogguard"
 	"github.com/avivsinai/agent-message-queue/internal/hookfile"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
@@ -34,6 +35,8 @@ const maxWakeDialogHookInputBytes = 8 << 20
 type wakeDialogHookInput struct {
 	Event          string `json:"hook_event_name"`
 	SessionID      string `json:"session_id"`
+	ConversationID string `json:"conversation_id"`
+	cursorReceiver bool
 	Tool           string `json:"tool_name"`
 	ToolUseID      string `json:"tool_use_id"`
 	TranscriptPath string `json:"transcript_path"`
@@ -362,6 +365,7 @@ func runWakeDialog(args []string, stdin io.Reader) error {
 		in.emptyInput = true
 	}
 	in.hostPID = *hostPID
+	in.cursorReceiver = *harness == "cursor"
 	if !open && inputErr != nil {
 		return nil
 	}
@@ -400,6 +404,9 @@ func runWakeDialog(args []string, stdin io.Reader) error {
 	}
 	defer func() { _ = agentDir.Close() }()
 	_ = agentDir.withFD(func(dirfd int) error {
+		if in.cursorReceiver && fs.Arg(0) == "submit" {
+			recordWakeSubmit(dirfd, agentDir, in)
+		}
 		if !open && !turn {
 			if fs.Arg(0) == "submit" {
 				recordWakeSubmit(dirfd, agentDir, in)
