@@ -177,6 +177,15 @@ func TestWakeHoldsDoorbellAfterInputSinceSubmit(t *testing.T) {
 	}
 }
 
+func TestClaudePasteSubmitStaysPlain(t *testing.T) {
+	// agent-message-queue-nkky review: only Cursor gained paste-mode submit
+	// support. Keep the established raw-only Claude Code contract explicit.
+	h, _, _ := doorbellOnPrivateTTY(t, true, wakeInjectModePaste, true, "claude")
+	if got := h.cfg.inputGuard.status(h.cfg.settings); got != inputGuardPlain || h.cfg.hasCurrentSubmit() {
+		t.Fatalf("Claude paste installation = %q, submit fact = %t; want plain and false", got, h.cfg.hasCurrentSubmit())
+	}
+}
+
 func TestWakeCursorSubmitFactTypesPromptlyAndHoldsDraft(t *testing.T) {
 	// agent-message-queue-nkky: Cursor's beforeSubmitPrompt arrives with
 	// conversation_id, in the paste-mode seat, and provides the same submit

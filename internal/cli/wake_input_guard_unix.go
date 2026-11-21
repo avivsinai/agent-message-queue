@@ -25,6 +25,13 @@ type wakeSubmit struct {
 	At   time.Time             `json:"at"`
 }
 
+func wakeSubmitModeSupported(cursor bool, mode string) bool {
+	if cursor {
+		return mode == wakeInjectModeRaw || mode == wakeInjectModePaste
+	}
+	return mode == wakeInjectModeRaw
+}
+
 func recordWakeSubmit(dirfd int, dir *wakeAgentDir, in wakeDialogHookInput) {
 	cursor := in.cursorReceiver && in.Event == "beforeSubmitPrompt" && in.ConversationID != ""
 	claude := !in.cursorReceiver && in.Event == "UserPromptSubmit" && in.SessionID != ""
@@ -40,7 +47,7 @@ func recordWakeSubmit(dirfd int, dir *wakeAgentDir, in wakeDialogHookInput) {
 	// appear as later input at the next wake.
 	raw, _, err := readWakeLockFileAt(dirfd, filepath.Join(dir.path, wakeLockFileName))
 	target := wakeLock{}
-	if err != nil || json.Unmarshal(raw, &target) != nil || (target.WakeMode != wakeInjectModeRaw && target.WakeMode != wakeInjectModePaste) ||
+	if err != nil || json.Unmarshal(raw, &target) != nil || !wakeSubmitModeSupported(cursor, target.WakeMode) ||
 		filepath.Dir(target.TTY) != "/dev" || (!strings.HasPrefix(filepath.Base(target.TTY), "ttys") && target.TTY != "/dev/console") {
 		return
 	}
@@ -80,7 +87,7 @@ func (s *wakeStart) newInputGuard() *wakeInputGuard {
 	guard := &wakeInputGuard{
 		sample: func() (ttyInputState, error) { return sampleGuardedTTY(tty) },
 	}
-	if s.harness != "claude" && s.harness != "cursor" {
+	if s.harness != "claude" && s.harness != "cursor" || !wakeSubmitModeSupported(s.harness == "cursor", s.currentWake.Lock.WakeMode) {
 		guard.installation = func() string { return inputGuardPlain }
 		guard.submitTime = func() time.Time { return time.Time{} }
 		return guard
