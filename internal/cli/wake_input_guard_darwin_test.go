@@ -314,9 +314,10 @@ func TestQueuedPasteHoldsTheEnter(t *testing.T) {
 	}
 }
 
-// agent-message-queue-h7o7, real-pty run: with the guard on, the rescue Enter
-// 150 ms after the first one submitted text the person typed in between.
-func TestGuardedDoorbellSendsNoRescueEnter(t *testing.T) {
+// agent-message-queue-h7o7, real-pty runs: keys read 0.4 to 1.3 ms after the
+// wake's Enter count as the wake's own write. The rescue Enter 150 ms later
+// submitted them alone, and without it the bare reminder did 5 s later.
+func TestKeysReadInsideTheSettleIntervalAreNotSubmittedAlone(t *testing.T) {
 	h, read, _ := guardedClaudeDoorbellMode(t, false, wakeInjectModeRaw)
 	settle := rawInjectSleep
 	typed := false
@@ -333,5 +334,16 @@ func TestGuardedDoorbellSendsNoRescueEnter(t *testing.T) {
 	h.scan(h.cfg)
 	if !slices.Equal(h.injected, []string{coopWakeDoorbell, "\r"}) {
 		t.Fatalf("wrote %q, want the doorbell and one Enter", h.injected)
+	}
+	h.injected = nil
+	h.now = h.deadline()
+	h.scan(h.cfg)
+	if len(h.injected) != 0 {
+		t.Fatalf("reminder for the unread mail wrote %q, want nothing before the stale time", h.injected)
+	}
+	h.advance(h.cfg.settings.inputStaleFor)
+	h.scan(h.cfg)
+	if !slices.Equal(h.injected, []string{coopWakeDoorbell, "\r"}) {
+		t.Fatalf("after the stale time wrote %q, want the full doorbell", h.injected)
 	}
 }

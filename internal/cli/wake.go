@@ -1802,6 +1802,19 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 			return deliverWakeTransientAttention(cfg, notice.output, nil)
 		case inputCleanSubmit, inputStale:
 			notice.submitOnly = false
+		case inputCleanOwn:
+			if notice.submitOnly {
+				// The cohort was presented with its Enter. With the guard on,
+				// every Enter follows the wake's own text in the same delivery,
+				// so the reminder is a full doorbell, and it waits for the stale
+				// time: keys read inside the settle interval of the last write
+				// count as the wake's own, and a quick Enter would submit them.
+				if !cfg.ownWriteStale() {
+					cfg.lastAttemptTransientAttention = true // nothing typed; the retry cadence goes on
+					return nil
+				}
+				notice.submitOnly = false
+			}
 		}
 	}
 
@@ -2636,7 +2649,7 @@ func resumeWakeInputDelivery(cfg *wakeConfig) (bool, error) {
 				// The first Enter was delivered. A second one 150 ms later can
 				// submit text the person typed in between: the wake cannot tell
 				// that read from the editor's own trailing read. A swallowed
-				// first Enter is recovered by the reminder, which decides again.
+				// first Enter is recovered by the full doorbell of the reminder.
 				state.reset()
 				return true, nil
 			}

@@ -162,6 +162,13 @@ func (cfg *wakeConfig) enterHeld() bool {
 	return false
 }
 
+// ownWriteStale reports whether the wake's last terminal write was read at
+// least input_stale_for ago, which is when a presented cohort may ring again.
+func (cfg *wakeConfig) ownWriteStale() bool {
+	stale := cfg.settings.inputStaleFor
+	return stale > 0 && cfg.wakeDoorbellNow().Sub(cfg.inputGuard.lastOwnRead) >= stale
+}
+
 // An incomplete paste drain supplies no proof for a following Enter.
 func (cfg *wakeConfig) samplePasteDrain() {
 	_, _, _ = cfg.waitRawDrain(rawInjectCRDrainTimeout, rawInjectDrainPollInterval)
