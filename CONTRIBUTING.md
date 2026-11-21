@@ -77,6 +77,7 @@ AMQ_CODEX_LIVE=1 AMQ_CODEX_LIVE_THREAD="<scratch-thread-uuid>" go test ./interna
 AMQ_TMUX_LIVE=1 go test ./internal/launch -run '^TestTmuxBackendLifecycleAndRecovery$' -count=1 -v
 AMQ_AGY_LIVE=1 go test ./internal/acp/host -run '^TestAgyLiveRemembersAcrossHostRestart$' -count=1 -v
 AMQ_WAKE_SELF_UPGRADE_PTY_LIVE=1 go test ./internal/cli -run '^Test(Darwin|Linux)WakeSelfUpgradeRealPTYStableSymlink$' -count=1 -v
+AMQ_WAKE_INPUT_GUARD_PTY_LIVE=1 go test ./internal/cli -run '^TestWakeInputGuardRealPTY$' -count=1 -v
 ```
 
 Read the selected test before running it. The tmux proof starts a private
@@ -88,6 +89,11 @@ turns across a host restart. The Codex
 check submits to the exact live thread you supply; replace the placeholder
 with a disposable thread UUID and keep its writer open. Never omit that UUID:
 the test otherwise selects an active thread. A skipped check is not a live result.
+
+The input-guard proof starts a real `coop exec` and wake on private pseudo
+terminals with a raw-mode reader that drains to EAGAIN and logs partial drafts.
+It needs no vendor harness or credentials, and takes less than three minutes.
+
 The wake self-upgrade proof replaces a binary through a real PTY-attached
 wake daemon and takes about 40 seconds; run it alone in an isolated
 environment, never in a shared agent session.
