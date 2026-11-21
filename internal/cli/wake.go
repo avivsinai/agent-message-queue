@@ -1844,10 +1844,10 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 		if resumeGuarded {
 			inputAccepted, injectErr = resumeWakeInputDelivery(cfg)
 		} else if notice.submitOnly {
-			inputAccepted, injectErr = injectTerminalSubmitOnly(cfg, wakeInjectModeRaw, guardInput && cfg.inputGuard.status(cfg.settings) == inputGuardProper)
+			inputAccepted, injectErr = injectTerminalSubmitOnly(cfg, wakeInjectModeRaw, guardInput && cfg.guardedInputEnabled())
 		} else {
 			inputAccepted, injectErr = injectTerminalNotification(cfg, wakeInjectModeRaw, injectedText,
-				notice.input.provenance == wakePayloadOwnerCommand, guardInput && cfg.inputGuard.status(cfg.settings) == inputGuardProper)
+				notice.input.provenance == wakePayloadOwnerCommand, guardInput && cfg.guardedInputEnabled())
 		}
 		inputAccepted = inputAccepted || cfg.inputDelivery.confirmedInput()
 
@@ -1863,13 +1863,13 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 			pasteText = "\a" + pasteText
 		}
 		if notice.submitOnly {
-			inputAccepted, injectErr = injectTerminalSubmitOnly(cfg, wakeInjectModePaste, false)
+			inputAccepted, injectErr = injectTerminalSubmitOnly(cfg, wakeInjectModePaste, guardInput && cfg.guardedInputEnabled())
 		} else {
 			inputAccepted, injectErr = injectTerminalNotification(
 				cfg,
 				wakeInjectModePaste,
 				pasteText,
-				false, false,
+				false, guardInput && cfg.guardedInputEnabled(),
 			)
 		}
 		inputAccepted = inputAccepted || cfg.inputDelivery.confirmedInput()
@@ -2530,6 +2530,9 @@ func resumeWakeInputDelivery(cfg *wakeConfig) (bool, error) {
 				// authorizes the Enter after this wait, so a dialog or a
 				// foreground change during it holds the submit.
 				rawInjectSleep(pasteSubmitDelay(cfg))
+				if state.guardInput {
+					cfg.samplePasteDrain()
+				}
 			} else {
 				// Hold the submit CR past the TUI's paste-burst window.
 				rawInjectSleep(rawInjectSettleDelay)
@@ -2562,7 +2565,14 @@ func resumeWakeInputDelivery(cfg *wakeConfig) (bool, error) {
 					return false, nil
 				}
 			}
-			if state.mode == wakeInjectModePaste || state.oneSubmit {
+			if state.mode == wakeInjectModePaste {
+				if state.guardInput {
+					cfg.samplePasteDrain()
+				}
+				state.reset()
+				return true, nil
+			}
+			if state.oneSubmit {
 				state.reset()
 				return true, nil
 			}

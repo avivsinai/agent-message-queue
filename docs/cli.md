@@ -741,10 +741,11 @@ External injection:
   contain sanitized but message-derived header content.
 
 Input deferral (default on): wake samples terminal input only after
-  a message is pending on a plain seat, then waits for a short quiet window.
-  Managed raw Claude Code on macOS with the submit hook guards input after
-  the first submit. A later read holds until --input-stale-for (default 5m,
-  0 never). The wake samples the armed terminal every 2s between arrivals.
+  a message is pending on a seat without a known-empty terminal since its
+  own write. A macOS built-in raw or paste wake uses its own writes (and
+  any Claude submit hook). Later reads hold until --input-stale-for
+  (default 2m, 0 never). New launches keep the usual first-input rule.
+  The wake samples guarded terminals every 2s between arrivals.
   Collision reduction only: it cannot detect permission/approval dialogs.
   A pause longer than --input-quiet-for can still inject while a prompt
   is being composed. If input remains active through --input-max-hold,
@@ -846,7 +847,7 @@ Options:
   -input-quiet-for duration
         Quiet window before deferred injection (advisory only on Linux; tty atime granularity is ~8s) (default 1.2s)
   -input-stale-for duration
-        Type a full doorbell after this long without another read on a guarded terminal (0 = never) (default 5m0s)
+        Type a full doorbell after this long without another read on a guarded terminal (0 = never) (default 2m0s)
   -interrupt
         Enable interrupt injection for urgent interrupt messages (default true)
   -interrupt-cmd string
@@ -1556,7 +1557,7 @@ Options:
   -input-quiet-for duration
         Quiet window before deferred injection (advisory only on Linux; tty atime granularity is ~8s) (default 1.2s)
   -input-stale-for duration
-        Type a full doorbell after this long without another read on a guarded terminal (0 = never) (default 5m0s)
+        Type a full doorbell after this long without another read on a guarded terminal (0 = never) (default 2m0s)
   -interrupt
         Enable interrupt injection for urgent interrupt messages (default true)
   -interrupt-cooldown duration
