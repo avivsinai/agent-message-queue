@@ -162,11 +162,24 @@ func (cfg *wakeConfig) enterHeld() bool {
 	return false
 }
 
-// ownWriteStale reports whether the wake's last terminal write was read at
-// least input_stale_for ago, which is when a presented cohort may ring again.
-func (cfg *wakeConfig) ownWriteStale() bool {
+// reminderHold reports whether a cohort the wake already presented must not
+// ring again yet, and when to look again. With the guard on, a reminder is a
+// full doorbell, and it comes no sooner than input_stale_for after the wake's
+// last terminal write was read; with input_stale_for 0 it does not come. A
+// seat with no recorded own read has no such fact and keeps the earlier
+// reminder.
+func (cfg *wakeConfig) reminderHold(now time.Time) (time.Duration, bool) {
+	if !cfg.guardedInputEnabled() || cfg.inputGuard.lastOwnRead.IsZero() {
+		return 0, false
+	}
 	stale := cfg.settings.inputStaleFor
-	return stale > 0 && cfg.wakeDoorbellNow().Sub(cfg.inputGuard.lastOwnRead) >= stale
+	if stale <= 0 {
+		return wakeDoorbellRetryMax, true
+	}
+	if wait := cfg.inputGuard.lastOwnRead.Add(stale).Sub(now); wait > 0 {
+		return wait, true
+	}
+	return 0, false
 }
 
 // An incomplete paste drain supplies no proof for a following Enter.

@@ -207,9 +207,9 @@ func TestPlainDoorbellReminderAfterInputIsNotBareEnter(t *testing.T) {
 	h.injected = nil
 	read("draft")
 	h.now = h.deadline()
-	notice := captureWakeStderr(t, func() { h.scan(h.cfg) })
-	if len(h.injected) != 0 || notice == "" {
-		t.Fatalf("input was read: reminder wrote %q, notice %q", h.injected, notice)
+	h.scan(h.cfg)
+	if len(h.injected) != 0 {
+		t.Fatalf("input was read: reminder wrote %q", h.injected)
 	}
 	h.advance(30 * time.Second)
 	h.scan(h.cfg)

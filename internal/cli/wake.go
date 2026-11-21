@@ -1247,6 +1247,14 @@ func deliverNewMessageNotification(
 		}
 		cfg.dialogHold, cfg.dialogHoldBusy, cfg.dialogHoldGeneration = wakeDialogClosed, false, ""
 	}
+	if plan.submitOnly && shouldDeferBeforeInject(cfg, deferForInput) {
+		// Like a dialog hold, this is neither a ledger record nor an attempt.
+		if wait, held := cfg.reminderHold(now); held {
+			cfg.doorbell.recordDialogHold(now, wait)
+			persistWakeDoorbellStatusBestEffort(cfg)
+			return nil
+		}
+	}
 	// A harness released from its trust dialog by its trust record alone
 	// may not accept input yet, so a write then does not confirm the
 	// doorbell: the retry ladder types the full doorbell again, not a bare
@@ -1800,21 +1808,12 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 			}
 		case inputUnknown:
 			return deliverWakeTransientAttention(cfg, notice.output, nil)
-		case inputCleanSubmit, inputStale:
+		case inputCleanSubmit, inputCleanOwn, inputStale:
+			// With the guard on, every Enter follows the wake's own text in
+			// the same delivery: a reminder is the full doorbell, never a bare
+			// Enter. Keys read inside the settle interval of the last write
+			// count as the wake's own, and a bare Enter would submit them.
 			notice.submitOnly = false
-		case inputCleanOwn:
-			if notice.submitOnly {
-				// The cohort was presented with its Enter. With the guard on,
-				// every Enter follows the wake's own text in the same delivery,
-				// so the reminder is a full doorbell, and it waits for the stale
-				// time: keys read inside the settle interval of the last write
-				// count as the wake's own, and a quick Enter would submit them.
-				if !cfg.ownWriteStale() {
-					cfg.lastAttemptTransientAttention = true // nothing typed; the retry cadence goes on
-					return nil
-				}
-				notice.submitOnly = false
-			}
 		}
 	}
 
