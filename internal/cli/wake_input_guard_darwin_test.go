@@ -355,3 +355,23 @@ func TestKeysReadInsideTheSettleIntervalAreNotSubmittedAlone(t *testing.T) {
 		t.Fatalf("a second reminder wrote %q, want one reminder for a cohort", h.injected)
 	}
 }
+
+// Review of agent-message-queue-h7o7: a held reminder kept the deadline of
+// the input_stale_for value it started with.
+func TestHeldReminderFollowsAChangedStaleTime(t *testing.T) {
+	h, _, _ := guardedClaudeDoorbellMode(t, false, wakeInjectModeRaw)
+	h.send("pending", "normal")
+	h.scan(h.cfg)
+	h.injected = nil
+	h.now = h.deadline()
+	h.scan(h.cfg)
+	if len(h.injected) != 0 {
+		t.Fatalf("reminder inside the stale time wrote %q", h.injected)
+	}
+	h.cfg.settings.inputStaleFor = time.Second
+	h.advance(6 * time.Second)
+	h.scan(h.cfg)
+	if !slices.Equal(h.injected, []string{coopWakeDoorbell, "\r"}) {
+		t.Fatalf("after the stale time became 1s wrote %q, want the full doorbell", h.injected)
+	}
+}

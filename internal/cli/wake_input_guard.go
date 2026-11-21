@@ -177,7 +177,9 @@ func (cfg *wakeConfig) reminderHold(now time.Time) (time.Duration, bool) {
 		return wakeDoorbellRetryMax, true
 	}
 	if wait := cfg.inputGuard.lastOwnRead.Add(stale).Sub(now); wait > 0 {
-		return wait, true
+		// Look again soon: a change of input_guard or input_stale_for must
+		// apply to a cohort that is already held.
+		return min(wait, wakeDoorbellRetryBase), true
 	}
 	return 0, false
 }
