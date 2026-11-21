@@ -28,7 +28,7 @@ const coopHookPeerActive = 10 * time.Minute
 
 func runCoopHook(args []string) error {
 	fs := flag.NewFlagSet("coop hook", flag.ContinueOnError)
-	usage := usageWithFlags(fs, "amq coop hook session-start|stop|wait|codex-wait",
+	usage := usageWithFlags(fs, "amq coop hook session-start|stop|prompt|wait|codex-wait",
 		"Hook receivers for the co-op hooks; amq coop install-hooks installs them.",
 		"They read AM_ME, AM_ROOT and the session pin from the environment, or the",
 		"identity amq coop join bound to the session, and never read .amqrc. They exit",
@@ -46,6 +46,9 @@ func runCoopHook(args []string) error {
 		"baseline, because the wake rings for later mail. It allows the stop after",
 		"5 blocks in one chain, and prints a systemMessage when the context conflicts",
 		"or the mailbox cannot be read.",
+		"",
+		"prompt: on UserPromptSubmit, adds a line of context when unread mail waits;",
+		"prints nothing for the wake's own doorbell.",
 		"",
 		"wait is the doorbell of a session that no wake rings, such as a session of",
 		"the Claude Code desktop app. It runs as an asyncRewake hook: it waits for",
@@ -67,19 +70,21 @@ func runCoopHook(args []string) error {
 		return nil
 	}
 	if fs.NArg() != 1 {
-		return UsageError("coop hook needs exactly one of: session-start, stop, wait, codex-wait")
+		return UsageError("coop hook needs exactly one of: session-start, stop, prompt, wait, codex-wait")
 	}
 	switch fs.Arg(0) {
 	case "session-start":
 		return writeCoopSessionStart(os.Stdout, time.Now())
 	case "stop":
 		return writeCoopStop(os.Stdin, os.Stdout)
+	case "prompt":
+		return writeCoopPrompt(os.Stdin, os.Stdout)
 	case "wait":
 		return runCoopWait(context.Background())
 	case "codex-wait":
 		return runCoopWaitCodex(context.Background(), os.Stdin)
 	default:
-		return UsageError("coop hook needs exactly one of: session-start, stop, wait, codex-wait")
+		return UsageError("coop hook needs exactly one of: session-start, stop, prompt, wait, codex-wait")
 	}
 }
 

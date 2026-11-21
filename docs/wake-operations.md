@@ -212,7 +212,8 @@ unknown past the stale interval, it sends the full doorbell; a draft left
 untouched that long can be typed into and submitted. Set `amq wake config
 --input-stale-for 0` to keep holding while input is unknown. Before the
 wake's first own write of a launch, `input_quiet_for` and the existing input
-deferral decide, as before.
+deferral decide, as before. With the co-op hooks installed on Claude Code,
+a held doorbell reaches the model at the user's next submit, through the hook.
 
 A managed Claude Code seat with the installed submit hook adds the fact
 that the editor was emptied by a submit. `amq wake install-dialog-hook`

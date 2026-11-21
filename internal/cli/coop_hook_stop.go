@@ -12,6 +12,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 )
 
 const (
@@ -37,6 +38,47 @@ type coopStopMessage struct {
 	Created  string
 	Priority string
 	File     os.FileInfo
+}
+
+// writeCoopPrompt lets a prompt carry unread mail to the model without a
+// keystroke. It creates no state and never blocks or disturbs the prompt.
+func writeCoopPrompt(stdin io.Reader, w io.Writer) error {
+	var in struct {
+		Prompt string `json:"prompt"`
+	}
+	// The bound can cut a long prompt. A cut prompt is not the doorbell, so a
+	// decode error only means there is no prompt to compare.
+	_ = json.NewDecoder(io.LimitReader(stdin, 1<<20)).Decode(&in)
+	if strings.TrimSpace(in.Prompt) == harness.Doorbell {
+		return nil
+	}
+	root, me, session, err := coopHookContext()
+	if me == "" || root == "" || err != nil {
+		return nil
+	}
+	pending, err := coopStopPending(root, me)
+	if err != nil {
+		return nil
+	}
+	unread := 0
+	for _, msg := range pending {
+		if msg.ID != "" {
+			unread++
+		}
+	}
+	if unread == 0 {
+		return nil
+	}
+	if session == "" {
+		session = "(none)"
+	}
+	_ = writeCoopHookJSON(w, map[string]any{
+		"hookSpecificOutput": map[string]string{
+			"hookEventName":     "UserPromptSubmit",
+			"additionalContext": fmt.Sprintf("You have %d unread AMQ message(s). Run amq drain --include-body. root=%s session=%s.", unread, root, session),
+		},
+	})
+	return nil
 }
 
 // writeCoopStop is the co-op Stop guard. It blocks a stop once for unread

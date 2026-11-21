@@ -26,8 +26,12 @@ const (
 // shellQuote quotes s as one word for sh.
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
-// coopHookEvents are the events amq coop install-hooks wires.
-var coopHookEvents = []string{"SessionStart", "Stop"}
+// coopHookEvents are the events amq coop install-hooks wires for Claude.
+var coopHookEvents = []string{"SessionStart", "Stop", "UserPromptSubmit"}
+
+// codexCoopHookEvents are Codex's supported wait events. UserPromptSubmit
+// belongs to Claude in this build and must not be added to Codex here.
+var codexCoopHookEvents = []string{"SessionStart", "Stop"}
 
 // coopHookCommand is the shell command one co-op hook runs. The gate runs
 // in the harness shell, so a session that does not take part starts no
@@ -48,7 +52,7 @@ func coopHookCommand(bin, store, verb string) string {
 	gate := coopHookMarker + `[ -n "${AM_ME-}" ] || ` + bound(envClaudeSession) + ` || ` + bound(envClaudeHostSession) + ` || exit 0; `
 	amq := shellQuote(bin) + " --no-update-check coop hook " + verb
 	switch verb {
-	case "stop":
+	case "stop", "prompt":
 		return gate + amq + " || true"
 	case "wait":
 		return gate + amq + "; [ $? -ne " + strconv.Itoa(harness.ClaudeRewakeRingExit) + " ] || exit 2"
@@ -84,6 +88,13 @@ func coopHooks(bin, store string) []hookfile.CommandHook {
 			Event:   "Stop",
 			Marker:  coopHookMarker,
 			Command: coopHookCommand(bin, store, "stop"),
+			Timeout: 2,
+			Owns:    ownsCoopHook(false),
+		},
+		{
+			Event:   "UserPromptSubmit",
+			Marker:  coopHookMarker,
+			Command: coopHookCommand(bin, store, "prompt"),
 			Timeout: 2,
 			Owns:    ownsCoopHook(false),
 		},
@@ -123,8 +134,8 @@ func codexCoopWaitCommand(bin, threads string) string {
 // it for a chat that waits for its first turn, and every turn end arms it
 // again. Codex runs an async hook in the background for the thread.
 func codexCoopHooks(bin, threads string) []hookfile.CommandHook {
-	hooks := make([]hookfile.CommandHook, 0, len(coopHookEvents))
-	for _, event := range coopHookEvents {
+	hooks := make([]hookfile.CommandHook, 0, len(codexCoopHookEvents))
+	for _, event := range codexCoopHookEvents {
 		hooks = append(hooks, hookfile.CommandHook{
 			Event:   event,
 			Marker:  coopHookMarker,
@@ -176,6 +187,8 @@ func runCoopInstallHooks(args []string) error {
 		"SessionStart (startup, resume, clear, compact) gives the agent its co-op",
 		"preamble: handle, session, peers, unread count, and what announces new mail.",
 		"Stop blocks a stop once for unread mail that no wake doorbell will announce.",
+		"UserPromptSubmit adds context with the unread count to the person's prompt.",
+		"A seat with an earlier hook installation adds this entry at the next install.",
 		"The wait hook, on SessionStart and Stop, is the doorbell of a session that no",
 		"wake rings, such as a session of the Claude Code desktop app: it runs in the",
 		"background (asyncRewake) and wakes the session when mail arrives. It stops",
@@ -279,7 +292,7 @@ func runCoopUninstallHooks(args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := hookfile.UninstallCommandHooksAt(path, coopHookMarker, coopHookEvents); err != nil {
+		if err := hookfile.UninstallCommandHooksAt(path, coopHookMarker, codexCoopHookEvents); err != nil {
 			return err
 		}
 		return writeStdout("co-op wait hook removed from %s\n", path)

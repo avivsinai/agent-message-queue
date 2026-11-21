@@ -49,7 +49,7 @@ amq coop exec --no-wake claude
 amq coop install-hooks
 ```
 
-This adds three hooks to `$CLAUDE_CONFIG_DIR/settings.json` (default
+This adds four hooks to `$CLAUDE_CONFIG_DIR/settings.json` (default
 `~/.claude/settings.json`):
 
 - **SessionStart.** On startup, resume, `/clear`, and compaction it gives the
@@ -61,6 +61,9 @@ This adds three hooks to `$CLAUDE_CONFIG_DIR/settings.json` (default
   mail that the wake will not ring for (see
   [Wake operations](docs/wake-operations.md)). After 5 blocks in one chain it
   allows the stop with a notice.
+- **UserPromptSubmit.** It adds one line of context when unread mail waits,
+  so the user's own submit tells the model. It prints nothing for the wake's
+  own doorbell. Reinstall to add this entry to an earlier hook installation.
 - **Wait** (on SessionStart and Stop). It is the doorbell of a session that no
   wake rings; see [Claude Code desktop app](#claude-code-desktop-app).
 
