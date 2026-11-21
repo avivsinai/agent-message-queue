@@ -162,7 +162,7 @@ func TestNotifyNewMessagesReminderAfterInputSincePresentation(t *testing.T) {
 	h, read, _ := guardedClaudeDoorbell(t)
 	h.send("pending", "normal")
 	h.scan(h.cfg)
-	if !slices.Equal(h.injected, []string{coopWakeDoorbell, "\r", "\r"}) {
+	if !slices.Equal(h.injected, []string{coopWakeDoorbell, "\r"}) {
 		t.Fatalf("initial ring = %q", h.injected)
 	}
 	h.injected = nil
@@ -174,7 +174,7 @@ func TestNotifyNewMessagesReminderAfterInputSincePresentation(t *testing.T) {
 	}
 	h.advance(5 * time.Minute)
 	h.scan(h.cfg)
-	if !slices.Equal(h.injected, []string{coopWakeDoorbell, "\r", "\r"}) {
+	if !slices.Equal(h.injected, []string{coopWakeDoorbell, "\r"}) {
 		t.Fatalf("stale reminder = %q, want full doorbell", h.injected)
 	}
 }
@@ -189,7 +189,7 @@ func TestWakeTypesCleanAndStaleDoorbells(t *testing.T) {
 			}
 			h.send("pending", "normal")
 			h.scan(h.cfg)
-			if !slices.Equal(h.injected, []string{coopWakeDoorbell, "\r", "\r"}) || *waits != 0 {
+			if !slices.Equal(h.injected, []string{coopWakeDoorbell, "\r"}) || *waits != 0 {
 				t.Fatalf("wrote %q with %d quiet waits", h.injected, *waits)
 			}
 		})
@@ -201,19 +201,19 @@ func TestPlainDoorbellReminderAfterInputIsNotBareEnter(t *testing.T) {
 	h, read, _ := guardedClaudeDoorbellMode(t, false, wakeInjectModeRaw)
 	h.send("pending", "normal")
 	h.scan(h.cfg)
-	if !slices.Equal(h.injected, []string{coopWakeDoorbell, "\r", "\r"}) {
+	if !slices.Equal(h.injected, []string{coopWakeDoorbell, "\r"}) {
 		t.Fatalf("initial ring = %q", h.injected)
 	}
 	h.injected = nil
 	read("draft")
 	h.now = h.deadline()
-	notice := captureWakeStderr(t, func() { h.scan(h.cfg) })
-	if len(h.injected) != 0 || notice == "" {
-		t.Fatalf("input was read: reminder wrote %q, notice %q", h.injected, notice)
+	h.scan(h.cfg)
+	if len(h.injected) != 0 {
+		t.Fatalf("input was read: reminder wrote %q", h.injected)
 	}
 	h.advance(30 * time.Second)
 	h.scan(h.cfg)
-	if !slices.Equal(h.injected, []string{coopWakeDoorbell, "\r", "\r"}) {
+	if !slices.Equal(h.injected, []string{coopWakeDoorbell, "\r"}) {
 		t.Fatalf("stale reminder = %q, want full doorbell", h.injected)
 	}
 }
@@ -229,7 +229,7 @@ func TestPlainDoorbellNeedsNoQuietWaitAfterOwnWrite(t *testing.T) {
 				readAt := firstEmpty
 				h.cfg.inputGuard.sample = func() (ttyInputState, error) {
 					sample := ttyInputState{hasLastRead: true, lastRead: readAt}
-					if len(h.injected) == 3 { // the initial doorbell's rescue Enter
+					if len(h.injected) == 2 { // the initial doorbell's Enter
 						readAt = firstEmpty.Add(142 * time.Microsecond)
 					}
 					return sample, nil
@@ -243,9 +243,6 @@ func TestPlainDoorbellNeedsNoQuietWaitAfterOwnWrite(t *testing.T) {
 			h.now = h.deadline()
 			h.scan(h.cfg)
 			want := []string{coopWakeDoorbell, "\r"}
-			if mode == wakeInjectModeRaw {
-				want = append(want, "\r")
-			}
 			if !slices.Equal(h.injected, want) || *waits != 0 {
 				t.Fatalf("second ring = %q with %d quiet waits, want %q and none", h.injected, *waits, want)
 			}
@@ -271,7 +268,7 @@ func TestStaleInputAfterDoorbellTextRetriesWithFullDoorbell(t *testing.T) {
 	h.injected = nil
 	h.advance(h.cfg.settings.inputStaleFor + time.Second)
 	h.scan(h.cfg)
-	if !slices.Equal(h.injected, []string{coopWakeDoorbell, "\r", "\r"}) {
+	if !slices.Equal(h.injected, []string{coopWakeDoorbell, "\r"}) {
 		t.Fatalf("input after the draft aged = %q, want the full doorbell and submit", h.injected)
 	}
 }
@@ -314,5 +311,67 @@ func TestQueuedPasteHoldsTheEnter(t *testing.T) {
 	h.scan(h.cfg)
 	if !slices.Equal(h.injected, []string{coopWakeDoorbell}) {
 		t.Fatalf("wrote %q, want the doorbell text and no Enter", h.injected)
+	}
+}
+
+// agent-message-queue-h7o7, real-pty runs: keys read 0.4 to 1.3 ms after the
+// wake's Enter count as the wake's own write. The rescue Enter 150 ms later
+// submitted them alone, and without it the bare reminder did 5 s later.
+func TestKeysReadInsideTheSettleIntervalAreNotSubmittedAlone(t *testing.T) {
+	h, read, _ := guardedClaudeDoorbellMode(t, false, wakeInjectModeRaw)
+	settle := rawInjectSleep
+	typed := false
+	rawInjectSleep = func(delay time.Duration) {
+		// The person's keys are read inside the settle interval after the
+		// Enter, so the wake's own read time covers them (1.3 ms in the run).
+		if delay == rawInjectDrainPollInterval && len(h.injected) == 2 && !typed {
+			typed = true
+			read("xyz")
+		}
+	}
+	t.Cleanup(func() { rawInjectSleep = settle })
+	h.send("pending", "normal")
+	h.scan(h.cfg)
+	if !slices.Equal(h.injected, []string{coopWakeDoorbell, "\r"}) {
+		t.Fatalf("wrote %q, want the doorbell and one Enter", h.injected)
+	}
+	h.injected = nil
+	h.now = h.deadline()
+	h.scan(h.cfg)
+	if len(h.injected) != 0 {
+		t.Fatalf("reminder for the unread mail wrote %q, want nothing before the stale time", h.injected)
+	}
+	h.advance(h.cfg.settings.inputStaleFor)
+	h.scan(h.cfg)
+	if !slices.Equal(h.injected, []string{coopWakeDoorbell, "\r"}) {
+		t.Fatalf("after the stale time wrote %q, want the full doorbell", h.injected)
+	}
+	// Review of agent-message-queue-h7o7: a busy agent got each further
+	// reminder as one more message.
+	h.injected = nil
+	h.advance(10 * h.cfg.settings.inputStaleFor)
+	h.scan(h.cfg)
+	if len(h.injected) != 0 {
+		t.Fatalf("a second reminder wrote %q, want one reminder for a cohort", h.injected)
+	}
+}
+
+// Review of agent-message-queue-h7o7: a held reminder kept the deadline of
+// the input_stale_for value it started with.
+func TestHeldReminderFollowsAChangedStaleTime(t *testing.T) {
+	h, _, _ := guardedClaudeDoorbellMode(t, false, wakeInjectModeRaw)
+	h.send("pending", "normal")
+	h.scan(h.cfg)
+	h.injected = nil
+	h.now = h.deadline()
+	h.scan(h.cfg)
+	if len(h.injected) != 0 {
+		t.Fatalf("reminder inside the stale time wrote %q", h.injected)
+	}
+	h.cfg.settings.inputStaleFor = time.Second
+	h.advance(6 * time.Second)
+	h.scan(h.cfg)
+	if !slices.Equal(h.injected, []string{coopWakeDoorbell, "\r"}) {
+		t.Fatalf("after the stale time became 1s wrote %q, want the full doorbell", h.injected)
 	}
 }

@@ -162,6 +162,28 @@ func (cfg *wakeConfig) enterHeld() bool {
 	return false
 }
 
+// reminderHold reports whether a cohort the wake already presented must not
+// ring again yet, and when to look again. With the guard on, a reminder is a
+// full doorbell, and it comes no sooner than input_stale_for after the wake's
+// last terminal write was read; with input_stale_for 0 it does not come. A
+// seat with no recorded own read has no such fact and keeps the earlier
+// reminder.
+func (cfg *wakeConfig) reminderHold(now time.Time) (time.Duration, bool) {
+	if !cfg.guardedInputEnabled() || cfg.inputGuard.lastOwnRead.IsZero() {
+		return 0, false
+	}
+	stale := cfg.settings.inputStaleFor
+	if stale <= 0 {
+		return wakeDoorbellRetryMax, true
+	}
+	if wait := cfg.inputGuard.lastOwnRead.Add(stale).Sub(now); wait > 0 {
+		// Look again soon: a change of input_guard or input_stale_for must
+		// apply to a cohort that is already held.
+		return min(wait, wakeDoorbellRetryBase), true
+	}
+	return 0, false
+}
+
 // An incomplete paste drain supplies no proof for a following Enter.
 func (cfg *wakeConfig) samplePasteDrain() {
 	_, _, _ = cfg.waitRawDrain(rawInjectCRDrainTimeout, rawInjectDrainPollInterval)

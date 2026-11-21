@@ -1247,6 +1247,16 @@ func deliverNewMessageNotification(
 		}
 		cfg.dialogHold, cfg.dialogHoldBusy, cfg.dialogHoldGeneration = wakeDialogClosed, false, ""
 	}
+	guardedReminder := false
+	if plan.submitOnly && shouldDeferBeforeInject(cfg, deferForInput) {
+		// Like a dialog hold, this is neither a ledger record nor an attempt.
+		if wait, held := cfg.reminderHold(now); held {
+			cfg.doorbell.recordDialogHold(now, wait)
+			persistWakeDoorbellStatusBestEffort(cfg)
+			return nil
+		}
+		guardedReminder = cfg.guardedInputEnabled() && !cfg.inputGuard.lastOwnRead.IsZero()
+	}
 	// A harness released from its trust dialog by its trust record alone
 	// may not accept input yet, so a write then does not confirm the
 	// doorbell: the retry ladder types the full doorbell again, not a bare
@@ -1302,6 +1312,13 @@ func deliverNewMessageNotification(
 				currentPending,
 				deliveryErr,
 			)
+			if guardedReminder && wakeInputAttemptConfirmed(cfg, deliveryErr) {
+				// A guarded reminder is a second full doorbell, and a busy
+				// agent takes it as one more message. One recovers a first
+				// doorbell the editor did not take; more would only repeat it.
+				cfg.doorbell.parkCurrentCohort()
+				persistWakeDoorbellStatusBestEffort(cfg)
+			}
 		}
 		return deliveryErr
 	}
@@ -1800,7 +1817,11 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 			}
 		case inputUnknown:
 			return deliverWakeTransientAttention(cfg, notice.output, nil)
-		case inputCleanSubmit, inputStale:
+		case inputCleanSubmit, inputCleanOwn, inputStale:
+			// With the guard on, every Enter follows the wake's own text in
+			// the same delivery: a reminder is the full doorbell, never a bare
+			// Enter. Keys read inside the settle interval of the last write
+			// count as the wake's own, and a bare Enter would submit them.
 			notice.submitOnly = false
 		}
 	}
@@ -2632,12 +2653,15 @@ func resumeWakeInputDelivery(cfg *wakeConfig) (bool, error) {
 			state.phase = wakeInputRawRescuePending
 
 		case wakeInputRawRescuePending:
-			rawInjectSleep(rawInjectSettleDelay)
-			if state.guardInput && cfg.enterHeld() {
-				// The first Enter was delivered. An optional rescue must not submit later edits.
+			if state.guardInput && cfg.guardedInputEnabled() && !cfg.inputGuard.plainAttempt {
+				// The first Enter was delivered. A second one 150 ms later can
+				// submit text the person typed in between: the wake cannot tell
+				// that read from the editor's own trailing read. A swallowed
+				// first Enter is recovered by the full doorbell of the reminder.
 				state.reset()
 				return true, nil
 			}
+			rawInjectSleep(rawInjectSettleDelay)
 			wrote, err := writePendingWakeInputChunk(cfg, state, "\r")
 			if err != nil {
 				if cfg.debug {
