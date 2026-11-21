@@ -8,6 +8,18 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.160.0](https://github.com/avivsinai/agent-message-queue/compare/v0.159.2...v0.160.0) (2026-11-21)
+
+
+### Features
+
+* **wake:** the input guard knows a Cursor CLI submit ([f1e5dc8](https://github.com/avivsinai/agent-message-queue/commit/f1e5dc8dbd38d6d7d79ab5379b46baa0562168d9))
+
+
+### Bug Fixes
+
+* **wake:** leave a pending owner command alone when the peer inbox drains ([15e6faa](https://github.com/avivsinai/agent-message-queue/commit/15e6faaeaf9f0b6c8bf817644394f6e7d05ff405))
+
 ## [0.159.2](https://github.com/avivsinai/agent-message-queue/compare/v0.159.1...v0.159.2) (2026-11-21)
 
 
