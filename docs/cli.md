@@ -741,11 +741,11 @@ External injection:
   contain sanitized but message-derived header content.
 
 Input deferral (default on): wake samples terminal input only after
-  a message is pending on a seat without a known-empty terminal since its
-  own write. A macOS built-in raw or paste wake uses its own writes (and
-  any Claude submit hook). Later reads hold until --input-stale-for
-  (default 2m, 0 never). New launches keep the usual first-input rule.
-  The wake samples guarded terminals every 2s between arrivals.
+  a message is pending, then waits for a short quiet window.
+  With --input-guard (off by default), a macOS built-in raw or paste wake
+  types at once when nothing was read since its own write or the last
+  Claude submit; later reads hold until --input-stale-for (default 30s,
+  0 never), and the wake samples the terminal every 2s between arrivals.
   Collision reduction only: it cannot detect permission/approval dialogs.
   A pause longer than --input-quiet-for can still inject while a prompt
   is being composed. If input remains active through --input-max-hold,
@@ -840,6 +840,8 @@ Options:
         Timeout for one --inject-via command (default 5s)
   -inject-via string
         External executable for injection (payload appended as last arg, bypasses TTY requirement)
+  -input-guard
+        Type the doorbell only into a terminal that read no input since the wake's own write or the last submit (macOS, built-in typing); off uses the quiet window
   -input-max-hold duration
         Maximum time to defer one wake injection (0 = no hold) (default 15s)
   -input-poll-interval duration
@@ -847,7 +849,7 @@ Options:
   -input-quiet-for duration
         Quiet window before deferred injection (advisory only on Linux; tty atime granularity is ~8s) (default 1.2s)
   -input-stale-for duration
-        Type a full doorbell after this long without another read on a guarded terminal (0 = never) (default 2m0s)
+        Type a full doorbell after this long without another read on a guarded terminal (0 = never) (default 30s)
   -interrupt
         Enable interrupt injection for urgent interrupt messages (default true)
   -interrupt-cmd string
@@ -1550,6 +1552,8 @@ Options:
         Hold the first doorbell for normal-priority mail up to this long (0 = no priority hold)
   -inject-timeout duration
         Timeout for one --inject-via command (default 5s)
+  -input-guard
+        Type the doorbell only into a terminal that read no input since the wake's own write or the last submit (macOS, built-in typing); off uses the quiet window
   -input-max-hold duration
         Maximum time to defer one wake injection (0 = no hold) (default 15s)
   -input-poll-interval duration
@@ -1557,7 +1561,7 @@ Options:
   -input-quiet-for duration
         Quiet window before deferred injection (advisory only on Linux; tty atime granularity is ~8s) (default 1.2s)
   -input-stale-for duration
-        Type a full doorbell after this long without another read on a guarded terminal (0 = never) (default 2m0s)
+        Type a full doorbell after this long without another read on a guarded terminal (0 = never) (default 30s)
   -interrupt
         Enable interrupt injection for urgent interrupt messages (default true)
   -interrupt-cooldown duration

@@ -22,7 +22,8 @@ const (
 	defaultWakeDebounce          = 250 * time.Millisecond
 	defaultWakePreviewLen        = 48
 	defaultWakeDeferWhileInput   = true
-	defaultWakeInputStaleFor     = 2 * time.Minute
+	defaultWakeInputGuard        = false
+	defaultWakeInputStaleFor     = 30 * time.Second
 	defaultWakeInputQuietFor     = 1200 * time.Millisecond
 	defaultWakeInputPollInterval = 200 * time.Millisecond
 	defaultWakeInputMaxHold      = 15 * time.Second
@@ -64,6 +65,7 @@ type wakeSettings struct {
 	previewLen        int
 	bell              bool
 	deferWhileInput   bool
+	inputGuard        bool
 	inputStaleFor     time.Duration
 	inputQuietFor     time.Duration
 	inputPollInterval time.Duration
@@ -83,6 +85,7 @@ func defaultWakeSettings() wakeSettings {
 		debounce:          defaultWakeDebounce,
 		previewLen:        defaultWakePreviewLen,
 		deferWhileInput:   defaultWakeDeferWhileInput,
+		inputGuard:        defaultWakeInputGuard,
 		inputStaleFor:     defaultWakeInputStaleFor,
 		inputQuietFor:     defaultWakeInputQuietFor,
 		inputPollInterval: defaultWakeInputPollInterval,
@@ -163,6 +166,8 @@ var wakeSettingDefs = []wakeSettingDef{
 		func(s *wakeSettings) any { return &s.bell }},
 	{"defer_while_input", "defer-while-input", "Best-effort: defer non-interrupt injection while terminal input appears active",
 		func(s *wakeSettings) any { return &s.deferWhileInput }},
+	{"input_guard", "input-guard", "Type the doorbell only into a terminal that read no input since the wake's own write or the last submit (macOS, built-in typing); off uses the quiet window",
+		func(s *wakeSettings) any { return &s.inputGuard }},
 	{"input_stale_for", "input-stale-for", "Type a full doorbell after this long without another read on a guarded terminal (0 = never)",
 		func(s *wakeSettings) any { return &s.inputStaleFor }},
 	{"input_quiet_for", "input-quiet-for", "Quiet window before deferred injection (advisory only on Linux; tty atime granularity is ~8s)",

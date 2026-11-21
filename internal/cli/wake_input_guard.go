@@ -18,10 +18,11 @@ type wakeInputGuard struct {
 }
 
 const (
+	inputGuardOff       = "off"
 	inputGuardPlain     = "plain"
 	inputGuardProper    = "proper (claude)"
 	inputGuardNeedsHook = "plain (run amq wake install-dialog-hook)"
-	inputGuardLinux     = "plain (Linux)"
+	inputGuardLinux     = "off (Linux)"
 )
 
 type wakeInputDecision uint8
@@ -38,6 +39,9 @@ func (g *wakeInputGuard) status(settings wakeSettings) string {
 	if runtime.GOOS == "linux" {
 		return inputGuardLinux
 	}
+	if !settings.inputGuard {
+		return inputGuardOff
+	}
 	if g == nil || !settings.deferWhileInput || settings.inputMaxHold <= 0 {
 		return inputGuardPlain
 	}
@@ -45,8 +49,11 @@ func (g *wakeInputGuard) status(settings wakeSettings) string {
 }
 
 func wakeInputGuardValue(status string) string {
-	if status == inputGuardProper {
-		return inputGuardProper
+	switch status {
+	case inputGuardProper:
+		return status
+	case inputGuardOff, inputGuardLinux:
+		return inputGuardOff
 	}
 	return inputGuardPlain
 }
@@ -71,7 +78,7 @@ func (cfg *wakeConfig) resumeOwedInput(output wakePayload) error {
 
 func (cfg *wakeConfig) guardedInputEnabled() bool {
 	mode := effectiveInjectMode(cfg)
-	return cfg.inputGuard != nil && cfg.settings.deferWhileInput && cfg.settings.inputMaxHold > 0 &&
+	return cfg.inputGuard != nil && cfg.settings.inputGuard && cfg.settings.deferWhileInput && cfg.settings.inputMaxHold > 0 &&
 		cfg.injectVia == "" && (mode == wakeInjectModeRaw || mode == wakeInjectModePaste)
 }
 
@@ -107,7 +114,8 @@ func (cfg *wakeConfig) inputDecision(owedEnter bool) wakeInputDecision {
 	}
 	g := cfg.inputGuard
 	armed := cfg.hasCurrentSubmit()
-	if !armed && g.lastOwnRead.IsZero() {
+	if !owedEnter && !armed && g.lastOwnRead.IsZero() {
+		// No fact about this terminal yet: the quiet window decides.
 		return inputPlain
 	}
 	state, err := g.sample()
@@ -124,6 +132,11 @@ func (cfg *wakeConfig) inputDecision(owedEnter bool) wakeInputDecision {
 	if state.pendingBytes > 0 {
 		return inputUnknown
 	}
+	if owedEnter && g.lastOwnRead.IsZero() {
+		// The wake's last write was never seen read, so an Enter could
+		// follow bytes the reader has not taken.
+		return inputUnknown
+	}
 	if !g.lastOwnRead.After(now) && !state.lastRead.After(g.lastOwnRead) {
 		return inputCleanOwn
 	}
@@ -136,29 +149,46 @@ func (cfg *wakeConfig) inputDecision(owedEnter bool) wakeInputDecision {
 	return inputUnknown
 }
 
-// A paste payload or its Enter can be observed without changing its timing.
-// Failure retains the legacy behavior; an incomplete drain is not clean proof.
+// enterHeld reports whether an Enter that carries no text must not be
+// written: terminal input was read since the wake's own last write, so the
+// editor can hold text that is not the wake's. Staleness does not release
+// such an Enter; it releases only a full doorbell. A seat with no usable
+// sample keeps the plain wake's Enter.
+func (cfg *wakeConfig) enterHeld() bool {
+	switch cfg.inputDecision(true) {
+	case inputUnknown, inputStale:
+		return true
+	}
+	return false
+}
+
+// An incomplete paste drain supplies no proof for a following Enter.
 func (cfg *wakeConfig) samplePasteDrain() {
 	_, _, _ = cfg.waitRawDrain(rawInjectCRDrainTimeout, rawInjectDrainPollInterval)
 }
 
-// Observe the exact sample that finishes the drain. If the real terminal
-// cannot be sampled, retain the plain wake's queue-drain behavior.
 func (cfg *wakeConfig) waitRawDrain(timeout, poll time.Duration) (time.Duration, bool, error) {
 	if !cfg.guardedInputEnabled() || !cfg.inputDelivery.guardInput || cfg.inputGuard.plainAttempt {
 		return waitForRawInputDrained(timeout, poll)
 	}
 	g := cfg.inputGuard
-	waited, drained, err := waitForInputQueueDrain(func() (int, error) {
+	samplePending := func() (int, error) {
 		state, err := g.sample()
-		if err == nil && state.pendingBytes == 0 && state.hasLastRead && !state.lastRead.After(cfg.wakeDoorbellNow()) {
+		if err == nil && state.pendingBytes == 0 && state.hasLastRead && !state.lastRead.IsZero() && !state.lastRead.After(cfg.wakeDoorbellNow()) {
 			g.lastOwnRead = state.lastRead
 		}
 		return state.pendingBytes, err
-	}, time.Now, time.Sleep, timeout, poll)
+	}
+	waited, drained, err := waitForInputQueueDrain(samplePending, time.Now, time.Sleep, timeout, poll)
 	if err != nil {
 		g.plainAttempt = true
 		return waitForRawInputDrained(timeout-waited, poll)
+	}
+	if drained {
+		// The queue can empty before the reader marks the read on return.
+		// Keep the first timestamp if input is queued at the settled sample.
+		rawInjectSleep(poll)
+		_, _ = samplePending()
 	}
 	return waited, drained, nil
 }

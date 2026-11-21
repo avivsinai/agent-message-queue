@@ -200,13 +200,26 @@ only and a retry), or the opt-in `claude-native` injector.
 
 ## Input guard (macOS)
 
-For every managed owner-bound seat on macOS using built-in raw or paste
-typing, the rule is: type when the editor is known empty, or when no input
-was read for `input_stale_for` (default `2m`). A seat without a submit hook
+The input guard is off by default: the wake then uses the quiet window of
+input deferral only. Turn it on for one seat with
+`amq wake config --input-guard=true`, or for every seat of the user with
+`amq wake config --machine --input-guard=true`; a running wake applies the
+change without a restart. Turning it on applies from the next delivery: a
+doorbell already being typed finishes without the guard. Turning it off
+applies at once, also to a doorbell that waits for its Enter. With the guard off, an
+installed Claude submit hook still records the submit time in
+`agents/<me>/.wake.submit`; no wake reads it. `coop exec` prints `input guard: off`, `plain` or
+`proper (claude)`.
+
+With the guard on, for every managed owner-bound seat on macOS using built-in
+raw or paste typing, the rule is: type when the editor is known empty, or when no input
+was read for `input_stale_for` (default `30s`). A seat without a submit hook
 uses the wake's own writes as proof: when nothing was read since the last
 one, it types immediately, without waiting for the first input quiet timer.
-An Enter with no text is sent only on that same proof, or when input is
-stale. After later input, the wake types nothing, emits its usual
+An Enter with no text is sent only when nothing was read since the wake's
+own write. If input is read before that Enter, the wake drops the key; the
+stale interval never releases it. An unread cohort retries with the full
+doorbell once input is stale. After later input, the wake types nothing, emits its usual
 out-of-band notice and retries on the existing schedule. When input remains
 unknown past the stale interval, it sends the full doorbell; a draft left
 untouched that long can be typed into and submitted. Set `amq wake config
@@ -228,7 +241,10 @@ macOS can assign the terminal's read time on the first stat after a read.
 The hook stats it at submit, and the wake samples guarded seats on its
 existing two-second settings tick, so an idle draft ages between mail
 arrivals. A human keystroke interleaved with a write or arriving after the
-last sample can still be submitted. The guard reduces collisions; it does
+last sample can still be submitted. The wake takes its own read time 10 ms
+after the terminal queue is empty, because the editor marks its read after
+the queue empties; a keystroke the editor consumes in that interval counts
+as the wake's write. The guard reduces collisions; it does
 not see drafts or approval dialogs.
 
 Linux, external injectors, native Claude delivery, attention-only mode and
@@ -796,7 +812,7 @@ A running wake has two kinds of input.
   the wake through its owning terminal or supervisor after a `wake check`.
 - Settings are policy values the wake reads each time it uses them: `debounce`,
   `hold_normal`, `hold_low`, `preview_len`, `bell`, `defer_while_input`,
-  `input_quiet_for`, `input_stale_for`, `input_poll_interval`, `input_max_hold`, `interrupt`,
+  `input_quiet_for`, `input_guard`, `input_stale_for`, `input_poll_interval`, `input_max_hold`, `interrupt`,
   `interrupt_label`, `interrupt_priority`, `interrupt_notice`,
   `interrupt_cooldown`, `inject_timeout`, `self_upgrade`, and `held_notice`.
   Each has a flag of the same name with `-` in place of `_`.

@@ -240,16 +240,24 @@ func ownerCommandMaySubmit(cfg *wakeConfig) bool {
 	if err == nil {
 		return true
 	}
+	c.refuseTyping(cfg, err.Error())
+	return false
+}
+
+// refuseTyping closes the claimed command without retrying its text or Enter.
+func (c *wakeCommands) refuseTyping(cfg *wakeConfig, reason string) {
+	if c == nil || c.typing.ID == "" {
+		return
+	}
 	req := c.typing
 	c.typing = wakecmd.Request{}
-	q, ok, qerr := openWakeCommandQueue(c.dir)
-	if qerr != nil || !ok {
-		_ = writeWakeDiagnostic(cfg, "amq wake: owner command %s dropped before its Enter: %v\n", req.ID, err)
-		return false
+	q, ok, err := openWakeCommandQueue(c.dir)
+	if err != nil || !ok {
+		_ = writeWakeDiagnostic(cfg, "amq wake: owner command %s dropped before its Enter: %s\n", req.ID, reason)
+		return
 	}
 	defer func() { _ = q.Close() }()
-	finishWakeCommand(cfg, int(q.Fd()), req.ID, wakecmd.Refused, err.Error())
-	return false
+	finishWakeCommand(cfg, int(q.Fd()), req.ID, wakecmd.Refused, reason)
 }
 
 // wakeCommandMayOpenPicker reports whether text is a command that opens a

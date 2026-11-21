@@ -55,9 +55,9 @@ func TestWakeRingsAPlainDoorbellWithoutDialogHooks(t *testing.T) {
 	if !strings.Contains(stderr, "dialog guard: plain\n") {
 		t.Fatalf("stderr = %q, want the plain dialog guard line", stderr)
 	}
-	wantInput := "input guard: plain\n"
+	wantInput := "input guard: off\n"
 	if runtime.GOOS == "linux" {
-		wantInput = "input guard: plain (Linux)\n"
+		wantInput = "input guard: off (Linux)\n"
 	}
 	if !strings.Contains(stderr, wantInput) {
 		t.Fatalf("stderr = %q, want %q", stderr, wantInput)

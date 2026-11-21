@@ -487,10 +487,11 @@ AskUserQuestion, ExitPlanMode, or a permission dialog is open; see
 [Dialog guard](docs/wake-operations.md#dialog-guard-claude-code) for the
 dialogs it cannot see. Use `none` when zero synthetic input is required.
 Removing Enter or sanitizing payload text does not prevent single-key approval
-shortcuts. On macOS, every owner-bound raw or paste seat remembers the read
-time after the wake's own write: no subsequent read type at once; later
-input shows a notice until the configured stale interval (default two
-minutes, zero to keep holding). The full doorbell, never a bare Enter, is the
+shortcuts. With the input guard on (`amq wake config --input-guard=true`; it
+is off by default), every owner-bound raw or paste seat on macOS remembers
+the read time after the wake's own write: no subsequent read type at once; later
+input shows a notice until the configured stale interval (default 30
+seconds, zero to keep holding). The full doorbell, never a bare Enter, is the
 reminder after later input. Before the wake's first own write, quiet input
 deferral decides. Claude Code's submit hook adds proof that the editor was
 emptied. [Input guard](docs/wake-operations.md#input-guard-macos). Urgent

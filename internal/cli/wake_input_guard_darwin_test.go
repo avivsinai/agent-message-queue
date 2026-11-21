@@ -25,6 +25,10 @@ func guardedClaudeDoorbell(t *testing.T) (h *wakeHoldHarness, read func(string),
 }
 
 func guardedClaudeDoorbellMode(t *testing.T, hooked bool, mode string) (h *wakeHoldHarness, read func(string), quietWaits *int) {
+	return doorbellOnPrivateTTY(t, hooked, mode, true)
+}
+
+func doorbellOnPrivateTTY(t *testing.T, hooked bool, mode string, guard bool) (h *wakeHoldHarness, read func(string), quietWaits *int) {
 	t.Helper()
 	h = newWakeHoldHarness(t, wakeHoldPolicy{})
 	home := t.TempDir()
@@ -92,6 +96,7 @@ func guardedClaudeDoorbellMode(t *testing.T, hooked bool, mode string) (h *wakeH
 	}
 	cfg := start.newLoopConfig()
 	cfg.injectMode = mode
+	cfg.settings.inputGuard = guard
 	h.cfg = &cfg
 	h.now = time.Now().Add(3 * time.Second)
 	cfg.doorbellNow = func() time.Time { return h.now }
@@ -180,7 +185,7 @@ func TestWakeTypesCleanAndStaleDoorbells(t *testing.T) {
 			h, read, waits := guardedClaudeDoorbell(t)
 			if stale {
 				read("draft")
-				h.advance(2 * time.Minute)
+				h.advance(30 * time.Second)
 			}
 			h.send("pending", "normal")
 			h.scan(h.cfg)
@@ -206,7 +211,7 @@ func TestPlainDoorbellReminderAfterInputIsNotBareEnter(t *testing.T) {
 	if len(h.injected) != 0 || notice == "" {
 		t.Fatalf("input was read: reminder wrote %q, notice %q", h.injected, notice)
 	}
-	h.advance(2 * time.Minute)
+	h.advance(30 * time.Second)
 	h.scan(h.cfg)
 	if !slices.Equal(h.injected, []string{coopWakeDoorbell, "\r", "\r"}) {
 		t.Fatalf("stale reminder = %q, want full doorbell", h.injected)
@@ -217,6 +222,19 @@ func TestPlainDoorbellNeedsNoQuietWaitAfterOwnWrite(t *testing.T) {
 	for _, mode := range []string{wakeInjectModeRaw, wakeInjectModePaste} {
 		t.Run(mode, func(t *testing.T) {
 			h, _, waits := guardedClaudeDoorbellMode(t, false, mode)
+			if mode == wakeInjectModeRaw {
+				// agent-message-queue-fsmt live run on v0.159.0: the reader marked
+				// its read after the wake's first empty-queue sample.
+				firstEmpty := h.now.Add(-time.Second)
+				readAt := firstEmpty
+				h.cfg.inputGuard.sample = func() (ttyInputState, error) {
+					sample := ttyInputState{hasLastRead: true, lastRead: readAt}
+					if len(h.injected) == 3 { // the initial doorbell's rescue Enter
+						readAt = firstEmpty.Add(142 * time.Microsecond)
+					}
+					return sample, nil
+				}
+			}
 			h.send("pending", "normal")
 			h.scan(h.cfg)
 			h.send("second", "normal")
@@ -232,5 +250,69 @@ func TestPlainDoorbellNeedsNoQuietWaitAfterOwnWrite(t *testing.T) {
 				t.Fatalf("second ring = %q with %d quiet waits, want %q and none", h.injected, *waits, want)
 			}
 		})
+	}
+}
+
+// agent-message-queue-fsmt live run on v0.159.0: a held Enter was sent when
+// the input became stale and submitted the user's draft alone.
+func TestStaleInputAfterDoorbellTextRetriesWithFullDoorbell(t *testing.T) {
+	h, read, _ := guardedClaudeDoorbell(t)
+	rawInjectSleep = func(delay time.Duration) {
+		if delay == rawInjectSettleDelay {
+			read("draft")
+			rawInjectSleep = func(time.Duration) {}
+		}
+	}
+	h.send("pending", "normal")
+	h.scan(h.cfg)
+	if !slices.Equal(h.injected, []string{coopWakeDoorbell}) {
+		t.Fatalf("input before the draft aged = %q", h.injected)
+	}
+	h.injected = nil
+	h.advance(h.cfg.settings.inputStaleFor + time.Second)
+	h.scan(h.cfg)
+	if !slices.Equal(h.injected, []string{coopWakeDoorbell, "\r", "\r"}) {
+		t.Fatalf("input after the draft aged = %q, want the full doorbell and submit", h.injected)
+	}
+}
+
+// agent-message-queue-fsmt review: a seat whose terminal cannot be sampled
+// has no fact about its input, so the Enter of its doorbell is still sent.
+func TestDoorbellSubmitsWhenTheTerminalCannotBeSampled(t *testing.T) {
+	h, _, _ := guardedClaudeDoorbellMode(t, false, wakeInjectModeRaw)
+	h.cfg.inputGuard.sample = func() (ttyInputState, error) { return ttyInputState{}, os.ErrInvalid }
+	h.send("pending", "normal")
+	h.scan(h.cfg)
+	if !slices.Equal(h.injected, []string{coopWakeDoorbell, "\r", "\r"}) {
+		t.Fatalf("wrote %q, want the doorbell and its Enter", h.injected)
+	}
+}
+
+// With the input guard off, which is the default, the wake keeps its earlier
+// behavior: a reminder for an unread cohort is a bare Enter.
+func TestInputGuardOffKeepsTheEarlierReminder(t *testing.T) {
+	h, read, _ := doorbellOnPrivateTTY(t, false, wakeInjectModeRaw, false)
+	h.send("pending", "normal")
+	h.scan(h.cfg)
+	read("xyz")
+	h.injected = nil
+	h.now = h.deadline()
+	h.scan(h.cfg)
+	if !slices.Equal(h.injected, []string{"\r", "\r"}) {
+		t.Fatalf("reminder with the guard off wrote %q, want the earlier bare Enter", h.injected)
+	}
+}
+
+// agent-message-queue-fsmt review: with a paste still queued in the terminal,
+// the wake sent its Enter anyway.
+func TestQueuedPasteHoldsTheEnter(t *testing.T) {
+	h, _, _ := guardedClaudeDoorbellMode(t, false, wakeInjectModePaste)
+	h.cfg.inputGuard.sample = func() (ttyInputState, error) {
+		return ttyInputState{pendingBytes: 1, hasLastRead: true, lastRead: h.now.Add(-time.Minute)}, nil
+	}
+	h.send("pending", "normal")
+	h.scan(h.cfg)
+	if !slices.Equal(h.injected, []string{coopWakeDoorbell}) {
+		t.Fatalf("wrote %q, want the doorbell text and no Enter", h.injected)
 	}
 }
