@@ -346,4 +346,12 @@ func TestKeysReadInsideTheSettleIntervalAreNotSubmittedAlone(t *testing.T) {
 	if !slices.Equal(h.injected, []string{coopWakeDoorbell, "\r"}) {
 		t.Fatalf("after the stale time wrote %q, want the full doorbell", h.injected)
 	}
+	// Review of agent-message-queue-h7o7: a busy agent got each further
+	// reminder as one more message.
+	h.injected = nil
+	h.advance(10 * h.cfg.settings.inputStaleFor)
+	h.scan(h.cfg)
+	if len(h.injected) != 0 {
+		t.Fatalf("a second reminder wrote %q, want one reminder for a cohort", h.injected)
+	}
 }

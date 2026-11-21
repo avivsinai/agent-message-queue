@@ -220,7 +220,9 @@ An Enter with no text is sent only when nothing was read since the wake's
 own write, and it always follows the wake's own text in the same delivery:
 the wake sends one Enter after the doorbell text, no second one, and no bare
 Enter as a reminder. For mail that stays unread after its doorbell, the wake
-rings again with the full doorbell after the stale interval. If input is read before that Enter, the wake drops the key; the
+rings one more time with the full doorbell after the stale interval, and then
+waits for new mail; an agent in a long turn takes that second line as one
+more message. If input is read before that Enter, the wake drops the key; the
 stale interval never releases it. An unread cohort retries with the full
 doorbell once input is stale. After later input, the wake types nothing, emits its usual
 out-of-band notice and retries on the existing schedule. When input remains

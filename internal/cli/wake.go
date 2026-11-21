@@ -1247,6 +1247,7 @@ func deliverNewMessageNotification(
 		}
 		cfg.dialogHold, cfg.dialogHoldBusy, cfg.dialogHoldGeneration = wakeDialogClosed, false, ""
 	}
+	guardedReminder := false
 	if plan.submitOnly && shouldDeferBeforeInject(cfg, deferForInput) {
 		// Like a dialog hold, this is neither a ledger record nor an attempt.
 		if wait, held := cfg.reminderHold(now); held {
@@ -1254,6 +1255,7 @@ func deliverNewMessageNotification(
 			persistWakeDoorbellStatusBestEffort(cfg)
 			return nil
 		}
+		guardedReminder = cfg.guardedInputEnabled() && !cfg.inputGuard.lastOwnRead.IsZero()
 	}
 	// A harness released from its trust dialog by its trust record alone
 	// may not accept input yet, so a write then does not confirm the
@@ -1310,6 +1312,13 @@ func deliverNewMessageNotification(
 				currentPending,
 				deliveryErr,
 			)
+			if guardedReminder && wakeInputAttemptConfirmed(cfg, deliveryErr) {
+				// A guarded reminder is a second full doorbell, and a busy
+				// agent takes it as one more message. One recovers a first
+				// doorbell the editor did not take; more would only repeat it.
+				cfg.doorbell.parkCurrentCohort()
+				persistWakeDoorbellStatusBestEffort(cfg)
+			}
 		}
 		return deliveryErr
 	}
