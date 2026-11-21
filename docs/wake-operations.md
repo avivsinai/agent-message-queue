@@ -204,7 +204,10 @@ The input guard is off by default: the wake then uses the quiet window of
 input deferral only. Turn it on for one seat with
 `amq wake config --input-guard=true`, or for every seat of the user with
 `amq wake config --machine --input-guard=true`; a running wake applies the
-change without a restart. `coop exec` prints `input guard: off`, `plain` or
+change without a restart, from its next delivery: a doorbell already being
+typed finishes under the rule it started with. With the guard off, an
+installed Claude submit hook still records the submit time in
+`agents/<me>/.wake.submit`; no wake reads it. `coop exec` prints `input guard: off`, `plain` or
 `proper (claude)`.
 
 With the guard on, for every managed owner-bound seat on macOS using built-in

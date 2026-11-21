@@ -174,7 +174,9 @@ type wakeInputDeliveryState struct {
 	phase      wakeInputDeliveryPhase
 	mode       string
 	payload    string
-	guardInput bool // this delivery observes normal input deferral, including its owed Enter
+	// guardInput is fixed when the delivery starts: a change of the
+	// input_guard setting applies from the next delivery.
+	guardInput bool
 	// oneSubmit marks the owner's command: it sends no rescue Enter (the
 	// command can open a picker, and a second Enter would choose in it),
 	// and its Enter is sent only while the command still verifies.
