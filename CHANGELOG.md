@@ -8,6 +8,16 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.159.0](https://github.com/avivsinai/agent-message-queue/compare/v0.158.0...v0.159.0) (2026-11-21)
+
+
+### Features
+
+* **wake:** guard a plain seat's prompt by the wake's own writes ([28d4f1b](https://github.com/avivsinai/agent-message-queue/commit/28d4f1b095a8fb94f6f4007ccf45c825788da94e))
+* **wake:** guard a plain seat's prompt by the wake's own writes ([#1573](https://github.com/avivsinai/agent-message-queue/issues/1573)) ([28d4f1b](https://github.com/avivsinai/agent-message-queue/commit/28d4f1b095a8fb94f6f4007ccf45c825788da94e))
+* **wake:** type the doorbell only into an editor that took no input ([4f024ce](https://github.com/avivsinai/agent-message-queue/commit/4f024ce4c2cdb47fa6f322483d54516d400c2712))
+* **wake:** type the doorbell only into an editor that took no input since the last submit ([#1572](https://github.com/avivsinai/agent-message-queue/issues/1572)) ([4f024ce](https://github.com/avivsinai/agent-message-queue/commit/4f024ce4c2cdb47fa6f322483d54516d400c2712))
+
 ## [0.158.0](https://github.com/avivsinai/agent-message-queue/compare/v0.157.0...v0.158.0) (2026-11-20)
 
 
