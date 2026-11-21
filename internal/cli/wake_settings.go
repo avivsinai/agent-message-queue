@@ -22,7 +22,7 @@ const (
 	defaultWakeDebounce          = 250 * time.Millisecond
 	defaultWakePreviewLen        = 48
 	defaultWakeDeferWhileInput   = true
-	defaultWakeInputStaleFor     = 2 * time.Minute
+	defaultWakeInputStaleFor     = 30 * time.Second
 	defaultWakeInputQuietFor     = 1200 * time.Millisecond
 	defaultWakeInputPollInterval = 200 * time.Millisecond
 	defaultWakeInputMaxHold      = 15 * time.Second

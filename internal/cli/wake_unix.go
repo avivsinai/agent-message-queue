@@ -2007,7 +2007,7 @@ var wakeUsageNotes = []string{
 	"  a message is pending on a seat without a known-empty terminal since its",
 	"  own write. A macOS built-in raw or paste wake uses its own writes (and",
 	"  any Claude submit hook). Later reads hold until --input-stale-for",
-	"  (default 2m, 0 never). New launches keep the usual first-input rule.",
+	"  (default 30s, 0 never). New launches keep the usual first-input rule.",
 	"  The wake samples guarded terminals every 2s between arrivals.",
 	"  Collision reduction only: it cannot detect permission/approval dialogs.",
 	"  A pause longer than --input-quiet-for can still inject while a prompt",

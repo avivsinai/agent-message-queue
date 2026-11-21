@@ -2375,12 +2375,18 @@ func reconcileWakeInputAfterInboxDrain(cfg *wakeConfig) error {
 		return nil
 	}
 	if cfg.inputDelivery.phase == wakeInputPayloadPending {
-		// Inbox is empty: never finish or repeat doorbell text. A queued submit
-		// may still complete so an already-presented prompt does not sit idle.
+		// Inbox is empty: never finish or repeat doorbell text.
 		clearWakeInputState(cfg)
 		return nil
 	}
-	return cfg.resumeOwedInput(wakePayload{text: coopWakeDoorbell, provenance: wakePayloadSystemFixed})
+	// An owed Enter still completes a prompt the wake presented, under the
+	// rule of every Enter without text. One the input guard holds is dropped
+	// there, and with no mail left it needs no notice.
+	cfg.beginInputAttempt()
+	if _, err := resumeWakeInputDelivery(cfg); err != nil && !errors.Is(err, errWakeInputHeld) {
+		return err
+	}
+	return nil
 }
 
 func injectTerminalNotification(
@@ -2464,6 +2470,9 @@ func resumeWakeInputDelivery(cfg *wakeConfig) (bool, error) {
 				return false, nil
 			}
 			if state.mode == wakeInjectModePaste {
+				if state.guardInput {
+					cfg.samplePasteDrain()
+				}
 				state.phase = wakeInputPrimarySubmitPending
 				continue
 			}
@@ -2522,6 +2531,9 @@ func resumeWakeInputDelivery(cfg *wakeConfig) (bool, error) {
 			if cfg.debug {
 				_ = writeWakeDiagnostic(cfg, "amq wake [debug]: prelude injected OK (%q)\n", prelude)
 			}
+			if state.guardInput {
+				_, _, _ = cfg.waitRawDrain(rawInjectDrainTimeout, rawInjectDrainPollInterval)
+			}
 			state.phase = wakeInputPrimarySubmitPending
 
 		case wakeInputPrimarySubmitPending:
@@ -2530,9 +2542,6 @@ func resumeWakeInputDelivery(cfg *wakeConfig) (bool, error) {
 				// authorizes the Enter after this wait, so a dialog or a
 				// foreground change during it holds the submit.
 				rawInjectSleep(pasteSubmitDelay(cfg))
-				if state.guardInput {
-					cfg.samplePasteDrain()
-				}
 			} else {
 				// Hold the submit CR past the TUI's paste-burst window.
 				rawInjectSleep(rawInjectSettleDelay)
@@ -2543,7 +2552,11 @@ func resumeWakeInputDelivery(cfg *wakeConfig) (bool, error) {
 				state.reset()
 				return false, nil
 			}
-			if state.guardInput && cfg.inputDecision(true) == inputUnknown {
+			if state.guardInput && cfg.enterHeld() {
+				if state.oneSubmit {
+					cfg.commands.refuseTyping(cfg, "terminal input changed before the command could be submitted")
+				}
+				state.reset()
 				return false, errWakeInputHeld
 			}
 			wrote, err := writePendingWakeInputChunk(cfg, state, "\r")
@@ -2617,8 +2630,10 @@ func resumeWakeInputDelivery(cfg *wakeConfig) (bool, error) {
 
 		case wakeInputRawRescuePending:
 			rawInjectSleep(rawInjectSettleDelay)
-			if state.guardInput && cfg.inputDecision(true) == inputUnknown {
-				return false, errWakeInputHeld
+			if state.guardInput && cfg.enterHeld() {
+				// The first Enter was delivered. An optional rescue must not submit later edits.
+				state.reset()
+				return true, nil
 			}
 			wrote, err := writePendingWakeInputChunk(cfg, state, "\r")
 			if err != nil {

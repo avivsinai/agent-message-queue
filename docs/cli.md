@@ -744,7 +744,7 @@ Input deferral (default on): wake samples terminal input only after
   a message is pending on a seat without a known-empty terminal since its
   own write. A macOS built-in raw or paste wake uses its own writes (and
   any Claude submit hook). Later reads hold until --input-stale-for
-  (default 2m, 0 never). New launches keep the usual first-input rule.
+  (default 30s, 0 never). New launches keep the usual first-input rule.
   The wake samples guarded terminals every 2s between arrivals.
   Collision reduction only: it cannot detect permission/approval dialogs.
   A pause longer than --input-quiet-for can still inject while a prompt
@@ -847,7 +847,7 @@ Options:
   -input-quiet-for duration
         Quiet window before deferred injection (advisory only on Linux; tty atime granularity is ~8s) (default 1.2s)
   -input-stale-for duration
-        Type a full doorbell after this long without another read on a guarded terminal (0 = never) (default 2m0s)
+        Type a full doorbell after this long without another read on a guarded terminal (0 = never) (default 30s)
   -interrupt
         Enable interrupt injection for urgent interrupt messages (default true)
   -interrupt-cmd string
@@ -1557,7 +1557,7 @@ Options:
   -input-quiet-for duration
         Quiet window before deferred injection (advisory only on Linux; tty atime granularity is ~8s) (default 1.2s)
   -input-stale-for duration
-        Type a full doorbell after this long without another read on a guarded terminal (0 = never) (default 2m0s)
+        Type a full doorbell after this long without another read on a guarded terminal (0 = never) (default 30s)
   -interrupt
         Enable interrupt injection for urgent interrupt messages (default true)
   -interrupt-cooldown duration
