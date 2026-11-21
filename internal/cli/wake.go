@@ -171,9 +171,9 @@ const (
 )
 
 type wakeInputDeliveryState struct {
-	phase      wakeInputDeliveryPhase
-	mode       string
-	payload    string
+	phase   wakeInputDeliveryPhase
+	mode    string
+	payload string
 	// guardInput is fixed when the delivery starts: a change of the
 	// input_guard setting applies from the next delivery.
 	guardInput bool
