@@ -20,6 +20,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 )
 
 func TestCoopHookSessionStartPrintsThePreamble(t *testing.T) {
@@ -136,6 +138,7 @@ func TestCoopInstallHooksWritesTheGatedEntryAndListsOldOnes(t *testing.T) {
 	}{
 		{"SessionStart", coopSessionStartSources, gate + "exec " + amq + "session-start", false},
 		{"Stop", "", gate + amq + "stop || true", false},
+		{"UserPromptSubmit", "", gate + amq + "prompt || true", false},
 		// The waiter rings with exit 10; only that becomes the 2 that wakes
 		// the session, so a usage error of an older amq never rings.
 		{"SessionStart", coopSessionStartSources, gate + amq + "wait; [ $? -ne 10 ] || exit 2", true},
@@ -146,12 +149,17 @@ func TestCoopInstallHooksWritesTheGatedEntryAndListsOldOnes(t *testing.T) {
 			if len(group.Hooks) == 1 && group.Hooks[0].Command == want.command {
 				found++
 				if group.Matcher != want.matcher || group.Hooks[0].AsyncRewake != want.rewake ||
-					(want.rewake && group.Hooks[0].Timeout != coopWaitTimeout) {
+					(want.rewake && group.Hooks[0].Timeout != coopWaitTimeout) ||
+					(!want.rewake && group.Hooks[0].Timeout != 2) {
 					t.Fatalf("%s entry = %+v, want matcher %q asyncRewake %v", want.event, group, want.matcher, want.rewake)
 				}
 			}
 		}
-		if found != 1 || len(settings.Hooks[want.event]) != 2 {
+		wantGroups := 2
+		if want.event == "UserPromptSubmit" {
+			wantGroups = 1
+		}
+		if found != 1 || len(settings.Hooks[want.event]) != wantGroups {
 			t.Fatalf("%s = %+v, want the co-op entry and the waiter entry, with %q once", want.event, settings.Hooks[want.event], want.command)
 		}
 	}
@@ -194,6 +202,9 @@ func TestCoopInstallHooksWritesTheGatedEntryAndListsOldOnes(t *testing.T) {
 			groups[0].Hooks[0].Command != wait || !groups[0].Hooks[0].Async || groups[0].Hooks[0].Timeout != coopWaitTimeout {
 			t.Fatalf("Codex %s = %+v, want one async entry running %q", event, groups, wait)
 		}
+	}
+	if len(codex.Hooks["UserPromptSubmit"]) != 0 || len(codex.Hooks) != 2 {
+		t.Fatalf("Codex hooks expanded beyond SessionStart and Stop: %+v", codex.Hooks)
 	}
 }
 
@@ -240,6 +251,51 @@ func TestCoopHookStopBlocksOnceForNewMail(t *testing.T) {
 	info, err := os.Stat(filepath.Join(root, "agents", "claude", coopStopStateFile))
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("state file = %v, %v; want mode 0600", info, err)
+	}
+}
+
+func TestCoopPromptAddsUnreadContextOnlyForAHumanPrompt(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	base := filepath.Join(t.TempDir(), ".agent-mail")
+	root := filepath.Join(base, "collab")
+	if err := runInit([]string{"--root", root, "--agents", "claude,codex"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := captureStdout(t, func() error {
+		return runSend([]string{"--root", root, "--me", "codex", "--to", "claude", "--body", "hi"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envMe, "claude")
+	t.Setenv(envRoot, root)
+	t.Setenv(envBaseRoot, base)
+	t.Setenv(envSession, "collab")
+
+	var out bytes.Buffer
+	if err := writeCoopPrompt(strings.NewReader(`{"prompt":"hello"}`), &out); err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		HookSpecificOutput struct {
+			HookEventName     string `json:"hookEventName"`
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if got := response.HookSpecificOutput; got.HookEventName != "UserPromptSubmit" ||
+		!strings.Contains(got.AdditionalContext, "1 unread AMQ message") || !strings.Contains(got.AdditionalContext, "session=collab") {
+		t.Fatalf("prompt response = %+v", got)
+	}
+	out.Reset()
+	if err := writeCoopPrompt(strings.NewReader(`{"prompt":"`+harness.Doorbell+`"}`), &out); err != nil || out.Len() != 0 {
+		t.Fatalf("own doorbell: output %q, error %v", out.String(), err)
+	}
+	runDrainJSON(t, root, "claude", 100, false)
+	out.Reset()
+	if err := writeCoopPrompt(strings.NewReader(`{"prompt":"hello"}`), &out); err != nil || out.Len() != 0 {
+		t.Fatalf("empty inbox: output %q, error %v", out.String(), err)
 	}
 }
 

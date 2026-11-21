@@ -1958,6 +1958,8 @@ $CODEX_HOME/hooks.json.
 SessionStart (startup, resume, clear, compact) gives the agent its co-op
 preamble: handle, session, peers, unread count, and what announces new mail.
 Stop blocks a stop once for unread mail that no wake doorbell will announce.
+UserPromptSubmit adds context with the unread count to the person's prompt.
+A seat with an earlier hook installation adds this entry at the next install.
 The wait hook, on SessionStart and Stop, is the doorbell of a session that no
 wake rings, such as a session of the Claude Code desktop app: it runs in the
 background (asyncRewake) and wakes the session when mail arrives. It stops
@@ -2006,7 +2008,7 @@ Options:
 ```text
 $ amq coop hook --help
 Usage:
-  amq coop hook session-start|stop|wait|codex-wait
+  amq coop hook session-start|stop|prompt|wait|codex-wait
 
 Hook receivers for the co-op hooks; amq coop install-hooks installs them.
 They read AM_ME, AM_ROOT and the session pin from the environment, or the
@@ -2025,6 +2027,9 @@ live wake it counts only mail created at or before the wake's startup
 baseline, because the wake rings for later mail. It allows the stop after
 5 blocks in one chain, and prints a systemMessage when the context conflicts
 or the mailbox cannot be read.
+
+prompt: on UserPromptSubmit, adds a line of context when unread mail waits;
+prints nothing for the wake's own doorbell.
 
 wait is the doorbell of a session that no wake rings, such as a session of
 the Claude Code desktop app. It runs as an asyncRewake hook: it waits for
