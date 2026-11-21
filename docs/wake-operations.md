@@ -217,7 +217,9 @@ was read for `input_stale_for` (default `30s`). A seat without a submit hook
 uses the wake's own writes as proof: when nothing was read since the last
 one, it types immediately, without waiting for the first input quiet timer.
 An Enter with no text is sent only when nothing was read since the wake's
-own write. If input is read before that Enter, the wake drops the key; the
+own write. The wake sends one Enter after the doorbell text and no second
+one: when the editor did not take the first, the reminder for the unread
+mail submits the line. If input is read before that Enter, the wake drops the key; the
 stale interval never releases it. An unread cohort retries with the full
 doorbell once input is stale. After later input, the wake types nothing, emits its usual
 out-of-band notice and retries on the existing schedule. When input remains

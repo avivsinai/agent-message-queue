@@ -2632,12 +2632,15 @@ func resumeWakeInputDelivery(cfg *wakeConfig) (bool, error) {
 			state.phase = wakeInputRawRescuePending
 
 		case wakeInputRawRescuePending:
-			rawInjectSleep(rawInjectSettleDelay)
-			if state.guardInput && cfg.enterHeld() {
-				// The first Enter was delivered. An optional rescue must not submit later edits.
+			if state.guardInput && cfg.guardedInputEnabled() && !cfg.inputGuard.plainAttempt {
+				// The first Enter was delivered. A second one 150 ms later can
+				// submit text the person typed in between: the wake cannot tell
+				// that read from the editor's own trailing read. A swallowed
+				// first Enter is recovered by the reminder, which decides again.
 				state.reset()
 				return true, nil
 			}
+			rawInjectSleep(rawInjectSettleDelay)
 			wrote, err := writePendingWakeInputChunk(cfg, state, "\r")
 			if err != nil {
 				if cfg.debug {
