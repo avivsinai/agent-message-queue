@@ -174,8 +174,9 @@ type wakeInputDeliveryState struct {
 	phase   wakeInputDeliveryPhase
 	mode    string
 	payload string
-	// guardInput is fixed when the delivery starts: a change of the
-	// input_guard setting applies from the next delivery.
+	// guardInput is fixed when the delivery starts, so turning the
+	// input_guard setting on applies from the next delivery. Turning it off
+	// applies at once: every guard decision also reads the setting.
 	guardInput bool
 	// oneSubmit marks the owner's command: it sends no rescue Enter (the
 	// command can open a picker, and a second Enter would choose in it),
