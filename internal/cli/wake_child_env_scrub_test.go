@@ -20,12 +20,15 @@ import (
 // Regression: #790. scrubWakeChildEnv filters the base env to an allowlist
 // (AM_*/AMQ_* + PATH + HOME) before the child is spawned. wakeCommandEnv
 // scrubs its base; attachWakeAttentionFD scrubs its nil-fallback.
+// Regression: agent-message-queue-8d0d. The wake must find hooks in custom harness directories.
 func TestWakeChildEnvScrubbed(t *testing.T) {
 	// Simulate a parent shell env with AMQ-internal vars, required OS vars, and
 	// unrelated secrets that must NOT leak.
 	parent := []string{
 		"PATH=/usr/bin:/bin",
 		"HOME=/tmp/fake-home",
+		"CLAUDE_CONFIG_DIR=/tmp/claude-config",
+		"CODEX_HOME=/tmp/codex-home",
 		"XDG_STATE_HOME=/tmp/xdg-state",
 		"TERM_PROGRAM=ghostty",
 		"CMUX_SURFACE_ID=abc123",
@@ -56,7 +59,7 @@ func TestWakeChildEnvScrubbed(t *testing.T) {
 		}
 	}
 	// Required OS vars + AMQ-internal vars must survive.
-	for _, keep := range []string{"PATH", "HOME", "XDG_STATE_HOME", "TERM_PROGRAM", "CMUX_SURFACE_ID", "AM_ROOT", "AM_ME", "AMQ_WAKE_OWNER", "AMQ_GLOBAL_ROOT"} {
+	for _, keep := range []string{"PATH", "HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_STATE_HOME", "TERM_PROGRAM", "CMUX_SURFACE_ID", "AM_ROOT", "AM_ME", "AMQ_WAKE_OWNER", "AMQ_GLOBAL_ROOT"} {
 		if _, ok := scrubbedMap[keep]; !ok {
 			t.Fatalf("scrubWakeChildEnv dropped required env var %s: must be retained on the allowlist", keep)
 		}
