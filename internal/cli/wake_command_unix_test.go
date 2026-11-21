@@ -4,6 +4,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -274,5 +275,46 @@ func TestWakeCommandBlockedBeforeItsFirstByteStaysQueued(t *testing.T) {
 	serveWakeCommands(h.cfg)
 	if want := []string{"/compact", "\r"}; !slices.Equal(h.injected, want) {
 		t.Fatalf("after the dialog closed: typed %q, want %q", h.injected, want)
+	}
+}
+
+// agent-message-queue-s9yw: review of the input guard found that `/compact`
+// gave `/c` and was recorded as typed. A delayed partial terminal write can
+// leave the owner's own command in flight while the unrelated peer inbox
+// drains. Its queue must retain that delivery to completion or refuse it.
+func TestWakeCommandPartialWriteSurvivesAnEmptyPeerInbox(t *testing.T) {
+	h := newWakeHoldHarness(t, wakeHoldPolicy{})
+	owner, target := commandSeat(t, h)
+	h.cfg.dialogSource = func(time.Time) (wakeDialogState, error) { return wakeDialogClosed, nil }
+	id := queueCommand(t, h, owner, target, "/compact", h.now)
+	first := true
+	h.cfg.terminalWrite = func(text string) error {
+		if first {
+			first = false
+			accepted := text[:2]
+			h.injected = append(h.injected, accepted)
+			return &tiocstiInjectionError{Err: errors.New("partial terminal write"), Progress: len(accepted)}
+		}
+		h.injected = append(h.injected, text)
+		return nil
+	}
+	serveWakeCommands(h.cfg)
+	if !slices.Equal(h.injected, []string{"/c"}) || h.cfg.inputDelivery.phase != wakeInputPayloadPending || h.cfg.inputDelivery.acceptedBytes != 2 {
+		t.Fatalf("fixture must stop after the accepted partial prefix: writes=%q state=%#v", h.injected, h.cfg.inputDelivery)
+	}
+
+	h.scan(h.cfg) // The unrelated peer inbox is empty.
+	serveWakeCommands(h.cfg)
+
+	outcome, reason, found := wakecmd.Outcome(fsq.AgentBase(h.root, "codex"), id)
+	if !found {
+		t.Fatalf("partial owner command had no outcome; writes=%q", h.injected)
+	}
+	written := strings.Join(h.injected, "")
+	if outcome == wakecmd.Typed && written != "/compact\r" {
+		t.Fatalf("partial owner command was recorded as typed: writes=%q outcome=%s reason=%q", h.injected, outcome, reason)
+	}
+	if outcome != wakecmd.Typed && outcome != wakecmd.Refused {
+		t.Fatalf("after the empty inbox and command tick: outcome=%s reason=%q writes=%q, want a full delivery or refusal", outcome, reason, h.injected)
 	}
 }

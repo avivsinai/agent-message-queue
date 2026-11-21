@@ -2398,6 +2398,11 @@ func reconcileWakeInputAfterInboxDrain(cfg *wakeConfig) error {
 	if !cfg.inputDelivery.pending() {
 		return nil
 	}
+	if cfg.inputDelivery.oneSubmit {
+		// The owner's command is not doorbell text, and the peer inbox says
+		// nothing about it: its own path types it to the end or refuses it.
+		return nil
+	}
 	if cfg.inputDelivery.phase == wakeInputPayloadPending {
 		// Inbox is empty: never finish or repeat doorbell text.
 		clearWakeInputState(cfg)
