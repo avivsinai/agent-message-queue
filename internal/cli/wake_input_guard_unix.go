@@ -153,15 +153,15 @@ func startupInputGuard(root, me string) string {
 	}
 	dir, err := openExistingWakeAgentDir(root, me)
 	if err != nil {
-		return inputGuardPlain
+		return inputGuardOff
 	}
 	defer func() { _ = dir.Close() }()
-	status := inputGuardPlain
+	status := inputGuardOff
 	_ = dir.withFD(func(fd int) error {
 		lock := inspectWakeLockAt(fd, dir, root, me)
 		if applied, ok := readWakeSettingsAppliedAt(fd, dir, lock); ok {
 			switch applied.InputGuard {
-			case inputGuardProper, inputGuardNeedsHook:
+			case inputGuardProper, inputGuardNeedsHook, inputGuardPlain:
 				status = applied.InputGuard
 			}
 		}

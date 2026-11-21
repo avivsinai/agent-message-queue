@@ -25,6 +25,10 @@ func guardedClaudeDoorbell(t *testing.T) (h *wakeHoldHarness, read func(string),
 }
 
 func guardedClaudeDoorbellMode(t *testing.T, hooked bool, mode string) (h *wakeHoldHarness, read func(string), quietWaits *int) {
+	return doorbellOnPrivateTTY(t, hooked, mode, true)
+}
+
+func doorbellOnPrivateTTY(t *testing.T, hooked bool, mode string, guard bool) (h *wakeHoldHarness, read func(string), quietWaits *int) {
 	t.Helper()
 	h = newWakeHoldHarness(t, wakeHoldPolicy{})
 	home := t.TempDir()
@@ -92,6 +96,7 @@ func guardedClaudeDoorbellMode(t *testing.T, hooked bool, mode string) (h *wakeH
 	}
 	cfg := start.newLoopConfig()
 	cfg.injectMode = mode
+	cfg.settings.inputGuard = guard
 	h.cfg = &cfg
 	h.now = time.Now().Add(3 * time.Second)
 	cfg.doorbellNow = func() time.Time { return h.now }
@@ -280,5 +285,20 @@ func TestDoorbellSubmitsWhenTheTerminalCannotBeSampled(t *testing.T) {
 	h.scan(h.cfg)
 	if !slices.Equal(h.injected, []string{coopWakeDoorbell, "\r", "\r"}) {
 		t.Fatalf("wrote %q, want the doorbell and its Enter", h.injected)
+	}
+}
+
+// With the input guard off, which is the default, the wake keeps its earlier
+// behavior: a reminder for an unread cohort is a bare Enter.
+func TestInputGuardOffKeepsTheEarlierReminder(t *testing.T) {
+	h, read, _ := doorbellOnPrivateTTY(t, false, wakeInjectModeRaw, false)
+	h.send("pending", "normal")
+	h.scan(h.cfg)
+	read("xyz")
+	h.injected = nil
+	h.now = h.deadline()
+	h.scan(h.cfg)
+	if !slices.Equal(h.injected, []string{"\r", "\r"}) {
+		t.Fatalf("reminder with the guard off wrote %q, want the earlier bare Enter", h.injected)
 	}
 }

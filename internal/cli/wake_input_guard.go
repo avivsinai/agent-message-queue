@@ -18,10 +18,11 @@ type wakeInputGuard struct {
 }
 
 const (
+	inputGuardOff       = "off"
 	inputGuardPlain     = "plain"
 	inputGuardProper    = "proper (claude)"
 	inputGuardNeedsHook = "plain (run amq wake install-dialog-hook)"
-	inputGuardLinux     = "plain (Linux)"
+	inputGuardLinux     = "off (Linux)"
 )
 
 type wakeInputDecision uint8
@@ -38,6 +39,9 @@ func (g *wakeInputGuard) status(settings wakeSettings) string {
 	if runtime.GOOS == "linux" {
 		return inputGuardLinux
 	}
+	if !settings.inputGuard {
+		return inputGuardOff
+	}
 	if g == nil || !settings.deferWhileInput || settings.inputMaxHold <= 0 {
 		return inputGuardPlain
 	}
@@ -45,8 +49,11 @@ func (g *wakeInputGuard) status(settings wakeSettings) string {
 }
 
 func wakeInputGuardValue(status string) string {
-	if status == inputGuardProper {
-		return inputGuardProper
+	switch status {
+	case inputGuardProper:
+		return status
+	case inputGuardOff, inputGuardLinux:
+		return inputGuardOff
 	}
 	return inputGuardPlain
 }
@@ -71,7 +78,7 @@ func (cfg *wakeConfig) resumeOwedInput(output wakePayload) error {
 
 func (cfg *wakeConfig) guardedInputEnabled() bool {
 	mode := effectiveInjectMode(cfg)
-	return cfg.inputGuard != nil && cfg.settings.deferWhileInput && cfg.settings.inputMaxHold > 0 &&
+	return cfg.inputGuard != nil && cfg.settings.inputGuard && cfg.settings.deferWhileInput && cfg.settings.inputMaxHold > 0 &&
 		cfg.injectVia == "" && (mode == wakeInjectModeRaw || mode == wakeInjectModePaste)
 }
 
