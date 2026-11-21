@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -25,11 +26,15 @@ func guardedClaudeDoorbell(t *testing.T) (h *wakeHoldHarness, read func(string),
 }
 
 func guardedClaudeDoorbellMode(t *testing.T, hooked bool, mode string) (h *wakeHoldHarness, read func(string), quietWaits *int) {
-	return doorbellOnPrivateTTY(t, hooked, mode, true)
+	return doorbellOnPrivateTTY(t, hooked, mode, true, "claude")
 }
 
-func doorbellOnPrivateTTY(t *testing.T, hooked bool, mode string, guard bool) (h *wakeHoldHarness, read func(string), quietWaits *int) {
+func doorbellOnPrivateTTY(t *testing.T, hooked bool, mode string, guard bool, hookHarness ...string) (h *wakeHoldHarness, read func(string), quietWaits *int) {
 	t.Helper()
+	seatHarness := "claude"
+	if len(hookHarness) > 0 {
+		seatHarness = hookHarness[0]
+	}
 	h = newWakeHoldHarness(t, wakeHoldPolicy{})
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -41,7 +46,14 @@ func doorbellOnPrivateTTY(t *testing.T, hooked bool, mode string, guard bool) (h
 		t.Fatal(err)
 	}
 	if hooked {
-		if err := claude.InstallCommandHooks(home, dialogguard.ClaudeHooks(bin, []string{"UserPromptSubmit"})); err != nil {
+		if seatHarness == "cursor" {
+			if err := os.Mkdir(filepath.Join(home, ".cursor"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := installCursorDialogHook(bin, false); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := claude.InstallCommandHooks(home, dialogguard.ClaudeHooks(bin, []string{"UserPromptSubmit"})); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -86,7 +98,7 @@ func doorbellOnPrivateTTY(t *testing.T, hooked bool, mode string, guard bool) (h
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = dir.Close() })
-	start := wakeStart{flags: newWakeStartFlags(), root: h.root, me: "codex", harness: "claude", injectMode: mode,
+	start := wakeStart{flags: newWakeStartFlags(), root: h.root, me: "codex", harness: seatHarness, injectMode: mode,
 		flagSettings: defaultWakeSettings(), activeAgentDir: dir,
 		requestedOwner: &wakeOwner{PID: host.PID, ProcessStart: host.ProcessStart, BootID: host.BootID},
 		currentWake:    wakeLockInspection{Lock: wakeLock{PID: os.Getpid(), TTY: slave.Name(), WakeMode: mode}}}
@@ -124,8 +136,16 @@ func doorbellOnPrivateTTY(t *testing.T, hooked bool, mode string, guard bool) (h
 	}
 	cfg.attentionIsTTY = func() bool { return false }
 	if hooked {
-		args := []string{"--host-pid", strconv.Itoa(host.PID), dialogguard.ClaudeHookVerb("UserPromptSubmit")}
-		if err := runWakeDialog(args, strings.NewReader(`{"hook_event_name":"UserPromptSubmit","session_id":"local"}`)); err != nil {
+		args := []string{"--host-pid", strconv.Itoa(host.PID)}
+		input := ""
+		if seatHarness == "cursor" {
+			args = append(args, "--harness", "cursor", cursorDialogHookVerb("beforeSubmitPrompt"))
+			input = `{"hook_event_name":"beforeSubmitPrompt","conversation_id":"cursor-local"}`
+		} else {
+			args = append(args, dialogguard.ClaudeHookVerb("UserPromptSubmit"))
+			input = `{"hook_event_name":"UserPromptSubmit","session_id":"local"}`
+		}
+		if err := runWakeDialog(args, strings.NewReader(input)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -154,6 +174,38 @@ func TestWakeHoldsDoorbellAfterInputSinceSubmit(t *testing.T) {
 	notice := captureWakeStderr(t, func() { h.scan(h.cfg) })
 	if len(h.injected) != 0 || notice == "" || !h.cfg.lastAttemptTransientAttention {
 		t.Fatalf("after draft: wrote %q, transient notice %q", h.injected, notice)
+	}
+}
+
+func TestClaudePasteSubmitStaysPlain(t *testing.T) {
+	// agent-message-queue-nkky review: only Cursor gained paste-mode submit
+	// support. Keep the established raw-only Claude Code contract explicit.
+	h, _, _ := doorbellOnPrivateTTY(t, true, wakeInjectModePaste, true, "claude")
+	if got := h.cfg.inputGuard.status(h.cfg.settings); got != inputGuardPlain || h.cfg.hasCurrentSubmit() {
+		t.Fatalf("Claude paste installation = %q, submit fact = %t; want plain and false", got, h.cfg.hasCurrentSubmit())
+	}
+}
+
+func TestWakeCursorSubmitFactTypesPromptlyAndHoldsDraft(t *testing.T) {
+	// agent-message-queue-nkky: Cursor's beforeSubmitPrompt arrives with
+	// conversation_id, in the paste-mode seat, and provides the same submit
+	// fact the already covered raw Claude Code hook does.
+	h, read, waits := doorbellOnPrivateTTY(t, true, wakeInjectModePaste, true, "cursor")
+	if got := h.cfg.inputGuard.status(h.cfg.settings); got != properInputGuard("cursor") {
+		t.Fatalf("Cursor installation status = %q, want proper (cursor)", got)
+	}
+	h.send("pending", "normal")
+	h.scan(h.cfg)
+	if !slices.Equal(h.injected, []string{coopWakeDoorbell, "\r"}) || *waits != 0 {
+		t.Fatalf("after Cursor submit: wrote %q with %d quiet waits", h.injected, *waits)
+	}
+	h.cfg.inputDelivery.reset()
+	h.injected = nil
+	read("partial draft")
+	h.send("draft-pending", "normal")
+	h.scan(h.cfg)
+	if len(h.injected) != 0 {
+		t.Fatalf("typed %q after text was entered since the Cursor submit", h.injected)
 	}
 }
 

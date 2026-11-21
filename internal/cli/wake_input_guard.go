@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -18,11 +19,12 @@ type wakeInputGuard struct {
 }
 
 const (
-	inputGuardOff       = "off"
-	inputGuardPlain     = "plain"
-	inputGuardProper    = "proper (claude)"
-	inputGuardNeedsHook = "plain (run amq wake install-dialog-hook)"
-	inputGuardLinux     = "off (Linux)"
+	inputGuardOff             = "off"
+	inputGuardPlain           = "plain"
+	inputGuardProper          = "proper (claude)"
+	inputGuardNeedsHook       = "plain (run amq wake install-dialog-hook)"
+	inputGuardNeedsCursorHook = "plain (run amq wake install-dialog-hook --harness cursor)"
+	inputGuardLinux           = "off (Linux)"
 )
 
 type wakeInputDecision uint8
@@ -48,11 +50,19 @@ func (g *wakeInputGuard) status(settings wakeSettings) string {
 	return g.installation()
 }
 
+func properInputGuard(harness string) string {
+	return "proper (" + harness + ")"
+}
+
+func inputGuardHasSubmit(status string) bool {
+	return strings.HasPrefix(status, "proper (")
+}
+
 func wakeInputGuardValue(status string) string {
-	switch status {
-	case inputGuardProper:
+	if inputGuardHasSubmit(status) {
 		return status
-	case inputGuardOff, inputGuardLinux:
+	}
+	if status == inputGuardOff || status == inputGuardLinux {
 		return inputGuardOff
 	}
 	return inputGuardPlain
@@ -89,7 +99,7 @@ func (cfg *wakeConfig) hasCurrentSubmit() bool {
 		return false
 	}
 	g := cfg.inputGuard
-	if g.installation() != inputGuardProper {
+	if !inputGuardHasSubmit(g.installation()) {
 		g.lastSubmit = time.Time{}
 		return false
 	}

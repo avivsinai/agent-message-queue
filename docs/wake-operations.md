@@ -207,9 +207,9 @@ input deferral only. Turn it on for one seat with
 change without a restart. Turning it on applies from the next delivery: a
 doorbell already being typed finishes without the guard. Turning it off
 applies at once, also to a doorbell that waits for its Enter. With the guard off, an
-installed Claude submit hook still records the submit time in
+installed Claude or Cursor submit hook still records the submit time in
 `agents/<me>/.wake.submit`; no wake reads it. `coop exec` prints `input guard: off`, `plain` or
-`proper (claude)`.
+`proper (claude)` / `proper (cursor)`.
 
 With the guard on, for every managed owner-bound seat on macOS using built-in
 raw or paste typing, the rule is: type when the editor is known empty, or when no input
@@ -233,13 +233,18 @@ wake's first own write of a launch, `input_quiet_for` and the existing input
 deferral decide, as before. With the co-op hooks installed on Claude Code,
 a held doorbell reaches the model at the user's next submit, through the hook.
 
-A managed Claude Code seat with the installed submit hook adds the fact
+A managed Claude Code or Cursor CLI seat with the installed submit hook adds the fact
 that the editor was emptied by a submit. `amq wake install-dialog-hook`
-installs that hook, and updates an earlier installation's submit entry.
+installs the Claude Code hook, and updates an earlier installation's submit entry.
+Cursor CLI needs `amq wake install-dialog-hook --harness cursor`, which installs
+the submit receiver in the user's `hooks.json` while keeping the same neutral
+JSON reply and startup-close behavior. Cursor reads `hooks.json` when a session
+starts, so an existing session takes the new hook at its next start.
 `coop exec` prints `input guard: proper (claude)` for an armed raw Claude
-seat and `input guard: plain` for a seat without the hook. `amq wake check
+seat, `proper (cursor)` for an armed raw or paste Cursor seat, and
+`input guard: plain` for a seat without the hook. `amq wake check
 --json` records this as `input_guard` (`wake.input_guard` in schema v2).
-The submit hook records the time and host identity in
+Each submit hook records the time and host identity in
 `agents/<me>/.wake.submit`.
 
 macOS can assign the terminal's read time on the first stat after a read.
