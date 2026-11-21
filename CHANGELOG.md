@@ -8,6 +8,21 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.159.1](https://github.com/avivsinai/agent-message-queue/compare/v0.159.0...v0.159.1) (2026-11-21)
+
+
+### Features
+
+* **coop:** tell Claude Code about waiting mail when the user submits a prompt ([#1576](https://github.com/avivsinai/agent-message-queue/issues/1576)) ([b97d678](https://github.com/avivsinai/agent-message-queue/commit/b97d67860f5ec75bbd582a2efa1e49110f0e67e5))
+
+
+### Bug Fixes
+
+* **wake:** make the input guard opt-in, off by default ([4db0677](https://github.com/avivsinai/agent-message-queue/commit/4db0677512c9d73f6667c06c961841dadaaa16a5))
+* **wake:** pass the harness config directory to the wake ([7df533e](https://github.com/avivsinai/agent-message-queue/commit/7df533e5966567009411a1d6e05c6791c79c8fce))
+* **wake:** pass the harness config directory to the wake ([#1575](https://github.com/avivsinai/agent-message-queue/issues/1575)) ([7df533e](https://github.com/avivsinai/agent-message-queue/commit/7df533e5966567009411a1d6e05c6791c79c8fce))
+* **wake:** record the wake's own read after the reader returns ([4db0677](https://github.com/avivsinai/agent-message-queue/commit/4db0677512c9d73f6667c06c961841dadaaa16a5))
+
 ## [0.159.0](https://github.com/avivsinai/agent-message-queue/compare/v0.158.0...v0.159.0) (2026-11-21)
 
 
