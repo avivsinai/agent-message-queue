@@ -108,7 +108,8 @@ func writeCoopStop(stdin io.Reader, w io.Writer) error {
 		return writeCoopHookJSON(w, map[string]string{"systemMessage": fmt.Sprintf("AMQ mailbox unreadable at %s; pending messages may exist.", root)})
 	}
 	var baseline *time.Time
-	if len(pending) > 0 {
+	ringer, _ := readSeatDoorbell(root, me)
+	if len(pending) > 0 && ringer == doorbellTyped {
 		if at, ok := coopHookWakeBaseline(root, me); ok {
 			baseline = &at
 		}
@@ -118,15 +119,7 @@ func writeCoopStop(stdin io.Reader, w io.Writer) error {
 	}
 	statePath := filepath.Join(fsq.AgentBase(root, me), coopStopStateFile)
 	old := readCoopStopState(statePath)
-	// An attended seat never blocks: the person reads the systemMessage and
-	// the model learns of the mail at their next prompt. Every unread
-	// message counts, with no wake baseline: the attended wake types
-	// nothing, so mail after its baseline would otherwise never be reported
-	// at a turn end (bead gijx, spec item K). The reported-ids state is
-	// kept, so the notice shows once per message. R2: a seat that is not
-	// attended keeps the block below.
-	attendedSettings, _ := coopWaitSettings(root, me, wakeSettingsLayers{})
-	if attendedSettings.attended {
+	if ringer == doorbellNone {
 		next := decideCoopStopAttended(pending, old)
 		if !slices.Equal(next.BlockedIDs, old.BlockedIDs) || next.ChainBlocks != old.ChainBlocks {
 			_ = writeCoopHookState(statePath, next)

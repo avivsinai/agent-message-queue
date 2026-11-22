@@ -81,7 +81,7 @@ type joinSession struct {
 	other     func(root, rootID, me string) (string, bool, error)
 	otherKind string
 	release   func() (me, root string, freed bool, err error)
-	doorbell  func() string
+	doorbell  func(root, me string) string
 }
 
 // coopSessionHarness says which harness the command runs in: a Claude Code
@@ -260,7 +260,7 @@ func codexThreadRuns(holder codexidentity.Record) bool {
 
 // codexJoinDoorbell says what will announce new mail to a Codex thread that
 // just joined, or why nothing will.
-func codexJoinDoorbell() string {
+func codexJoinDoorbell(_, _ string) string {
 	home, err := os.UserHomeDir()
 	path, perr := codexCoopHooksPath()
 	if err != nil || perr != nil {
@@ -462,7 +462,7 @@ func runCoopJoin(args []string) error {
 	if ownWake {
 		return writeStdout("The running wake of %s announces new mail.\n", handle)
 	}
-	return writeStdout("%s\n", s.doorbell())
+	return writeStdout("%s\n", s.doorbell(root, handle))
 }
 
 // coopJoinHandle picks the handle of a join and, when the caller did not
@@ -508,7 +508,7 @@ const claudeNameSourceUser = "user"
 
 // coopJoinDoorbell says what will announce new mail to the session that
 // just joined, or why nothing will.
-func coopJoinDoorbell() string {
+func coopJoinDoorbell(root, me string) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "No wake: run amq drain --include-body between tasks."
@@ -520,7 +520,7 @@ func coopJoinDoorbell() string {
 		return "No wake: the wait hook is not installed. Run amq coop install-hooks, then start a new session and join again; until then run amq drain --include-body between tasks."
 	case !slices.Contains(commands, coopHookCommand(bin, claudeidentity.SessionsDir(home), "wait")):
 		return "No wake: the installed wait hook is not the one this amq installs (another binary, or an older release). Run amq coop install-hooks, then start a new session; until then run amq drain --include-body between tasks."
-	case !coopWaitRunsInBackground():
+	case !coopWaitRunsInBackground(root, me):
 		return "No wake: this Claude Code session does not keep the wait hook in the background. Run amq drain --include-body between tasks."
 	}
 	return "A hook wakes this session when mail arrives after a turn ends; it starts at the end of this turn. Do not run amq watch, amq monitor or a polling loop."

@@ -198,6 +198,27 @@ The guard does not change hold by priority, urgent and interrupt delivery,
 the bounded wait while the person types (at most 15 seconds, then attention
 only and a retry), or the opt-in `claude-native` injector.
 
+## Hook doorbell
+
+On a Claude Code terminal with the co-op hooks installed, run
+`amq wake config --hook-doorbell=true` to let the hook wake the session
+when mail arrives. A fresh session can receive mail before its first prompt,
+and a draft stays in the editor. The setting defaults to false. Add
+`--machine` to set the machine default, or use `--hook-doorbell=false`
+to switch a running seat back to its typed doorbell.
+
+A built-in typing wake yields while the waiter holds its lock and for up to
+two minutes after a ring. If mail is still unread and neither condition holds,
+the wake types the doorbell when the usual delivery guards allow it. This
+also covers a missing or stopped hook. In `amq wake check --json`, `doorbell`
+shows the channel the live wake published and `waiter_live` reports the lock.
+A drain receipt records consumption.
+
+The terminal hook has been observed on macOS with Claude Code 2.1.330.
+The desktop app uses its existing wait hook on 2.1.321 and later.
+`claude -p` never runs the waiter. The terminal behavior is unverified on
+Linux, earlier terminal versions, and Codex.
+
 ## Input guard (macOS)
 
 The input guard is off by default: the wake then uses the quiet window of
@@ -825,6 +846,7 @@ A running wake has two kinds of input.
   `input_quiet_for`, `input_guard`, `input_stale_for`, `input_poll_interval`, `input_max_hold`, `interrupt`,
   `interrupt_label`, `interrupt_priority`, `interrupt_notice`,
   `interrupt_cooldown`, `inject_timeout`, `self_upgrade`, and `held_notice`.
+  The `hook_doorbell` key enables the [hook doorbell](#hook-doorbell).
   Each has a flag of the same name with `-` in place of `_`.
 - `held_notice` (default `true`) shows the desktop notification of a
   dialog-held doorbell (see [Held-doorbell notice](#dialog-guard-claude-code)).

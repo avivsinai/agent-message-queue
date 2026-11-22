@@ -472,6 +472,29 @@ func TestWakeInputGuardRealPTY(t *testing.T) {
 			}
 		})
 	}
+	t.Run("hook doorbell seat is not typed into while a waiter holds the lock", func(t *testing.T) {
+		s := newWakeInputGuardPTYSeat(t, wakeInjectModeRaw, false)
+		defer holdWaiterForTest(t, s.root, "seat")()
+		s.run("wake", "config", "--root", s.root, "--me", "seat", "--hook-doorbell=true", "--wait")
+		check := s.run("wake", "check", "--root", s.root, "--me", "seat", "--json")
+		var observed wakeCheckResult
+		if err := json.Unmarshal([]byte(check), &observed); err != nil || observed.Doorbell != wakeChannelHook || !observed.WaiterLive {
+			s.fail("expected a published hook channel and a live waiter: " + check)
+		}
+		s.typeInput("draft")
+		if !s.waitUntil(2*time.Second, func(records []wakeInputGuardEditorRecord) bool {
+			return len(records) > 0 && records[len(records)-1].Buffer == "draft"
+		}) {
+			s.fail("editor did not read the draft")
+		}
+		before := len(s.records())
+		for range 3 {
+			s.run("send", "--root", s.root, "--me", "sender", "--to", "seat", "--body", "hook seat")
+			s.requireDuring(5*time.Second, func(records []wakeInputGuardEditorRecord) bool {
+				return len(records) == before && records[len(records)-1].Buffer == "draft"
+			}, "unexpected editor input after mail")
+		}
+	})
 	t.Run("guard on leaves a draft alone", func(t *testing.T) {
 		const draft = "draft"
 		s := newWakeInputGuardPTYSeat(t, wakeInjectModeRaw, true)

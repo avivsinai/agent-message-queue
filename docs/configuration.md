@@ -25,6 +25,11 @@ agent value pins its key, including a value equal to the default. See
 [Wake operations](wake-operations.md#live-settings) for the wake keys and the
 commands that edit each layer.
 
+`hook_doorbell` defaults to false. Set it for one seat with
+`amq wake config --hook-doorbell=true` or for the machine with
+`amq wake config --machine --hook-doorbell=true`. It applies while the wake
+runs. See [Hook doorbell](wake-operations.md#hook-doorbell).
+
 Root routing is a separate chain with its own eligibility rules, not a
 per-key overlay. See [Session routing and safety](session-routing.md).
 

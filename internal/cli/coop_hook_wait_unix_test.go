@@ -20,6 +20,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -90,7 +91,35 @@ func TestCoopWaitRingsOnceForNewMail(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := wait(4 * time.Second)
+	// Under a live wake, only the generation's published channel permits
+	// the waiter to ring for this message.
+	process := inspectWakeProcess(os.Getpid())
+	process.Executable = "/opt/amq"
+	process.Args = []string{"amq", "wake"}
+	stubInspectWakeProcess(t, func(int) wakeProcessInfo { return process })
+	stopWake, err := acquireWakeLockWithOptions(root, "claude", wakeLockAcquireOptions{wakeMode: wakeInjectModeRaw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stopWake()
+	dir, err := openExistingWakeAgentDir(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dir.Close() }()
+	inspection := inspectWakeLock(root, "claude")
+	publish := func(channel wakeChannel) {
+		t.Helper()
+		if err := recordWakeSettingsApplied(dir, inspection, wakeSettingsAppliedStatus{doorbell: channel}, wakeSettingsGuardTimeout); err != nil {
+			t.Fatal(err)
+		}
+	}
+	publish(wakeChannelTyped)
+	if err := wait(quiet); err != nil {
+		t.Fatalf("typed wake: %v, want silence", err)
+	}
+	publish(wakeChannelHook)
+	err = wait(4 * time.Second)
 	if !errors.Is(err, errCoopWaitRing) || GetExitCode(err) != harness.ClaudeRewakeRingExit || err.Error() != harness.Doorbell {
 		t.Fatalf("new mail: %v (exit %d), want the doorbell with the ring code", err, GetExitCode(err))
 	}
@@ -320,5 +349,43 @@ func TestCodexWaitQueuesTheDoorbellToItsThread(t *testing.T) {
 	want := []string{"queue", "--thread", thread, "--message", harness.Doorbell}
 	if len(recorder.queued) != 1 || !slices.Equal(recorder.queued[0], want) {
 		t.Fatalf("queued %v, want one call %v", recorder.queued, want)
+	}
+}
+
+func TestTerminalWaitHookRequiresOptIn(t *testing.T) {
+	clearJoinTestEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	const session = "7c29e148-77eb-47c0-8984-10c13b4700b1"
+	t.Setenv(envClaudeSession, session)
+	pid := os.Getppid()
+	path := claudeSessionRecord(t, pid, session)
+	raw, err := json.Marshal(claudeNativeRegistry{PID: pid, SessionID: session, Version: "2.1.330", Entrypoint: "cli"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureAgentDirs(root, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envRoot, root)
+	t.Setenv(envMe, "claude")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := runCoopWait(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(fsq.AgentBase(root, "claude"), coopWaitOwnerFile)); !os.IsNotExist(err) {
+		t.Fatalf("waiter owner with hook doorbell off: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fsq.AgentBase(root, "claude"), wakeSettingsFileName), []byte(`{"schema":1,"settings":{"hook_doorbell":true}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if !coopWaitRunsInBackground(root, "claude") {
+		t.Fatal("the same terminal should admit a waiter when the setting is enabled")
 	}
 }

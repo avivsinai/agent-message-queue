@@ -350,6 +350,8 @@ func publishStartupDialogMarker(root, handle string, marker wakeDialogMarker, ho
 		} else {
 			_ = writeStderr("delivery: attended (notice only; run amq coop install-hooks for context at your next prompt)\n")
 		}
+	} else if settings.hookDoorbell {
+		_ = writeStderr("delivery: hook doorbell (the harness's hook rings; the wake types only when no hook waits)\n")
 	}
 	return nil
 }

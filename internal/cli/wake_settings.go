@@ -66,6 +66,7 @@ type wakeSettings struct {
 	previewLen        int
 	bell              bool
 	deferWhileInput   bool
+	hookDoorbell      bool
 	inputGuard        bool
 	inputStaleFor     time.Duration
 	inputQuietFor     time.Duration
@@ -169,6 +170,8 @@ var wakeSettingDefs = []wakeSettingDef{
 		func(s *wakeSettings) any { return &s.bell }},
 	{"defer_while_input", "defer-while-input", "Best-effort: defer non-interrupt injection while terminal input appears active",
 		func(s *wakeSettings) any { return &s.deferWhileInput }},
+	{"hook_doorbell", "hook-doorbell", "Let the harness's own background hook ring this seat; the wake types only when no hook waits",
+		func(s *wakeSettings) any { return &s.hookDoorbell }},
 	{"input_guard", "input-guard", "Type the doorbell only into a terminal that read no input since the wake's own write or the last submit (macOS, built-in typing); off uses the quiet window",
 		func(s *wakeSettings) any { return &s.inputGuard }},
 	{"input_stale_for", "input-stale-for", "Type a full doorbell after this long without another read on a guarded terminal (0 = never)",
@@ -705,6 +708,7 @@ const (
 // .wake.settings.applied for one observed agent file digest and one
 // observed machine file digest.
 type wakeSettingsAppliedStatus struct {
+	doorbell      wakeChannel
 	inputGuard    string
 	attended      bool
 	status        string
@@ -829,7 +833,7 @@ func (cfg *wakeConfig) reloadSettings() bool {
 	if cfg.settingsSource == nil {
 		return false
 	}
-	retryPendingWakeSettingsApplied(cfg)
+	_ = retryPendingWakeSettingsApplied(cfg)
 	agent, agentRead := readWakeSettingsSource(cfg.settingsSource)
 	machine, machineRead := readWakeSettingsSource(cfg.machineSettingsSource)
 	agentChanged := agentRead && !agent.same(cfg.settingsObserved)
@@ -955,9 +959,10 @@ func noteWakeSettingsApplied(cfg *wakeConfig, status wakeSettingsAppliedStatus) 
 	status.inputGuard = cfg.inputGuard.status(cfg.settings)
 	cfg.reportedInputGuard = status.inputGuard
 	status.attended = cfg.settings.attended
+	status.doorbell = wakeDoorbellChannel(cfg.settings, effectiveInjectMode(cfg), cfg.injectVia)
 	pending := status
 	cfg.pendingSettingsApplied = &pending
-	if err := cfg.recordSettingsApplied(status); err != nil {
+	if err := retryPendingWakeSettingsApplied(cfg); err != nil {
 		_ = writeWakeDiagnostic(
 			cfg,
 			"amq wake: record %s: %v; retrying\n",
@@ -966,14 +971,19 @@ func noteWakeSettingsApplied(cfg *wakeConfig, status wakeSettingsAppliedStatus) 
 		)
 		return
 	}
-	cfg.pendingSettingsApplied = nil
 }
 
-func retryPendingWakeSettingsApplied(cfg *wakeConfig) {
-	if cfg.pendingSettingsApplied == nil || cfg.recordSettingsApplied == nil {
-		return
+// The wake changes channel only after its readers can observe the decision
+// for this generation. A failed publication retains the last channel.
+func retryPendingWakeSettingsApplied(cfg *wakeConfig) error {
+	pending := cfg.pendingSettingsApplied
+	if pending == nil || cfg.recordSettingsApplied == nil {
+		return nil
 	}
-	if cfg.recordSettingsApplied(*cfg.pendingSettingsApplied) == nil {
-		cfg.pendingSettingsApplied = nil
+	if err := cfg.recordSettingsApplied(*pending); err != nil {
+		return err
 	}
+	cfg.applyPublishedChannel(pending.doorbell)
+	cfg.pendingSettingsApplied = nil
+	return nil
 }

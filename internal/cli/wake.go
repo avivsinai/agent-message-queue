@@ -130,6 +130,9 @@ type wakeConfig struct {
 	logNotices                    *wakeLogNoticeFold // folds repeated notices when attention output is a log
 	diagnosticIsTTY               func() bool
 	diagnosticIsForeground        func() bool // the wake leads the stderr terminal's foreground group
+
+	publishedChannel wakeChannel
+	hookYieldReason  string
 }
 
 type wakeNotifierStatus struct {
@@ -804,6 +807,9 @@ func injectWakeInterruptKey(
 	currentPending map[string]os.FileInfo,
 ) (bool, error) {
 	now := time.Now()
+	if _, held := cfg.hookYield(cfg.wakeDoorbellNow()); held {
+		return false, nil
+	}
 	if cfg.settings.attended {
 		// Attended seat: no interrupt key is ever typed. The batch takes the
 		// normal notification path, which the attended gate routes to a notice.
@@ -1262,16 +1268,13 @@ func deliverNewMessageNotification(
 		}
 		cfg.dialogHold, cfg.dialogHoldBusy, cfg.dialogHoldGeneration = wakeDialogClosed, false, ""
 	}
-	guardedReminder := false
-	if plan.submitOnly && shouldDeferBeforeInject(cfg, deferForInput) {
-		// Like a dialog hold, this is neither a ledger record nor an attempt.
-		if wait, held := cfg.reminderHold(now); held {
-			cfg.doorbell.recordDialogHold(now, wait)
-			persistWakeDoorbellStatusBestEffort(cfg)
-			return nil
-		}
-		guardedReminder = cfg.guardedInputEnabled() && !cfg.inputGuard.lastOwnRead.IsZero()
+	reminder := plan.submitOnly && shouldDeferBeforeInject(cfg, deferForInput)
+	if wait, held := cfg.preAttemptHold(now, reminder); held {
+		cfg.doorbell.recordDialogHold(now, wait)
+		persistWakeDoorbellStatusBestEffort(cfg)
+		return nil
 	}
+	guardedReminder := reminder && cfg.guardedInputEnabled() && !cfg.inputGuard.lastOwnRead.IsZero()
 	// A harness released from its trust dialog by its trust record alone
 	// may not accept input yet, so a write then does not confirm the
 	// doorbell: the retry ladder types the full doorbell again, not a bare

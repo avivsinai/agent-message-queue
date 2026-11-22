@@ -13,6 +13,8 @@ type coopHookWakeObservation struct {
 	pid        int
 	generation string
 	baselineAt string
+	channel    wakeChannel
+	attended   bool
 }
 
 // coopHookWakeBaseline returns the startup baseline of the live wake for
@@ -21,18 +23,18 @@ type coopHookWakeObservation struct {
 // changed between two reads; the guard then counts every message.
 func coopHookWakeBaseline(root, me string) (time.Time, bool) {
 	root = canonicalWakeRoot(root)
-	first, ok := observeCoopHookWake(root, me)
-	if !ok {
+	first, ok := observeCoopHookWake(root, me, true)
+	if !ok || decideSeatDoorbell(true, first.channel, first.attended) != doorbellTyped {
 		return time.Time{}, false
 	}
-	if second, ok := observeCoopHookWake(root, me); !ok || second != first {
+	if second, ok := observeCoopHookWake(root, me, true); !ok || second != first {
 		return time.Time{}, false
 	}
 	baseline, err := time.Parse(time.RFC3339Nano, first.baselineAt)
 	return baseline, err == nil
 }
 
-func observeCoopHookWake(root, me string) (coopHookWakeObservation, bool) {
+func observeCoopHookWake(root, me string, withBaseline bool) (coopHookWakeObservation, bool) {
 	var obs coopHookWakeObservation
 	agentDir, err := openWakeDirectory(fsq.AgentBase(root, me), "wake agent directory")
 	if err != nil {
@@ -46,14 +48,22 @@ func observeCoopHookWake(root, me string) (coopHookWakeObservation, bool) {
 			inspection.Status == wakeLockValid &&
 			inspection.IdentityConfirmed &&
 			inspection.Process.Running
+		if !live {
+			return nil
+		}
+		applied, _ := readWakeSettingsAppliedAt(dirfd, agentDir, inspection)
 		obs = coopHookWakeObservation{
+			channel:    applied.publishedWakeChannel(),
+			attended:   applied.Attended,
 			pid:        inspection.PID,
 			generation: inspection.Lock.Generation,
-			baselineAt: observeWakeCheckBaselineAt(dirfd, agentDir, inspection),
+		}
+		if withBaseline {
+			obs.baselineAt = observeWakeCheckBaselineAt(dirfd, agentDir, inspection)
 		}
 		return nil
 	}); err != nil {
 		return obs, false
 	}
-	return obs, live && obs.baselineAt != ""
+	return obs, live
 }

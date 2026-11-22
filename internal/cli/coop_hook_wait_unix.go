@@ -29,11 +29,6 @@ import (
 // agent read anything.
 
 const (
-	// coopWaitStateFile holds the ids the waiter rang for, and for which
-	// Claude session. It is apart from the Stop guard's state: the guard
-	// still blocks once for mail the waiter rang for, so a ring that Claude
-	// Code dropped loses no mail. A record is an attempt, not a delivery.
-	coopWaitStateFile = ".rewake-hook-state.json"
 	// coopWaitOwnerFile names the newest waiter of an agent. Every turn end
 	// starts a waiter with a new timeout, so the newest one is the doorbell
 	// and an older one exits when it reads another name here.
@@ -65,7 +60,7 @@ func runCoopWait(ctx context.Context) error {
 	if err != nil || root == "" || me == "" {
 		return nil
 	}
-	claude, ok := coopWaitHost()
+	claude, ok := eligibleCoopWaitHost(root, me)
 	if !ok {
 		return nil
 	}
@@ -153,7 +148,8 @@ func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 		}
 		wait := coopWaitPoll
 		var due []string
-		if release != nil && !coopHookWakeRings(root, me) {
+		ringer, _ := layers.readSeatDoorbell(root, me)
+		if release != nil && ringer == doorbellHook {
 			if now := time.Now(); now.Sub(promoted) >= coopWaitFollowUpEvery {
 				promoted = now
 				// The hook's stderr is the ring text, so a failure stays
@@ -164,35 +160,29 @@ func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 			if err == nil && len(pending) > 0 {
 				var settings wakeSettings
 				settings, layers = coopWaitSettings(root, me, layers)
-				// An attended seat is never rung: the hooks carry the mail to the
-				// person and the model without a keystroke (bead gijx). The read has
-				// no wake-lock dependency, so it holds on an app seat too. Nothing
-				// is due, so the loop's one select below waits the poll interval.
-				if !settings.attended {
-					rang := readCoopWaitState(statePath, w.session)
-					announced := append(readCoopStopState(filepath.Join(agent, coopStopStateFile)).BlockedIDs, rang.RangIDs...)
-					now := time.Now()
-					var next time.Time
-					due, next = decideCoopWait(pending, announced, settings.holdPolicy(), now)
-					switch {
-					case len(due) > 0 && !debounced:
-						// The Stop guard of the same turn end may be about to
-						// report this mail; let it, and batch a burst.
-						wait = settings.debounce
-					case len(due) > 0:
-						// Ring only after the record is stored: a ring the next
-						// waiter cannot see would repeat at every turn end.
-						if err := writeCoopHookState(statePath, nextCoopWaitState(rang, pending, due)); err != nil {
-							return nil
-						}
-						undo, err := w.ring()
-						if undo {
-							_ = writeCoopHookState(statePath, rang)
-						}
-						return err
-					case !next.IsZero() && next.Sub(now) < wait:
-						wait = next.Sub(now)
+				rang := readCoopWaitState(statePath, w.session)
+				announced := append(readCoopStopState(filepath.Join(agent, coopStopStateFile)).BlockedIDs, rang.RangIDs...)
+				now := time.Now()
+				var next time.Time
+				due, next = decideCoopWait(pending, announced, settings.holdPolicy(), now)
+				switch {
+				case len(due) > 0 && !debounced:
+					// The Stop guard of the same turn end may be about to
+					// report this mail; let it, and batch a burst.
+					wait = settings.debounce
+				case len(due) > 0:
+					// Ring only after the record is stored: a ring the next
+					// waiter cannot see would repeat at every turn end.
+					if err := writeCoopHookState(statePath, nextCoopWaitState(rang, pending, due)); err != nil {
+						return nil
 					}
+					undo, err := w.ring()
+					if undo {
+						_ = writeCoopHookState(statePath, rang)
+					}
+					return err
+				case !next.IsZero() && next.Sub(now) < wait:
+					wait = next.Sub(now)
 				}
 			}
 		}
@@ -305,28 +295,33 @@ func coopWaitRuns(root, me string) bool {
 
 // coopWaitRunsInBackground reports whether the Claude Code session this
 // hook runs in keeps an asyncRewake hook in the background.
-func coopWaitRunsInBackground() bool {
-	_, ok := coopWaitHost()
+func coopWaitRunsInBackground(root, me string) bool {
+	_, ok := eligibleCoopWaitHost(root, me)
 	return ok
 }
 
-// coopWaitHost returns the Claude Code process of the session this hook
-// runs in, when that session keeps an asyncRewake hook in the background.
-// A session that does not would hold its turn end until the waiter exits,
-// so anything unproven is false: no session record among this process's
-// ancestors for CLAUDE_CODE_SESSION_ID, an entrypoint AMQ has not seen
-// background the hook, or a version below the one it was seen on.
-func coopWaitHost() (claude launch.HolderIdentity, ok bool) {
+func eligibleCoopWaitHost(root, me string) (launch.HolderIdentity, bool) {
+	host, support, ok := coopWaitHost()
+	if ok && support.OptIn {
+		_, ok = readSeatDoorbell(root, me)
+	}
+	return host, ok
+}
+
+// coopWaitHost admits only a recorded ancestor session whose entrypoint
+// and version keep an asyncRewake command in the background.
+func coopWaitHost() (launch.HolderIdentity, harness.ClaudeRewakeSupport, bool) {
 	session, configDir, ok := claudeSessionID()
 	if !ok {
-		return launch.HolderIdentity{}, false
+		return launch.HolderIdentity{}, harness.ClaudeRewakeSupport{}, false
 	}
-	record, claude, ok := ancestorClaudeSession(configDir, session)
-	if !ok {
-		return launch.HolderIdentity{}, false
+	record, host, ok := ancestorClaudeSession(configDir, session)
+	support, known := harness.ClaudeRewakeEntrypoints[record.Entrypoint]
+	if !ok || !known {
+		return host, support, false
 	}
-	cmp, ok := update.CompareVersions(harness.ClaudeRewakeMinVersion, record.Version)
-	return claude, ok && cmp <= 0 && slices.Contains(harness.ClaudeRewakeEntrypoints, record.Entrypoint)
+	cmp, ok := update.CompareVersions(support.MinVersion, record.Version)
+	return host, support, ok && cmp <= 0
 }
 
 // errCoopWaitRing is the waiter's ring. Its text is the doorbell, which

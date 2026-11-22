@@ -121,7 +121,10 @@ amq coop join                 # once per session, inside the session
   is unread at the next turn end, so a ring is an attempt, not proof that the
   agent read anything. `join` prints whether the hook will wake the session,
   or why not. While the hook waits, `amq who` shows the agent as
-  `active (hook_live)`.
+  `active (hook_live)`. In a Claude Code terminal with the hooks installed,
+  `amq wake config --hook-doorbell=true` lets mail wake a fresh session
+  while a draft stays in the editor. The wake resumes typing if the waiter
+  disappears and two minutes have passed since its last ring.
 - **Policy is the wake settings.** The wait hook obeys `hold_normal`,
   `hold_low` and `debounce` from `~/.amq/wake.settings` and the agent's
   `.wake.settings` (`amq wake config`; `--machine` changes the user's file),
@@ -136,10 +139,9 @@ Limits:
 
 - `amq coop join` and `amq coop leave` run on macOS and Linux. Native Windows
   refuses them.
-- The wait hook runs only in desktop-app sessions (entrypoint
-  `claude-desktop`) on Claude Code 2.1.321 or later, and is proven only on
-  macOS. In other sessions it exits at once: plain `claude -p` would hold
-  each turn end until the hook exits.
+- The wait hook runs in desktop-app sessions on Claude Code 2.1.321 and
+  later, and in opted-in terminal sessions on 2.1.330 and later. Live proof
+  covers macOS. Print mode (`claude -p`) exits the hook immediately.
 - A session has a doorbell only while its Claude Code process runs and the
   session has ended a turn after the join. Claude Code ends the hook after
   its timeout of 7 days, so a session with no turn for 7 days has no doorbell
