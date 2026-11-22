@@ -164,29 +164,35 @@ func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 			if err == nil && len(pending) > 0 {
 				var settings wakeSettings
 				settings, layers = coopWaitSettings(root, me, layers)
-				rang := readCoopWaitState(statePath, w.session)
-				announced := append(readCoopStopState(filepath.Join(agent, coopStopStateFile)).BlockedIDs, rang.RangIDs...)
-				now := time.Now()
-				var next time.Time
-				due, next = decideCoopWait(pending, announced, settings.holdPolicy(), now)
-				switch {
-				case len(due) > 0 && !debounced:
-					// The Stop guard of the same turn end may be about to
-					// report this mail; let it, and batch a burst.
-					wait = settings.debounce
-				case len(due) > 0:
-					// Ring only after the record is stored: a ring the next
-					// waiter cannot see would repeat at every turn end.
-					if err := writeCoopHookState(statePath, nextCoopWaitState(rang, pending, due)); err != nil {
-						return nil
+				// An attended seat is never rung: the hooks carry the mail to the
+				// person and the model without a keystroke (bead gijx). The read has
+				// no wake-lock dependency, so it holds on an app seat too. Nothing
+				// is due, so the loop's one select below waits the poll interval.
+				if !settings.attended {
+					rang := readCoopWaitState(statePath, w.session)
+					announced := append(readCoopStopState(filepath.Join(agent, coopStopStateFile)).BlockedIDs, rang.RangIDs...)
+					now := time.Now()
+					var next time.Time
+					due, next = decideCoopWait(pending, announced, settings.holdPolicy(), now)
+					switch {
+					case len(due) > 0 && !debounced:
+						// The Stop guard of the same turn end may be about to
+						// report this mail; let it, and batch a burst.
+						wait = settings.debounce
+					case len(due) > 0:
+						// Ring only after the record is stored: a ring the next
+						// waiter cannot see would repeat at every turn end.
+						if err := writeCoopHookState(statePath, nextCoopWaitState(rang, pending, due)); err != nil {
+							return nil
+						}
+						undo, err := w.ring()
+						if undo {
+							_ = writeCoopHookState(statePath, rang)
+						}
+						return err
+					case !next.IsZero() && next.Sub(now) < wait:
+						wait = next.Sub(now)
 					}
-					undo, err := w.ring()
-					if undo {
-						_ = writeCoopHookState(statePath, rang)
-					}
-					return err
-				case !next.IsZero() && next.Sub(now) < wait:
-					wait = next.Sub(now)
 				}
 			}
 		}

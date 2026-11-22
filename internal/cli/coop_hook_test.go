@@ -91,6 +91,40 @@ func TestCoopHookSessionStartPrintsThePreamble(t *testing.T) {
 	}
 }
 
+func TestCoopSessionStartAttendedPreamble(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	dir := t.TempDir()
+	base := filepath.Join(dir, ".agent-mail")
+	root := filepath.Join(base, "collab")
+	if err := runInit([]string{"--root", root, "--agents", "claude,codex"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envMe, "claude")
+	t.Setenv(envRoot, root)
+	setAttendedForTest(t, root, "claude")
+
+	stdout, stderr := captureOutput(t, func() error { return writeCoopSessionStart(os.Stdout, time.Now()) })
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want none", stderr)
+	}
+	var got struct {
+		HookSpecificOutput struct {
+			HookEventName     string `json:"hookEventName"`
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("output %q: %v", stdout, err)
+	}
+	want := "This seat is attended: no doorbell is typed and no hook wakes it."
+	if !strings.Contains(got.HookSpecificOutput.AdditionalContext, want) {
+		t.Fatalf("attended preamble = %q, want it to contain %q", got.HookSpecificOutput.AdditionalContext, want)
+	}
+	if strings.Contains(got.HookSpecificOutput.AdditionalContext, "A wake rings this terminal") {
+		t.Fatalf("attended preamble = %q, want no typed-doorbell case", got.HookSpecificOutput.AdditionalContext)
+	}
+}
+
 func TestCoopInstallHooksWritesTheGatedEntryAndListsOldOnes(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -321,6 +355,24 @@ func TestCoopStopUnderALiveWakeCountsOnlyBaselineMail(t *testing.T) {
 	next, out := decideCoopStop([]coopStopMessage{before, after}, &baseline, fresh, false, "root=r session=s")
 	if out["decision"] != "block" || !slices.Equal(next.BlockedIDs, []string{"before"}) {
 		t.Fatalf("mail at the baseline: %v blocked %v, want a block for before only", out, next.BlockedIDs)
+	}
+}
+
+// An attended seat has no baseline cut (spec item K): the attended wake
+// types nothing, so mail created after its baseline would never be
+// reported anywhere else. The decide function takes no baseline, so the
+// unit case is that mail after a live wake's baseline is reported.
+func TestCoopStopAttendedReportsMailAfterTheWakeBaseline(t *testing.T) {
+	baseline := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
+	after := coopStopMessage{ID: "after", Created: baseline.Add(time.Second).Format(time.RFC3339Nano)}
+	fresh := coopStopState{Schema: 1, BlockedIDs: []string{}}
+
+	next := decideCoopStopAttended([]coopStopMessage{after}, fresh)
+	if !slices.Equal(next.BlockedIDs, []string{"after"}) {
+		t.Fatalf("attended mail after the baseline: reported %v, want \"after\"", next.BlockedIDs)
+	}
+	if got := freshAttendedIDs([]coopStopMessage{after}, fresh); !slices.Equal(got, []string{"after"}) {
+		t.Fatalf("attended fresh ids after the baseline = %v, want \"after\"", got)
 	}
 }
 

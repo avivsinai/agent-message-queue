@@ -26,6 +26,7 @@ type wakeCheckResult struct {
 	StartedAt                string `json:"started_at,omitempty"`
 	BaselineAt               string `json:"baseline_at,omitempty"`
 	InputGuard               string `json:"input_guard"`
+	Attended                 bool   `json:"attended"`
 	WakeStatus               string `json:"wake_status"`
 	HealthStatus             string `json:"health_status,omitempty"`
 	HealthDetail             string `json:"health_detail,omitempty"`
@@ -81,6 +82,7 @@ type wakeCheckObservation struct {
 	// outside the stability comparison.
 	BaselineAt string
 	InputGuard string
+	Attended   bool
 }
 
 type wakeCheckSnapshot struct {
@@ -166,6 +168,7 @@ func inspectWakeCheckSnapshot(root, me string) wakeCheckSnapshot {
 	snapshot.Decision.Wake.BaselineAt = wakeCheckOptionalString(second.BaselineAt)
 	if snapshot.Decision.Wake.Live {
 		snapshot.Decision.Wake.InputGuard = second.InputGuard
+		snapshot.Decision.Wake.Attended = second.Attended
 		applyWakeCheckHealth(&snapshot.Decision, probeWakeHealthPlatform(root, me, second.Inspection))
 	}
 	// Image and loop probing can take time. Re-observe afterwards so a PID
@@ -203,6 +206,7 @@ func observeWakeCheck(root, me string) (wakeCheckObservation, error) {
 		)
 		if applied, ok := readWakeSettingsAppliedAt(dirfd, agentDir, observation.Inspection); ok {
 			observation.InputGuard = applied.InputGuard
+			observation.Attended = applied.Attended
 		}
 		observation.BaselineAt = observeWakeCheckBaselineAt(dirfd, agentDir, observation.Inspection)
 		var boundSelectionErr error
@@ -593,6 +597,7 @@ func renderWakeCheckV1(decision wakeCheckDecision) wakeCheckResult {
 		StartedAt:                wakeCheckStringValue(decision.Wake.StartedAt, ""),
 		BaselineAt:               wakeCheckStringValue(decision.Wake.BaselineAt, ""),
 		InputGuard:               wakeInputGuardValue(decision.Wake.InputGuard),
+		Attended:                 decision.Wake.Attended,
 		WakeStatus:               decision.Wake.Status,
 		HealthStatus:             decision.Health.Status,
 		HealthDetail:             decision.Health.Detail,

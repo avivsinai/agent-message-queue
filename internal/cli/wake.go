@@ -82,6 +82,7 @@ type wakeConfig struct {
 	dialogHoldReason              func() wakeDialogHoldCause                   // why the marker holds input; nil = a generic dialog
 	dialogHoldDetail              func(now time.Time) string                   // the marker's event, kind, harness, tool and age for the wake log; nil = none
 	desktopNotify                 func(title, body string) error               // the held-doorbell desktop notice; nil = none (direct loop tests)
+	attendedInterruptNoted        bool                                         // the "interrupt key not sent" line was logged once for this wake
 	startupTrustRelease           func() bool                                  // a Startup marker closed only by the harness's trust record; nil = never
 	startupReleaseAttempted       bool                                         // input reached the terminal after a trust release
 	startupInputProven            bool                                         // a drain followed a post-release attempt, so the harness accepts input
@@ -803,6 +804,20 @@ func injectWakeInterruptKey(
 	currentPending map[string]os.FileInfo,
 ) (bool, error) {
 	now := time.Now()
+	if cfg.settings.attended {
+		// Attended seat: no interrupt key is ever typed. The batch takes the
+		// normal notification path, which the attended gate routes to a notice.
+		// The diagnostic shows only where a key would have gone out: a seat
+		// that sends no interrupt keys (none set, or a co-op doorbell seat)
+		// is not changed by attended.
+		if cfg.interruptKey != "" && !usesCoopDoorbell(cfg) && shouldInterruptNow(cfg, now) {
+			if !cfg.attendedInterruptNoted {
+				cfg.attendedInterruptNoted = true
+				_ = writeWakeDiagnostic(cfg, "attended seat: interrupt key not sent\n")
+			}
+		}
+		return false, nil
+	}
 	if !usesCoopDoorbell(cfg) &&
 		cfg.interruptKey != "" &&
 		shouldInterruptNow(cfg, now) {
@@ -1784,6 +1799,22 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 	cfg.lastInjectorOutcome = wakeInjectorOutcomeNone
 	cfg.lastInjectorDetail = ""
 	ownerBound := usesCoopDoorbell(cfg)
+	if cfg.settings.attended && notice.input.provenance != wakePayloadOwnerCommand {
+		// Attended seat: the person reads the notice; the model learns of the
+		// mail at their next prompt. No keystroke, whatever else is true. The
+		// input state is not cleared here: an owner command may sit pending in
+		// oneSubmit, and dropping it would drop the owner's own input.
+		err := deliverWakeAttendedNotice(cfg, notice.output)
+		if err == nil {
+			// One notice per unread cohort: park it like a presented cohort, so
+			// the retry ladder does not repeat the notice for mail the person
+			// has already been told about. An addition — or urgent mail —
+			// revives the parked cohort for at most one more notice.
+			cfg.doorbell.parkCurrentCohort()
+			persistWakeDoorbellStatusBestEffort(cfg)
+		}
+		return err
+	}
 	if ownerBound {
 		if notice.submitOnly && notice.input.provenance == wakePayloadSystemFixed {
 			// A submit-only reminder is system-created from cohort state. It has
@@ -2122,6 +2153,21 @@ func deliverWakeAttentionOnly(cfg *wakeConfig, payload wakePayload) error {
 			_ = writeWakeDiagnostic(cfg, "amq wake: record attention-only degraded status: %v\n", err)
 		}
 	}
+	return nil
+}
+
+// deliverWakeAttendedNotice is the designed channel of an attended seat: the
+// notice is the delivery, not a fallback. It records no degraded notifier
+// status, so doctor and wake check do not flag the seat; an earlier
+// degraded status from a real fallback is left alone.
+func deliverWakeAttendedNotice(cfg *wakeConfig, payload wakePayload) error {
+	if err := authorizePeerWakeAttention(cfg, payload); err != nil {
+		return err
+	}
+	if err := emitWakeAttention(cfg, payload); err != nil {
+		return err
+	}
+	cfg.lastAttemptAttention = true
 	return nil
 }
 

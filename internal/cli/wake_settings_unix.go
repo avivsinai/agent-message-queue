@@ -374,6 +374,7 @@ func seedWakeSettingsFile(
 // without them comes from an image that never reads the machine file.
 type wakeSettingsAppliedFile struct {
 	InputGuard    string `json:"input_guard,omitempty"`
+	Attended      bool   `json:"attended,omitempty"`
 	Schema        int    `json:"schema"`
 	Root          string `json:"root"`
 	Agent         string `json:"agent"`
@@ -433,6 +434,7 @@ func recordWakeSettingsApplied(
 		}
 		applied := wakeSettingsAppliedFile{
 			InputGuard:    status.inputGuard,
+			Attended:      status.attended,
 			Schema:        wakeSettingsSchemaV1,
 			Root:          inspection.Root,
 			Agent:         inspection.Agent,

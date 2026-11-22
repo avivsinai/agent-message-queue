@@ -33,6 +33,7 @@ const (
 	defaultWakeInterruptCooldown = 7 * time.Second
 	defaultWakeSelfUpgrade       = true
 	defaultWakeHeldNotice        = true
+	defaultWakeAttended          = false
 )
 
 const (
@@ -78,6 +79,7 @@ type wakeSettings struct {
 	injectTimeout     time.Duration
 	selfUpgrade       bool
 	heldNotice        bool
+	attended          bool
 }
 
 func defaultWakeSettings() wakeSettings {
@@ -97,6 +99,7 @@ func defaultWakeSettings() wakeSettings {
 		injectTimeout:     defaultInjectTimeout,
 		selfUpgrade:       defaultWakeSelfUpgrade,
 		heldNotice:        defaultWakeHeldNotice,
+		attended:          defaultWakeAttended,
 	}
 }
 
@@ -192,6 +195,8 @@ var wakeSettingDefs = []wakeSettingDef{
 		func(s *wakeSettings) any { return &s.selfUpgrade }},
 	{"held_notice", "held-notice", "Show a desktop notification at once when a harness dialog holds the doorbell (macOS osascript, Linux notify-send)",
 		func(s *wakeSettings) any { return &s.heldNotice }},
+	{"attended", "attended", "A person works in this terminal: never type the doorbell; show a notice only",
+		func(s *wakeSettings) any { return &s.attended }},
 }
 
 // wakeRestartOnlyFlags are the amq wake flags bound into the running wake's
@@ -701,6 +706,7 @@ const (
 // observed machine file digest.
 type wakeSettingsAppliedStatus struct {
 	inputGuard    string
+	attended      bool
 	status        string
 	digest        string
 	err           string
@@ -905,6 +911,12 @@ func (cfg *wakeConfig) reloadSettings() bool {
 		if cfg.settings.holdPolicy() != next.holdPolicy() {
 			cfg.holdPolicyChanged = true
 		}
+		if next.attended && !cfg.settings.attended && cfg.inputDelivery.pending() && !cfg.inputDelivery.oneSubmit {
+			// The seat just became attended: an owed Enter or pending payload of
+			// an earlier delivery is dropped, never sent. A pending owner command
+			// is the owner's own input and stays (oneSubmit).
+			clearWakeInputState(cfg)
+		}
 		cfg.settings = next
 		var files []string
 		if agentTaken {
@@ -942,6 +954,7 @@ func noteWakeSettingsApplied(cfg *wakeConfig, status wakeSettingsAppliedStatus) 
 	}
 	status.inputGuard = cfg.inputGuard.status(cfg.settings)
 	cfg.reportedInputGuard = status.inputGuard
+	status.attended = cfg.settings.attended
 	pending := status
 	cfg.pendingSettingsApplied = &pending
 	if err := cfg.recordSettingsApplied(status); err != nil {
