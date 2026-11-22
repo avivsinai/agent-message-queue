@@ -86,8 +86,9 @@ func TestAttendedSeatNeverRunsTheExternalInjector(t *testing.T) {
 
 // The owner's own queued command is the one exception: it is the owner's
 // input, typed on the owner's order, on an attended seat too. The command
-// path builds its own notification (wakePayloadOwnerCommand), so it bypasses
-// the attended gate in deliverWakeNotification.
+// path builds its own notification (wakePayloadOwnerCommand) and calls
+// deliverWakeNotification directly, so it never reaches the attended gate
+// in deliverNewMessageNotification.
 func TestAttendedSeatStillTypesTheOwnerCommand(t *testing.T) {
 	h := newWakeHoldHarness(t, wakeHoldPolicy{})
 	setAttendedForTest(t, h.root, "codex")
