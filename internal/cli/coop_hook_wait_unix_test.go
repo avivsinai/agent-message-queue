@@ -255,6 +255,54 @@ func (r *codexQueueRecorder) Run(_ context.Context, _ string, args ...string) ([
 	return []byte(fmt.Sprintf("Queued message m1 for thread %s.", args[2])), nil
 }
 
+// Review of PR 1585: a Codex started from the shell tool of a joined Claude
+// Code session inherits CLAUDE_CODE_SESSION_ID. amq adopted the Claude
+// seat before the receiver read its input, so a Codex chat that is not
+// joined got the Claude seat's unread line and a joined one got nothing.
+func TestCodexHookReceiverIgnoresAnInheritedClaudeSession(t *testing.T) {
+	const claudeSession = "7c29e148-77eb-47c0-8984-10c13b4700d1"
+	const joined, unbound = "019a1166-dd8e-77c0-bc3b-a4b7e24e91f1", "019a1166-dd8e-77c0-bc3b-a4b7e24e91f2"
+	joinCodexThread(t, joined)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	claudeSessionRecord(t, os.Getppid(), claudeSession)
+	t.Setenv(envClaudeSession, claudeSession)
+	if _, err := captureStdout(t, func() error { return runCoopJoin([]string{"--me", "claude"}) }); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(defaultCoopRoot, defaultSessionName)
+	for to, from := range map[string]string{"claude": "codex", "codex": "claude"} {
+		if _, err := captureStdout(t, func() error {
+			return runSend([]string{"--root", root, "--me", from, "--to", to, "--body", "hi"})
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clearIdentity := func() {
+		for _, key := range append([]string{"CODEX_THREAD_ID"}, identityEnvKeys...) {
+			_ = os.Unsetenv(key)
+		}
+	}
+	prompt := func(sessionID string) string {
+		t.Helper()
+		clearIdentity()
+		defer clearIdentity()
+		defer withStdin(t, fmt.Sprintf(`{"session_id":%q,"hook_event_name":"UserPromptSubmit","prompt":"hello"}`, sessionID))()
+		out, err := captureStdout(t, func() error {
+			return Run([]string{"--no-update-check", "coop", "hook", "codex-prompt"}, "test")
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	if got := prompt(unbound); got != "" {
+		t.Fatalf("a Codex chat that is not joined got %q, want nothing", got)
+	}
+	if got := prompt(joined); !strings.Contains(got, "You have 1 unread AMQ message(s)") {
+		t.Fatalf("the joined Codex chat got %q, want its own unread context", got)
+	}
+}
+
 // joinCodexThread makes a co-op project with the agents claude and codex
 // in the working directory and joins thread as codex, the way a chat of the
 // Codex desktop app does. It leaves the environment a Codex hook has: no
