@@ -93,17 +93,21 @@ func codexDialogStore() (string, error) {
 	return codexidentity.CurrentDir(home), nil
 }
 
-// adoptCodexHookIdentity gives a Codex hook with no AM_* the identity amq
-// coop exec recorded for its thread: the hook input's session_id is the
-// thread id, and Codex passes no CODEX_THREAD_ID to hooks. A recorded
-// identity that cannot be used is an error, so the receiver does nothing.
+// adoptCodexHookIdentity gives a Codex hook with no AM_* the identity AMQ
+// recorded for its thread. The thread is the hook input's session_id. The
+// environment's CODEX_THREAD_ID does not name it: Codex gives its hooks
+// none, and a Codex that was started from a Codex shell tool inherits its
+// parent's. So amq adopts no thread identity before a hook receiver runs
+// (isCodexHookReceiver), and AM_* here are the process's own pins. A
+// recorded identity that cannot be used is an error, so the receiver does
+// nothing.
 func adoptCodexHookIdentity(sessionID string) error {
 	for _, key := range identityEnvKeys {
 		if _, present := os.LookupEnv(key); present {
 			return nil
 		}
 	}
-	if _, present := os.LookupEnv("CODEX_THREAD_ID"); present || !codexidentity.ValidThread(sessionID) {
+	if !codexidentity.ValidThread(sessionID) {
 		return nil
 	}
 	if err := os.Setenv("CODEX_THREAD_ID", sessionID); err != nil {

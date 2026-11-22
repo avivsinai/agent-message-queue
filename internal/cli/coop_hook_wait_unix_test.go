@@ -19,6 +19,7 @@ package cli
 // starts a waiter or rings.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -254,7 +255,60 @@ func (r *codexQueueRecorder) Run(_ context.Context, _ string, args ...string) ([
 	return []byte(fmt.Sprintf("Queued message m1 for thread %s.", args[2])), nil
 }
 
-func TestCodexWaitQueuesTheDoorbellToItsThread(t *testing.T) {
+// Review of PR 1585: a Codex started from the shell tool of a joined Claude
+// Code session inherits CLAUDE_CODE_SESSION_ID. amq adopted the Claude
+// seat before the receiver read its input, so a Codex chat that is not
+// joined got the Claude seat's unread line and a joined one got nothing.
+func TestCodexHookReceiverIgnoresAnInheritedClaudeSession(t *testing.T) {
+	const claudeSession = "7c29e148-77eb-47c0-8984-10c13b4700d1"
+	const joined, unbound = "019a1166-dd8e-77c0-bc3b-a4b7e24e91f1", "019a1166-dd8e-77c0-bc3b-a4b7e24e91f2"
+	joinCodexThread(t, joined)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	claudeSessionRecord(t, os.Getppid(), claudeSession)
+	t.Setenv(envClaudeSession, claudeSession)
+	if _, err := captureStdout(t, func() error { return runCoopJoin([]string{"--me", "claude"}) }); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(defaultCoopRoot, defaultSessionName)
+	for to, from := range map[string]string{"claude": "codex", "codex": "claude"} {
+		if _, err := captureStdout(t, func() error {
+			return runSend([]string{"--root", root, "--me", from, "--to", to, "--body", "hi"})
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clearIdentity := func() {
+		for _, key := range append([]string{"CODEX_THREAD_ID"}, identityEnvKeys...) {
+			_ = os.Unsetenv(key)
+		}
+	}
+	prompt := func(sessionID string) string {
+		t.Helper()
+		clearIdentity()
+		defer clearIdentity()
+		defer withStdin(t, fmt.Sprintf(`{"session_id":%q,"hook_event_name":"UserPromptSubmit","prompt":"hello"}`, sessionID))()
+		out, err := captureStdout(t, func() error {
+			return Run([]string{"--no-update-check", "coop", "hook", "codex-prompt"}, "test")
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	if got := prompt(unbound); got != "" {
+		t.Fatalf("a Codex chat that is not joined got %q, want nothing", got)
+	}
+	if got := prompt(joined); !strings.Contains(got, "You have 1 unread AMQ message(s)") {
+		t.Fatalf("the joined Codex chat got %q, want its own unread context", got)
+	}
+}
+
+// joinCodexThread makes a co-op project with the agents claude and codex
+// in the working directory and joins thread as codex, the way a chat of the
+// Codex desktop app does. It leaves the environment a Codex hook has: no
+// CODEX_THREAD_ID and no AMQ identity.
+func joinCodexThread(t *testing.T, thread string) {
+	t.Helper()
 	clearJoinTestEnv(t)
 	t.Setenv("HOME", t.TempDir())
 	codexHome := t.TempDir()
@@ -263,7 +317,12 @@ func TestCodexWaitQueuesTheDoorbellToItsThread(t *testing.T) {
 	if _, err := captureStdout(t, func() error { return runCoopInit([]string{"--agents", "claude,codex", "--no-gitignore"}) }); err != nil {
 		t.Fatal(err)
 	}
-	const thread, unbound = "019a1166-dd8e-77c0-bc3b-a4b7e24e91f1", "019a1166-dd8e-77c0-bc3b-a4b7e24e91f2"
+	bindCodexThread(t, codexHome, thread, "codex")
+}
+
+// bindCodexThread joins a loaded thread of codexHome as me.
+func bindCodexThread(t *testing.T, codexHome, thread, me string) {
+	t.Helper()
 	holdCodexThread(t, codexHome, thread)
 	rollout := filepath.Join(codexHome, "sessions", "2026", "11", "13", "rollout-2026-11-13T10-00-00-"+thread+".jsonl")
 	if err := os.MkdirAll(filepath.Dir(rollout), 0o700); err != nil {
@@ -272,6 +331,143 @@ func TestCodexWaitQueuesTheDoorbellToItsThread(t *testing.T) {
 	if err := os.WriteFile(rollout, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("CODEX_THREAD_ID", thread)
+	if _, err := captureStdout(t, func() error { return runCoopJoin([]string{"--me", me}) }); err != nil {
+		t.Fatal(err)
+	}
+	setOptionalEnv(t, "CODEX_THREAD_ID", "", false)
+}
+
+// Review of PR 1585: a Codex started from a Codex shell tool inherits its
+// parent's CODEX_THREAD_ID. amq adopted the parent's identity before the
+// hook receiver read its input, so a permission dialog of the child marked
+// the parent's mailbox.
+func TestCodexHookReceiverTakesItsThreadFromTheHookInput(t *testing.T) {
+	const parent, child = "019a1166-dd8e-77c0-bc3b-a4b7e24e91f1", "019a1166-dd8e-77c0-bc3b-a4b7e24e91f3"
+	joinCodexThread(t, parent)
+	bindCodexThread(t, os.Getenv("CODEX_HOME"), child, "claude")
+	root := absPath(filepath.Join(defaultCoopRoot, defaultSessionName))
+	t.Setenv("CODEX_THREAD_ID", parent)
+	t.Cleanup(func() {
+		for _, key := range identityEnvKeys {
+			_ = os.Unsetenv(key)
+		}
+	})
+	defer withStdin(t, fmt.Sprintf(`{"session_id":%q,"turn_id":"t-1","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"touch hello.txt"}}`, child))()
+	if err := Run([]string{"--no-update-check", "wake", "dialog", "--harness", "codex", "open"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	held := func(me string) bool {
+		_, err := os.Lstat(filepath.Join(fsq.AgentBase(root, me), wakeDialogFileName))
+		return err == nil
+	}
+	if !held("claude") || held("codex") {
+		t.Fatalf("the child's dialog marked claude=%v codex=%v, want only the child's mailbox (claude)", held("claude"), held("codex"))
+	}
+}
+
+func TestCodexPromptAddsUnreadContextToAJoinedChat(t *testing.T) {
+	const thread, unbound = "019a1166-dd8e-77c0-bc3b-a4b7e24e91f1", "019a1166-dd8e-77c0-bc3b-a4b7e24e91f2"
+	joinCodexThread(t, thread)
+	if _, err := captureStdout(t, func() error {
+		return runSend([]string{"--root", filepath.Join(defaultCoopRoot, defaultSessionName), "--me", "claude", "--to", "codex", "--body", "hi"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	prompt := func(sessionID, text string) string {
+		t.Helper()
+		// The receiver adopts the thread's identity into its own process.
+		defer func() {
+			for _, key := range append([]string{"CODEX_THREAD_ID"}, identityEnvKeys...) {
+				_ = os.Unsetenv(key)
+			}
+		}()
+		var out bytes.Buffer
+		input := fmt.Sprintf(`{"session_id":%q,"hook_event_name":"UserPromptSubmit","prompt":%q}`, sessionID, text)
+		if err := runCoopPromptCodex(strings.NewReader(input), &out); err != nil {
+			t.Fatalf("prompt hook of %s: %v, want exit 0", sessionID, err)
+		}
+		return out.String()
+	}
+	got := prompt(thread, "hello")
+	if !strings.Contains(got, `"hookEventName":"UserPromptSubmit"`) || !strings.Contains(got, "You have 1 unread AMQ message(s). Run amq drain --include-body.") {
+		t.Fatalf("a person's prompt in the joined chat got %q, want the unread context", got)
+	}
+	if got := prompt(thread, harness.Doorbell); got != "" {
+		t.Fatalf("the doorbell got %q, want nothing", got)
+	}
+	if got := prompt(unbound, "hello"); got != "" {
+		t.Fatalf("a chat with no binding got %q, want nothing", got)
+	}
+
+	// Review of PR 1585: the receiver spoke for a thread other than its
+	// input's, and for input it could not decode.
+	run := func(input string) string {
+		t.Helper()
+		var out bytes.Buffer
+		if err := runCoopPromptCodex(strings.NewReader(input), &out); err != nil {
+			t.Fatalf("prompt hook: %v, want exit 0", err)
+		}
+		return out.String()
+	}
+	if got := run(fmt.Sprintf(`{"session_id":%q,"prompt":5}`, thread)); got != "" {
+		t.Fatalf("input with a prompt that is not text got %q, want nothing", got)
+	}
+	for _, key := range append([]string{"CODEX_THREAD_ID"}, identityEnvKeys...) {
+		_ = os.Unsetenv(key)
+	}
+	t.Setenv("CODEX_THREAD_ID", thread)
+	if got := run(fmt.Sprintf(`{"session_id":%q,"prompt":"hello"}`, unbound)); got != "" {
+		t.Fatalf("an environment that names another thread than the input got %q, want nothing", got)
+	}
+	for _, key := range append([]string{"CODEX_THREAD_ID"}, identityEnvKeys...) {
+		_ = os.Unsetenv(key)
+	}
+	// The process is another seat, and the input's thread has its own record.
+	root := absPath(filepath.Join(defaultCoopRoot, defaultSessionName))
+	if _, err := captureStdout(t, func() error {
+		return runSend([]string{"--root", root, "--me", "codex", "--to", "claude", "--body", "hi"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AM_ROOT", root)
+	t.Setenv("AM_ME", "claude")
+	if got := run(fmt.Sprintf(`{"session_id":%q,"prompt":"hello"}`, thread)); got != "" {
+		t.Fatalf("a thread recorded for codex in a process that is claude got %q, want nothing", got)
+	}
+	// A Codex started from a Codex shell tool inherits its parent's thread
+	// id; the seat of its own process stands.
+	t.Setenv("CODEX_THREAD_ID", thread)
+	if got := run(fmt.Sprintf(`{"session_id":%q,"prompt":"hello"}`, unbound)); !strings.Contains(got, "You have 1 unread AMQ message(s)") {
+		t.Fatalf("a thread with no record in a process that is claude got %q, want the seat's unread context", got)
+	}
+
+	// The queue was made again at the same path: the thread's record pinned
+	// the earlier one, so the thread does not speak for the new one. The
+	// earlier tree is moved away, not removed: a root's identity is its
+	// file-system identity, and a removed directory can give its inode to
+	// the next one (CI run of PR 1587 on Linux).
+	_ = os.Unsetenv("CODEX_THREAD_ID")
+	if err := os.Rename(defaultCoopRoot, defaultCoopRoot+".earlier"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := captureStdout(t, func() error { return runCoopInit([]string{"--agents", "claude,codex", "--no-gitignore"}) }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := captureStdout(t, func() error {
+		return runSend([]string{"--root", root, "--me", "claude", "--to", "codex", "--body", "hi"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AM_ME", "codex")
+	if got := run(fmt.Sprintf(`{"session_id":%q,"prompt":"hello"}`, thread)); got != "" {
+		t.Fatalf("a thread recorded for an earlier queue at this path got %q, want nothing", got)
+	}
+}
+
+func TestCodexWaitQueuesTheDoorbellToItsThread(t *testing.T) {
+	const thread, unbound = "019a1166-dd8e-77c0-bc3b-a4b7e24e91f1", "019a1166-dd8e-77c0-bc3b-a4b7e24e91f2"
+	joinCodexThread(t, thread)
 	// The desktop app names its own codex in the hook environment.
 	app := filepath.Join(t.TempDir(), "codex")
 	if err := os.WriteFile(app, []byte("#!/bin/sh\n"), 0o755); err != nil {
@@ -282,12 +478,7 @@ func TestCodexWaitQueuesTheDoorbellToItsThread(t *testing.T) {
 	codexWaitRunner = recorder
 	t.Cleanup(func() { codexWaitRunner = nil })
 
-	t.Setenv("CODEX_THREAD_ID", thread)
-	if _, err := captureStdout(t, func() error { return runCoopJoin(nil) }); err != nil {
-		t.Fatal(err)
-	}
 	// A hook has no CODEX_THREAD_ID; the thread is the input's session_id.
-	setOptionalEnv(t, "CODEX_THREAD_ID", "", false)
 	wait := func(sessionID string) (string, time.Duration) {
 		t.Helper()
 		defer func() {
