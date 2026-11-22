@@ -211,3 +211,39 @@ func TestAdapterBusyAfterANativeCallStaysRejected(t *testing.T) {
 		t.Fatalf("record = %+v, %v, %v; want a terminal rejection with its dispatch", rec, ok, err)
 	}
 }
+
+// The link contract changed by design: an adapter's busy with nothing sent
+// was a terminal refusal for a link request, so sending again needed a second
+// signature. It now leaves the busy tombstone a local request gets, with no
+// input, and the same signed request runs once. A Buzz share's request still
+// ends refused.
+func TestAdapterBusyLeavesALinkTombstoneAndRefusesABuzzShare(t *testing.T) {
+	att := &busyAttachment{Runtime: fake.New("fake", "e_1"), nothingSent: true}
+	att.busy.Store(true)
+	ep, store, clk := newLinkEndpoint(t, att)
+	link := linkSubmit(clk, "fake", "11111111-1111-4111-8111-11111111b5e3")
+	buzz := linkSubmit(clk, "fake", "11111111-1111-4111-8111-11111111b5e4")
+
+	if r := submitReply(t, ep, link, linkSource(hostB, "fake")); r.Outcome.Code != protocol.CodeBusy {
+		t.Fatalf("link submit while the adapter is busy = %q, want busy", r.Outcome.Code)
+	}
+	rec, ok, err := store.Get(requests.Key{CreatorHost: hostB, TargetID: "fake", RequestID: link.RequestID})
+	if err != nil || !ok || rec.State != protocol.StateRejected || rec.Code != protocol.CodeBusy || !rec.Tombstone || rec.Input != nil || rec.NativeDispatches != 0 {
+		t.Fatalf("link record after an adapter busy = %+v, %v, %v; want a busy tombstone with no input", rec, ok, err)
+	}
+	if r := submitReply(t, ep, buzz, ownerShare); r.Outcome.Code != protocol.CodeBusy {
+		t.Fatalf("Buzz submit while the adapter is busy = %q, want busy", r.Outcome.Code)
+	}
+
+	att.busy.Store(false)
+	if r := submitReply(t, ep, buzz, ownerShare); r.Snapshot.State != protocol.StateRejected || att.Snapshot().Dispatches != 0 {
+		t.Fatalf("Buzz resubmit to a free target after an adapter busy = %s, %d dispatches; want the stored refusal, none", r.Snapshot.State, att.Snapshot().Dispatches)
+	}
+	if r := submitReply(t, ep, link, linkSource(hostB, "fake")); r.Snapshot.State != protocol.StateRunning {
+		t.Fatalf("same signed link resubmit = %s %q, want running", r.Snapshot.State, r.Outcome.Code)
+	}
+	submitReply(t, ep, link, linkSource(hostB, "fake"))
+	if got := att.Snapshot().Dispatches; got != 1 {
+		t.Fatalf("native dispatches = %d, want 1: the link request once", got)
+	}
+}

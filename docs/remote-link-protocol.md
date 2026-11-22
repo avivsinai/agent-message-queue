@@ -101,7 +101,10 @@ signed submit is refused before admission with one of:
 | `clock_skew` | `issued_at` is more than 60 s from the machine's clock |
 | `expired` | The consent's `not_after` has passed |
 | `unshared` | The binding is not shared with this link |
-| `busy` | The harness is busy and `input.busy` is `reject`. No `retry_after_ms`: sending again is a new request and a new signature |
+| `busy` | The harness is busy and `input.busy` is `reject`. The reply is `{"outcome": {"op": "request.submit", "code": "busy"}}`. The server may send the same signed document again; wait at least 2 seconds between sends. It is admitted when the session is free, while the document's `issued_at` is within 60 s of the machine's clock and before its `not_after`. A document for the same request id with another input or `not_after` does not run and is answered `request_conflict` |
+
+`busy` and `request_conflict` arrive as an outcome reply, not as an error
+reply, and `busy` leaves a busy record.
 
 `interaction.respond` and `session.events` from a link are always refused
 with `unsupported`. A request whose reply would exceed the frame limit is

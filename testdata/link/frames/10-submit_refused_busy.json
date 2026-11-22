@@ -1,12 +1,12 @@
 {
-  "body_def": "error_reply",
-  "description": "The harness is busy and input.busy is reject: an ordinary refusal with no retry_after_ms. Sending again is a new request and a new signature.",
+  "body_def": "outcome_reply",
+  "description": "The harness is busy and input.busy is reject: AMQ's Outcome with code busy, which leaves a busy record. The server may send the same signed document again, at least 2 seconds apart; it runs at most once, while its issued_at window and not_after allow. Another document for the same request id does not run and is answered request_conflict.",
   "direction": "endpoint_to_server",
   "frame": {
     "body": {
-      "error": {
+      "outcome": {
         "code": "busy",
-        "message": "pi · demo repo is busy"
+        "op": "request.submit"
       }
     },
     "gen": 12,

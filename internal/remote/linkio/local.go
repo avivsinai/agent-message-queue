@@ -260,8 +260,8 @@ func (h *held) take(id, digest string, now time.Time) (*HeldTask, error) {
 	return t, nil
 }
 
-// forget drops a confirmed digest whose handoff core refused without a
-// record, so a resend is held and shown again instead of running on that press.
+// forget drops a confirmed digest whose handoff core refused, so a resend is
+// held and shown again instead of running on that press.
 func (h *held) forget(digest string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
