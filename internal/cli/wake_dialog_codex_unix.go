@@ -97,7 +97,12 @@ func codexDialogStore() (string, error) {
 // coop exec recorded for its thread: the hook input's session_id is the
 // thread id, and Codex passes no CODEX_THREAD_ID to hooks. A recorded
 // identity that cannot be used is an error, so the receiver does nothing.
+// A hook speaks for its input's thread: an environment that names another
+// thread is an error too.
 func adoptCodexHookIdentity(sessionID string) error {
+	if env, present := os.LookupEnv("CODEX_THREAD_ID"); present && codexidentity.ValidThread(sessionID) && strings.TrimSpace(env) != sessionID {
+		return fmt.Errorf("the hook input names Codex thread %s and CODEX_THREAD_ID names another", sessionID)
+	}
 	for _, key := range identityEnvKeys {
 		if _, present := os.LookupEnv(key); present {
 			return nil

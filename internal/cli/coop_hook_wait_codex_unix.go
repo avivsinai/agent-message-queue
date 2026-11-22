@@ -83,18 +83,35 @@ func runCoopPromptCodex(stdin io.Reader, w io.Writer) error {
 		SessionID string `json:"session_id"`
 		Prompt    string `json:"prompt"`
 	}
-	// A prompt cut by the bound leaves the thread unread, and then this is
-	// not a chat the hook can name.
-	_ = json.NewDecoder(io.LimitReader(stdin, coopPromptInputLimit)).Decode(&in)
-	if !codexidentity.ValidThread(in.SessionID) || adoptCodexHookIdentity(in.SessionID) != nil {
+	// Input the receiver cannot read whole, a prompt cut by the bound among
+	// it, names no chat and no prompt to speak for.
+	if json.NewDecoder(io.LimitReader(stdin, coopPromptInputLimit)).Decode(&in) != nil || !codexidentity.ValidThread(in.SessionID) {
+		return nil
+	}
+	if adoptCodexHookIdentity(in.SessionID) != nil {
 		return nil
 	}
 	root, me, session, err := coopHookContext()
-	if err != nil || root == "" || me == "" {
+	if err != nil || root == "" || me == "" || !codexThreadMayBe(in.SessionID, root, me) {
 		return nil
 	}
 	writeCoopPromptFor(w, in.Prompt, root, me, session)
 	return nil
+}
+
+// codexThreadMayBe reports whether thread may speak for (root, me). A
+// thread with a record of its own is that seat only. A thread with none is
+// the seat of its process, as an amq command of that thread is.
+func codexThreadMayBe(thread, root, me string) bool {
+	codexHome, err := codexHomeDir()
+	if err != nil {
+		return false
+	}
+	rec, err := codexidentity.Lookup(thread, absPath(filepath.Clean(codexHome)))
+	if errors.Is(err, codexidentity.ErrNone) {
+		return true
+	}
+	return err == nil && rec.Me == me && canonicalWakeRoot(rec.Root) == canonicalWakeRoot(root)
 }
 
 // codexWaiter is the waiter of a Codex thread under codexHome.

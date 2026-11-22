@@ -317,6 +317,49 @@ func TestCodexPromptAddsUnreadContextToAJoinedChat(t *testing.T) {
 	if got := prompt(unbound, "hello"); got != "" {
 		t.Fatalf("a chat with no binding got %q, want nothing", got)
 	}
+
+	// Review of PR 1585: the receiver spoke for a thread other than its
+	// input's, and for input it could not decode.
+	run := func(input string) string {
+		t.Helper()
+		var out bytes.Buffer
+		if err := runCoopPromptCodex(strings.NewReader(input), &out); err != nil {
+			t.Fatalf("prompt hook: %v, want exit 0", err)
+		}
+		return out.String()
+	}
+	if got := run(fmt.Sprintf(`{"session_id":%q,"prompt":5}`, thread)); got != "" {
+		t.Fatalf("input with a prompt that is not text got %q, want nothing", got)
+	}
+	for _, key := range append([]string{"CODEX_THREAD_ID"}, identityEnvKeys...) {
+		_ = os.Unsetenv(key)
+	}
+	// amq adopts the identity of the environment's thread before a verb runs.
+	t.Setenv("CODEX_THREAD_ID", thread)
+	if err := adoptCodexThreadIdentity(); err != nil {
+		t.Fatal(err)
+	}
+	if got := run(fmt.Sprintf(`{"session_id":%q,"prompt":"hello"}`, unbound)); got != "" {
+		t.Fatalf("an environment that names another thread than the input got %q, want nothing", got)
+	}
+	for _, key := range append([]string{"CODEX_THREAD_ID"}, identityEnvKeys...) {
+		_ = os.Unsetenv(key)
+	}
+	// The process is another seat, and the input's thread has its own record.
+	root := absPath(filepath.Join(defaultCoopRoot, defaultSessionName))
+	if _, err := captureStdout(t, func() error {
+		return runSend([]string{"--root", root, "--me", "codex", "--to", "claude", "--body", "hi"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AM_ROOT", root)
+	t.Setenv("AM_ME", "claude")
+	if got := run(fmt.Sprintf(`{"session_id":%q,"prompt":"hello"}`, thread)); got != "" {
+		t.Fatalf("a thread recorded for codex in a process that is claude got %q, want nothing", got)
+	}
+	if got := run(fmt.Sprintf(`{"session_id":%q,"prompt":"hello"}`, unbound)); !strings.Contains(got, "You have 1 unread AMQ message(s)") {
+		t.Fatalf("a thread with no record in a process that is claude got %q, want the seat's unread context", got)
+	}
 }
 
 func TestCodexWaitQueuesTheDoorbellToItsThread(t *testing.T) {
