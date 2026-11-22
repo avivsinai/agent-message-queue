@@ -443,9 +443,12 @@ func TestCodexPromptAddsUnreadContextToAJoinedChat(t *testing.T) {
 	}
 
 	// The queue was made again at the same path: the thread's record pinned
-	// the earlier one, so the thread does not speak for the new one.
+	// the earlier one, so the thread does not speak for the new one. The
+	// earlier tree is moved away, not removed: a root's identity is its
+	// file-system identity, and a removed directory can give its inode to
+	// the next one (CI run of PR 1587 on Linux).
 	_ = os.Unsetenv("CODEX_THREAD_ID")
-	if err := os.RemoveAll(defaultCoopRoot); err != nil {
+	if err := os.Rename(defaultCoopRoot, defaultCoopRoot+".earlier"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := captureStdout(t, func() error { return runCoopInit([]string{"--agents", "claude,codex", "--no-gitignore"}) }); err != nil {
