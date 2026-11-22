@@ -1126,6 +1126,7 @@ func writeWakeCheckText(result wakeCheckResult) error {
 			wakeCheckTextValue(result.WakeMode),
 			result.OwnerBound,
 		),
+		fmt.Sprintf("  Attended: %t", result.Attended),
 		fmt.Sprintf(
 			"  Running image: %s (version=%s status=%s)",
 			result.RunningImagePath,
