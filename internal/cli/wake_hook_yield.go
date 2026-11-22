@@ -2,7 +2,6 @@ package cli
 
 import (
 	"encoding/json"
-	"io"
 	"path/filepath"
 	"time"
 
@@ -128,14 +127,16 @@ func coopAnnounced(agent, session string, anySession bool) map[string]time.Time 
 // readCoopHookRecord decodes the co-op hook record at path into v and
 // returns the file's time, which is when the hook last wrote it. A missing
 // or undecodable record, a link, or a file that is not regular reads as
-// none.
+// none. The read has no size bound: a record holds one id per unread
+// message, and a record cut short would read as none, so the waiter would
+// ring every message of a large backlog again.
 func readCoopHookRecord(path string, v any) (time.Time, bool) {
 	f, info, err := fsq.OpenRegularNoFollow(path)
 	if err != nil {
 		return time.Time{}, false
 	}
 	defer func() { _ = f.Close() }()
-	if json.NewDecoder(io.LimitReader(f, maxWakeMetadataFileBytes)).Decode(v) != nil {
+	if json.NewDecoder(f).Decode(v) != nil {
 		return time.Time{}, false
 	}
 	return info.ModTime(), true
