@@ -16,6 +16,9 @@ func TestSeatDoorbellSelectsOneRinger(t *testing.T) {
 		{"notify-only wake", true, wakeChannelNone, false, doorbellHook},
 		{"typing wake", true, wakeChannelTyped, false, doorbellTyped},
 		{"unpublished wake", true, "", false, doorbellTyped},
+		// Review finding H1: a notify-only wake with no recorded channel
+		// typed nothing and silenced the waiter, so the seat had no ringer.
+		{"notify-only wake with no record", true, publishedWakeChannel("", wakeInjectModeNone), false, doorbellHook},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := decideSeatDoorbell(tc.live, tc.channel, tc.attended); got != tc.want {

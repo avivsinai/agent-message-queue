@@ -2,29 +2,28 @@
 
 package cli
 
-// publishedWakeChannel treats an older or missing sidecar as a typing wake.
-func (applied wakeSettingsAppliedFile) publishedWakeChannel() wakeChannel {
-	switch applied.Doorbell {
-	case wakeChannelNone, wakeChannelHook:
-		return applied.Doorbell
-	default:
-		return wakeChannelTyped
-	}
-}
-
 // readSeatDoorbell uses the published channel for exactly the inspected wake
 // generation. Only a seat without a live wake uses its settings directly.
-func readSeatDoorbell(root, me string) (ringer seatDoorbell, optIn bool) {
+func readSeatDoorbell(root, me string) seatDoorbellRead {
 	var layers wakeSettingsLayers
 	return layers.readSeatDoorbell(root, me)
 }
 
 // A long-running waiter retains the last valid settings across refused edits.
-func (layers *wakeSettingsLayers) readSeatDoorbell(root, me string) (seatDoorbell, bool) {
+func (layers *wakeSettingsLayers) readSeatDoorbell(root, me string) seatDoorbellRead {
 	if observed, live := observeCoopHookWake(canonicalWakeRoot(root), me, false); live {
-		return decideSeatDoorbell(true, observed.channel, observed.attended), observed.channel == wakeChannelHook
+		hook := observed.channel == wakeChannelHook
+		return seatDoorbellRead{
+			ringer:        decideSeatDoorbell(true, observed.channel, observed.attended),
+			hookPublished: hook,
+			optIn:         hook,
+		}
 	}
 	settings, next := coopWaitSettings(root, me, *layers)
 	*layers = next
-	return decideSeatDoorbell(false, "", settings.attended), settings.hookDoorbell
+	return seatDoorbellRead{
+		ringer:   decideSeatDoorbell(false, "", settings.attended),
+		optIn:    settings.hookDoorbell,
+		settings: &settings,
+	}
 }

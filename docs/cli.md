@@ -2035,10 +2035,11 @@ that does not match AM_ROOT, or when the mailbox does not exist, it prints
 nothing.
 
 stop blocks the stop once for unread mail it has not reported yet. Under a
-typing wake it counts only mail created at or before the wake's startup
-baseline, because the wake rings for later mail. It allows the stop after
-5 blocks in one chain, and prints a systemMessage when the context conflicts
-or the mailbox cannot be read.
+live wake it counts only mail created at or before the wake's startup
+baseline, because the wake or its hook rings for later mail. On an attended
+seat it never blocks: it reports each unread message once. It allows the
+stop after 5 blocks in one chain, and prints a systemMessage when the
+context conflicts or the mailbox cannot be read.
 
 prompt: on UserPromptSubmit, adds a line of context when unread mail waits;
 prints nothing for the wake's own doorbell.

@@ -19,6 +19,7 @@ package cli
 // starts a waiter or rings.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -134,6 +135,85 @@ func TestCoopWaitRingsOnceForNewMail(t *testing.T) {
 	}
 	if err := wait(quiet); err != nil {
 		t.Fatalf("same mail again: %v, want no second ring", err)
+	}
+
+	// Review finding H7: a ring the waiter undoes (its queue failed) left a
+	// fresh rang record, which the wake read as a recent ring and so held
+	// its typed doorbell for the whole grace.
+	aged := time.Now().Add(-2 * hookRingGrace)
+	if err := os.Chtimes(statePath, aged, aged); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := captureStdout(t, func() error {
+		return runSend([]string{"--root", root, "--me", "codex", "--to", "claude", "--body", "again"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	undone := claudeWaiter(claudeSession, os.Getppid(), launch.HolderIdentity{})
+	undone.ring = func() (bool, error) { return true, nil }
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	if err := waitCoopMail(ctx, root, "claude", undone); err != nil {
+		t.Fatalf("undone ring: %v", err)
+	}
+	yield := &wakeConfig{root: root, me: "claude", publishedChannel: wakeChannelHook}
+	if wait, held := yield.hookYield(time.Now()); held {
+		t.Fatalf("the wake yields %s after an undone ring, want it to type", wait)
+	}
+
+	// Review finding H3: the Stop guard keeps the baseline cut of #1152 under
+	// every live wake that is not attended, whatever channel it published:
+	// mail after the baseline does not block the stop.
+	for _, seat := range []struct {
+		me, mode string
+		channel  wakeChannel
+	}{
+		{"hookseat", wakeInjectModeRaw, wakeChannelHook},
+		{"notifyseat", wakeInjectModeNone, ""},
+	} {
+		if err := fsq.EnsureAgentDirs(root, seat.me); err != nil {
+			t.Fatal(err)
+		}
+		stop, err := acquireWakeLockWithOptions(root, seat.me, wakeLockAcquireOptions{wakeMode: seat.mode})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer stop()
+		live := inspectWakeLock(root, seat.me)
+		if err := writeWakePreparedFile(root, seat.me, live); err != nil {
+			t.Fatal(err)
+		}
+		// A message's created time has whole seconds: the baseline is set a
+		// minute back so the next mail is plainly after it.
+		started := time.Now().Add(-time.Minute)
+		if err := os.Chtimes(wakePreparedPath(root, seat.me), started, started); err != nil {
+			t.Fatal(err)
+		}
+		if seat.channel != "" {
+			seatDir, err := openExistingWakeAgentDir(root, seat.me)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = recordWakeSettingsApplied(seatDir, live, wakeSettingsAppliedStatus{doorbell: seat.channel}, wakeSettingsGuardTimeout)
+			_ = seatDir.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := captureStdout(t, func() error {
+			return runSend([]string{"--root", root, "--me", "codex", "--to", seat.me, "--body", "after the baseline"})
+		}); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(envRoot, root)
+		t.Setenv(envMe, seat.me)
+		var out bytes.Buffer
+		if err := writeCoopStop(strings.NewReader(`{"stop_hook_active":false}`), &out); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out.String(), `"decision"`) {
+			t.Fatalf("%s: stop = %q, want no block for mail after the baseline", seat.me, out.String())
+		}
 	}
 }
 
@@ -385,7 +465,17 @@ func TestTerminalWaitHookRequiresOptIn(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(fsq.AgentBase(root, "claude"), wakeSettingsFileName), []byte(`{"schema":1,"settings":{"hook_doorbell":true}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if !coopWaitRunsInBackground(root, "claude") {
+	if !coopWaitRunsInBackground(readSeatDoorbell(root, "claude").optIn) {
 		t.Fatal("the same terminal should admit a waiter when the setting is enabled")
+	}
+	// Review finding H2: with the setting on, no live wake and no wait hook
+	// installed, nothing rings, so the preamble must not tell the agent a
+	// hook wakes it.
+	var preamble bytes.Buffer
+	if err := writeCoopSessionStart(&preamble, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(preamble.String(), "No wake: run amq drain --include-body between tasks.") {
+		t.Fatalf("preamble with no wake and no wait hook = %q, want No wake", preamble.String())
 	}
 }

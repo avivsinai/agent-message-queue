@@ -520,7 +520,7 @@ func coopJoinDoorbell(root, me string) string {
 		return "No wake: the wait hook is not installed. Run amq coop install-hooks, then start a new session and join again; until then run amq drain --include-body between tasks."
 	case !slices.Contains(commands, coopHookCommand(bin, claudeidentity.SessionsDir(home), "wait")):
 		return "No wake: the installed wait hook is not the one this amq installs (another binary, or an older release). Run amq coop install-hooks, then start a new session; until then run amq drain --include-body between tasks."
-	case !coopWaitRunsInBackground(root, me):
+	case !coopWaitRunsInBackground(readSeatDoorbell(root, me).optIn):
 		return "No wake: this Claude Code session does not keep the wait hook in the background. Run amq drain --include-body between tasks."
 	}
 	return "A hook wakes this session when mail arrives after a turn ends; it starts at the end of this turn. Do not run amq watch, amq monitor or a polling loop."

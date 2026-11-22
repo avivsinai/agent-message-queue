@@ -18,13 +18,14 @@ type coopHookWakeObservation struct {
 }
 
 // coopHookWakeBaseline returns the startup baseline of the live wake for
-// (root, me), with amq wake check's liveness rule and baseline_at. ok is false
-// when no wake is live, the live wake has published no baseline, or the lock
-// changed between two reads; the guard then counts every message.
+// (root, me), with amq wake check's liveness rule and baseline_at, whatever
+// channel that wake published. ok is false when no wake is live, the live
+// wake has published no baseline, or the lock changed between two reads;
+// the guard then counts every message.
 func coopHookWakeBaseline(root, me string) (time.Time, bool) {
 	root = canonicalWakeRoot(root)
 	first, ok := observeCoopHookWake(root, me, true)
-	if !ok || decideSeatDoorbell(true, first.channel, first.attended) != doorbellTyped {
+	if !ok {
 		return time.Time{}, false
 	}
 	if second, ok := observeCoopHookWake(root, me, true); !ok || second != first {
@@ -53,7 +54,7 @@ func observeCoopHookWake(root, me string, withBaseline bool) (coopHookWakeObserv
 		}
 		applied, _ := readWakeSettingsAppliedAt(dirfd, agentDir, inspection)
 		obs = coopHookWakeObservation{
-			channel:    applied.publishedWakeChannel(),
+			channel:    publishedWakeChannel(applied.Doorbell, inspection.Lock.WakeMode),
 			attended:   applied.Attended,
 			pid:        inspection.PID,
 			generation: inspection.Lock.Generation,

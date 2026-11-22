@@ -15,11 +15,15 @@ const (
 	coopWaitStateFile = ".rewake-hook-state.json"
 )
 
-func wakeDoorbellChannel(settings wakeSettings, mode, injectVia string) wakeChannel {
+// wakeDoorbellChannel is the channel a wake publishes for settings. The
+// inject mode and injector come from cfg alone, at startup and at every
+// reload.
+func wakeDoorbellChannel(settings wakeSettings, cfg *wakeConfig) wakeChannel {
+	mode := effectiveInjectMode(cfg)
 	switch {
 	case settings.attended || mode == wakeInjectModeNone:
 		return wakeChannelNone
-	case settings.hookDoorbell && injectVia == "" && (mode == wakeInjectModeRaw || mode == wakeInjectModePaste):
+	case settings.hookDoorbell && cfg.injectVia == "" && (mode == wakeInjectModeRaw || mode == wakeInjectModePaste):
 		return wakeChannelHook
 	default:
 		return wakeChannelTyped

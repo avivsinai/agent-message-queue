@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -60,7 +61,7 @@ func runCoopWait(ctx context.Context) error {
 	if err != nil || root == "" || me == "" {
 		return nil
 	}
-	claude, ok := eligibleCoopWaitHost(root, me)
+	claude, ok := coopWaitAdmits(readSeatDoorbell(root, me).optIn)
 	if !ok {
 		return nil
 	}
@@ -148,8 +149,8 @@ func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 		}
 		wait := coopWaitPoll
 		var due []string
-		ringer, _ := layers.readSeatDoorbell(root, me)
-		if release != nil && ringer == doorbellHook {
+		seat := layers.readSeatDoorbell(root, me)
+		if release != nil && seat.ringer == doorbellHook {
 			if now := time.Now(); now.Sub(promoted) >= coopWaitFollowUpEvery {
 				promoted = now
 				// The hook's stderr is the ring text, so a failure stays
@@ -159,7 +160,11 @@ func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 			pending, err := inbox.pending(root, me)
 			if err == nil && len(pending) > 0 {
 				var settings wakeSettings
-				settings, layers = coopWaitSettings(root, me, layers)
+				if seat.settings != nil {
+					settings = *seat.settings
+				} else {
+					settings, layers = coopWaitSettings(root, me, layers)
+				}
 				rang := readCoopWaitState(statePath, w.session)
 				announced := append(readCoopStopState(filepath.Join(agent, coopStopStateFile)).BlockedIDs, rang.RangIDs...)
 				now := time.Now()
@@ -173,12 +178,13 @@ func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 				case len(due) > 0:
 					// Ring only after the record is stored: a ring the next
 					// waiter cannot see would repeat at every turn end.
+					before, beforeErr := os.Lstat(statePath)
 					if err := writeCoopHookState(statePath, nextCoopWaitState(rang, pending, due)); err != nil {
 						return nil
 					}
 					undo, err := w.ring()
 					if undo {
-						_ = writeCoopHookState(statePath, rang)
+						undoCoopWaitRing(statePath, rang, before, beforeErr)
 					}
 					return err
 				case !next.IsZero() && next.Sub(now) < wait:
@@ -193,6 +199,21 @@ func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 		case <-time.After(wait):
 		}
 	}
+}
+
+// undoCoopWaitRing puts back the rang record of a ring that did not reach
+// the session. The record's file time is the wake's evidence of a recent
+// ring, so the earlier time comes back with the earlier record, and a
+// record that did not exist before the ring is removed.
+func undoCoopWaitRing(path string, rang coopWaitState, before os.FileInfo, beforeErr error) {
+	if errors.Is(beforeErr, fs.ErrNotExist) {
+		_ = os.Remove(path)
+		return
+	}
+	if writeCoopHookState(path, rang) != nil || before == nil {
+		return
+	}
+	_ = os.Chtimes(path, time.Time{}, before.ModTime())
 }
 
 // coopWaitOwns reports whether the owner file still names this waiter.
@@ -294,18 +315,19 @@ func coopWaitRuns(root, me string) bool {
 }
 
 // coopWaitRunsInBackground reports whether the Claude Code session this
-// hook runs in keeps an asyncRewake hook in the background.
-func coopWaitRunsInBackground(root, me string) bool {
-	_, ok := eligibleCoopWaitHost(root, me)
+// hook runs in keeps an asyncRewake hook in the background, for a seat
+// whose opt-in is optIn.
+func coopWaitRunsInBackground(optIn bool) bool {
+	_, ok := coopWaitAdmits(optIn)
 	return ok
 }
 
-func eligibleCoopWaitHost(root, me string) (launch.HolderIdentity, bool) {
+// coopWaitAdmits returns the host session of this hook when it may run the
+// waiter: a host that needs an opt-in is admitted only when optIn, the
+// opt-in the caller already read for the seat.
+func coopWaitAdmits(optIn bool) (launch.HolderIdentity, bool) {
 	host, support, ok := coopWaitHost()
-	if ok && support.OptIn {
-		_, ok = readSeatDoorbell(root, me)
-	}
-	return host, ok
+	return host, ok && (!support.OptIn || optIn)
 }
 
 // coopWaitHost admits only a recorded ancestor session whose entrypoint

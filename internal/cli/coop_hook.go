@@ -42,10 +42,11 @@ func runCoopHook(args []string) error {
 		"nothing.",
 		"",
 		"stop blocks the stop once for unread mail it has not reported yet. Under a",
-		"typing wake it counts only mail created at or before the wake's startup",
-		"baseline, because the wake rings for later mail. It allows the stop after",
-		"5 blocks in one chain, and prints a systemMessage when the context conflicts",
-		"or the mailbox cannot be read.",
+		"live wake it counts only mail created at or before the wake's startup",
+		"baseline, because the wake or its hook rings for later mail. On an attended",
+		"seat it never blocks: it reports each unread message once. It allows the",
+		"stop after 5 blocks in one chain, and prints a systemMessage when the",
+		"context conflicts or the mailbox cannot be read.",
 		"",
 		"prompt: on UserPromptSubmit, adds a line of context when unread mail waits;",
 		"prints nothing for the wake's own doorbell.",
@@ -143,17 +144,19 @@ func writeCoopSessionStart(w io.Writer, now time.Time) error {
 	if unread > 0 {
 		fmt.Fprintf(&b, "\nInbox: %d unread. Run amq drain --include-body.", unread)
 	}
-	ringer, optIn := readSeatDoorbell(root, me)
+	seat := readSeatDoorbell(root, me)
 	switch {
-	case ringer == doorbellNone:
+	case seat.ringer == doorbellNone:
 		// An attended seat is never typed into, so no wake mode changes the
 		// wording.
 		b.WriteString("\nThis seat is attended: no doorbell is typed and no hook wakes it. Mail is announced at the person's next prompt and at a turn end; run amq drain --include-body then. Do not run amq watch, amq monitor or a polling loop.")
-	case ringer == doorbellTyped:
+	case seat.ringer == doorbellTyped:
 		b.WriteString("\nA wake rings this terminal when mail arrives; do not run amq watch, amq monitor or a polling loop.")
-	case optIn && coopWaitRunsInBackground(root, me):
+	case seat.hookPublished:
+		// The live wake types the doorbell whenever no waiter holds it, so
+		// this seat has a ringer whether or not its hook runs.
 		b.WriteString("\nA hook wakes this session when mail arrives; a wake types the doorbell only when no hook waits. Do not run amq watch, amq monitor or a polling loop.")
-	case coopWaitRings(root, me):
+	case coopWaitRings(seat.optIn):
 		b.WriteString("\nA hook wakes this session when mail arrives after a turn ends; do not run amq watch, amq monitor or a polling loop.")
 	default:
 		b.WriteString("\nNo wake: run amq drain --include-body between tasks.")
@@ -202,8 +205,8 @@ func coopHookPeers(root, me string, now time.Time) []string {
 
 // coopWaitRings reports whether the waiter is this session's doorbell when
 // no wake rings: amq coop install-hooks installed it, and the session keeps
-// it in the background.
-func coopWaitRings(root, me string) bool {
+// it in the background. optIn is the seat's opt-in from its one seat read.
+func coopWaitRings(optIn bool) bool {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return false
@@ -212,7 +215,7 @@ func coopWaitRings(root, me string) bool {
 	if err != nil || !slices.ContainsFunc(commands, ownsCoopHook(true)) {
 		return false
 	}
-	return coopWaitRunsInBackground(root, me)
+	return coopWaitRunsInBackground(optIn)
 }
 
 // coopHookUnread counts messages in inbox/new the way amq list --new does.

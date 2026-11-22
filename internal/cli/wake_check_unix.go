@@ -48,7 +48,8 @@ type wakeCheckResult struct {
 	// StartupHold is an open trust-dialog hold coop exec placed.
 	StartupHold *wakeStartupHoldStatus `json:"startup_hold,omitempty"`
 
-	Doorbell   wakeChannel `json:"doorbell"`
+	// Doorbell is absent with no live wake.
+	Doorbell   wakeChannel `json:"doorbell,omitempty"`
 	WaiterLive bool        `json:"waiter_live"`
 }
 
@@ -213,7 +214,7 @@ func observeWakeCheck(root, me string) (wakeCheckObservation, error) {
 		applied, _ := readWakeSettingsAppliedAt(dirfd, agentDir, observation.Inspection)
 		observation.InputGuard = applied.InputGuard
 		observation.Attended = applied.Attended
-		observation.Doorbell = applied.publishedWakeChannel()
+		observation.Doorbell = publishedWakeChannel(applied.Doorbell, observation.Inspection.Lock.WakeMode)
 		observation.BaselineAt = observeWakeCheckBaselineAt(dirfd, agentDir, observation.Inspection)
 		var boundSelectionErr error
 		observation.Repair = assessWakeRepair(
@@ -604,7 +605,7 @@ func renderWakeCheckV1(decision wakeCheckDecision) wakeCheckResult {
 		BaselineAt:               wakeCheckStringValue(decision.Wake.BaselineAt, ""),
 		InputGuard:               wakeInputGuardValue(decision.Wake.InputGuard),
 		Attended:                 decision.Wake.Attended,
-		Doorbell:                 decision.Wake.reportedDoorbell(),
+		Doorbell:                 decision.Wake.Doorbell,
 		WaiterLive:               decision.Wake.WaiterLive,
 		WakeStatus:               decision.Wake.Status,
 		HealthStatus:             decision.Health.Status,

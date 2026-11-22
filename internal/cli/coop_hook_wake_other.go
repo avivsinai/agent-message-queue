@@ -11,4 +11,6 @@ func coopHookWakeBaseline(root, me string) (time.Time, bool) {
 }
 
 // On this platform no wake or wait hook runs.
-func readSeatDoorbell(root, me string) (seatDoorbell, bool) { return doorbellHook, false }
+func readSeatDoorbell(root, me string) seatDoorbellRead {
+	return seatDoorbellRead{ringer: doorbellHook}
+}

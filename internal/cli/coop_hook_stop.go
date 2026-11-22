@@ -113,13 +113,15 @@ func writeCoopStop(stdin io.Reader, w io.Writer) error {
 	// The seat decision is read before the wake baseline, and only when mail
 	// is pending or a notice is already recorded: most turn ends have
 	// neither, and the decision's reads are the only ones here that touch
-	// the disk.
-	ringer := doorbellHook
+	// the disk. The guard asks it only whether the seat is attended: every
+	// other live wake, whatever its channel, rings or yields to a ringer for
+	// mail after its baseline.
+	attended := false
 	if len(pending) > 0 || len(old.NoticedIDs) > 0 {
-		ringer, _ = readSeatDoorbell(root, me)
+		attended = readSeatDoorbell(root, me).ringer == doorbellNone
 	}
 	var baseline *time.Time
-	if len(pending) > 0 && ringer == doorbellTyped {
+	if len(pending) > 0 && !attended {
 		if at, ok := coopHookWakeBaseline(root, me); ok {
 			baseline = &at
 		}
@@ -132,7 +134,7 @@ func writeCoopStop(stdin io.Reader, w io.Writer) error {
 	// message counts, with no wake baseline: the attended wake types
 	// nothing, so mail after its baseline would otherwise never be reported
 	// at a turn end. A seat that is not attended keeps the block below.
-	if ringer == doorbellNone {
+	if attended {
 		next := decideCoopStopAttended(pending, old)
 		fresh := freshAttendedIDs(pending, old.NoticedIDs)
 		if !slices.Equal(next.NoticedIDs, old.NoticedIDs) {

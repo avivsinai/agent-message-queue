@@ -965,7 +965,7 @@ func noteWakeSettingsApplied(cfg *wakeConfig, status wakeSettingsAppliedStatus) 
 	status.inputGuard = cfg.inputGuard.status(cfg.settings)
 	cfg.reportedInputGuard = status.inputGuard
 	status.attended = cfg.settings.attended
-	status.doorbell = wakeDoorbellChannel(cfg.settings, effectiveInjectMode(cfg), cfg.injectVia)
+	status.doorbell = wakeDoorbellChannel(cfg.settings, cfg)
 	pending := status
 	cfg.pendingSettingsApplied = &pending
 	if err := retryPendingWakeSettingsApplied(cfg); err != nil {

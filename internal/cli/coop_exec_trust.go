@@ -338,8 +338,10 @@ func decideStartupDialogMarker(binaryPath string, args []string, recorded, guard
 // Enter, never held for a dialog), or "dialog guard: proper (<harness>)"
 // when guard names the harness whose dialog hook or relay holds it. An
 // attended seat adds one delivery line for every harness: no doorbell is
-// typed, mail shows as a notice. The line does not predict what the hooks
-// will deliver — that is the hooks' own state at each prompt.
+// typed, mail shows as a notice. A seat that is not attended and has
+// hook_doorbell on adds the hook doorbell line instead. Neither line
+// predicts what the hooks will deliver — that is the hooks' own state at
+// each prompt.
 func publishStartupDialogMarker(root, handle string, marker wakeDialogMarker, hold bool, guard string) error {
 	if err := syncStartupDialogMarkerState(root, handle, marker, hold); err != nil {
 		return err

@@ -19,7 +19,7 @@ func coopWaitRuns(root, me string) bool { return false }
 
 // coopWaitRunsInBackground reports no session that keeps the waiter in the
 // background where the waiter does not run.
-func coopWaitRunsInBackground(root, me string) bool { return false }
+func coopWaitRunsInBackground(optIn bool) bool { return false }
 
 // coopWaitSettings is the settings read of a seat where amq wake does not
 // run. No settings file is written on these platforms, so the defaults are
