@@ -184,13 +184,22 @@ func TestLinkBusyIsReadmittedOnlyByTheSameSignedRequest(t *testing.T) {
 	dispatches := func() int { return rt.Snapshot().Dispatches }
 
 	// Another signature for the same id (a later not_after) does not run: it
-	// is answered from the stored record.
+	// is answered from the stored record. Review of this branch: the outcome
+	// had no code, which a link server reads as accepted; it is
+	// request_conflict.
 	later := *resigned
 	later.NotAfter = protocol.FormatTime(clk.now().Add(3 * time.Minute))
 	before := dispatches()
-	if r := submitReply(t, ep, &later, linkSource(hostB, "fake")); r.Snapshot.State != protocol.StateRejected || r.Snapshot.Code != protocol.CodeBusy || dispatches() != before || rt.HasRun(resigned.RequestID) {
-		t.Fatalf("resubmit with a later not_after = %s/%s, dispatches %d -> %d; want the stored busy record, no run",
-			r.Snapshot.State, r.Snapshot.Code, before, dispatches())
+	if r := submitReply(t, ep, &later, linkSource(hostB, "fake")); r.Snapshot.State != protocol.StateRejected || r.Snapshot.Code != protocol.CodeBusy || r.Outcome.Code != protocol.CodeRequestConflict || dispatches() != before || rt.HasRun(resigned.RequestID) {
+		t.Fatalf("resubmit with a later not_after = %s/%s outcome %q, dispatches %d -> %d; want the stored busy record, request_conflict, no run",
+			r.Snapshot.State, r.Snapshot.Code, r.Outcome.Code, before, dispatches())
+	}
+
+	// Review of this branch: a source that is not a link, with the link's
+	// host, ran the link's tombstone without signed bytes. Only a link
+	// re-admits it.
+	if _, err := ep.Handle(runs, core.Source{Host: hostB}); refusalCode(err) != protocol.CodeConsentInvalid || dispatches() != before || rt.HasRun(runs.RequestID) {
+		t.Fatalf("non-link resubmit of a link tombstone = %v, dispatches %d -> %d; want consent_invalid, no run", err, before, dispatches())
 	}
 
 	// The same signed document runs once the target is free, and only once.

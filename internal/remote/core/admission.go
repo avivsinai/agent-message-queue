@@ -45,14 +45,20 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		// normally, not answered from the tombstone (minimal tombstone
 		// semantics; full safety/reset is not handled here). Recognizable as
 		// a tombstoned rejected record with no dispatch behind it and the
-		// same request (sameRequest); only a DIFFERENT digest is a conflict,
-		// and any other resubmit is answered from the stored record.
+		// same request (sameRequest). A different digest, or another signed
+		// document for a link's busy tombstone, is a conflict; any other
+		// resubmit is answered from the stored record.
 		retryable := readmittableBusy(rec) && sameRequest(rec, cmd, digest)
 		if !retryable {
 			e.mu.Unlock()
 			out := protocol.Outcome{Op: protocol.OpRequestSubmit}
 			if rec.InputDigest != "" && rec.InputDigest != digest {
 				out.Code = protocol.CodeRequestConflict
+			} else if rec.Origin["carrier"] == CarrierLink && readmittableBusy(rec) && rec.NotAfter != cmd.NotAfter {
+				// The document never runs; an empty code would read as
+				// accepted over the link, which carries only the outcome.
+				out.Code = protocol.CodeRequestConflict
+				out.Message = "another signed document holds this request id"
 			} else if rec.State == protocol.StateRejected {
 				// Same-digest retry of a rejected submit. status/get already
 				// returns the stored adapter text; the duplicate submit must too.
@@ -180,10 +186,13 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 // tombstone rec by src. The caller holds e.mu; it unlocks exactly once on
 // every return.
 func (e *Endpoint) resubmitTombstoneLocked(cmd *protocol.Command, src Source, key requests.Key, rec *requests.Record) (protocol.Reply, error) {
-	// A link re-admits under the gates of a fresh link submit: verified
-	// signed bytes and a target still shared with it here, its bound of open
-	// requests before the reservation below.
-	if isLink(src) && (src.NativeSession == "" || src.Credential == "") {
+	// A link's record, or any record a link resubmits, re-admits only under
+	// the gates of a fresh link submit: a link source with verified signed
+	// bytes, a target still shared with it here, and its bound of open
+	// requests before the reservation below. Only a link verifies the signed
+	// document, so no other source re-admits a link's tombstone.
+	signedLink := isLink(src) && src.NativeSession != "" && src.Credential != ""
+	if (isLink(src) || rec.Origin["carrier"] == CarrierLink) && !signedLink {
 		e.mu.Unlock()
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeConsentInvalid, "a link submit runs only from verified signed bytes")
 	}
@@ -510,7 +519,8 @@ func readmittableBusy(rec *requests.Record) bool {
 // request rec stores. The digest does not cover not_after, so a link record
 // also needs the same not_after: only the same signed document re-admits a
 // link's busy tombstone, and another signature for the same request id is
-// answered from the stored record. Nothing is admitted after not_after, so
+// answered from the stored record with request_conflict. Nothing is admitted
+// after not_after, so
 // a link record whose deadline passed never runs.
 func sameRequest(rec *requests.Record, cmd *protocol.Command, digest string) bool {
 	if rec.InputDigest != digest {
