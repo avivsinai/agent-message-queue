@@ -20,6 +20,10 @@ type BoundRequest struct {
 	// run in. An adapter that reads the session it is about to write to
 	// refuses with session_changed when that session differs.
 	NativeSession string
+	// Granted marks a link request that a session grant admitted with no
+	// signature of its own. An adapter that reads the session's permission
+	// mode refuses it with consent_invalid when the session does not ask.
+	Granted bool
 }
 
 // Admission is the attachment's answer to Submit. Admitted means the request
@@ -191,6 +195,14 @@ type UncertainReleaser interface {
 // instead of a bare code.
 type SubmitBlocker interface {
 	InspectSubmit() (protocol.Session, string)
+}
+
+// PermissionReader is an optional Attachment method for an adapter that reads
+// from the harness itself whether the session asks the user before a tool
+// acts. asks is false when the mode does not ask or cannot be read; why names
+// the mode, or why it cannot be read. It reads only the adapter's own state.
+type PermissionReader interface {
+	SessionAsks() (asks bool, why string)
 }
 
 type Attachment interface {

@@ -48,7 +48,7 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		// same request (sameRequest). A different digest, or another signed
 		// document for a link's busy tombstone, is a conflict; any other
 		// resubmit is answered from the stored record.
-		retryable := readmittableBusy(rec) && sameRequest(rec, cmd, digest)
+		retryable := readmittableBusy(rec) && sameRequest(rec, cmd, digest, src.GrantDigest)
 		if !retryable {
 			e.mu.Unlock()
 			out := protocol.Outcome{Op: protocol.OpRequestSubmit}
@@ -61,6 +61,11 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 				// outcome.
 				out.Code = protocol.CodeRequestConflict
 				out.Message = "another signed document holds this request id"
+			} else if rec.Origin["carrier"] == CarrierLink && rec.GrantDigest != src.GrantDigest {
+				// A link's request id admitted by a signature is never run
+				// by a grant, nor the reverse, nor by another grant.
+				out.Code = protocol.CodeRequestConflict
+				out.Message = "another grant or signature holds this request id"
 			} else if rec.State == protocol.StateRejected {
 				// Same-digest retry of a rejected submit. status/get already
 				// returns the stored adapter text; the duplicate submit must too.
@@ -91,6 +96,7 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		Origin:            maps.Clone(src.Origin),
 		NativeSession:     src.NativeSession,
 		ConsentCredential: src.Credential,
+		GrantDigest:       src.GrantDigest,
 	}
 	// Decide admissibility + reservation BEFORE Create: a request we are
 	// about to refuse is never written (no durable placeholder to leak on a
@@ -125,6 +131,12 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		}
 	}
 	if t == nil {
+		if src.GrantDigest != "" {
+			// A granted request is never held for later: it runs now or the
+			// link sends it again, so it leaves no record.
+			e.mu.Unlock()
+			return protocol.Reply{Snapshot: e.unpersisted(rec, protocol.StateRejected, protocol.CodeBusy), Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeBusy, Message: "the target is offline; nothing was sent"}}, nil
+		}
 		// Target registered but offline: Create received and let Tick admit
 		// or expire it later.
 		if err := e.crashAt(PointBeforeReceived); err != nil {
@@ -144,12 +156,12 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
 	}
 	// A session-bound request runs only on the native session it is bound
-	// to, and a link request only with a consent key still accepted. This
-	// check and the dispatching commit below share one critical section; the
-	// handoff is the cutoff.
-	if code := e.handoffLocked(rec, t); code != "" {
+	// to, and a link request only with a consent key, and a grant, still
+	// accepted. This check and the dispatching commit below share one
+	// critical section; the handoff is the cutoff.
+	if code, reason := e.handoffLocked(rec, t); code != "" {
 		e.mu.Unlock()
-		return protocol.Reply{Snapshot: e.unpersisted(rec, protocol.StateRejected, code), Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: code}}, nil
+		return protocol.Reply{Snapshot: e.unpersisted(rec, protocol.StateRejected, code), Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: code, Message: protocol.BoundReason(reason)}}, nil
 	}
 	// Per-runtime reservation: refuse a second concurrent dispatch
 	// for the same target, unless the target is a ConcurrentSubmitter.
@@ -221,9 +233,25 @@ func (e *Endpoint) resubmitTombstoneLocked(cmd *protocol.Command, src Source, ke
 	if src.NativeSession != "" {
 		rec.NativeSession = src.NativeSession
 	}
-	if code := e.handoffLocked(rec, t); code != "" {
+	if linkRecord {
+		rec.ConsentCredential, rec.GrantDigest = src.Credential, src.GrantDigest
+	}
+	if code, reason := e.handoffLocked(rec, t); code != "" {
+		if rec.GrantDigest == "" || code != protocol.CodeConsentInvalid {
+			e.mu.Unlock()
+			return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: code}}, nil
+		}
+		// A granted request whose grant no longer admits it ends here: it is
+		// never sent again under that grant.
+		e.transitionLocked(rec, causeRefused, nativeEvidence{code: code, reason: reason})
+		if _, err := e.commitLocked(rec, nil); err != nil {
+			e.mu.Unlock()
+			return protocol.Reply{}, err
+		}
+		snap := rec.Snapshot
 		e.mu.Unlock()
-		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: code}}, nil
+		e.publishRevision(rec)
+		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code, Message: rec.RefusalReason}}, nil
 	}
 	reserved, rerr := e.runtimeInFlightLocked(cmd.TargetID, key)
 	if rerr != nil {
@@ -288,13 +316,13 @@ func (e *Endpoint) resubmitTombstoneLocked(cmd *protocol.Command, src Source, ke
 		e.mu.Unlock()
 		return protocol.Reply{}, err
 	}
-	input, origin, native := *cmd.Input, maps.Clone(rec.Origin), rec.NativeSession
+	input, origin, native, granted := *cmd.Input, maps.Clone(rec.Origin), rec.NativeSession, rec.GrantDigest != ""
 	sent := e.unpersisted(rec, protocol.StateUncertain, protocol.CodeAttachmentLost)
 	e.mu.Unlock()
 	if err := e.crashAt(PointBeforeNative); err != nil {
 		return protocol.Reply{}, err
 	}
-	adm, nerr := t.att.Submit(BoundRequest{Key: key, Epoch: cmd.Epoch, Input: input, NotAfter: cmd.NotAfter, Origin: origin, NativeSession: native})
+	adm, nerr := t.att.Submit(BoundRequest{Key: key, Epoch: cmd.Epoch, Input: input, NotAfter: cmd.NotAfter, Origin: origin, NativeSession: native, Granted: granted})
 	if err := e.crashAt(PointAfterNative); err != nil {
 		return protocol.Reply{}, err
 	}
@@ -369,14 +397,14 @@ func (e *Endpoint) dispatchReceivedLocked(cmd *protocol.Command, key requests.Ke
 		e.mu.Unlock()
 		return protocol.Reply{}, err
 	}
-	origin, native := maps.Clone(rec.Origin), rec.NativeSession
+	origin, native, granted := maps.Clone(rec.Origin), rec.NativeSession, rec.GrantDigest != ""
 	sent := e.unpersisted(rec, protocol.StateUncertain, protocol.CodeAttachmentLost)
 	e.mu.Unlock()
 
 	if err := e.crashAt(PointBeforeNative); err != nil {
 		return protocol.Reply{}, err
 	}
-	adm, nerr := t.att.Submit(BoundRequest{Key: key, Epoch: cmd.Epoch, Input: *cmd.Input, NotAfter: cmd.NotAfter, Origin: origin, NativeSession: native})
+	adm, nerr := t.att.Submit(BoundRequest{Key: key, Epoch: cmd.Epoch, Input: *cmd.Input, NotAfter: cmd.NotAfter, Origin: origin, NativeSession: native, Granted: granted})
 	if err := e.crashAt(PointAfterNative); err != nil {
 		return protocol.Reply{}, err
 	}
@@ -481,26 +509,39 @@ func (e *Endpoint) unpersisted(rec *requests.Record, state protocol.State, code 
 }
 
 // handoffLocked decides, right before the handoff, whether a request may
-// still run. A link request needs its consent key still accepted. A
-// session-bound request runs only while the target is attached to the exact
-// native session the record names; an unknown (empty) session on either side
-// refuses, so a record stored before Buzz requests carried a session never
-// runs. A request no session binds passes.
-func (e *Endpoint) handoffLocked(rec *requests.Record, t *target) protocol.Code {
+// still run, and the reason text when one exists. A link request needs its
+// consent key still accepted, and a granted one its grant too (with no grant
+// check installed it is refused). A session-bound request runs only while
+// the target is attached to the exact native session the record names; an
+// unknown (empty) session on either side refuses, so a record stored before
+// Buzz requests carried a session never runs. A request no session binds
+// passes.
+func (e *Endpoint) handoffLocked(rec *requests.Record, t *target) (protocol.Code, string) {
 	if rec.Origin["carrier"] == CarrierLink && (e.consent == nil || !e.consent(rec.CreatorHost, rec.ConsentCredential)) {
-		return protocol.CodeConsentInvalid
+		if rec.GrantDigest != "" {
+			return protocol.CodeConsentInvalid, "grant_revoked: the key that signed the grant is no longer accepted"
+		}
+		return protocol.CodeConsentInvalid, ""
+	}
+	if rec.GrantDigest != "" {
+		if e.grant == nil {
+			return protocol.CodeConsentInvalid, "grant_revoked: this machine checks no grants"
+		}
+		if reason := e.grant(rec.CreatorHost, rec.TargetID, rec.GrantDigest); reason != "" {
+			return protocol.CodeConsentInvalid, reason
+		}
 	}
 	if rec.NativeSession == "" && !sessionBound(rec.Origin) {
-		return ""
+		return "", ""
 	}
 	native := ""
 	if n, ok := t.att.(NativeIdentifier); ok {
 		native = n.NativeSessionID()
 	}
 	if native == "" || native != rec.NativeSession {
-		return protocol.CodeSessionChanged
+		return protocol.CodeSessionChanged, ""
 	}
-	return ""
+	return "", ""
 }
 
 // readmittableBusy reports whether rec is a busy tombstone that the same
@@ -517,17 +558,19 @@ func readmittableBusy(rec *requests.Record) bool {
 		rec.Cancel == nil
 }
 
-// sameRequest reports whether cmd, whose input digest is digest, is the
-// request rec stores. The digest does not cover not_after, so a link record
-// also needs the same not_after: only the same signed document re-admits a
-// link's busy tombstone, and another signature for the same request id is
-// answered from the stored record with request_conflict. Nothing is admitted
-// after not_after, so a link record whose deadline passed never runs.
-func sameRequest(rec *requests.Record, cmd *protocol.Command, digest string) bool {
+// sameRequest reports whether cmd, whose input digest is digest, sent under
+// the grant grantDigest ("" for none), is the request rec stores. The digest
+// does not cover not_after, so a link record also needs the same not_after
+// and the same grant: only the same signed document, or the same command
+// under the same grant, re-admits a link's busy tombstone, and anything else
+// for the same request id is answered from the stored record with
+// request_conflict. Nothing is admitted after not_after, so a link record
+// whose deadline passed never runs.
+func sameRequest(rec *requests.Record, cmd *protocol.Command, digest, grantDigest string) bool {
 	if rec.InputDigest != digest {
 		return false
 	}
-	return rec.Origin["carrier"] != CarrierLink || rec.NotAfter == cmd.NotAfter
+	return rec.Origin["carrier"] != CarrierLink || (rec.NotAfter == cmd.NotAfter && rec.GrantDigest == grantDigest)
 }
 
 // busyTombstoneLocked moves rec to the busy tombstone of a refusal that
@@ -709,9 +752,9 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 		e.mu.Unlock()
 		return nil // the consent check is not installed yet; retry on the next tick
 	}
-	if code := e.handoffLocked(rec, t); code != "" {
+	if code, reason := e.handoffLocked(rec, t); code != "" {
 		e.store.ReleaseReservation(key)
-		e.transitionLocked(rec, causeRefused, nativeEvidence{code: code})
+		e.transitionLocked(rec, causeRefused, nativeEvidence{code: code, reason: reason})
 		_, err = e.commitLocked(rec, nil)
 		e.mu.Unlock()
 		return err
@@ -726,10 +769,10 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 	if rec.Input != nil {
 		input = *rec.Input
 	}
-	origin, native := maps.Clone(rec.Origin), rec.NativeSession
+	origin, native, granted := maps.Clone(rec.Origin), rec.NativeSession, rec.GrantDigest != ""
 	e.mu.Unlock()
 
-	adm, nerr := t.att.Submit(BoundRequest{Key: key, Epoch: rec.Epoch, Input: input, NotAfter: rec.NotAfter, Origin: origin, NativeSession: native})
+	adm, nerr := t.att.Submit(BoundRequest{Key: key, Epoch: rec.Epoch, Input: input, NotAfter: rec.NotAfter, Origin: origin, NativeSession: native, Granted: granted})
 
 	// No defer: finishAdmissionLocked unlocks exactly once on every return.
 	e.mu.Lock()

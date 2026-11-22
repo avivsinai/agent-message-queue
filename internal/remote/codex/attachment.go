@@ -108,6 +108,11 @@ type Attachment struct {
 	// reviewerSeen keeps an update newer than the resume snapshot.
 	reviewer     string
 	reviewerSeen bool
+	// perm is the thread's permission mode as this connection last heard
+	// it: from thread/resume, then each thread/settings/updated. permSeen
+	// keeps an update newer than the resume snapshot.
+	perm         perm
+	permSeen     bool
 	runs         map[requests.Key]*run
 	byTurn       map[string]*run
 	byClientID   map[string]*run // keyed by clientIDFor(key), not bare RequestID
@@ -306,7 +311,9 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 				Type string `json:"type"`
 			} `json:"status"`
 		} `json:"thread"`
-		ApprovalsReviewer string `json:"approvalsReviewer"`
+		ApprovalsReviewer string          `json:"approvalsReviewer"`
+		ApprovalPolicy    json.RawMessage `json:"approvalPolicy"`
+		Sandbox           json.RawMessage `json:"sandbox"`
 	}
 	if err := client.Call(ctx, "thread/resume", map[string]any{"threadId": threadID}, &resumed); err != nil {
 		_ = client.Close()
@@ -337,6 +344,9 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 	if !a.reviewerSeen {
 		a.reviewer = autoReviewer(resumed.ApprovalsReviewer)
 	}
+	if !a.permSeen {
+		a.perm = readPerm(resumed.ApprovalPolicy, resumed.ApprovalsReviewer, resumed.Sandbox)
+	}
 	a.mu.Unlock()
 	go func() {
 		<-client.Done()
@@ -357,6 +367,56 @@ func autoReviewer(v string) string {
 		return ""
 	}
 	return v
+}
+
+// perm is a thread's permission mode as the app-server reported it. known
+// is true only when the approval policy is a plain string and the reviewer
+// and the sandbox type are both present.
+type perm struct {
+	known                     bool
+	policy, reviewer, sandbox string
+}
+
+// readPerm reads a permission mode from the app-server's approvalPolicy,
+// approvalsReviewer and sandbox policy values. Anything it cannot read
+// leaves the mode unknown.
+func readPerm(policy json.RawMessage, reviewer string, sandbox json.RawMessage) perm {
+	var p perm
+	var sb struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(policy, &p.policy) != nil || json.Unmarshal(sandbox, &sb) != nil {
+		return perm{}
+	}
+	p.reviewer, p.sandbox = reviewer, sb.Type
+	p.known = p.policy != "" && p.reviewer != "" && p.sandbox != ""
+	return p
+}
+
+// asks reports whether a thread in mode p asks the user before a tool acts
+// outside what the sandbox already allows: the policy asks, the user (not an
+// automatic reviewer) answers, and the sandbox is not full access.
+func asks(p perm) bool {
+	return p.known &&
+		(p.policy == "untrusted" || p.policy == "on-request") &&
+		p.reviewer == "user" &&
+		(p.sandbox == "readOnly" || p.sandbox == "workspaceWrite")
+}
+
+// SessionAsks implements core.PermissionReader from the mode this connection
+// last heard. An offline attachment, or a mode it could not read, does not
+// ask.
+func (a *Attachment) SessionAsks() (bool, string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.sessionAsksLocked()
+}
+
+func (a *Attachment) sessionAsksLocked() (bool, string) {
+	if a.offline || !a.perm.known {
+		return false, "mode_unreadable"
+	}
+	return asks(a.perm), fmt.Sprintf("approvalPolicy=%s approvalsReviewer=%s sandbox=%s", a.perm.policy, a.perm.reviewer, a.perm.sandbox)
 }
 
 // TargetID derives the stable target id for a thread.
@@ -447,7 +507,13 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	}
 	busy := a.status == "busy" || a.activeTurn != ""
 	codexHome := a.codexHome
+	sessionAsks, why := a.sessionAsksLocked()
 	a.mu.Unlock()
+	// A granted request runs only while the session asks the user before a
+	// tool acts, as read with busy above. The turn carries no override.
+	if req.Granted && !sessionAsks {
+		return core.Admission{Code: protocol.CodeConsentInvalid, Message: "grant_needs_signature: " + why, NothingSent: true}, nil
+	}
 	// A turn sent while the seat's TUI still shows a startup screen would
 	// end the hold that keeps the seat's own doorbell out of that screen.
 	if held, why := seatStartupHeld(a.threadID, codexHome); held {
@@ -1198,14 +1264,18 @@ func (a *Attachment) onNotification(n Notification) {
 		var p struct {
 			ThreadID       string `json:"threadId"`
 			ThreadSettings struct {
-				ApprovalsReviewer string `json:"approvalsReviewer"`
+				ApprovalsReviewer string          `json:"approvalsReviewer"`
+				ApprovalPolicy    json.RawMessage `json:"approvalPolicy"`
+				SandboxPolicy     json.RawMessage `json:"sandboxPolicy"`
 			} `json:"threadSettings"`
 		}
 		if json.Unmarshal(n.Params, &p) != nil || p.ThreadID != a.threadID {
 			return
 		}
+		s := p.ThreadSettings
 		a.mu.Lock()
-		a.reviewer, a.reviewerSeen = autoReviewer(p.ThreadSettings.ApprovalsReviewer), true
+		a.reviewer, a.reviewerSeen = autoReviewer(s.ApprovalsReviewer), true
+		a.perm, a.permSeen = readPerm(s.ApprovalPolicy, s.ApprovalsReviewer, s.SandboxPolicy), true
 		a.mu.Unlock()
 	case "item/started", "item/completed":
 		a.onItem(n)

@@ -34,12 +34,24 @@ type Source struct {
 	// handoff to the harness.
 	NativeSession string
 	Credential    string
+	// GrantDigest is set only for a link request a stored session grant
+	// admitted: the grant's digest. Credential is then the key that signed
+	// the grant. Core stores it on the record and asks GrantCheck about it
+	// right before the handoff.
+	GrantDigest string
 }
 
 // ConsentCheck reports whether the consent key credential of the link with
 // creator host is still accepted. It runs under the endpoint lock, so it
 // reads an immutable snapshot and never waits.
 type ConsentCheck func(creatorHost, credential string) bool
+
+// GrantCheck reports whether the session grant with digest grantDigest still
+// admits a request of the link with creator host to the target targetID: ""
+// when it does, else the reason, which starts with the grant code
+// ("grant_revoked: ...", "grant_expired: ..."). It runs under the endpoint
+// lock, so it reads an immutable snapshot and never waits.
+type GrantCheck func(creatorHost, targetID, grantDigest string) string
 
 // CarrierLink is the Origin "carrier" value of a link source: a server the
 // user's machine dialed. Its Host is the link's creator host, link-<id>.
@@ -192,6 +204,7 @@ type Endpoint struct {
 	// holds or waits for it.
 	answering map[answerKey]*answerLock
 	consent   ConsentCheck
+	grant     GrantCheck
 }
 
 // Config configures New.
@@ -252,6 +265,14 @@ func (e *Endpoint) SetConsent(c ConsentCheck) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.consent = c
+}
+
+// SetGrant installs the grant check a granted request passes at the handoff.
+// Until it is set, every granted request is refused there.
+func (e *Endpoint) SetGrant(g GrantCheck) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.grant = g
 }
 
 // SetPublish replaces the publisher after construction. Serve uses this
