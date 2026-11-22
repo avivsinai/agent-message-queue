@@ -235,6 +235,9 @@ func TestAttendedSeatOffRingsOneDoorbellForThePendingCohort(t *testing.T) {
 	if cfg.settings.attended {
 		t.Fatal("tick did not apply attended off")
 	}
+	if cfg.attendedChanged {
+		t.Fatal("the tick left attendedChanged set")
+	}
 	if got := h.rings(); got != 1 {
 		t.Fatalf("attended-off tick typed %d doorbell(s), want 1 for the pending cohort", got)
 	}

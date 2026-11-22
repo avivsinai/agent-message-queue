@@ -13,6 +13,9 @@ import (
 // same. Deleting the else-if in coop exec's startup block removes the line
 // and fails this test.
 func TestCoopExecNoWakeNamesAttendedDelivery(t *testing.T) {
+	// The hook installer writes the shared Claude config; give this test its
+	// own HOME so later tests see no hook.
+	t.Setenv("HOME", t.TempDir())
 	base := initCoopProjectForTest(t, "alice")
 	clearCoopSessionPinForTest(t)
 	// exec provisions and reads the default session root, not the base.

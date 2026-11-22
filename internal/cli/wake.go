@@ -1221,10 +1221,9 @@ func deliverNewMessageNotification(
 	// The attended check comes before the dialog hold and the native
 	// branch: a held-notice ladder and a native doorbell frame both reach
 	// the person the attended notice does not, so an attended seat routes
-	// every attempt to the same notice the gate in deliverWakeNotification
-	// routes to. The cohort state gates it: an announced cohort is not an
-	// attempt.
-	if plan.attempt && cfg.settings.attended && notice.input.provenance != wakePayloadOwnerCommand {
+	// every attempt to the same notice. The cohort state gates it: an
+	// announced cohort is not an attempt.
+	if plan.attempt && cfg.settings.attended {
 		return cfg.deliverAttended(notice.output, currentPending)
 	}
 	if !plan.attempt {
@@ -1298,7 +1297,7 @@ func deliverNewMessageNotification(
 			}
 		}
 		notice.submitOnly = plan.submitOnly
-		deliveryErr := deliverWakeNotificationCohort(cfg, notice, deferForInput)
+		deliveryErr := deliverWakeNotification(cfg, notice, deferForInput)
 		if isWakeInputDemotionBlocked(deliveryErr) {
 			return enterWakeInputRecovery(cfg, currentPending, deliveryErr)
 		}
@@ -1343,7 +1342,7 @@ func deliverNewMessageNotification(
 		return deliveryErr
 	}
 
-	deliveryErr := deliverWakeNotificationCohort(cfg, notice, deferForInput)
+	deliveryErr := deliverWakeNotification(cfg, notice, deferForInput)
 	if isWakeInputDemotionBlocked(deliveryErr) {
 		return enterWakeInputRecovery(cfg, currentPending, deliveryErr)
 	}
@@ -1795,10 +1794,6 @@ func normalizeWakeInjectMode(raw string) (string, error) {
 }
 
 func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForInput bool) error {
-	return deliverWakeNotificationCohort(cfg, notice, deferForInput)
-}
-
-func deliverWakeNotificationCohort(cfg *wakeConfig, notice wakeNotification, deferForInput bool) error {
 	if cfg.injectMode == wakeInjectModeClaudeNative {
 		return errors.New("native wake cannot use terminal delivery")
 	}
