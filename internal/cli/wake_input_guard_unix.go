@@ -215,6 +215,13 @@ func startupInputGuard(root, me string) string {
 					status = applied.InputGuard
 				}
 			}
+			if applied.Attended {
+				if status == inputGuardOff {
+					status = "off, attended: on"
+				} else {
+					status += ", attended: on"
+				}
+			}
 		}
 		return nil
 	})

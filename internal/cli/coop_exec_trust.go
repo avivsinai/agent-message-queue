@@ -17,7 +17,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/codexlaunch"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
-	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"golang.org/x/sys/unix"
 )
 
@@ -221,10 +220,16 @@ func syncStartupDialogMarker(root, handle, binaryPath string, args []string, rec
 	if err != nil {
 		return err
 	}
-	if facts, _ := harness.ForExecutable(binaryPath); facts.Name == harness.Agy {
+	facts, _ := harness.ForExecutable(binaryPath)
+	if facts.Name == harness.Agy {
 		if err := removeHarnessDialogMarker(root, handle, harness.Agy); err != nil {
 			return err
 		}
+	}
+	if guard == "" {
+		// A launch with no dialog guard still names its harness for the
+		// attended delivery line.
+		marker.Harness = facts.Name
 	}
 	return publishStartupDialogMarker(root, handle, marker, hold, guard)
 }
@@ -332,8 +337,9 @@ func decideStartupDialogMarker(binaryPath string, args []string, recorded, guard
 // stderr which doorbell the launch gets: "dialog guard: plain" (text and
 // Enter, never held for a dialog), or "dialog guard: proper (<harness>)"
 // when guard names the harness whose dialog hook or relay holds it. An
-// attended seat adds one delivery line: notice only, and context at the
-// person's next prompt when the co-op hooks are installed for Claude Code.
+// attended seat adds one delivery line for every harness: no doorbell is
+// typed, mail shows as a notice. The line does not predict what the hooks
+// will deliver — that is the hooks' own state at each prompt.
 func publishStartupDialogMarker(root, handle string, marker wakeDialogMarker, hold bool, guard string) error {
 	if err := syncStartupDialogMarkerState(root, handle, marker, hold); err != nil {
 		return err
@@ -345,49 +351,11 @@ func publishStartupDialogMarker(root, handle string, marker wakeDialogMarker, ho
 	}
 	_ = writeStderr("input guard: %s\n", startupInputGuard(root, handle))
 	if settings, _ := coopWaitSettings(root, handle, wakeSettingsLayers{}); settings.attended {
-		if claudeCoopHooksInstalled() {
-			_ = writeStderr("delivery: attended (notice, and context at your next prompt)\n")
-		} else {
-			_ = writeStderr("delivery: attended (notice only; run amq coop install-hooks for context at your next prompt)\n")
-		}
+		_ = writeStderr("delivery: attended (no doorbell is typed; mail shows as a notice)\n")
 	} else if settings.hookDoorbell {
 		_ = writeStderr("delivery: hook doorbell (the harness's hook rings; the wake types only when no hook waits)\n")
 	}
 	return nil
-}
-
-// claudeCoopHooksInstalled reports whether the co-op hooks are present in
-// Claude Code's settings file. It reads the file only: the presence of one
-// AMQ co-op entry is the evidence, not a live hook run.
-func claudeCoopHooksInstalled() bool {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return false
-	}
-	raw, err := os.ReadFile(claude.SettingsPath(home))
-	if err != nil {
-		return false
-	}
-	var settings struct {
-		Hooks map[string][]struct {
-			Hooks []struct {
-				Command string `json:"command"`
-			} `json:"hooks"`
-		} `json:"hooks"`
-	}
-	if json.Unmarshal(raw, &settings) != nil {
-		return false
-	}
-	for _, groups := range settings.Hooks {
-		for _, group := range groups {
-			for _, hook := range group.Hooks {
-				if strings.HasPrefix(hook.Command, coopHookMarker) {
-					return true
-				}
-			}
-		}
-	}
-	return false
 }
 
 // syncStartupDialogMarkerState publishes the decided hold through the

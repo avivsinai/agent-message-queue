@@ -179,8 +179,13 @@ func runCoopNamedInject(args []string) error {
 		return nil
 	}
 	// The typed command and its Enter would answer an open dialog, so it
-	// waits for the dialog marker exactly as the doorbell does.
+	// waits for the dialog marker exactly as the doorbell does. An attended
+	// seat is never typed into, so there is nothing to wait for or to inject.
 	root, handle := strings.TrimSpace(*rootFlag), strings.TrimSpace(*meFlag)
+	if settings, _ := coopWaitSettings(root, handle, wakeSettingsLayers{}); settings.attended {
+		_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, binaryBase, "the seat is attended"))
+		return nil
+	}
 	facts, _ := harness.ForExecutable(binaryBase)
 	if !waitCoopNamedInputFree(root, handle, facts.Name, wakeDialogQuietHold, wakeDialogRecheck) {
 		_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, binaryBase, "a harness dialog stayed open"))
