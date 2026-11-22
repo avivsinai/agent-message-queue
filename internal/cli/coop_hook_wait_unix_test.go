@@ -357,8 +357,30 @@ func TestCodexPromptAddsUnreadContextToAJoinedChat(t *testing.T) {
 	if got := run(fmt.Sprintf(`{"session_id":%q,"prompt":"hello"}`, thread)); got != "" {
 		t.Fatalf("a thread recorded for codex in a process that is claude got %q, want nothing", got)
 	}
+	// A Codex started from a Codex shell tool inherits its parent's thread
+	// id; the seat of its own process stands.
+	t.Setenv("CODEX_THREAD_ID", thread)
 	if got := run(fmt.Sprintf(`{"session_id":%q,"prompt":"hello"}`, unbound)); !strings.Contains(got, "You have 1 unread AMQ message(s)") {
 		t.Fatalf("a thread with no record in a process that is claude got %q, want the seat's unread context", got)
+	}
+
+	// The queue was made again at the same path: the thread's record pinned
+	// the earlier one, so the thread does not speak for the new one.
+	_ = os.Unsetenv("CODEX_THREAD_ID")
+	if err := os.RemoveAll(defaultCoopRoot); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := captureStdout(t, func() error { return runCoopInit([]string{"--agents", "claude,codex", "--no-gitignore"}) }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := captureStdout(t, func() error {
+		return runSend([]string{"--root", root, "--me", "claude", "--to", "codex", "--body", "hi"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AM_ME", "codex")
+	if got := run(fmt.Sprintf(`{"session_id":%q,"prompt":"hello"}`, thread)); got != "" {
+		t.Fatalf("a thread recorded for an earlier queue at this path got %q, want nothing", got)
 	}
 }
 

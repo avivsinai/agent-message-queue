@@ -43,25 +43,35 @@ func adoptCodexThreadIdentity() error {
 			return nil
 		}
 	}
-	codexHome, err := codexHomeDir()
-	if err != nil {
-		return ContextMismatchError("cannot resolve CODEX_HOME for this Codex thread's AMQ identity: %v", err)
-	}
-	rec, err := codexidentity.Lookup(strings.TrimSpace(thread), absPath(filepath.Clean(codexHome)))
+	id, err := recordedCodexIdentity(strings.TrimSpace(thread))
 	if errors.Is(err, codexidentity.ErrNone) {
 		return nil
 	}
 	if err != nil {
-		return ContextMismatchError("this Codex thread's AMQ identity cannot be used: %v; run amq coop join --me <handle>, or set AM_ROOT and AM_ME explicitly", err)
-	}
-	id, err := validateRecordedIdentity(launch.Identity{
-		Root: rec.Root, BaseRoot: rec.BaseRoot, Session: rec.Session,
-		Me: rec.Me, RootID: rec.RootID, BaseRootID: rec.BaseRootID,
-	}, "this Codex thread's")
-	if err != nil {
 		return err
 	}
 	return adoptIdentity(id, "this Codex thread's")
+}
+
+// recordedCodexIdentity returns the validated identity AMQ recorded for
+// thread. The error is codexidentity.ErrNone when the thread has no record,
+// and a context mismatch when a record exists and cannot be used.
+func recordedCodexIdentity(thread string) (launch.Identity, error) {
+	codexHome, err := codexHomeDir()
+	if err != nil {
+		return launch.Identity{}, ContextMismatchError("cannot resolve CODEX_HOME for this Codex thread's AMQ identity: %v", err)
+	}
+	rec, err := codexidentity.Lookup(thread, absPath(filepath.Clean(codexHome)))
+	if errors.Is(err, codexidentity.ErrNone) {
+		return launch.Identity{}, err
+	}
+	if err != nil {
+		return launch.Identity{}, ContextMismatchError("this Codex thread's AMQ identity cannot be used: %v; run amq coop join --me <handle>, or set AM_ROOT and AM_ME explicitly", err)
+	}
+	return validateRecordedIdentity(launch.Identity{
+		Root: rec.Root, BaseRoot: rec.BaseRoot, Session: rec.Session,
+		Me: rec.Me, RootID: rec.RootID, BaseRootID: rec.BaseRootID,
+	}, "this Codex thread's")
 }
 
 // adoptIdentity makes id this process's identity: it sets every identity

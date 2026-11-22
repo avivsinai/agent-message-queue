@@ -100,18 +100,15 @@ func runCoopPromptCodex(stdin io.Reader, w io.Writer) error {
 }
 
 // codexThreadMayBe reports whether thread may speak for (root, me). A
-// thread with a record of its own is that seat only. A thread with none is
-// the seat of its process, as an amq command of that thread is.
+// thread with a record of its own is the seat that record still names, on
+// the queue it pinned. A thread with none is the seat of its process, as an
+// amq command of that thread is.
 func codexThreadMayBe(thread, root, me string) bool {
-	codexHome, err := codexHomeDir()
-	if err != nil {
-		return false
-	}
-	rec, err := codexidentity.Lookup(thread, absPath(filepath.Clean(codexHome)))
+	id, err := recordedCodexIdentity(thread)
 	if errors.Is(err, codexidentity.ErrNone) {
 		return true
 	}
-	return err == nil && rec.Me == me && canonicalWakeRoot(rec.Root) == canonicalWakeRoot(root)
+	return err == nil && id.Me == me && canonicalWakeRoot(id.Root) == canonicalWakeRoot(root)
 }
 
 // codexWaiter is the waiter of a Codex thread under codexHome.
