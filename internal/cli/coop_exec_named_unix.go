@@ -186,7 +186,16 @@ func runCoopNamedInject(args []string) error {
 		_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, binaryBase, "a harness dialog stayed open"))
 		return nil
 	}
-	inputFree := func() bool { return waitCoopNamedInputFree(root, handle, facts.Name, 0, 0) }
+	// The setting is read at each use of the closure, not once here: the
+	// wait above can hold for minutes, and a seat that becomes attended in
+	// that wait must not be typed into when the wait ends.
+	inputFree := func() bool {
+		if settings, _ := coopWaitSettings(root, handle, wakeSettingsLayers{}); settings.attended {
+			_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, binaryBase, "the seat is attended"))
+			return false
+		}
+		return waitCoopNamedInputFree(root, handle, facts.Name, 0, 0)
+	}
 	if err := runCoopNamedTUI(reader, name, binaryBase, cwd, execStart, inputFree); err != nil {
 		_ = writeStderr("warning: coop named inject: %v\n", err)
 	}

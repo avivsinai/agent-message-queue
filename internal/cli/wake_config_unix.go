@@ -365,6 +365,15 @@ func (c *wakeConfigRun) report() error {
 	if err := printWakeConfig(c.common.JSON, out); err != nil {
 		return err
 	}
+	// The value is useless on a wake of an older release, which refuses a
+	// settings file that carries the key: point at the live check.
+	if c.changing {
+		for _, key := range c.explicit {
+			if key == "attended" {
+				_ = writeStderr("attended applies to a wake of this release or newer; check with amq wake check\n")
+			}
+		}
+	}
 	return waitErr
 }
 

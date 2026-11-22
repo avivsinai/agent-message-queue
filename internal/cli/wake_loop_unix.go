@@ -873,10 +873,16 @@ func (l *wakeLoop) run(maintenanceTicks, settingsTicks <-chan time.Time) error {
 			// The owner's command queue sits in the agent directory too, so
 			// this tick also serves it.
 			serveWakeCommands(&l.cfg)
-			// Only a hold-policy change needs a scan now: it re-times held
-			// cohorts. A scan for any other key could resend an interrupt
-			// key for mail that is still unread; those keys apply at next use.
-			if !l.cfg.reloadSettings() || !l.cfg.holdPolicyChanged {
+			// A hold-policy or attended change needs a scan now: a policy
+			// change re-times held cohorts, and an attended change reset the
+			// cohort, so both deliver what waits under the new setting at
+			// this tick instead of the next unrelated scan. On attended
+			// turning off, that rescan may type the interrupt key for urgent
+			// mail when the interrupt cooldown allows; that is the normal
+			// behavior of a seat that is not attended, and no different from
+			// the next unrelated scan taking the same path. Turning attended
+			// on only writes the notice.
+			if !l.cfg.reloadSettings() || (!l.cfg.holdPolicyChanged && !l.cfg.attendedChanged) {
 				continue
 			}
 			l.pendingNotify = true

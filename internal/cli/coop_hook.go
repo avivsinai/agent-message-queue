@@ -147,7 +147,17 @@ func writeCoopSessionStart(w io.Writer, now time.Time) error {
 	if unread > 0 {
 		fmt.Fprintf(&b, "\nInbox: %d unread. Run amq drain --include-body.", unread)
 	}
+	// The settings are read the way the Stop guard reads them: a seat is
+	// attended when its agent or machine file says so, live wake or not.
+	attended := false
+	if settings, _ := coopWaitSettings(root, me, wakeSettingsLayers{}); settings.attended {
+		attended = true
+	}
 	switch {
+	case attended:
+		// An attended seat is never typed into, so no wake mode changes the
+		// wording.
+		b.WriteString("\nThis seat is attended: no doorbell is typed and no hook wakes it. Mail is announced at the person's next prompt and at a turn end; run amq drain --include-body then. Do not run amq watch, amq monitor or a polling loop.")
 	case coopHookWakeRings(root, me):
 		b.WriteString("\nA wake rings this terminal when mail arrives; do not run amq watch, amq monitor or a polling loop.")
 	case coopWaitRings():

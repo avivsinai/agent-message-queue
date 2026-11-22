@@ -74,6 +74,7 @@ type wakeConfig struct {
 	settingsUnseeded              bool               // an unseeded resume runs argv settings until its seed lands
 	settingsTicks                 <-chan time.Time
 	holdPolicyChanged             bool                                         // consumed by the next inbox scan that builds holds
+	attendedChanged               bool                                         // an attended change reset the cohort: the next scan delivers what waits
 	dialogSource                  func(now time.Time) (wakeDialogState, error) // reads .wake.dialog; nil = no dialog guard (direct loop tests)
 	commands                      *wakeCommands                                // the owner command queue the wake types (wakecmd); nil = none
 	dialogHold                    wakeDialogState                              // the state last held for, so each change logs once
@@ -742,6 +743,15 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		cfg.doorbell.reholdForPolicy(currentPending, holds)
 		cfg.holdPolicyChanged = false
 	}
+	if cfg.attendedChanged {
+		// A live attended change reset the cohort: this scan delivers one
+		// notice for what waits under the new setting even with no inbox
+		// event; the recorded cohort makes every later scan quiet again.
+		// The normal path below delivers it: every pending file is a
+		// message here, so an empty messages slice with pending files
+		// cannot happen.
+		cfg.attendedChanged = false
+	}
 	if cfg.inputRecoveryRequired &&
 		dischargeWakeInputRecoveryAfterProgress(cfg, currentPending) &&
 		len(messages) == 0 {
@@ -803,7 +813,8 @@ func injectWakeInterruptKey(
 	currentPending map[string]os.FileInfo,
 ) (bool, error) {
 	now := time.Now()
-	if !usesCoopDoorbell(cfg) &&
+	if !cfg.settings.attended &&
+		!usesCoopDoorbell(cfg) &&
 		cfg.interruptKey != "" &&
 		shouldInterruptNow(cfg, now) {
 		if cfg.injectVia != "" {
@@ -1207,6 +1218,14 @@ func deliverNewMessageNotification(
 		cfg.startupInputProven = true
 	}
 	persistWakeDoorbellStatusBestEffort(cfg)
+	// The attended check comes before the dialog hold and the native
+	// branch: a held-notice ladder and a native doorbell frame both reach
+	// the person the attended notice does not, so an attended seat routes
+	// every attempt to the same notice. The cohort state gates it: an
+	// announced cohort is not an attempt.
+	if plan.attempt && cfg.settings.attended {
+		return cfg.deliverAttended(notice.output, currentPending)
+	}
 	if !plan.attempt {
 		return nil
 	}
@@ -2096,13 +2115,9 @@ func deliverWakeTransientAttention(
 }
 
 func deliverWakeAttentionOnly(cfg *wakeConfig, payload wakePayload) error {
-	if err := authorizePeerWakeAttention(cfg, payload); err != nil {
+	if err := deliverWakeAttendedNotice(cfg, payload); err != nil {
 		return err
 	}
-	if err := emitWakeAttention(cfg, payload); err != nil {
-		return err
-	}
-	cfg.lastAttemptAttention = true
 	// Persist degraded status so `amq doctor --ops` can distinguish a
 	// fully-injecting wake from one that fell back to attention-only. Without
 	// this, doctor reports healthy while the operator only gets a stderr BEL.
@@ -2122,6 +2137,38 @@ func deliverWakeAttentionOnly(cfg *wakeConfig, payload wakePayload) error {
 			_ = writeWakeDiagnostic(cfg, "amq wake: record attention-only degraded status: %v\n", err)
 		}
 	}
+	return nil
+}
+
+// deliverAttended is the attended seat's whole delivery: the notice is the
+// message, on every transport. It records no degraded notifier status, so
+// doctor and wake check do not flag the seat; an earlier degraded status
+// from a real fallback is left alone. The cohort is recorded as announced
+// (not parked): an addition re-arms it for exactly one more notice with no
+// lifetime cap, because the cap bounds synthetic input and an attended
+// seat types none.
+func (cfg *wakeConfig) deliverAttended(payload wakePayload, currentPending map[string]os.FileInfo) error {
+	if err := deliverWakeAttendedNotice(cfg, payload); err != nil {
+		return err
+	}
+	if len(currentPending) > 0 {
+		cfg.doorbell.recordInjected(currentPending)
+	}
+	return nil
+}
+
+// deliverWakeAttendedNotice is the designed channel of an attended seat: the
+// notice is the delivery, not a fallback. It records no degraded notifier
+// status, so doctor and wake check do not flag the seat; an earlier
+// degraded status from a real fallback is left alone.
+func deliverWakeAttendedNotice(cfg *wakeConfig, payload wakePayload) error {
+	if err := authorizePeerWakeAttention(cfg, payload); err != nil {
+		return err
+	}
+	if err := emitWakeAttention(cfg, payload); err != nil {
+		return err
+	}
+	cfg.lastAttemptAttention = true
 	return nil
 }
 
@@ -2401,6 +2448,13 @@ func reconcileWakeInputAfterInboxDrain(cfg *wakeConfig) error {
 	if cfg.inputDelivery.oneSubmit {
 		// The owner's command is not doorbell text, and the peer inbox says
 		// nothing about it: its own path types it to the end or refuses it.
+		return nil
+	}
+	if cfg.settings.attended {
+		// Defence at the write site: the invariant lives here, not only in
+		// the earlier reload-time clear. An attended seat is never typed
+		// into, so the input state drops instead of sending an owed Enter.
+		clearWakeInputState(cfg)
 		return nil
 	}
 	if cfg.inputDelivery.phase == wakeInputPayloadPending {

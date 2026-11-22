@@ -71,6 +71,11 @@ notification, open
 and select the section for the receiving harness. Inspect the current settings
 before changing them.
 
+On an attended seat (`attended: true` in `amq wake check` on a live wake, or
+`attended true` in `amq wake config` when no wake is live) no doorbell
+is typed, on any transport: mail is announced at the person's next prompt.
+Drain then, with `amq drain --include-body`; do not start a watcher.
+
 Without an injecting wake or a wait hook, use the receive methods in the
 operations guide.
 A notify-only wake (`--inject-mode none`) paired with a supervisor `monitor`
