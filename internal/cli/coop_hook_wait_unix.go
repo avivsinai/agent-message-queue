@@ -179,6 +179,7 @@ func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 				// silent here; the next drain reports it.
 				_ = promoteFollowUpsAtPath(root, me, now)
 			}
+			wait = boundWait(wait, promoted.Add(coopWaitFollowUpEvery), time.Now())
 			pending, err := inbox.pending(root, me)
 			if err == nil && len(pending) > 0 {
 				var settings wakeSettings
@@ -205,8 +206,8 @@ func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 						_ = writeCoopHookState(statePath, rang)
 					}
 					return err
-				case !next.IsZero() && next.Sub(now) < wait:
-					wait = next.Sub(now)
+				default:
+					wait = boundWait(wait, next, now)
 				}
 			}
 		}
@@ -221,6 +222,15 @@ func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 			return nil
 		}
 	}
+}
+
+// boundWait returns wait cut so that it ends no later than at, and never
+// below zero. A zero at leaves wait as it is.
+func boundWait(wait time.Duration, at, now time.Time) time.Duration {
+	if at.IsZero() {
+		return wait
+	}
+	return max(min(wait, at.Sub(now)), 0)
 }
 
 // coopWaitOwns reports whether the owner file still names this waiter.

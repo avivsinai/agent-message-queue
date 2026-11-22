@@ -151,3 +151,25 @@ func TestCoopWaitDebounceBatchesABurst(t *testing.T) {
 		t.Fatalf("rang ids = %v, want both messages of the burst", rang.RangIDs)
 	}
 }
+
+// The review of the wait-events change found that an event just before a
+// follow-up promotion was due started a full idle wait, so the promotion
+// came up to twice its interval late. The wait now ends at the promotion
+// time and at the hold deadline through the same bound.
+func TestBoundWaitEndsAtTheEarlierTime(t *testing.T) {
+	now := time.Now()
+	for _, c := range []struct {
+		name string
+		at   time.Time
+		want time.Duration
+	}{
+		{"no deadline", time.Time{}, coopWaitIdle},
+		{"deadline before the wait ends", now.Add(time.Second), time.Second},
+		{"deadline after the wait ends", now.Add(time.Minute), coopWaitIdle},
+		{"deadline passed", now.Add(-time.Second), 0},
+	} {
+		if got := boundWait(coopWaitIdle, c.at, now); got != c.want {
+			t.Errorf("%s: boundWait = %s, want %s", c.name, got, c.want)
+		}
+	}
+}
