@@ -49,17 +49,28 @@ func writeCoopPrompt(stdin io.Reader, w io.Writer) error {
 	}
 	// The bound can cut a long prompt. A cut prompt is not the doorbell, so a
 	// decode error only means there is no prompt to compare.
-	_ = json.NewDecoder(io.LimitReader(stdin, 1<<20)).Decode(&in)
-	if strings.TrimSpace(in.Prompt) == harness.Doorbell {
-		return nil
-	}
+	_ = json.NewDecoder(io.LimitReader(stdin, coopPromptInputLimit)).Decode(&in)
 	root, me, session, err := coopHookContext()
 	if me == "" || root == "" || err != nil {
 		return nil
 	}
+	writeCoopPromptFor(w, in.Prompt, root, me, session)
+	return nil
+}
+
+// coopPromptInputLimit bounds the hook input a prompt receiver reads.
+const coopPromptInputLimit = 1 << 20
+
+// writeCoopPromptFor prints the unread-mail context of (root, me) for a
+// submitted prompt. The wake's own doorbell gets none: it already tells the
+// agent to drain.
+func writeCoopPromptFor(w io.Writer, prompt, root, me, session string) {
+	if strings.TrimSpace(prompt) == harness.Doorbell {
+		return
+	}
 	pending, err := coopStopPending(root, me)
 	if err != nil {
-		return nil
+		return
 	}
 	unread := 0
 	for _, msg := range pending {
@@ -68,7 +79,7 @@ func writeCoopPrompt(stdin io.Reader, w io.Writer) error {
 		}
 	}
 	if unread == 0 {
-		return nil
+		return
 	}
 	if session == "" {
 		session = "(none)"
@@ -79,7 +90,6 @@ func writeCoopPrompt(stdin io.Reader, w io.Writer) error {
 			"additionalContext": fmt.Sprintf("You have %d unread AMQ message(s). Run amq drain --include-body. root=%s session=%s.", unread, root, session),
 		},
 	})
-	return nil
 }
 
 // writeCoopStop is the co-op Stop guard. It blocks a stop once for unread
