@@ -63,6 +63,7 @@ type wakeConfig struct {
 	inputRecoveryRequired     bool
 	doorbell                  wakeDoorbellState
 	holds                     map[string]wakeHold // set by each inbox scan for the doorbell plan
+	cohortIDs                 []string            // set by each inbox scan: the header ids of the mail it would announce
 	// settingsSource reads .wake.settings (raw bytes, whether it exists). nil
 	// disables live settings: direct loop tests and legacy callers.
 	settingsSource                func() ([]byte, bool, error)
@@ -740,6 +741,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		}
 	}
 	cfg.holds = holds
+	cfg.cohortIDs = wakeMessageIDs(messages)
 	if cfg.holdPolicyChanged {
 		// A live hold change re-times a held cohort from the same scan's holds,
 		// before planHeld reads the deadline.
@@ -820,7 +822,7 @@ func injectWakeInterruptKey(
 	currentPending map[string]os.FileInfo,
 ) (bool, error) {
 	now := time.Now()
-	if _, held := cfg.hookYield(cfg.wakeDoorbellNow(), currentPending); held {
+	if _, held := cfg.hookYield(cfg.wakeDoorbellNow(), cfg.cohortIDs); held {
 		return false, nil
 	}
 	if !cfg.settings.attended &&
@@ -1278,7 +1280,7 @@ func deliverNewMessageNotification(
 		cfg.dialogHold, cfg.dialogHoldBusy, cfg.dialogHoldGeneration = wakeDialogClosed, false, ""
 	}
 	reminder := plan.submitOnly && shouldDeferBeforeInject(cfg, deferForInput)
-	if wait, held := cfg.preAttemptHold(now, reminder, currentPending); held {
+	if wait, held := cfg.preAttemptHold(now, reminder, cfg.cohortIDs); held {
 		cfg.doorbell.recordDialogHold(now, wait)
 		persistWakeDoorbellStatusBestEffort(cfg)
 		return nil

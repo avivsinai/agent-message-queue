@@ -241,14 +241,20 @@ and a draft stays in the editor. The setting defaults to false. Add
 `--machine` to set the machine default, or use `--hook-doorbell=false`
 to switch a running seat back to its typed doorbell.
 
-A built-in typing wake yields while the waiter holds its lock and for up to
-two minutes after a ring. If mail is still unread and neither condition holds,
-the wake types the doorbell when the usual delivery guards allow it. This
-also covers a missing or stopped hook. The grace runs from the ring. When a
-ring is 2 minutes old and the mail it named is not drained, the wake types
-the doorbell one time, also while a waiter holds its lock. So when the turn
-that follows a ring lasts longer than 2 minutes, the wake can type during
-that turn. A wake from an older release
+A built-in typing wake yields only when the hook covers every unread
+message. A message is covered when a waiter holds its lock and no hook
+announced the message yet, or when a hook announced it less than 2 minutes
+ago: the waiter rang for it, or the turn-end hook reported it. In every
+other case the wake types the doorbell when the usual delivery guards allow
+it. This also covers a missing or stopped hook, and new mail that arrives
+while no waiter runs, such as during the turn that a ring started.
+
+The grace runs from the announcement. After a ring that no drain followed
+within 2 minutes, the wake starts its typed doorbell one time (the doorbell,
+then its usual reminders), also while a waiter holds its lock. The same
+applies to mail that the turn-end hook reported and nobody drained. So when
+the turn that follows a ring or a report lasts longer than 2 minutes, the
+wake can type during that turn. A wake from an older release
 refuses a settings file that holds `hook_doorbell` and keeps its last
 settings until it upgrades; it keeps typing.
 

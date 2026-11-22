@@ -68,10 +68,22 @@ func (h *wakeHoldHarness) newConfig(policy wakeHoldPolicy) *wakeConfig {
 // empty priority leaves the header without one.
 func (h *wakeHoldHarness) send(name, priority string) {
 	h.t.Helper()
+	h.deliver(name+".md", name, priority)
+}
+
+// sendAs delivers a normal message with header id id in the inbox file
+// file, as a bridge or a DLQ retry can.
+func (h *wakeHoldHarness) sendAs(file, id string) {
+	h.t.Helper()
+	h.deliver(file, id, format.PriorityNormal)
+}
+
+func (h *wakeHoldHarness) deliver(file, id, priority string) {
+	h.t.Helper()
 	msg := format.Message{
 		Header: format.Header{
-			Schema: 1, ID: name, From: "peer", To: []string{"codex"},
-			Thread: "p2p/codex__peer", Subject: name, Priority: priority,
+			Schema: 1, ID: id, From: "peer", To: []string{"codex"},
+			Thread: "p2p/codex__peer", Subject: id, Priority: priority,
 			Created: "2026-07-28T15:00:00Z",
 		},
 		Body: "body",
@@ -80,7 +92,7 @@ func (h *wakeHoldHarness) send(name, priority string) {
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	path, err := deliverToInboxForTest(h.t, h.root, "codex", name+".md", data)
+	path, err := deliverToInboxForTest(h.t, h.root, "codex", file, data)
 	if err != nil {
 		h.t.Fatal(err)
 	}

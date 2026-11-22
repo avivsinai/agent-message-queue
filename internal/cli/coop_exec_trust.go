@@ -331,12 +331,8 @@ func decideStartupDialogMarker(binaryPath string, args []string, recorded, guard
 // publishStartupDialogMarker publishes a decided Startup marker and says on
 // stderr which doorbell the launch gets: "dialog guard: plain" (text and
 // Enter, never held for a dialog), or "dialog guard: proper (<harness>)"
-// when guard names the harness whose dialog hook or relay holds it. An
-// attended seat adds one delivery line for every harness: no doorbell is
-// typed, mail shows as a notice. A seat that is not attended and has
-// hook_doorbell on adds the hook doorbell line instead. Neither line
-// predicts what the hooks will deliver — that is the hooks' own state at
-// each prompt.
+// when guard names the harness whose dialog hook or relay holds it, then
+// the seat's delivery line.
 func publishStartupDialogMarker(root, handle string, marker wakeDialogMarker, hold bool, guard string) error {
 	if err := syncStartupDialogMarkerState(root, handle, marker, hold); err != nil {
 		return err
@@ -347,12 +343,22 @@ func publishStartupDialogMarker(root, handle string, marker wakeDialogMarker, ho
 		_ = writeStderr("dialog guard: proper (%s)\n", guard)
 	}
 	_ = writeStderr("input guard: %s\n", startupInputGuard(root, handle))
+	writeSeatDeliveryLine(root, handle)
+	return nil
+}
+
+// writeSeatDeliveryLine prints the delivery line of a seat from its
+// settings files, with or without a wake of this launch. An attended seat
+// gets one line for every harness: no doorbell is typed, mail shows as a
+// notice. A seat that is not attended and has hook_doorbell on gets the
+// hook doorbell line instead. Neither line predicts what the hooks will
+// deliver — that is the hooks' own state at each prompt.
+func writeSeatDeliveryLine(root, handle string) {
 	if settings, _ := coopWaitSettings(root, handle, wakeSettingsLayers{}); settings.attended {
 		_ = writeStderr("delivery: attended (no doorbell is typed; mail shows as a notice)\n")
 	} else if settings.hookDoorbell {
 		_ = writeStderr("delivery: hook doorbell (the harness's hook rings; the wake types only when no hook waits)\n")
 	}
-	return nil
 }
 
 // syncStartupDialogMarkerState publishes the decided hold through the

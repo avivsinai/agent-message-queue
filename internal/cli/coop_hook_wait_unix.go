@@ -51,15 +51,6 @@ const (
 	coopWaitFollowUpEvery = 30 * time.Second
 )
 
-// coopWaitState's ClaudeSession is the waiter's session key: the Claude
-// session, or the Codex thread id. The field keeps its name so a record
-// written by an earlier release reads the same.
-type coopWaitState struct {
-	Schema        int      `json:"schema"`
-	ClaudeSession string   `json:"claude_session"`
-	RangIDs       []string `json:"rang_ids"`
-}
-
 // runCoopWait is the waiter. It returns nil, and so exits 0, whenever it is
 // not this session's doorbell: no participant, or a harness that would hold
 // the event on it. A ring is errCoopWaitRing.
@@ -184,7 +175,7 @@ func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 				var settings wakeSettings
 				settings, layers = coopWaitSettings(root, me, layers)
 				rang := readCoopWaitState(statePath, w.session)
-				announced := append(readCoopStopState(filepath.Join(agent, coopStopStateFile)).BlockedIDs, rang.RangIDs...)
+				announced := coopAnnounced(agent, w.session, false)
 				now := time.Now()
 				var next time.Time
 				due, next = decideCoopWait(pending, announced, settings.holdPolicy(), now)
@@ -262,16 +253,16 @@ func coopWaitOwns(path, owner string) bool {
 // announced, and the earliest time a held message is due (zero when none
 // is held). A message is due when its hold has passed; the hold runs from
 // the inbox file's time, as the wake's does.
-func decideCoopWait(pending []coopStopMessage, announced []string, policy wakeHoldPolicy, now time.Time) (due []string, next time.Time) {
-	skip := coopIDSet(announced)
+func decideCoopWait(pending []coopStopMessage, announced map[string]time.Time, policy wakeHoldPolicy, now time.Time) (due []string, next time.Time) {
+	taken := make(map[string]bool)
 	for _, msg := range pending {
-		if msg.ID == "" || skip[msg.ID] {
+		if _, ok := announced[msg.ID]; msg.ID == "" || ok || taken[msg.ID] {
 			continue
 		}
 		hold := newWakeHold(policy, msg.Priority, msg.File, now)
 		if !hold.due.After(now) {
 			due = append(due, msg.ID)
-			skip[msg.ID] = true
+			taken[msg.ID] = true
 			continue
 		}
 		if next.IsZero() || hold.due.Before(next) {

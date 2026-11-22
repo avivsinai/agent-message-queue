@@ -57,11 +57,12 @@ func TestCoopWaitRingsOnlyForDueMailNoHookAnnounced(t *testing.T) {
 		{ID: "reported", Priority: format.PriorityUrgent, File: arrived},
 	}
 
-	due, next := decideCoopWait(pending, []string{"reported"}, policy, now)
+	announced := map[string]time.Time{"reported": now}
+	due, next := decideCoopWait(pending, announced, policy, now)
 	if !slices.Equal(due, []string{"urgent"}) || !next.Equal(now.Add(4*time.Minute)) {
 		t.Fatalf("due = %v next = %v, want urgent now and normal in 4m", due, next)
 	}
-	due, next = decideCoopWait(pending, []string{"reported"}, wakeHoldPolicy{}, now)
+	due, next = decideCoopWait(pending, announced, wakeHoldPolicy{}, now)
 	if !slices.Equal(due, []string{"low", "normal", "urgent"}) || !next.IsZero() {
 		t.Fatalf("without holds: due = %v next = %v, want all three and nothing held", due, next)
 	}
@@ -156,8 +157,16 @@ func TestCoopWaitRingsOnceForNewMail(t *testing.T) {
 	if err := waitCoopMail(ctx, root, "claude", undone); err != nil {
 		t.Fatalf("undone ring: %v", err)
 	}
+	pending, err := coopStopPending(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, msg := range pending {
+		ids = append(ids, msg.ID)
+	}
 	yield := &wakeConfig{root: root, me: "claude", publishedChannel: wakeChannelHook}
-	if wait, held := yield.hookYield(time.Now(), nil); held {
+	if wait, held := yield.hookYield(time.Now(), ids); held {
 		t.Fatalf("the wake yields %s after an undone ring, want it to type", wait)
 	}
 

@@ -57,6 +57,27 @@ func TestPublishStartupDialogMarkerAttendedDeliveryLine(t *testing.T) {
 	}
 }
 
+// Review finding H16: coop exec --no-wake printed no delivery line for a
+// seat with hook_doorbell on, although its waiter is then the only ringer.
+func TestCoopExecNoWakePrintsHookDoorbellDeliveryLine(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	root := secureTempDirForTest(t)
+	if err := runInit([]string{"--root", root, "--agents", "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	settings := []byte(`{"schema":1,"settings":{"hook_doorbell":true}}`)
+	if err := os.WriteFile(filepath.Join(fsq.AgentBase(root, "codex"), wakeSettingsFileName), settings, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err := captureCoopExecStderr(t, []string{"--root", root, "--me", "codex", "--no-wake", "sh"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr, "delivery: hook doorbell (the harness's hook rings; the wake types only when no hook waits)\n") {
+		t.Fatalf("stderr = %q, want the hook doorbell delivery line", stderr)
+	}
+}
+
 // A waiter on an attended seat stays quiet for its whole window and
 // records no rang ids, as it does on a quiet inbox: the gate in
 // waitCoopMail suppresses the ring, so a removed gate fails this test.

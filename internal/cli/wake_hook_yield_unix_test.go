@@ -24,24 +24,41 @@ func holdWaiterForTest(t *testing.T, root, me string) func() {
 	return release
 }
 
+// The wake yields only when the hook covers every message of the cohort:
+// a waiter holds the lock and no hook announced it, or a hook announced it
+// less than hookRingGrace ago. Rows 2 and 4 to 6 come from review findings
+// H9 and H14: an announced message that nobody drained left the waiter
+// silent on it and the wake yielding to that waiter, so it was never
+// announced again (a Stop-guard report and an inbox file not named
+// <id>.md escaped the first fix).
 func TestHookDoorbellYieldsOnlyToCurrentDeliveryEvidence(t *testing.T) {
+	type record struct {
+		ids []string
+		age time.Duration
+	}
+	type mail struct{ file, id string }
+	one := []mail{{"mail.md", "mail"}}
 	for _, tc := range []struct {
 		name      string
 		published wakeChannel
 		locked    bool
-		ringAge   time.Duration
-		pending   string
-		wait      time.Duration
+		rang      *record
+		blocked   *record
+		inbox     []mail
+		yield     bool
 	}{
-		{"live waiter", wakeChannelHook, true, 0, "", wakeDoorbellRetryBase},
-		{"recent ring", wakeChannelHook, false, hookRingGrace - time.Second, "", time.Second},
-		{"expired ring", wakeChannelHook, false, hookRingGrace, "", 0},
-		{"unpublished", "", true, 0, "", 0},
-		// Review finding H9: a ring that no drain followed left the next
-		// waiter silent on the rang id and the wake yielding to that waiter,
-		// so the mail was never announced again.
-		{"undrained ring", wakeChannelHook, true, 3 * time.Minute, "mail.md", 0},
-		{"older ring for other mail", wakeChannelHook, true, 3 * time.Minute, "other.md", wakeDoorbellRetryBase},
+		{"1 waiter, mail not announced", wakeChannelHook, true, nil, nil, one, true},
+		{"2 waiter, mail rung 3 minutes ago", wakeChannelHook, true, &record{[]string{"mail"}, 3 * time.Minute}, nil, one, false},
+		{"3 waiter, mail rung 30 s ago", wakeChannelHook, true, &record{[]string{"mail"}, 30 * time.Second}, nil, one, true},
+		{"4 waiter, mail reported by the Stop guard 3 minutes ago", wakeChannelHook, true, nil, &record{[]string{"mail"}, 3 * time.Minute}, one, false},
+		{"5 waiter, one message covered and one stale", wakeChannelHook, true,
+			&record{[]string{"fresh"}, 30 * time.Second}, &record{[]string{"stale"}, 3 * time.Minute},
+			[]mail{{"fresh.md", "fresh"}, {"stale.md", "stale"}}, false},
+		{"6 waiter, bridged file name rung 3 minutes ago", wakeChannelHook, true,
+			&record{[]string{"mail"}, 3 * time.Minute}, nil, []mail{{"bridged-copy.md", "mail"}}, false},
+		{"7 no waiter, mail rung 30 s ago", wakeChannelHook, false, &record{[]string{"mail"}, 30 * time.Second}, nil, one, true},
+		{"8 no waiter, nothing announced", wakeChannelHook, false, nil, nil, one, false},
+		{"unpublished", "", true, nil, nil, one, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newWakeHoldHarness(t, wakeHoldPolicy{})
@@ -49,23 +66,36 @@ func TestHookDoorbellYieldsOnlyToCurrentDeliveryEvidence(t *testing.T) {
 			if tc.locked {
 				defer holdWaiterForTest(t, h.root, "codex")()
 			}
-			if tc.ringAge != 0 {
-				path := filepath.Join(fsq.AgentBase(h.root, "codex"), coopWaitStateFile)
-				if err := writeCoopHookState(path, coopWaitState{Schema: 1, RangIDs: []string{"mail"}}); err != nil {
+			agent := fsq.AgentBase(h.root, "codex")
+			for path, rec := range map[string]*record{
+				filepath.Join(agent, coopWaitStateFile): tc.rang,
+				filepath.Join(agent, coopStopStateFile): tc.blocked,
+			} {
+				if rec == nil {
+					continue
+				}
+				var state any = coopWaitState{Schema: 1, RangIDs: rec.ids}
+				if filepath.Base(path) == coopStopStateFile {
+					state = coopStopState{Schema: 1, BlockedIDs: rec.ids}
+				}
+				if err := writeCoopHookState(path, state); err != nil {
 					t.Fatal(err)
 				}
-				at := h.now.Add(-tc.ringAge)
+				at := h.now.Add(-rec.age)
 				if err := os.Chtimes(path, at, at); err != nil {
 					t.Fatal(err)
 				}
 			}
-			var pending map[string]os.FileInfo
-			if tc.pending != "" {
-				pending = map[string]os.FileInfo{tc.pending: nil}
+			for _, m := range tc.inbox {
+				h.sendAs(m.file, m.id)
 			}
-			wait, held := h.cfg.hookYield(h.now, pending)
-			if wait != tc.wait || held != (tc.wait > 0) {
-				t.Fatalf("hold = %v, %t; want %v", wait, held, tc.wait)
+			h.scan(h.cfg)
+			want := 1
+			if tc.yield {
+				want = 0
+			}
+			if got := h.rings(); got != want {
+				t.Fatalf("typed doorbells = %d, want %d", got, want)
 			}
 		})
 	}

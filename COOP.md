@@ -123,8 +123,9 @@ amq coop join                 # once per session, inside the session
   or why not. While the hook waits, `amq who` shows the agent as
   `active (hook_live)`. In a Claude Code terminal with the hooks installed,
   `amq wake config --hook-doorbell=true` lets mail wake a fresh session
-  while a draft stays in the editor. The wake resumes typing if the waiter
-  disappears and two minutes have passed since its last ring.
+  while a draft stays in the editor. The wake types the doorbell for unread
+  mail that no waiter will ring and that no hook announced in the last two
+  minutes.
 - **Policy is the wake settings.** The wait hook obeys `hold_normal`,
   `hold_low` and `debounce` from `~/.amq/wake.settings` and the agent's
   `.wake.settings` (`amq wake config`; `--machine` changes the user's file),

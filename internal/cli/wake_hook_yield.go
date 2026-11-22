@@ -3,7 +3,6 @@ package cli
 import (
 	"encoding/json"
 	"io"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -12,10 +11,19 @@ import (
 
 const (
 	hookRingGrace = 2 * time.Minute
-	// The waiter writes its rang IDs before attempting delivery. Its mtime
-	// bounds the handover until the session arms its next waiter.
+	// The waiter writes its rang IDs before attempting delivery, so the
+	// file's time is the time of its last ring.
 	coopWaitStateFile = ".rewake-hook-state.json"
 )
+
+// coopWaitState's ClaudeSession is the waiter's session key: the Claude
+// session, or the Codex thread id. The field keeps its name so a record
+// written by an earlier release reads the same.
+type coopWaitState struct {
+	Schema        int      `json:"schema"`
+	ClaudeSession string   `json:"claude_session"`
+	RangIDs       []string `json:"rang_ids"`
+}
 
 // wakeDoorbellChannel is the channel a wake publishes for settings. The
 // inject mode and injector come from cfg alone, at startup and at every
@@ -44,28 +52,45 @@ func (cfg *wakeConfig) applyPublishedChannel(channel wakeChannel) {
 	}
 }
 
-// hookYield checks the waiter's lock and its last ring against pending, the
-// inbox file names of the cohort the wake would announce. Both are delivery
-// evidence; only a drain receipt establishes consumption. A ring at least
-// hookRingGrace old that named a message still pending was not followed by
-// a drain, so the wake types for it even while a waiter holds the lock.
-func (cfg *wakeConfig) hookYield(now time.Time, pending map[string]os.FileInfo) (time.Duration, bool) {
+// hookYield reports whether the harness's own hook covers every message of
+// ids, the header ids of the cohort the wake would announce, and when to
+// look again. A message is covered when a waiter holds its lock and no hook
+// announced it (the waiter rings it), or when the record that announced it
+// is younger than hookRingGrace (the agent has the grace to drain). An
+// announced message whose record is older, or dated in the future, was not
+// followed by a drain, so the wake types for it even while a waiter holds
+// the lock. An empty cohort is not covered. Every fact here is delivery
+// evidence; only a drain receipt establishes consumption.
+func (cfg *wakeConfig) hookYield(now time.Time, ids []string) (time.Duration, bool) {
 	if cfg.publishedChannel != wakeChannelHook {
 		return 0, false
 	}
-	reason := "no waiter and no recent ring; typing"
-	var wait time.Duration
-	rang, ringAt, ok := readHookRing(filepath.Join(fsq.AgentBase(cfg.root, cfg.me), coopWaitStateFile))
-	age := now.Sub(ringAt)
-	switch {
-	case ok && age >= hookRingGrace && hookRingNamesAny(rang, pending):
-		reason = "a ring was not followed by a drain within its grace period; typing"
-	case coopWaitRuns(cfg.root, cfg.me):
-		wait = wakeDoorbellRetryBase
-		reason = "a waiter holds the doorbell"
-	case ok && age >= 0 && age < hookRingGrace:
-		wait = min(wakeDoorbellRetryBase, hookRingGrace-age)
-		reason = "the last ring is within its grace period"
+	waiter := coopWaitRuns(cfg.root, cfg.me)
+	// The wake does not know the waiter's session, so a ring of any session
+	// counts.
+	announced := coopAnnounced(fsq.AgentBase(cfg.root, cfg.me), "", true)
+	wait, reason := wakeDoorbellRetryBase, "a waiter holds the doorbell"
+	if len(ids) == 0 {
+		wait, reason = 0, "no mail with an id; typing"
+	}
+	for _, id := range ids {
+		at, ok := announced[id]
+		age := now.Sub(at)
+		switch {
+		case !ok && waiter:
+		case ok && age >= 0 && age < hookRingGrace:
+			wait = min(wait, hookRingGrace-age)
+			if !waiter {
+				reason = "a hook announced the mail within its grace period"
+			}
+		case ok:
+			wait, reason = 0, "a hook announced mail that was not drained within its grace period; typing"
+		default:
+			wait, reason = 0, "no waiter for mail that no hook announced; typing"
+		}
+		if wait == 0 {
+			break
+		}
 	}
 	if cfg.hookYieldReason != reason {
 		cfg.hookYieldReason = reason
@@ -74,38 +99,50 @@ func (cfg *wakeConfig) hookYield(now time.Time, pending map[string]os.FileInfo) 
 	return wait, wait > 0
 }
 
-// readHookRing reads the ids of the waiter's last ring and the record's
-// file time, which is the time of that ring. The ids of every session
-// count: the wake asks only whether a message it would announce was rung.
-func readHookRing(path string) ([]string, time.Time, bool) {
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() {
-		return nil, time.Time{}, false
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, info.ModTime(), true
-	}
-	defer func() { _ = f.Close() }()
-	var record struct {
-		RangIDs []string `json:"rang_ids"`
-	}
-	_ = json.NewDecoder(io.LimitReader(f, maxWakeMetadataFileBytes)).Decode(&record)
-	return record.RangIDs, info.ModTime(), true
-}
-
-// hookRingNamesAny reports whether a rang id names an inbox file in pending.
-func hookRingNamesAny(rang []string, pending map[string]os.FileInfo) bool {
-	for _, id := range rang {
-		if _, ok := pending[id+".md"]; id != "" && ok {
-			return true
+// coopAnnounced is the announced set of the agent whose mailbox is agent:
+// the ids of the waiter's last ring and the ids the Stop guard reported by
+// a block. Each id maps to the file time of the record that holds it, the
+// newer one when both do: the time the id was last announced. A ring heard
+// by one session says nothing to another, so only the ring of session
+// counts, unless anySession.
+func coopAnnounced(agent, session string, anySession bool) map[string]time.Time {
+	announced := make(map[string]time.Time)
+	add := func(ids []string, at time.Time) {
+		for _, id := range ids {
+			if prev, ok := announced[id]; id != "" && (!ok || at.After(prev)) {
+				announced[id] = at
+			}
 		}
 	}
-	return false
+	var stop coopStopState
+	if at, ok := readCoopHookRecord(filepath.Join(agent, coopStopStateFile), &stop); ok {
+		add(stop.BlockedIDs, at)
+	}
+	var rang coopWaitState
+	if at, ok := readCoopHookRecord(filepath.Join(agent, coopWaitStateFile), &rang); ok && (anySession || rang.ClaudeSession == session) {
+		add(rang.RangIDs, at)
+	}
+	return announced
 }
 
-func (cfg *wakeConfig) preAttemptHold(now time.Time, reminder bool, pending map[string]os.FileInfo) (time.Duration, bool) {
-	if wait, held := cfg.hookYield(now, pending); held {
+// readCoopHookRecord decodes the co-op hook record at path into v and
+// returns the file's time, which is when the hook last wrote it. A missing
+// or undecodable record, a link, or a file that is not regular reads as
+// none.
+func readCoopHookRecord(path string, v any) (time.Time, bool) {
+	f, info, err := fsq.OpenRegularNoFollow(path)
+	if err != nil {
+		return time.Time{}, false
+	}
+	defer func() { _ = f.Close() }()
+	if json.NewDecoder(io.LimitReader(f, maxWakeMetadataFileBytes)).Decode(v) != nil {
+		return time.Time{}, false
+	}
+	return info.ModTime(), true
+}
+
+func (cfg *wakeConfig) preAttemptHold(now time.Time, reminder bool, ids []string) (time.Duration, bool) {
+	if wait, held := cfg.hookYield(now, ids); held {
 		return wait, true
 	}
 	if reminder {
