@@ -105,6 +105,7 @@ func (c *Carrier) grantInfo(binding string) (any, error) {
 	}
 	c.gmu.Lock()
 	defer c.gmu.Unlock()
+	c.refreshGrantsLocked() // an expired grant ends, with a new generation, before it is read
 	gen, err := c.cfg.Grants.Generation(binding)
 	if err == nil && c.deadGeneration(gen) {
 		// Revoked here while the new value was not yet written.
