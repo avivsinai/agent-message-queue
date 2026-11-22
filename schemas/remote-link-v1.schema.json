@@ -133,10 +133,7 @@
       "type": "object",
       "required": ["outcome"],
       "additionalProperties": false,
-      "properties": {
-        "outcome": { "$ref": "#/$defs/outcome" },
-        "retry_after_ms": { "type": "integer", "minimum": 0, "description": "Present with outcome code busy: the same signed document may be sent again after it." }
-      }
+      "properties": { "outcome": { "$ref": "#/$defs/outcome" } }
     },
     "command_reply": {
       "type": "object",

@@ -180,6 +180,11 @@ func TestLinkBusyIsReadmittedOnlyByTheSameSignedRequest(t *testing.T) {
 				busy.Outcome.Code, rec.State, rec.Code, rec.Tombstone, rec.Input)
 		}
 	}
+	// A busy tombstone of a source that is not a link, under the link's host.
+	local := linkSubmit(clk, "fake", "11111111-1111-4111-8111-1111111111b5")
+	if r := submitReply(t, ep, local, core.Source{Host: hostB}); r.Outcome.Code != protocol.CodeBusy {
+		t.Fatalf("non-link submit while busy = %q, want busy", r.Outcome.Code)
+	}
 	rt.Complete(idA, "done")
 	dispatches := func() int { return rt.Snapshot().Dispatches }
 
@@ -200,6 +205,15 @@ func TestLinkBusyIsReadmittedOnlyByTheSameSignedRequest(t *testing.T) {
 	// re-admits it.
 	if _, err := ep.Handle(runs, core.Source{Host: hostB}); refusalCode(err) != protocol.CodeConsentInvalid || dispatches() != before || rt.HasRun(runs.RequestID) {
 		t.Fatalf("non-link resubmit of a link tombstone = %v, dispatches %d -> %d; want consent_invalid, no run", err, before, dispatches())
+	}
+
+	// Review of this branch: a signed link submit with the same id and input
+	// ran the busy tombstone of a source that is not a link. Only a source of
+	// the record's own kind re-admits it.
+	signed := linkSource(hostB, "fake")
+	signed.NativeSession, signed.Credential = "fake", "cred-1"
+	if _, err := ep.Handle(local, signed); refusalCode(err) != protocol.CodeConsentInvalid || dispatches() != before || rt.HasRun(local.RequestID) {
+		t.Fatalf("signed link resubmit of a non-link tombstone = %v, dispatches %d -> %d; want consent_invalid, no run", err, before, dispatches())
 	}
 
 	// The same signed document runs once the target is free, and only once.

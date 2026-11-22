@@ -201,15 +201,14 @@ func TestSignedSubmitRunsOverTheLink(t *testing.T) {
 	}
 	r := fs.next()
 	var rep outcomeReply
-	if err := decodeStrict(r.Body, "", &rep); err != nil || r.Re != "m_s1" || rep.Outcome.Evidence != "submitted" || rep.RetryAfterMS != 0 {
-		t.Fatalf("reply %s: want the submit's Outcome, no retry_after_ms", r.Body)
+	if err := decodeStrict(r.Body, "", &rep); err != nil || r.Re != "m_s1" || rep.Outcome.Evidence != "submitted" {
+		t.Fatalf("reply %s: want the submit's Outcome", r.Body)
 	}
-	// A busy outcome tells the server when the same signed document may be
-	// sent again.
+	// A busy refusal of the same signed document arrives as an outcome reply.
 	fs.send(Frame{Schema: SchemaFrame, ID: "m_s2", Gen: gen, Body: frame.Frame.Body})
 	r = fs.next()
-	if err := decodeStrict(r.Body, "", &rep); err != nil || r.Re != "m_s2" || rep.Outcome.Code != protocol.CodeBusy || rep.RetryAfterMS != busyRetryAfterMS {
-		t.Fatalf("busy reply %s: want outcome busy with retry_after_ms %d", r.Body, busyRetryAfterMS)
+	if err := decodeStrict(r.Body, "", &rep); err != nil || r.Re != "m_s2" || rep.Outcome.Code != protocol.CodeBusy {
+		t.Fatalf("busy reply %s: want an outcome reply with code busy", r.Body)
 	}
 }
 

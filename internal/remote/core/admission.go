@@ -186,15 +186,15 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 // tombstone rec by src. The caller holds e.mu; it unlocks exactly once on
 // every return.
 func (e *Endpoint) resubmitTombstoneLocked(cmd *protocol.Command, src Source, key requests.Key, rec *requests.Record) (protocol.Reply, error) {
-	// A link's record, or any record a link resubmits, re-admits only under
-	// the gates of a fresh link submit: a link source with verified signed
-	// bytes, a target still shared with it here, and its bound of open
-	// requests before the reservation below. Only a link verifies the signed
-	// document, so no other source re-admits a link's tombstone.
-	signedLink := isLink(src) && src.NativeSession != "" && src.Credential != ""
-	if (isLink(src) || rec.Origin["carrier"] == CarrierLink) && !signedLink {
+	// A tombstone re-admits only from a source of its own kind: a link's
+	// record only from a link with verified signed bytes, and any other
+	// record never from a link. A link's re-admission passes the gates of a
+	// fresh link submit: a target still shared with it here, and its bound of
+	// open requests before the reservation below.
+	linkRecord := rec.Origin["carrier"] == CarrierLink
+	if isLink(src) != linkRecord || (linkRecord && (src.NativeSession == "" || src.Credential == "")) {
 		e.mu.Unlock()
-		return protocol.Reply{}, protocol.Refuse(protocol.CodeConsentInvalid, "a link submit runs only from verified signed bytes")
+		return protocol.Reply{}, protocol.Refuse(protocol.CodeConsentInvalid, "a busy request runs again only from the kind of source that sent it, a link's only from verified signed bytes")
 	}
 	if src.Shared != nil && !slices.Contains(src.Shared, cmd.TargetID) {
 		e.mu.Unlock()
@@ -520,8 +520,7 @@ func readmittableBusy(rec *requests.Record) bool {
 // also needs the same not_after: only the same signed document re-admits a
 // link's busy tombstone, and another signature for the same request id is
 // answered from the stored record with request_conflict. Nothing is admitted
-// after not_after, so
-// a link record whose deadline passed never runs.
+// after not_after, so a link record whose deadline passed never runs.
 func sameRequest(rec *requests.Record, cmd *protocol.Command, digest string) bool {
 	if rec.InputDigest != digest {
 		return false

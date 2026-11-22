@@ -989,11 +989,7 @@ func (c *Carrier) admitSigned(m SignedSubmit) (any, error) {
 	if !ok {
 		return nil, errors.New("the endpoint returned no submit reply")
 	}
-	rep := outcomeReply{Outcome: reply.Outcome}
-	if reply.Outcome.Code == protocol.CodeBusy {
-		rep.RetryAfterMS = busyRetryAfterMS
-	}
-	return rep, nil
+	return outcomeReply{Outcome: reply.Outcome}, nil
 }
 
 // view is what the machine trusts right now. It is rebuilt for each signed
