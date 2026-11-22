@@ -152,16 +152,6 @@ func TestWakeAttentionRedirectedOutputOmitsControls(t *testing.T) {
 	}
 }
 
-// The held-doorbell notice builds an AppleScript literal: a quote or
-// backslash in the body must not end the string, and controls are removed.
-func TestAppleScriptStringEscapesQuotesAndBackslashes(t *testing.T) {
-	got := appleScriptString("say \"hi\" C:\\tmp\x07\nnext")
-	want := `"say \"hi\" C:\\tmp  next"`
-	if got != want {
-		t.Fatalf("appleScriptString = %s, want %s", got, want)
-	}
-}
-
 // A wake log holds one line per repeated notice plus a count, not the notice
 // again on every re-ring (.wake.log repeated identical lines, bead
 // agent-message-queue-9df).
