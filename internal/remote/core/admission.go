@@ -46,8 +46,8 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		// semantics; full safety/reset is not handled here). Recognizable as
 		// a tombstoned rejected record with no dispatch behind it and the
 		// same request (sameRequest). A different digest, or another signed
-		// document for a link's busy tombstone, is a conflict; any other
-		// resubmit is answered from the stored record.
+		// document (another not_after) for any link record, is a conflict;
+		// any other resubmit is answered from the stored record.
 		retryable := readmittableBusy(rec) && sameRequest(rec, cmd, digest)
 		if !retryable {
 			e.mu.Unlock()
