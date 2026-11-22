@@ -154,6 +154,21 @@ invariants.
   lists its digest.
   A re-attach or a new native session changes what the binding reports, and
   every older signature stops matching.
+- **A session grant stands in for a signature per task, only while the
+  session asks.** The owner may sign one grant, for at most 24 hours, that
+  lets a link send tasks to one shared binding with no signature each. A
+  granted task runs only when, at the handoff to the harness, the machine
+  holds the grant with the digest the record names, its generation is the
+  binding's generation now, now is before its `not_after`, the key that
+  signed it is still accepted, the share's consent is `passkey`, and the
+  harness reports from its own state that the session asks before a tool
+  acts. Every share write, detach, key change and revoke mints a new random
+  generation, which ends the grant. Within its time the server writes the
+  task text; the session reads with no dialog what it can read with no
+  dialog, rules the owner pre-allowed in the harness apply to granted tasks,
+  and the mode is a report, not a lock. The machine shows a notice when it
+  accepts a grant and when a grant ends. A signed submit stays valid on every
+  binding at all times.
 - **A revision is published when its sink acknowledged it.** A carrier counts
   a revision as published only after the sink confirms that it committed that
   revision or a newer one. Until then the revision stays owed and the

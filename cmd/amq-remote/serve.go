@@ -226,6 +226,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	machines := newMachineSet(ctx, stderr)
 	machines.tick(time.Now())
 	ep.SetConsent(links.consentLive)
+	ep.SetGrant(links.grantLive) // before any link frame is read
 	links.start(ctx, ep, mfSnap)
 	go func() {
 		t := time.NewTicker(*poll)

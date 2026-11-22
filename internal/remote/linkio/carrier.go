@@ -87,7 +87,18 @@ type Config struct {
 	ConsentKeys func() []ConsentKey
 	// LocalKey returns this link's local confirmation passkey, if any.
 	LocalKey func() (ConsentKey, bool)
-	Logf     func(format string, args ...any)
+	// Grants is this link's grant store. With none, the four grant requests
+	// answer unsupported.
+	Grants GrantStore
+	// GrantInfoFor reports whether a binding's session takes a grant now:
+	// its harness reports a mode that asks before a tool acts. reason is a
+	// GrantReason* value when it does not; maxTextBytes bounds the text of a
+	// granted task. With none, no session takes a grant.
+	GrantInfoFor func(b Binding) (available bool, reason string, maxTextBytes int)
+	// Notify shows the owner a desktop notice. The carrier calls it on a
+	// goroutine of its own, so it may block.
+	Notify func(title, body string)
+	Logf   func(format string, args ...any)
 
 	Now          func() time.Time
 	OfferTTL     time.Duration
@@ -150,6 +161,17 @@ type Carrier struct {
 	held       held                            // signed tasks waiting for the local confirmation
 	waiters    map[string]waiter               // frame id -> the request waiting for its reply
 	maxCalls   int                             // tool calls in flight, from welcome
+	shared     atomic.Pointer[map[string]bool] // binding names shared with the link when last read
+	grants     atomic.Pointer[Grants]          // the grant records as last read from the store
+	deadMu     sync.Mutex                      // serializes writers of deadGens
+	deadGens   atomic.Pointer[map[string]bool] // generations the server revoked here: never live again
+	// gmu serializes grant store reads and writes, so a snapshot read before
+	// a write never replaces one read after it. It is never held across a
+	// call into the endpoint.
+	gmu        sync.Mutex
+	grantSeen  map[string]StoredGrant // under gmu: digest -> a grant live at the last read
+	grantEnded map[string]string      // under gmu: digest -> the code its grant ended with
+	grantsErr  string                 // under gmu: the store read error last logged
 	// logged is the link state Run last logged: "online" or an offline
 	// error's class (offlineKey). Only Run's goroutine reads or writes it, so a link that
 	// stays down logs one line, not one per redial.
@@ -210,7 +232,9 @@ func New(cfg Config) (*Carrier, error) {
 	}
 	c.held.tasks = map[string]*HeldTask{}
 	c.held.confirmed = map[string]time.Time{}
-	c.refreshKeys() // the consent snapshot exists before the first handoff check
+	c.grantSeen, c.grantEnded = map[string]StoredGrant{}, map[string]string{}
+	c.refreshKeys()   // the consent snapshot exists before the first handoff check
+	c.RefreshGrants() // and so does the grant snapshot
 	return c, nil
 }
 
@@ -453,13 +477,14 @@ func (c *Carrier) Request(ctx context.Context, body any) (json.RawMessage, error
 // every sweep. With no session there is no one to tell: the handshake of the
 // next session sends the bindings as they are then.
 func (c *Carrier) Tick() {
+	c.RefreshGrants() // a grant ended by the owner or by its expiry is seen here
 	c.mu.Lock()
 	connected := c.sess != nil
 	c.mu.Unlock()
 	if !connected {
 		return
 	}
-	bindings := c.cfg.Bindings()
+	bindings := c.bindingsNow()
 	canon, err := jcs.Marshal(bindings)
 	if err != nil {
 		c.cfg.Logf("link %s: encode bindings: %v", c.cfg.Name, err)
@@ -695,7 +720,7 @@ func (c *Carrier) handshake(ctx context.Context, ws *websocket.Conn) (welcomeBod
 		return welcomeBody{}, nil, errors.New("challenge: empty nonce")
 	}
 	helloID := "h_" + newPrefix()
-	bindings := nonNil(c.cfg.Bindings())
+	bindings := nonNil(c.bindingsNow())
 	sentBind, err := jcs.Marshal(bindings)
 	if err != nil {
 		return welcomeBody{}, nil, err
@@ -851,11 +876,11 @@ func (c *Carrier) nextRevoke() (string, bool) {
 }
 
 // handleRequest answers a frame the server sends. key_revoked stops the key
-// at once and drops it on disk off the reader. A signed submit and a command
-// (get, cancel, session list or inspect) wait in one ordered queue per
-// request id on bounded workers, so a cancel runs after the submit
-// it follows. Only the reader's own refusals (undecodable, busy) are answered
-// inline.
+// at once and drops it on disk off the reader; grant_revoke ends the grant
+// the same way. A signed submit and a command (get, cancel, session list or
+// inspect) wait in one ordered queue per request id on bounded workers, so a
+// cancel runs after the submit it follows. Only the reader's own refusals
+// (undecodable, busy) are answered inline.
 func (c *Carrier) handleRequest(sess *session, f Frame) {
 	switch bodySchema(f.Body) {
 	case SchemaKeyRevoked:
@@ -918,6 +943,11 @@ func (c *Carrier) handleRequest(sess *session, f Frame) {
 		}
 		c.enqueue(sess, f, key, func() (any, error) { return c.runCommand(cmd) })
 		return
+	case SchemaGrantInfo, SchemaSignedGrant, SchemaGrantedSubmit, SchemaGrantRevoke:
+		if c.cfg.Grants != nil {
+			c.handleGrantRequest(sess, f)
+			return
+		}
 	}
 	c.refuse(sess, f.ID, ErrorBody{Code: string(protocol.CodeUnsupported), Message: "this endpoint does not accept that request on a link"})
 }
@@ -997,10 +1027,22 @@ func (c *Carrier) admitSigned(m SignedSubmit) (any, error) {
 func (c *Carrier) view() *ConsentView {
 	v := &ConsentView{ServerID: c.cfg.Pin.ServerID, StoreID: c.cfg.StoreID, Keys: map[string]ConsentKey{}, Bindings: map[string]Binding{}}
 	v.Keys = c.refreshKeys()
-	for _, b := range c.cfg.Bindings() {
+	for _, b := range c.bindingsNow() {
 		v.Bindings[b.Binding] = b
 	}
 	return v
+}
+
+// bindingsNow reads the bindings shared with the link and keeps their
+// names, which the reader checks a grant_revoke against with no I/O.
+func (c *Carrier) bindingsNow() []Binding {
+	bindings := c.cfg.Bindings()
+	names := make(map[string]bool, len(bindings))
+	for _, b := range bindings {
+		names[b.Binding] = true
+	}
+	c.shared.Store(&names)
+	return bindings
 }
 
 // ConsentLive reports whether this link still accepts a consent key. Core

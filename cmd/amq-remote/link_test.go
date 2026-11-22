@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -661,5 +662,53 @@ func TestLinkHelpPrintsUsage(t *testing.T) {
 		if !strings.Contains(out.String(), linkUsage) {
 			t.Fatalf("link %v does not print the link usage:\n%s", argv, out.String())
 		}
+	}
+}
+
+// link grant revoke ends the stored grant with a new generation, and link
+// status then lists no grant for the link.
+func TestLinkGrantRevokeEndsTheStoredGrant(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	stateDir := filepath.Join(root, stateDirName)
+	if _, err := linkio.MintDeviceKey(stateDir, "example"); err != nil {
+		t.Fatal(err)
+	}
+	mf := manifest.File{SchemaVersion: manifest.RelaySchemaVersion, Layer: manifest.Layer,
+		Links: []manifest.Link{{Name: "example", URL: "wss://link.example.test/link"}}}
+	if err := manifest.Write(manifest.DefaultPath(stateDir), mf); err != nil {
+		t.Fatal(err)
+	}
+	gen, err := linkio.EnsureGeneration(stateDir, "example", "pi-demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := linkio.StoreGrant(stateDir, "example", linkio.StoredGrant{
+		GrantID: "6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7", Binding: "pi-demo", Generation: gen, NotAfter: "2026-10-09T22:10:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	status := func() []linkGrantRow {
+		out, _, err := linkStatus([]string{"--root", root}, &jsonProbe{})
+		st, _ := out.(linkStatusOut)
+		if err != nil || len(st.Links) != 1 {
+			t.Fatalf("link status = %+v, %v", out, err)
+		}
+		return st.Links[0].Grants
+	}
+	if g := status(); len(g) != 1 || g[0].Binding != "pi-demo" {
+		t.Fatalf("link status grants = %+v; want the stored grant", g)
+	}
+
+	out, code, err := link([]string{"grant", "revoke", "--root", root, "--json", "example"}, strings.NewReader(""), io.Discard, &jsonProbe{})
+	if err != nil || code != 0 || !reflect.DeepEqual(out, map[string]any{"link": "example", "revoked": []string{"pi-demo"}}) {
+		t.Fatalf("link grant revoke = %v, %d, %v; want pi-demo revoked", out, code, err)
+	}
+	grants, err := linkio.LoadGrants(stateDir, "example")
+	if rec := grants["pi-demo"]; err != nil || rec.Generation == "" || rec.Generation == gen || rec.Grant != nil {
+		t.Fatalf("pi-demo after revoke = %+v, %v; want a new generation and no grant", rec, err)
+	}
+	if g := status(); len(g) != 0 {
+		t.Fatalf("link status grants = %+v after revoke; want none", g)
 	}
 }

@@ -142,6 +142,49 @@ func StoreGrant(stateDir, link string, sg StoredGrant) error {
 	})
 }
 
+// GrantStore is one link's grant records as the carrier reads and writes
+// them.
+type GrantStore interface {
+	// Load reads every record (LoadGrants).
+	Load() (Grants, error)
+	// Generation returns the binding's generation, minting one when it has
+	// none (EnsureGeneration).
+	Generation(binding string) (string, error)
+	// Store stores an accepted grant (StoreGrant).
+	Store(StoredGrant) error
+	// Mint gives the binding a new generation, which ends its grant, and
+	// returns the new value (MintGeneration).
+	Mint(binding string) (string, error)
+}
+
+// FileGrants is the GrantStore of link in stateDir: its grants.json.
+func FileGrants(stateDir, link string) GrantStore { return fileGrants{stateDir: stateDir, link: link} }
+
+type fileGrants struct{ stateDir, link string }
+
+func (f fileGrants) Load() (Grants, error) { return LoadGrants(f.stateDir, f.link) }
+
+func (f fileGrants) Generation(binding string) (string, error) {
+	return EnsureGeneration(f.stateDir, f.link, binding)
+}
+
+func (f fileGrants) Store(sg StoredGrant) error { return StoreGrant(f.stateDir, f.link, sg) }
+
+func (f fileGrants) Mint(binding string) (string, error) {
+	if err := MintGeneration(f.stateDir, f.link, binding); err != nil {
+		return "", err
+	}
+	g, err := LoadGrants(f.stateDir, f.link)
+	if err != nil {
+		return "", err
+	}
+	gen := g[binding].Generation
+	if gen == "" {
+		return "", fmt.Errorf("link %q has no state directory", f.link)
+	}
+	return gen, nil
+}
+
 // withGrants runs fn under the lock that serializes a link's grant record
 // changes, beside the file so the file can be replaced by rename. It never
 // creates the link directory: a retired link stays deleted. Without an

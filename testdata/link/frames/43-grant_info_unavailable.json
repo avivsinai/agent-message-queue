@@ -1,0 +1,18 @@
+{
+  "body_def": "grant_info_reply",
+  "description": "The binding takes no grant now: reason is consent_local, mode_unreadable or harness_unsupported. Send each task as a signed submit.",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "grant_info": {
+        "available": false,
+        "binding": "pi-demo",
+        "now": "2026-10-09T14:10:00Z",
+        "reason": "harness_unsupported"
+      }
+    },
+    "gen": 12,
+    "re": "m_gi1",
+    "schema": "amq.remote.link/1"
+  }
+}

@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/desktopnotice"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	karegistry "github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
@@ -53,6 +54,8 @@ type linkSet struct {
 	statuses map[string]linkio.Status
 	restored time.Time   // when restore last ran
 	pages    *pageServer // the endpoint's own local pages
+	// notice shows a desktop notice; nil where the platform has none.
+	notice func(title, body string) error
 }
 
 type linkRun struct {
@@ -73,6 +76,7 @@ func newLinkSet(root, stateDir, manifestFile, version string, stderr io.Writer) 
 		root: root, stateDir: stateDir, manifestFile: manifestFile, version: version, stderr: stderr,
 		running: map[string]*linkRun{}, byHost: map[string]*linkio.Carrier{}, retired: retired,
 		statuses: map[string]linkio.Status{}, pages: &pageServer{stateDir: stateDir},
+		notice: desktopnotice.Notifier(),
 	}
 }
 
@@ -237,6 +241,7 @@ func (ls *linkSet) newRun(ctx context.Context, l manifest.Link) (*linkRun, error
 			}
 			if run.carrier != nil {
 				run.carrier.RefreshConsentKeys()
+				run.carrier.RefreshGrants() // the drop ended every grant of the link
 			}
 		},
 		Revoked: func() { ls.retire(name) },
@@ -252,13 +257,51 @@ func (ls *linkSet) newRun(ctx context.Context, l manifest.Link) (*linkRun, error
 			}
 			return keys
 		},
-		Logf: func(f string, a ...any) { say(ls.stderr, f, a...) },
+		Grants:       linkio.FileGrants(ls.stateDir, name),
+		GrantInfoFor: ls.grantInfoFor,
+		Notify:       ls.notify,
+		Logf:         func(f string, a ...any) { say(ls.stderr, f, a...) },
 	})
 	if err != nil {
 		return nil, err
 	}
 	run.carrier = c
 	return run, nil
+}
+
+// grantInfoFor reports whether a shared binding's session takes a grant
+// now: its adapter reads from the harness that the session asks before a
+// tool acts. An adapter that cannot read the mode takes no grant.
+func (ls *linkSet) grantInfoFor(b linkio.Binding) (bool, string, int) {
+	ls.mu.Lock()
+	ep := ls.ep
+	ls.mu.Unlock()
+	if ep == nil {
+		return false, linkio.GrantReasonModeUnreadable, 0
+	}
+	att, ok := ep.AttachmentOf(b.TargetID)
+	if !ok {
+		return false, linkio.GrantReasonModeUnreadable, 0
+	}
+	pr, ok := att.(core.PermissionReader)
+	if !ok {
+		return false, linkio.GrantReasonHarnessUnsupported, 0
+	}
+	if asks, _ := pr.SessionAsks(); !asks {
+		return false, linkio.GrantReasonModeUnreadable, 0
+	}
+	return true, "", protocol.MaxInputBytes
+}
+
+// notify shows the owner a link notice on the desktop and in the log.
+func (ls *linkSet) notify(title, body string) {
+	say(ls.stderr, "link: %s", body)
+	if ls.notice == nil {
+		return
+	}
+	if err := ls.notice(title, body); err != nil {
+		say(ls.stderr, "link: desktop notice: %v", err)
+	}
 }
 
 // consentLive is core's handoff check: the link with that creator host still
@@ -268,6 +311,33 @@ func (ls *linkSet) consentLive(host, credential string) bool {
 	c := ls.byHost[host]
 	ls.mu.Unlock()
 	return c != nil && c.ConsentLive(credential)
+}
+
+// grantLive is core's handoff check of a granted request: the link with that
+// creator host still holds the grant, and the grant's share still takes
+// grants (consent passkey). A retired or unknown link holds none. It reads
+// only in-memory state.
+func (ls *linkSet) grantLive(host, target, digest string) string {
+	ls.mu.Lock()
+	c := ls.byHost[host]
+	var shares []manifest.LinkShare
+	for _, r := range ls.running {
+		if r.carrier == c {
+			shares = r.link.Shares
+		}
+	}
+	ls.mu.Unlock()
+	if c == nil {
+		return linkio.CodeGrantRevoked + ": the link is not running"
+	}
+	b, reason := c.GrantLive(target, digest)
+	if reason != "" {
+		return reason
+	}
+	if !slices.ContainsFunc(shares, func(sh manifest.LinkShare) bool { return sh.Binding == b && sh.Consent == "passkey" }) {
+		return fmt.Sprintf("%s: %s: binding %q is not shared with passkey consent now", linkio.CodeGrantUnsupported, linkio.GrantReasonConsentLocal, b)
+	}
+	return ""
 }
 
 // handle runs a link's admitted command on the endpoint.
@@ -422,7 +492,7 @@ func writeLinkStatus(stateDir, name string, st linkio.Status) {
 // link dispatches the link subcommands; --help prints their usage.
 func link(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe) (any, int, error) {
 	if len(args) == 0 {
-		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "link needs a subcommand: add, keys, local-key, confirm, remove, status, tools or call")
+		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "link needs a subcommand: add, keys, local-key, confirm, grant, remove, status, tools or call")
 	}
 	switch args[0] {
 	case "--help", "-h":
@@ -439,6 +509,11 @@ func link(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe) (a
 			return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "usage: amq-remote link keys add NAME --code CODE")
 		}
 		return linkKeysAdd(args[2:], stdin, stdout, probe)
+	case "grant":
+		if len(args) < 2 || args[1] != "revoke" {
+			return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "usage: amq-remote link grant revoke NAME [BINDING]")
+		}
+		return linkGrantRevoke(args[2:], stdout, probe)
 	case "remove":
 		return linkRemove(args[1:], stdout, probe)
 	case "status":
@@ -1009,6 +1084,56 @@ func linkRemove(args []string, stdout io.Writer, probe *jsonProbe) (any, int, er
 	return out, 0, nil
 }
 
+// linkGrantRevoke ends the session grant of one binding of a link, or of
+// every binding, with a new grant generation. It needs no running endpoint:
+// a running one stops the grant at its next sweep and every grant request
+// reads the new generation at once.
+func linkGrantRevoke(args []string, stdout io.Writer, probe *jsonProbe) (any, int, error) {
+	fs := flag.NewFlagSet("link grant revoke", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	c := addCommon(fs, probe)
+	pos, err := parseInterleaved(fs, args)
+	if err != nil || len(pos) < 1 || len(pos) > 2 {
+		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "usage: amq-remote link grant revoke NAME [BINDING]")
+	}
+	name := pos[0]
+	if err := linkio.ValidName(name); err != nil {
+		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
+	}
+	root, _, err := c.resolveLink(name)
+	if err != nil {
+		return nil, protocol.ExitCode(err), err
+	}
+	stateDir := filepath.Join(root, stateDirName)
+	revoked := pos[1:]
+	grants, gerr := linkio.LoadGrants(stateDir, name)
+	if len(revoked) == 0 {
+		// Every record; an unreadable file is replaced, which ends them all.
+		for b := range grants {
+			revoked = append(revoked, b)
+		}
+		sort.Strings(revoked)
+	} else if _, ok := grants[revoked[0]]; gerr == nil && !ok {
+		// No grant is live without a record: a name with none is a mistake.
+		return nil, protocol.ExitNotFound, protocol.Refuse(protocol.CodeNotFound, "link %s has no grant record for binding %q", name, revoked[0])
+	}
+	if err := linkio.MintGeneration(stateDir, name, pos[1:]...); err != nil {
+		return nil, protocol.ExitError, err
+	}
+	if revoked == nil {
+		revoked = []string{}
+	}
+	if c.json {
+		return map[string]any{"link": name, "revoked": revoked}, 0, nil
+	}
+	if len(revoked) == 0 {
+		say(stdout, "Link %s holds no grant.", name)
+		return nil, 0, nil
+	}
+	say(stdout, "Ended the grants of link %s for %s. The server must ask for a new grant.", name, strings.Join(revoked, ", "))
+	return nil, 0, nil
+}
+
 // dropManifestLink removes one link from the manifest under the same lock
 // attach uses for adapters.
 func dropManifestLink(stateDir, name string) error {
@@ -1079,8 +1204,14 @@ func removeAdapter(path string, match func(manifest.Adapter) bool) (bool, error)
 	return removed && err == nil, err
 }
 
-// shareWithLink adds or replaces one binding's share on a declared link.
+// shareWithLink adds or replaces one binding's share on a declared link. It
+// first ends the binding's grant on that link (a new grant generation): a
+// share written again takes no grant signed before. A failed end writes no
+// share.
 func shareWithLink(stateDir, name string, share manifest.LinkShare) error {
+	if err := linkio.MintGeneration(stateDir, name, share.Binding); err != nil {
+		return fmt.Errorf("end the grant of %s on link %s: %w", share.Binding, name, err)
+	}
 	found := false
 	err := editManifest(stateDir, func(mf *manifest.File) {
 		for i := range mf.Links {
@@ -1150,6 +1281,12 @@ func printLinkStatus(w io.Writer, v linkStatusOut) {
 		for _, b := range l.Shares {
 			say(w, "  %s: %s", b, nonEmpty(l.ShareStates[b], "unknown"))
 		}
+		for _, g := range l.Grants {
+			say(w, "  grant %s on %s until %s", g.GrantID, g.Binding, g.NotAfter)
+		}
+		if l.GrantsError != "" {
+			say(w, "  grants: %s", l.GrantsError)
+		}
 	}
 	for _, r := range v.RetiredSinks {
 		say(w, "retired %s (link %s): abandoned; its records settle without network", r.Sink, r.Link)
@@ -1166,6 +1303,17 @@ type linkStatusRow struct {
 	// ShareStates says, per shared binding, whether the server sees it now:
 	// "shared", or why not, with the step that fixes it.
 	ShareStates map[string]string `json:"share_states,omitempty"`
+	// Grants are the session grants stored on this machine, read from the
+	// link's grants.json; GrantsError says why they could not be read.
+	Grants      []linkGrantRow `json:"grants,omitempty"`
+	GrantsError string         `json:"grants_error,omitempty"`
+}
+
+// linkGrantRow is one stored session grant.
+type linkGrantRow struct {
+	Binding  string `json:"binding"`
+	GrantID  string `json:"grant_id"`
+	NotAfter string `json:"not_after"`
 }
 
 // dropShares removes from l the shares of the bindings in names and
@@ -1187,7 +1335,8 @@ func dropShares(l *manifest.Link, names map[string]bool) bool {
 // removeDetachedLinkShares removes entries for names that were just
 // detached or confirmed ended and reports whether it removed one. Each
 // manifest is written only when it holds one, so a root with no such share
-// keeps its file untouched.
+// keeps its file untouched. The grant of each removed share ends first (a
+// new grant generation); a failed end removes no share of that root.
 func removeDetachedLinkShares(roots, names []string) (bool, error) {
 	gone := make(map[string]bool, len(names))
 	for _, name := range names {
@@ -1202,7 +1351,19 @@ func removeDetachedLinkShares(roots, names []string) (bool, error) {
 		}
 		changed := false
 		for i := range mf.Links {
-			changed = dropShares(&mf.Links[i], gone) || changed
+			var dropped []string
+			for _, sh := range mf.Links[i].Shares {
+				if gone[sh.Binding] {
+					dropped = append(dropped, sh.Binding)
+				}
+			}
+			if len(dropped) == 0 {
+				continue
+			}
+			if err := linkio.MintGeneration(filepath.Join(root, stateDirName), mf.Links[i].Name, dropped...); err != nil {
+				return false, fmt.Errorf("end the grants of link %s: %w", mf.Links[i].Name, err)
+			}
+			changed = true
 		}
 		if !changed {
 			continue
@@ -1289,6 +1450,24 @@ func (p *nativeProbe) native(target string) (string, error) {
 	return reply.NativeSession, nil
 }
 
+// linkGrantRows lists the grants stored for a link, by binding. A grant is
+// listed until it is revoked or replaced; one past its not_after admits
+// nothing.
+func linkGrantRows(stateDir, name string) ([]linkGrantRow, string) {
+	grants, err := linkio.LoadGrants(stateDir, name)
+	if err != nil {
+		return nil, err.Error()
+	}
+	var rows []linkGrantRow
+	for _, rec := range grants {
+		if g := rec.Grant; g != nil {
+			rows = append(rows, linkGrantRow{Binding: g.Binding, GrantID: g.GrantID, NotAfter: g.NotAfter})
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Binding < rows[j].Binding })
+	return rows, ""
+}
+
 // linkStatus lists the links on this machine (or in --root) and the retired
 // sinks.
 func linkStatus(args []string, probe *jsonProbe) (any, int, error) {
@@ -1335,6 +1514,7 @@ func linkStatus(args []string, probe *jsonProbe) (any, int, error) {
 				if data, err := os.ReadFile(filepath.Join(linkio.LinkDir(stateDir, l.Name), "status.json")); err == nil {
 					_ = json.Unmarshal(data, &row.Status)
 				}
+				row.Grants, row.GrantsError = linkGrantRows(stateDir, l.Name)
 			} else if host := retiredHostOf(retiredNames, l.Name); host != "" {
 				row.Sink, row.Status.State = host, "retired"
 			} else {

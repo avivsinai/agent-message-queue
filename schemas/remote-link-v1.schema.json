@@ -258,6 +258,102 @@
         "review_url": { "type": "string", "pattern": "^https://" },
         "error": { "$ref": "#/$defs/error" }
       }
+    },
+    "grant_info": {
+      "type": "object",
+      "required": ["schema", "binding"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "const": "amq.remote.link.grant_info/1" },
+        "binding": { "$ref": "#/$defs/opaque" }
+      }
+    },
+    "grant_info_reply": {
+      "type": "object",
+      "required": ["grant_info"],
+      "additionalProperties": false,
+      "properties": {
+        "grant_info": {
+          "type": "object",
+          "required": ["binding", "available", "now"],
+          "additionalProperties": false,
+          "properties": {
+            "binding": { "$ref": "#/$defs/opaque" },
+            "available": { "type": "boolean" },
+            "reason": { "enum": ["consent_local", "mode_unreadable", "harness_unsupported"], "description": "Present when available is false." },
+            "grant_generation": { "$ref": "#/$defs/opaque", "description": "Present when available is true: the value a grant for this binding must carry." },
+            "max_lifetime_s": { "type": "integer", "minimum": 1, "description": "Present when available is true: the longest not_after - issued_at of a grant." },
+            "max_text_bytes": { "type": "integer", "minimum": 1, "description": "Present when available is true: the longest task text a grant carries on this binding." },
+            "now": { "type": "string", "format": "date-time", "description": "The machine's clock, for issued_at and a command's not_after." }
+          }
+        }
+      }
+    },
+    "signed_grant": {
+      "type": "object",
+      "required": ["schema", "document_b64", "credential_id", "authenticator_data", "client_data_json", "signature"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "const": "amq.remote.link.signed_grant/1" },
+        "document_b64": { "$ref": "#/$defs/b64url", "description": "The exact amq.remote.grant/1 bytes that were signed (their JCS form)." },
+        "credential_id": { "$ref": "#/$defs/b64url" },
+        "authenticator_data": { "$ref": "#/$defs/b64url" },
+        "client_data_json": { "$ref": "#/$defs/b64url", "description": "The raw clientDataJSON bytes; never re-serialized." },
+        "signature": { "$ref": "#/$defs/b64url" }
+      }
+    },
+    "grant_reply": {
+      "type": "object",
+      "required": ["grant"],
+      "additionalProperties": false,
+      "properties": {
+        "grant": {
+          "type": "object",
+          "required": ["digest", "grant_id", "binding", "not_after"],
+          "additionalProperties": false,
+          "properties": {
+            "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "sha256 of the signed grant document bytes." },
+            "grant_id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+            "binding": { "$ref": "#/$defs/opaque" },
+            "not_after": { "type": "string", "format": "date-time" }
+          }
+        }
+      }
+    },
+    "granted_submit": {
+      "type": "object",
+      "required": ["schema", "grant_digest", "command"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "const": "amq.remote.link.granted_submit/1" },
+        "grant_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "The digest grant_reply gave." },
+        "command": { "$ref": "#/$defs/command", "description": "A request.submit whose input writes out the grant's class." }
+      }
+    },
+    "grant_revoke": {
+      "type": "object",
+      "required": ["schema", "binding"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "const": "amq.remote.link.grant_revoke/1" },
+        "binding": { "$ref": "#/$defs/opaque" }
+      }
+    },
+    "revoked_reply": {
+      "type": "object",
+      "required": ["revoked"],
+      "additionalProperties": false,
+      "properties": {
+        "revoked": {
+          "type": "object",
+          "required": ["binding", "grant_generation"],
+          "additionalProperties": false,
+          "properties": {
+            "binding": { "$ref": "#/$defs/opaque" },
+            "grant_generation": { "$ref": "#/$defs/opaque" }
+          }
+        }
+      }
     }
   }
 }

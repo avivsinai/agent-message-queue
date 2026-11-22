@@ -14,6 +14,8 @@ byte and runs the same checks as `internal/remote/linkcontract` and
 | `consent/assertion.json` | A software authenticator's ES256 (`alg` -7) WebAuthn assertion over it, the public key, and the passkey fingerprint |
 | `consent/assertion_ed25519.json` | The same document signed by an Ed25519 (`alg` -8) passkey |
 | `consent/refused/*.json` | Documents a verifier refuses with `consent_invalid`, as `document_b64` |
+| `grant/document.json` | An `amq.remote.grant/1` session grant for the same binding, exactly the signed bytes |
+| `grant/assertion.json` | The ES256 assertion over it by the same consent key, and its `digest` (`"sha256:"` + hex of the document bytes) |
 | `device.json` | The endpoint's Ed25519 device key (SPKI) and the creator host derived from it |
 | `frames/NN-name.json` | One golden frame per body: `direction`, `body_def` (a `$defs` name in the schema), `frame` |
 

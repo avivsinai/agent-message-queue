@@ -1,0 +1,16 @@
+{
+  "body_def": "error_reply",
+  "description": "The session does not ask for permissions now, its mode cannot be read, or the text is longer than max_text_bytes. Nothing was sent. Send this task as a signed submit with a new request_id; the grant stays.",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "error": {
+        "code": "grant_needs_signature",
+        "message": "mode_unreadable: the session does not ask for permissions now; sign this task"
+      }
+    },
+    "gen": 12,
+    "re": "m_gs1",
+    "schema": "amq.remote.link/1"
+  }
+}
