@@ -54,9 +54,11 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 			out := protocol.Outcome{Op: protocol.OpRequestSubmit}
 			if rec.InputDigest != "" && rec.InputDigest != digest {
 				out.Code = protocol.CodeRequestConflict
-			} else if rec.Origin["carrier"] == CarrierLink && readmittableBusy(rec) && rec.NotAfter != cmd.NotAfter {
-				// The document never runs; an empty code would read as
-				// accepted over the link, which carries only the outcome.
+			} else if rec.Origin["carrier"] == CarrierLink && rec.NotAfter != cmd.NotAfter {
+				// Another signed document for a link's request id never
+				// runs, whatever the record's state; an empty code would
+				// read as accepted over the link, which carries only the
+				// outcome.
 				out.Code = protocol.CodeRequestConflict
 				out.Message = "another signed document holds this request id"
 			} else if rec.State == protocol.StateRejected {

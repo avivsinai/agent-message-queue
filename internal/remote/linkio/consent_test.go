@@ -204,11 +204,21 @@ func TestSignedSubmitRunsOverTheLink(t *testing.T) {
 	if err := decodeStrict(r.Body, "", &rep); err != nil || r.Re != "m_s1" || rep.Outcome.Evidence != "submitted" {
 		t.Fatalf("reply %s: want the submit's Outcome", r.Body)
 	}
-	// A busy refusal of the same signed document arrives as an outcome reply.
+	// A busy refusal of the same signed document has exactly the body of
+	// the contract's busy frame: an outcome reply with no other key.
 	fs.send(Frame{Schema: SchemaFrame, ID: "m_s2", Gen: gen, Body: frame.Frame.Body})
 	r = fs.next()
-	if err := decodeStrict(r.Body, "", &rep); err != nil || r.Re != "m_s2" || rep.Outcome.Code != protocol.CodeBusy {
-		t.Fatalf("busy reply %s: want an outcome reply with code busy", r.Body)
+	var contract struct {
+		Frame struct {
+			Body json.RawMessage `json:"body"`
+		} `json:"frame"`
+	}
+	if err := json.Unmarshal(readLinkFixture(t, "frames/10-submit_refused_busy.json"), &contract); err != nil {
+		t.Fatal(err)
+	}
+	var busy, want any
+	if err := json.Unmarshal(r.Body, &busy); err != nil || json.Unmarshal(contract.Frame.Body, &want) != nil || r.Re != "m_s2" || !reflect.DeepEqual(busy, want) {
+		t.Fatalf("busy reply %s: want the contract's busy body %s", r.Body, contract.Frame.Body)
 	}
 }
 

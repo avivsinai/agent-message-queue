@@ -224,6 +224,14 @@ func TestLinkBusyIsReadmittedOnlyByTheSameSignedRequest(t *testing.T) {
 	if dispatches() != before+1 {
 		t.Fatalf("a third identical submit dispatched again: %d -> %d", before, dispatches())
 	}
+	// Review of this branch: after the request ran, another signature for
+	// its id (a later not_after) was answered with no code, which a link
+	// server reads as accepted. It is request_conflict in every state.
+	ranLater := *runs
+	ranLater.NotAfter = protocol.FormatTime(clk.now().Add(3 * time.Minute))
+	if r := submitReply(t, ep, &ranLater, linkSource(hostB, "fake")); r.Outcome.Code != protocol.CodeRequestConflict || dispatches() != before+1 {
+		t.Fatalf("a later not_after for a request that ran = outcome %q, dispatches %d -> %d; want request_conflict, no run", r.Outcome.Code, before, dispatches())
+	}
 
 	// Past its not_after the same document is refused expired, and after the
 	// compaction horizon it still never runs.

@@ -1219,10 +1219,11 @@ func (c *Carrier) ConfirmLocal(id, digest, authenticatorData, clientDataJSON, si
 	}
 	out, err := c.cfg.Handle(t.verified.Cmd, c.source(c.view(), t.verified.Native, t.credential))
 	if reply, ok := out.(protocol.Reply); err != nil || (ok && reply.Outcome.Code != "") {
-		// Refused, busy included: a press that was told "not handed to" must
-		// not let a resend run on it, even where core keeps a busy record
-		// that the same request could re-admit. The resend is held and
-		// confirmed again.
+		// Refused, busy included: the confirmation is forgotten, so a later
+		// resend is held and confirmed again, also where core keeps a busy
+		// record that the same request could re-admit. A resend that arrives
+		// before the forget runs on this press; one press still causes at
+		// most one dispatch.
 		c.held.forget(digest)
 	}
 	return out, err
