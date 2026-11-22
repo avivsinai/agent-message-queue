@@ -73,6 +73,44 @@ func runCoopWaitCodex(ctx context.Context, stdin io.Reader) error {
 	return waitCoopMail(ctx, canonicalWakeRoot(root), me, codexWaiter(ctx, thread, codexHome, held))
 }
 
+// runCoopPromptCodex is the co-op prompt hook of a joined Codex chat: when
+// the person submits a prompt and unread mail waits, it adds one line of
+// context for the model. The hook input's session_id is the thread, as for
+// the waiter. It returns nil and prints nothing whenever this is not a
+// joined chat's prompt, so it never blocks or disturbs a prompt.
+func runCoopPromptCodex(stdin io.Reader, w io.Writer) error {
+	var in struct {
+		SessionID string `json:"session_id"`
+		Prompt    string `json:"prompt"`
+	}
+	// Input the receiver cannot read whole, a prompt cut by the bound among
+	// it, names no chat and no prompt to speak for.
+	if json.NewDecoder(io.LimitReader(stdin, coopPromptInputLimit)).Decode(&in) != nil || !codexidentity.ValidThread(in.SessionID) {
+		return nil
+	}
+	if adoptCodexHookIdentity(in.SessionID) != nil {
+		return nil
+	}
+	root, me, session, err := coopHookContext()
+	if err != nil || root == "" || me == "" || !codexThreadMayBe(in.SessionID, root, me) {
+		return nil
+	}
+	writeCoopPromptFor(w, in.Prompt, root, me, session)
+	return nil
+}
+
+// codexThreadMayBe reports whether thread may speak for (root, me). A
+// thread with a record of its own is the seat that record still names, on
+// the queue it pinned. A thread with none is the seat of its process, as an
+// amq command of that thread is.
+func codexThreadMayBe(thread, root, me string) bool {
+	id, err := recordedCodexIdentity(thread)
+	if errors.Is(err, codexidentity.ErrNone) {
+		return true
+	}
+	return err == nil && id.Me == me && canonicalWakeRoot(id.Root) == canonicalWakeRoot(root)
+}
+
 // codexWaiter is the waiter of a Codex thread under codexHome.
 func codexWaiter(ctx context.Context, thread, codexHome string, held func() bool) coopWaiter {
 	lockPath := codexWriterLockPath(codexHome, thread)

@@ -74,6 +74,7 @@ type wakeConfig struct {
 	settingsUnseeded              bool               // an unseeded resume runs argv settings until its seed lands
 	settingsTicks                 <-chan time.Time
 	holdPolicyChanged             bool                                         // consumed by the next inbox scan that builds holds
+	attendedChanged               bool                                         // an attended change reset the cohort: the next scan delivers what waits
 	dialogSource                  func(now time.Time) (wakeDialogState, error) // reads .wake.dialog; nil = no dialog guard (direct loop tests)
 	commands                      *wakeCommands                                // the owner command queue the wake types (wakecmd); nil = none
 	dialogHold                    wakeDialogState                              // the state last held for, so each change logs once
@@ -744,6 +745,19 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		// before planHeld reads the deadline.
 		cfg.doorbell.reholdForPolicy(currentPending, holds)
 		cfg.holdPolicyChanged = false
+	}
+	if cfg.attendedChanged {
+		// A live attended change reset the cohort: this scan delivers one
+		// notice for what waits under the new setting even with no inbox
+		// event; the recorded cohort makes every later scan quiet again.
+		cfg.attendedChanged = false
+		if len(messages) == 0 && len(currentPending) > 0 {
+			text := fmt.Sprintf(
+				"%s: %d unread message(s). Drain with: amq drain --include-body — then act on it",
+				notificationPrefix("AMQ", cfg.session), len(currentPending),
+			)
+			return deliverNewMessageNotification(cfg, peerWakeNotification(text), true, currentPending)
+		}
 	}
 	if cfg.inputRecoveryRequired &&
 		dischargeWakeInputRecoveryAfterProgress(cfg, currentPending) &&
@@ -2458,6 +2472,13 @@ func reconcileWakeInputAfterInboxDrain(cfg *wakeConfig) error {
 	if cfg.inputDelivery.oneSubmit {
 		// The owner's command is not doorbell text, and the peer inbox says
 		// nothing about it: its own path types it to the end or refuses it.
+		return nil
+	}
+	if cfg.settings.attended {
+		// Defence at the write site: the invariant lives here, not only in
+		// the earlier reload-time clear. An attended seat is never typed
+		// into, so the input state drops instead of sending an owed Enter.
+		clearWakeInputState(cfg)
 		return nil
 	}
 	if cfg.inputDelivery.phase == wakeInputPayloadPending {

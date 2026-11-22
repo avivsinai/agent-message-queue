@@ -239,8 +239,22 @@ func TestCoopInstallHooksWritesTheGatedEntryAndListsOldOnes(t *testing.T) {
 			t.Fatalf("Codex %s = %+v, want one async entry running %q", event, groups, wait)
 		}
 	}
-	if len(codex.Hooks["UserPromptSubmit"]) != 0 || len(codex.Hooks) != 2 {
-		t.Fatalf("Codex hooks expanded beyond SessionStart and Stop: %+v", codex.Hooks)
+	prompt := strings.Replace(wait, "codex-wait", "codex-prompt", 1)
+	if groups := codex.Hooks["UserPromptSubmit"]; len(codex.Hooks) != 3 || len(groups) != 1 || groups[0].Matcher != nil || len(groups[0].Hooks) != 1 ||
+		groups[0].Hooks[0].Command != prompt || groups[0].Hooks[0].Async || groups[0].Hooks[0].Timeout != 2 {
+		t.Fatalf("Codex UserPromptSubmit = %+v of %d events, want one entry running %q", groups, len(codex.Hooks), prompt)
+	}
+	if _, err := captureStdout(t, func() error { return runCoopInstallHooks([]string{"--harness", "codex"}) }); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := os.ReadFile(filepath.Join(codexHome, "hooks.json")); err != nil || !bytes.Equal(again, raw) {
+		t.Fatalf("second Codex install changed the hooks (%v):\n%s", err, again)
+	}
+	if _, err := captureStdout(t, func() error { return runCoopUninstallHooks([]string{"--harness", "codex"}) }); err != nil {
+		t.Fatal(err)
+	}
+	if left, err := os.ReadFile(filepath.Join(codexHome, "hooks.json")); err != nil || bytes.Contains(left, []byte(coopHookMarker)) {
+		t.Fatalf("Codex uninstall left co-op entries (%v):\n%s", err, left)
 	}
 }
 
@@ -363,9 +377,6 @@ func TestCoopStopUnderALiveWakeCountsOnlyBaselineMail(t *testing.T) {
 // types nothing, so mail created after its baseline would never be
 // reported anywhere else. The decide function takes no baseline, so the
 // unit case is that mail after a live wake's baseline is reported.
-// An attended seat reports mail created after the wake baseline too, at a
-// real turn end through writeCoopStop: the attended wake types nothing, so
-// a baseline cut would leave that mail unreported for ever.
 func sendCodexToClaudeForAttendedTest(t *testing.T, root string) {
 	t.Helper()
 	if _, err := captureStdout(t, func() error {
@@ -388,7 +399,12 @@ func setAttendedForTest(t *testing.T, root, me string) {
 	}
 }
 
-func TestCoopStopAttendedReportsMailAfterTheWakeBaseline(t *testing.T) {
+// An attended seat reports pending mail at a real turn end through
+// writeCoopStop: the notice shows, no block is returned, a repeat for the
+// same mail prints nothing, and a second message gets exactly one more
+// notice. No live wake exists here, so there is no baseline to cut with —
+// and the attended path never cuts by baseline anyway.
+func TestCoopStopAttendedReportsPendingMailWithoutAWake(t *testing.T) {
 	clearSendMailboxTestEnv(t)
 	base := filepath.Join(t.TempDir(), ".agent-mail")
 	root := filepath.Join(base, "collab")
@@ -403,14 +419,33 @@ func TestCoopStopAttendedReportsMailAfterTheWakeBaseline(t *testing.T) {
 	setAttendedForTest(t, root, "claude")
 
 	var out bytes.Buffer
-	if err := writeCoopStop(strings.NewReader(`{"stop_hook_active":false}`), &out); err != nil {
-		t.Fatal(err)
+	stop := func() string {
+		t.Helper()
+		out.Reset()
+		if err := writeCoopStop(strings.NewReader(`{"stop_hook_active":false}`), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
 	}
-	if !strings.Contains(out.String(), "unread message(s)") {
-		t.Fatalf("attended stop = %q, want the unread notice", out.String())
+	first := stop()
+	if !strings.Contains(first, "unread message(s)") {
+		t.Fatalf("attended stop = %q, want the unread notice", first)
 	}
-	if strings.Contains(out.String(), `"decision":"block"`) {
-		t.Fatalf("attended stop = %q, want no block", out.String())
+	if strings.Contains(first, `"decision":"block"`) {
+		t.Fatalf("attended stop = %q, want no block", first)
+	}
+	// A repeat for the same mail prints nothing: NoticedIDs already covers it.
+	if got := stop(); got != "" {
+		t.Fatalf("repeat attended stop = %q, want no output", got)
+	}
+	// A second message prints one more notice, once.
+	sendCodexToClaudeForAttendedTest(t, root)
+	second := stop()
+	if !strings.Contains(second, "2 unread message(s)") {
+		t.Fatalf("second attended stop = %q, want the notice for both messages", second)
+	}
+	if got := stop(); got != "" {
+		t.Fatalf("repeat after both noticed = %q, want no output", got)
 	}
 }
 

@@ -193,6 +193,11 @@ amq coop leave                           # release the handle
   shows the agent as `active (hook_live)`. `join` prints whether the hook
   will wake the chat, or why not. Without it, run `amq drain --include-body`
   between tasks.
+- **The prompt hook tells the model at a submit.** The same install writes a
+  `UserPromptSubmit` hook. When you submit a prompt in a joined chat and
+  unread mail waits, it adds one line of context with the unread count. It
+  prints nothing for the doorbell. Reinstall and approve it to add this entry
+  to an earlier hook installation.
 
 Limits of the Codex wait hook:
 

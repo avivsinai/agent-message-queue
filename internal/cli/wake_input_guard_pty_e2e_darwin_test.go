@@ -649,6 +649,18 @@ func TestWakeInputGuardRealPTY(t *testing.T) {
 			}
 			return records[len(records)-1].Buffer == "draft"
 		}, "the editor lost its draft, or the wake typed input on an attended seat")
+		// The person types nothing after the draft, so any read record after
+		// it is a wake byte, even one the editor discards (BEL, an escape
+		// sequence, 0x03): the byte log, not the buffer, is the proof.
+		s.requireDuring(1*time.Second, func(records []wakeInputGuardEditorRecord) bool {
+			for _, record := range records {
+				if record.Kind == "read" && record.At.After(sent) {
+					s.fail("attended seat wrote a byte after the draft: " + record.Hex)
+					return false
+				}
+			}
+			return true
+		}, "the wake wrote to the attended seat's terminal after the draft")
 	})
 
 }

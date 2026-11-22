@@ -43,25 +43,66 @@ func adoptCodexThreadIdentity() error {
 			return nil
 		}
 	}
-	codexHome, err := codexHomeDir()
-	if err != nil {
-		return ContextMismatchError("cannot resolve CODEX_HOME for this Codex thread's AMQ identity: %v", err)
-	}
-	rec, err := codexidentity.Lookup(strings.TrimSpace(thread), absPath(filepath.Clean(codexHome)))
+	id, err := recordedCodexIdentity(strings.TrimSpace(thread))
 	if errors.Is(err, codexidentity.ErrNone) {
 		return nil
 	}
 	if err != nil {
-		return ContextMismatchError("this Codex thread's AMQ identity cannot be used: %v; run amq coop join --me <handle>, or set AM_ROOT and AM_ME explicitly", err)
-	}
-	id, err := validateRecordedIdentity(launch.Identity{
-		Root: rec.Root, BaseRoot: rec.BaseRoot, Session: rec.Session,
-		Me: rec.Me, RootID: rec.RootID, BaseRootID: rec.BaseRootID,
-	}, "this Codex thread's")
-	if err != nil {
 		return err
 	}
 	return adoptIdentity(id, "this Codex thread's")
+}
+
+// isCodexHookReceiver reports whether args run a Codex hook receiver: amq
+// coop hook codex-wait or codex-prompt, or amq wake dialog --harness codex.
+// A receiver takes its seat from the hook input (adoptCodexHookIdentity),
+// so amq adopts no session identity from its environment: a Codex that was
+// started from a shell tool of Codex or of Claude Code inherits that
+// session's id.
+func isCodexHookReceiver(args []string) bool {
+	if len(args) < 3 {
+		return false
+	}
+	switch {
+	case args[0] == "coop" && args[1] == "hook":
+		return slices.Contains(args[2:], "codex-wait") || slices.Contains(args[2:], "codex-prompt")
+	case args[0] == "wake" && args[1] == "dialog":
+		// The flag package keeps the last value of a repeated flag.
+		harness := ""
+		for i, arg := range args[2:] {
+			name, value, inline := strings.Cut(strings.TrimLeft(arg, "-"), "=")
+			if !strings.HasPrefix(arg, "-") || name != "harness" {
+				continue
+			}
+			if !inline && i+3 < len(args) {
+				value = args[i+3]
+			}
+			harness = value
+		}
+		return harness == "codex"
+	}
+	return false
+}
+
+// recordedCodexIdentity returns the validated identity AMQ recorded for
+// thread. The error is codexidentity.ErrNone when the thread has no record,
+// and a context mismatch when a record exists and cannot be used.
+func recordedCodexIdentity(thread string) (launch.Identity, error) {
+	codexHome, err := codexHomeDir()
+	if err != nil {
+		return launch.Identity{}, ContextMismatchError("cannot resolve CODEX_HOME for this Codex thread's AMQ identity: %v", err)
+	}
+	rec, err := codexidentity.Lookup(thread, absPath(filepath.Clean(codexHome)))
+	if errors.Is(err, codexidentity.ErrNone) {
+		return launch.Identity{}, err
+	}
+	if err != nil {
+		return launch.Identity{}, ContextMismatchError("this Codex thread's AMQ identity cannot be used: %v; run amq coop join --me <handle>, or set AM_ROOT and AM_ME explicitly", err)
+	}
+	return validateRecordedIdentity(launch.Identity{
+		Root: rec.Root, BaseRoot: rec.BaseRoot, Session: rec.Session,
+		Me: rec.Me, RootID: rec.RootID, BaseRootID: rec.BaseRootID,
+	}, "this Codex thread's")
 }
 
 // adoptIdentity makes id this process's identity: it sets every identity

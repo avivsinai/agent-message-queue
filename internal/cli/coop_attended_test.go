@@ -3,12 +3,16 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
 
 // The coop exec delivery line names an attended seat once, for every
@@ -50,5 +54,41 @@ func TestPublishStartupDialogMarkerAttendedDeliveryLine(t *testing.T) {
 	}
 	if strings.Contains(stderr, "delivery: attended") {
 		t.Fatalf("unattended stderr = %q, want no attended delivery line", stderr)
+	}
+}
+
+// A waiter on an attended seat stays quiet for its whole window and
+// records no rang ids, as it does on a quiet inbox: the gate in
+// waitCoopMail suppresses the ring, so a removed gate fails this test.
+func TestCoopWaitOnAttendedSeatDoesNotRing(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	root := filepath.Join(t.TempDir(), "queue")
+	if err := runInit([]string{"--root", root, "--agents", "claude,codex"}); err != nil {
+		t.Fatal(err)
+	}
+	root = canonicalWakeRoot(root)
+	const claudeSession = "7c29e148-77eb-47c0-8984-10c13b4700b1"
+	setAttendedForTest(t, root, "claude")
+	sendCodexToClaudeForAttendedTest(t, root)
+
+	// wait runs one waiter for at most limit. With pending mail and
+	// attended=true it must stay quiet for the whole window and record no
+	// rang ids, as the unattended test's quiet inbox does.
+	quiet := 2 * defaultWakeDebounce
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), quiet)
+	defer cancel()
+	err := waitCoopMail(ctx, root, "claude", claudeWaiter(claudeSession, os.Getppid(), launch.HolderIdentity{}))
+	if errors.Is(err, errCoopWaitRing) {
+		t.Fatalf("attended waiter rang: %v, want no ring", err)
+	}
+	if err != nil {
+		t.Fatalf("attended waiter: %v, want a quiet end", err)
+	}
+	if elapsed := time.Since(start); elapsed < quiet/2 {
+		t.Fatalf("attended waiter ended after %s, want it to run its whole %s window", elapsed, quiet)
+	}
+	if rang := readCoopWaitState(filepath.Join(root, "agents", "claude", coopWaitStateFile), claudeSession); len(rang.RangIDs) != 0 {
+		t.Fatalf("attended waiter rang %v, want no rang ids", rang.RangIDs)
 	}
 }

@@ -819,7 +819,9 @@ sessions after an install.
   has published the startup marker decision. The namer waits while a dialog
   marker holds input, as the doorbell does, and checks the marker again
   before it types the command and right before its Enter; a marker then
-  stops the attempt with the manual-rename reminder.
+  stops the attempt with the manual-rename reminder. When `amq wake config`
+  sets `attended`, for either value, the attempt stops with the same
+  reminder naming the attended seat.
 - **Not covered.** Prompts that Cursor shows before any tool call run no
   hook: ask-question, mode switch, web search, and image approval. Esc on
   "Run this command?" opens "Tell the agent what to do instead"; that box is
