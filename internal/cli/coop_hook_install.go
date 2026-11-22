@@ -29,9 +29,14 @@ func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''
 // coopHookEvents are the events amq coop install-hooks wires for Claude.
 var coopHookEvents = []string{"SessionStart", "Stop", "UserPromptSubmit"}
 
-// codexCoopHookEvents are Codex's supported wait events. UserPromptSubmit
-// belongs to Claude in this build and must not be added to Codex here.
-var codexCoopHookEvents = []string{"SessionStart", "Stop"}
+// codexCoopWaitEvents are the events that arm the Codex wait hook.
+var codexCoopWaitEvents = []string{"SessionStart", "Stop"}
+
+// codexCoopPromptEvent is the event of the Codex prompt hook.
+const codexCoopPromptEvent = "UserPromptSubmit"
+
+// codexCoopHookEvents are the events amq coop install-hooks wires for Codex.
+var codexCoopHookEvents = []string{"SessionStart", "Stop", codexCoopPromptEvent}
 
 // coopHookCommand is the shell command one co-op hook runs. The gate runs
 // in the harness shell, so a session that does not take part starts no
@@ -126,16 +131,28 @@ func coopWaitHook(bin, store, event, matcher string) hookfile.CommandHook {
 // stays as the parent and ends in || true: exit 2 means something to Codex
 // on Stop, and an older amq exits 2 on the unknown verb.
 func codexCoopWaitCommand(bin, threads string) string {
-	return coopHookMarker + `[ -n "${AM_ME-}" ] || [ -d ` + shellQuote(threads) + ` ] || exit 0; ` +
-		shellQuote(bin) + " --no-update-check coop hook codex-wait || true"
+	return codexCoopCommand(bin, threads, "codex-wait")
 }
 
-// codexCoopHooks are the Codex wait hook's entries: a session start arms
-// it for a chat that waits for its first turn, and every turn end arms it
-// again. Codex runs an async hook in the background for the thread.
+// codexCoopPromptCommand is the command of the Codex prompt hook, with the
+// gate and the ending of the wait command: Codex reads stdout and gives
+// exit 2 a meaning on UserPromptSubmit too.
+func codexCoopPromptCommand(bin, threads string) string {
+	return codexCoopCommand(bin, threads, "codex-prompt")
+}
+
+func codexCoopCommand(bin, threads, verb string) string {
+	return coopHookMarker + `[ -n "${AM_ME-}" ] || [ -d ` + shellQuote(threads) + ` ] || exit 0; ` +
+		shellQuote(bin) + " --no-update-check coop hook " + verb + " || true"
+}
+
+// codexCoopHooks are the Codex co-op entries. The wait hook: a session
+// start arms it for a chat that waits for its first turn, and every turn
+// end arms it again; Codex runs an async hook in the background for the
+// thread. The prompt hook runs in the person's submit, so it is short.
 func codexCoopHooks(bin, threads string) []hookfile.CommandHook {
 	hooks := make([]hookfile.CommandHook, 0, len(codexCoopHookEvents))
-	for _, event := range codexCoopHookEvents {
+	for _, event := range codexCoopWaitEvents {
 		hooks = append(hooks, hookfile.CommandHook{
 			Event:   event,
 			Marker:  coopHookMarker,
@@ -144,7 +161,12 @@ func codexCoopHooks(bin, threads string) []hookfile.CommandHook {
 			Async:   true,
 		})
 	}
-	return hooks
+	return append(hooks, hookfile.CommandHook{
+		Event:   codexCoopPromptEvent,
+		Marker:  coopHookMarker,
+		Command: codexCoopPromptCommand(bin, threads),
+		Timeout: 2,
+	})
 }
 
 // codexCoopHooksPath is the user hooks file Codex reads:
@@ -178,11 +200,11 @@ func coopHookHarness(name string) (codex bool, err error) {
 func runCoopInstallHooks(args []string) error {
 	fs := flag.NewFlagSet("coop install-hooks", flag.ContinueOnError)
 	dryRun := fs.Bool("dry-run", false, "Print the hooks without changing the settings file")
-	harnessName := fs.String("harness", "claude", "claude, or codex for the wait hook of a joined Codex chat")
+	harnessName := fs.String("harness", "claude", "claude, or codex for the hooks of a joined Codex chat")
 	usage := usageWithFlags(fs, "amq coop install-hooks [--dry-run] [--harness claude|codex]",
 		"Install the co-op hooks in $CLAUDE_CONFIG_DIR/settings.json (default",
-		"~/.claude/settings.json), or with --harness codex the wait hook in",
-		"$CODEX_HOME/hooks.json.",
+		"~/.claude/settings.json), or with --harness codex the wait hook and the",
+		"prompt hook in $CODEX_HOME/hooks.json.",
 		"",
 		"SessionStart (startup, resume, clear, compact) gives the agent its co-op",
 		"preamble: handle, session, peers, unread count, and what announces new mail.",
@@ -203,6 +225,9 @@ func runCoopInstallHooks(args []string) error {
 		"the doorbell to the chat's thread when mail arrives. Codex runs it only after",
 		"you approve it, in a chat opened after that. It stops after 7 days without",
 		"a turn, or when Codex unloads the chat; the next turn starts it again.",
+		"The prompt hook runs on UserPromptSubmit and adds context with the unread",
+		"count to the person's prompt in a joined chat. A seat with an earlier hook",
+		"installation adds this entry at the next install; approve it in Codex.",
 		"",
 		"Running again keeps the same entries and replaces entries of another amq",
 		"binary. Other settings and hooks are not changed. It also lists old project",
@@ -249,12 +274,16 @@ func runCoopInstallHooks(args []string) error {
 	return writeLegacyCoopHookEntries()
 }
 
-// installCodexCoopHooks writes the Codex wait hook's entries after the
+// installCodexCoopHooks writes the Codex co-op entries after the
 // person's own, so the trust keys of their hooks do not move.
 func installCodexCoopHooks(hooks []hookfile.CommandHook, dryRun bool) error {
 	if dryRun {
 		for _, hook := range hooks {
-			if err := writeStdout("%s\t(all)\ttimeout=%ds async\t%s\n", hook.Event, hook.Timeout, hook.Command); err != nil {
+			mode := ""
+			if hook.Async {
+				mode = " async"
+			}
+			if err := writeStdout("%s\t(all)\ttimeout=%ds%s\t%s\n", hook.Event, hook.Timeout, mode, hook.Command); err != nil {
 				return err
 			}
 		}
@@ -267,7 +296,7 @@ func installCodexCoopHooks(hooks []hookfile.CommandHook, dryRun bool) error {
 	if _, err := hookfile.InstallCommandHooksAt(path, hooks); err != nil {
 		return err
 	}
-	return writeStdout("co-op wait hook installed in %s\n%s", path, codexCoopHookTrustNote)
+	return writeStdout("co-op hooks installed in %s\n%s", path, codexCoopHookTrustNote)
 }
 
 func runCoopUninstallHooks(args []string) error {
@@ -295,7 +324,7 @@ func runCoopUninstallHooks(args []string) error {
 		if err := hookfile.UninstallCommandHooksAt(path, coopHookMarker, codexCoopHookEvents); err != nil {
 			return err
 		}
-		return writeStdout("co-op wait hook removed from %s\n", path)
+		return writeStdout("co-op hooks removed from %s\n", path)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {

@@ -73,6 +73,30 @@ func runCoopWaitCodex(ctx context.Context, stdin io.Reader) error {
 	return waitCoopMail(ctx, canonicalWakeRoot(root), me, codexWaiter(ctx, thread, codexHome, held))
 }
 
+// runCoopPromptCodex is the co-op prompt hook of a joined Codex chat: when
+// the person submits a prompt and unread mail waits, it adds one line of
+// context for the model. The hook input's session_id is the thread, as for
+// the waiter. It returns nil and prints nothing whenever this is not a
+// joined chat's prompt, so it never blocks or disturbs a prompt.
+func runCoopPromptCodex(stdin io.Reader, w io.Writer) error {
+	var in struct {
+		SessionID string `json:"session_id"`
+		Prompt    string `json:"prompt"`
+	}
+	// A prompt cut by the bound leaves the thread unread, and then this is
+	// not a chat the hook can name.
+	_ = json.NewDecoder(io.LimitReader(stdin, coopPromptInputLimit)).Decode(&in)
+	if !codexidentity.ValidThread(in.SessionID) || adoptCodexHookIdentity(in.SessionID) != nil {
+		return nil
+	}
+	root, me, session, err := coopHookContext()
+	if err != nil || root == "" || me == "" {
+		return nil
+	}
+	writeCoopPromptFor(w, in.Prompt, root, me, session)
+	return nil
+}
+
 // codexWaiter is the waiter of a Codex thread under codexHome.
 func codexWaiter(ctx context.Context, thread, codexHome string, held func() bool) coopWaiter {
 	lockPath := codexWriterLockPath(codexHome, thread)

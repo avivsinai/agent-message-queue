@@ -1956,8 +1956,8 @@ Usage:
   amq coop install-hooks [--dry-run] [--harness claude|codex]
 
 Install the co-op hooks in $CLAUDE_CONFIG_DIR/settings.json (default
-~/.claude/settings.json), or with --harness codex the wait hook in
-$CODEX_HOME/hooks.json.
+~/.claude/settings.json), or with --harness codex the wait hook and the
+prompt hook in $CODEX_HOME/hooks.json.
 
 SessionStart (startup, resume, clear, compact) gives the agent its co-op
 preamble: handle, session, peers, unread count, and what announces new mail.
@@ -1978,6 +1978,9 @@ Codex hook and is the doorbell of a chat bound with amq coop join: it queues
 the doorbell to the chat's thread when mail arrives. Codex runs it only after
 you approve it, in a chat opened after that. It stops after 7 days without
 a turn, or when Codex unloads the chat; the next turn starts it again.
+The prompt hook runs on UserPromptSubmit and adds context with the unread
+count to the person's prompt in a joined chat. A seat with an earlier hook
+installation adds this entry at the next install; approve it in Codex.
 
 Running again keeps the same entries and replaces entries of another amq
 binary. Other settings and hooks are not changed. It also lists old project
@@ -1987,7 +1990,7 @@ Options:
   -dry-run
         Print the hooks without changing the settings file
   -harness string
-        claude, or codex for the wait hook of a joined Codex chat (default "claude")
+        claude, or codex for the hooks of a joined Codex chat (default "claude")
 ```
 
 ## amq coop uninstall-hooks
@@ -2012,7 +2015,7 @@ Options:
 ```text
 $ amq coop hook --help
 Usage:
-  amq coop hook session-start|stop|prompt|wait|codex-wait
+  amq coop hook session-start|stop|prompt|wait|codex-wait|codex-prompt
 
 Hook receivers for the co-op hooks; amq coop install-hooks installs them.
 They read AM_ME, AM_ROOT and the session pin from the environment, or the
@@ -2049,6 +2052,9 @@ It rings by queueing the doorbell to the thread with codex queue (the
 desktop app's binary when CODEX_APP_RUNTIME_CLI_PATH names it), and always
 exits 0; a ring that fails prints a systemMessage and is rung again by the
 next waiter.
+
+codex-prompt is prompt for a joined Codex chat: it reads the thread id from
+the hook input's session_id, and always exits 0.
 ```
 
 ## amq swarm list

@@ -19,6 +19,7 @@ package cli
 // starts a waiter or rings.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -254,7 +255,12 @@ func (r *codexQueueRecorder) Run(_ context.Context, _ string, args ...string) ([
 	return []byte(fmt.Sprintf("Queued message m1 for thread %s.", args[2])), nil
 }
 
-func TestCodexWaitQueuesTheDoorbellToItsThread(t *testing.T) {
+// joinCodexThread makes a co-op project with the agents claude and codex
+// in the working directory and joins thread as codex, the way a chat of the
+// Codex desktop app does. It leaves the environment a Codex hook has: no
+// CODEX_THREAD_ID and no AMQ identity.
+func joinCodexThread(t *testing.T, thread string) {
+	t.Helper()
 	clearJoinTestEnv(t)
 	t.Setenv("HOME", t.TempDir())
 	codexHome := t.TempDir()
@@ -263,7 +269,6 @@ func TestCodexWaitQueuesTheDoorbellToItsThread(t *testing.T) {
 	if _, err := captureStdout(t, func() error { return runCoopInit([]string{"--agents", "claude,codex", "--no-gitignore"}) }); err != nil {
 		t.Fatal(err)
 	}
-	const thread, unbound = "019a1166-dd8e-77c0-bc3b-a4b7e24e91f1", "019a1166-dd8e-77c0-bc3b-a4b7e24e91f2"
 	holdCodexThread(t, codexHome, thread)
 	rollout := filepath.Join(codexHome, "sessions", "2026", "11", "13", "rollout-2026-11-13T10-00-00-"+thread+".jsonl")
 	if err := os.MkdirAll(filepath.Dir(rollout), 0o700); err != nil {
@@ -272,6 +277,51 @@ func TestCodexWaitQueuesTheDoorbellToItsThread(t *testing.T) {
 	if err := os.WriteFile(rollout, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("CODEX_THREAD_ID", thread)
+	if _, err := captureStdout(t, func() error { return runCoopJoin(nil) }); err != nil {
+		t.Fatal(err)
+	}
+	setOptionalEnv(t, "CODEX_THREAD_ID", "", false)
+}
+
+func TestCodexPromptAddsUnreadContextToAJoinedChat(t *testing.T) {
+	const thread, unbound = "019a1166-dd8e-77c0-bc3b-a4b7e24e91f1", "019a1166-dd8e-77c0-bc3b-a4b7e24e91f2"
+	joinCodexThread(t, thread)
+	if _, err := captureStdout(t, func() error {
+		return runSend([]string{"--root", filepath.Join(defaultCoopRoot, defaultSessionName), "--me", "claude", "--to", "codex", "--body", "hi"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	prompt := func(sessionID, text string) string {
+		t.Helper()
+		// The receiver adopts the thread's identity into its own process.
+		defer func() {
+			for _, key := range append([]string{"CODEX_THREAD_ID"}, identityEnvKeys...) {
+				_ = os.Unsetenv(key)
+			}
+		}()
+		var out bytes.Buffer
+		input := fmt.Sprintf(`{"session_id":%q,"hook_event_name":"UserPromptSubmit","prompt":%q}`, sessionID, text)
+		if err := runCoopPromptCodex(strings.NewReader(input), &out); err != nil {
+			t.Fatalf("prompt hook of %s: %v, want exit 0", sessionID, err)
+		}
+		return out.String()
+	}
+	got := prompt(thread, "hello")
+	if !strings.Contains(got, `"hookEventName":"UserPromptSubmit"`) || !strings.Contains(got, "You have 1 unread AMQ message(s). Run amq drain --include-body.") {
+		t.Fatalf("a person's prompt in the joined chat got %q, want the unread context", got)
+	}
+	if got := prompt(thread, harness.Doorbell); got != "" {
+		t.Fatalf("the doorbell got %q, want nothing", got)
+	}
+	if got := prompt(unbound, "hello"); got != "" {
+		t.Fatalf("a chat with no binding got %q, want nothing", got)
+	}
+}
+
+func TestCodexWaitQueuesTheDoorbellToItsThread(t *testing.T) {
+	const thread, unbound = "019a1166-dd8e-77c0-bc3b-a4b7e24e91f1", "019a1166-dd8e-77c0-bc3b-a4b7e24e91f2"
+	joinCodexThread(t, thread)
 	// The desktop app names its own codex in the hook environment.
 	app := filepath.Join(t.TempDir(), "codex")
 	if err := os.WriteFile(app, []byte("#!/bin/sh\n"), 0o755); err != nil {
@@ -282,12 +332,7 @@ func TestCodexWaitQueuesTheDoorbellToItsThread(t *testing.T) {
 	codexWaitRunner = recorder
 	t.Cleanup(func() { codexWaitRunner = nil })
 
-	t.Setenv("CODEX_THREAD_ID", thread)
-	if _, err := captureStdout(t, func() error { return runCoopJoin(nil) }); err != nil {
-		t.Fatal(err)
-	}
 	// A hook has no CODEX_THREAD_ID; the thread is the input's session_id.
-	setOptionalEnv(t, "CODEX_THREAD_ID", "", false)
 	wait := func(sessionID string) (string, time.Duration) {
 		t.Helper()
 		defer func() {
