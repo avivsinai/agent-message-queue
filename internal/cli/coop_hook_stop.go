@@ -143,11 +143,12 @@ func writeCoopStop(stdin io.Reader, w io.Writer) error {
 	// the model learns of the mail at their next prompt. Every unread
 	// message counts, with no wake baseline: the attended wake types
 	// nothing, so mail after its baseline would otherwise never be reported
-	// at a turn end. A seat that is not attended keeps the block below.
+	// at a turn end. An id the guard already reported by a block counts as
+	// noticed too, so attended off-on-off does not print it a third time.
 	if attended {
 		next := decideCoopStopAttended(pending, old)
-		fresh := freshAttendedIDs(pending, old.NoticedIDs)
-		if !slices.Equal(next.NoticedIDs, old.NoticedIDs) {
+		fresh := freshAttendedIDs(pending, old.NoticedIDs, old.BlockedIDs)
+		if !slices.Equal(next.NoticedIDs, old.NoticedIDs) || !slices.Equal(next.BlockedIDs, old.BlockedIDs) {
 			_ = writeCoopHookState(statePath, next)
 		}
 		if len(fresh) == 0 {
@@ -157,7 +158,7 @@ func writeCoopStop(stdin io.Reader, w io.Writer) error {
 			"AMQ: %d unread message(s). Run amq drain --include-body.", len(pending))})
 	}
 	next, out := decideCoopStop(pending, baseline, old, in.StopHookActive, "root="+root+" session="+session)
-	if !slices.Equal(next.BlockedIDs, old.BlockedIDs) || next.ChainBlocks != old.ChainBlocks {
+	if !slices.Equal(next.BlockedIDs, old.BlockedIDs) || next.ChainBlocks != old.ChainBlocks || !slices.Equal(next.NoticedIDs, old.NoticedIDs) {
 		_ = writeCoopHookState(statePath, next)
 	}
 	if out == nil {
@@ -166,16 +167,10 @@ func writeCoopStop(stdin io.Reader, w io.Writer) error {
 	return writeCoopHookJSON(w, out)
 }
 
-// decideCoopStop returns the next state and the hook output (nil to allow
-// silently). Under a live wake, baseline is its startup baseline: the wake
-// rings for mail created later, and mail created at or before it may be the
-// cohort it baselined and never rings for, so only that mail counts. A
-// message whose creation time does not parse counts.
-// decideCoopStopAttended is the attended-seat Stop state: noticed = the ids
-// that are pending now, in NoticedIDs. The systemMessage prints when a
-// pending id is not in the old NoticedIDs, so the notice shows once per
-// message and a drained message leaves the state. BlockedIDs and the chain
-// block count stay as they are: an attended seat never blocks.
+// decideCoopStopAttended is the attended-seat Stop state: noticed = the
+// ids that are pending now, in NoticedIDs. BlockedIDs and the chain block
+// count stay as they are: an attended seat never blocks, and a blocked id
+// counts as noticed through freshAttendedIDs.
 func decideCoopStopAttended(pending []coopStopMessage, old coopStopState) coopStopState {
 	ids := make([]string, 0, len(pending))
 	for _, msg := range pending {
@@ -184,14 +179,18 @@ func decideCoopStopAttended(pending []coopStopMessage, old coopStopState) coopSt
 		}
 	}
 	slices.Sort(ids)
-	return coopStopState{Schema: 1, NoticedIDs: slices.Compact(ids), BlockedIDs: old.BlockedIDs}
+	return coopStopState{Schema: 1, NoticedIDs: slices.Compact(ids), BlockedIDs: old.BlockedIDs, ChainBlocks: old.ChainBlocks}
 }
 
 // freshAttendedIDs is the pending ids the attended Stop guard has not
-// noticed yet. There is no wake-baseline cut: an attended wake types
-// nothing, so mail created after its baseline is still only reported here.
-func freshAttendedIDs(pending []coopStopMessage, noticed []string) []string {
+// noticed yet: neither a systemMessage nor an earlier block reported them.
+// There is no wake-baseline cut: an attended wake types nothing, so mail
+// created after its baseline is still only reported here.
+func freshAttendedIDs(pending []coopStopMessage, noticed, blocked []string) []string {
 	seen := coopIDSet(noticed)
+	for _, id := range blocked {
+		seen[id] = true
+	}
 	var fresh []string
 	for _, msg := range pending {
 		if msg.ID == "" || seen[msg.ID] {
@@ -203,6 +202,11 @@ func freshAttendedIDs(pending []coopStopMessage, noticed []string) []string {
 	return fresh
 }
 
+// decideCoopStop returns the next state and the hook output (nil to allow
+// silently). Under a live wake, baseline is its startup baseline: the wake
+// rings for mail created later, and mail created at or before it may be the
+// cohort it baselined and never rings for, so only that mail counts. A
+// message whose creation time does not parse counts.
 func decideCoopStop(pending []coopStopMessage, baseline *time.Time, old coopStopState, active bool, where string) (coopStopState, map[string]string) {
 	var ids []string
 	for _, msg := range pending {
@@ -220,7 +224,7 @@ func decideCoopStop(pending []coopStopMessage, baseline *time.Time, old coopStop
 	slices.Sort(ids)
 	ids = slices.Compact(ids)
 
-	next := coopStopState{Schema: 1, BlockedIDs: []string{}}
+	next := coopStopState{Schema: 1, NoticedIDs: old.NoticedIDs, BlockedIDs: []string{}}
 	reported := coopIDSet(old.BlockedIDs)
 	var fresh []string
 	for _, id := range ids {

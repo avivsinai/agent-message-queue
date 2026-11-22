@@ -23,8 +23,8 @@ import (
 
 // Happy path: an attended seat is never typed into. Mail arrives, the wake
 // emits the attention output, and the terminal writer records nothing; the
-// reminder scan writes nothing either. The external injector (--inject-via)
-// is a transport too, so an attended seat routes it to the notice as well.
+// reminder scan writes nothing either. The raw path runs: no injector hook
+// stands in, so the terminal-write record proves the transport is quiet.
 func TestAttendedSeatNeverTypesTheDoorbell(t *testing.T) {
 	h := newWakeHoldHarness(t, wakeHoldPolicy{})
 	setAttendedForTest(t, h.root, "codex")
@@ -35,10 +35,7 @@ func TestAttendedSeatNeverTypesTheDoorbell(t *testing.T) {
 		return len(data), nil
 	}
 	h.cfg.attentionIsTTY = func() bool { return false }
-	h.cfg.injectViaHook = func(text string) (string, error) {
-		h.injected = append(h.injected, text)
-		return "", nil
-	}
+	h.cfg.recordAttention = func(wakeAttentionEmission) error { return nil }
 
 	h.send("a", format.PriorityNormal)
 	h.scan(h.cfg)
@@ -46,7 +43,7 @@ func TestAttendedSeatNeverTypesTheDoorbell(t *testing.T) {
 		t.Fatalf("attended seat typed %d doorbell(s), want none", got)
 	}
 	if len(h.injected) != 0 {
-		t.Fatalf("attended seat routed mail to the injector: %q, want the notice only", h.injected)
+		t.Fatalf("attended seat routed mail to the raw terminal write: %q, want the notice only", h.injected)
 	}
 	if !strings.Contains(attention.String(), "a") {
 		t.Fatalf("attention output = %q, want the mail notice", attention.String())
@@ -59,6 +56,31 @@ func TestAttendedSeatNeverTypesTheDoorbell(t *testing.T) {
 	h.scan(h.cfg)
 	if got := h.rings(); got != 0 {
 		t.Fatalf("attended reminder typed %d doorbell(s), want none", got)
+	}
+}
+
+// The external injector (--inject-via) is a transport too: on an attended
+// seat its command never runs, and the mail routes to the notice.
+func TestAttendedSeatNeverRunsTheExternalInjector(t *testing.T) {
+	h := newWakeHoldHarness(t, wakeHoldPolicy{})
+	setAttendedForTest(t, h.root, "codex")
+	h.cfg.settings.attended = true
+	attention := &strings.Builder{}
+	h.cfg.attentionWrite = func(data []byte) (int, error) {
+		attention.Write(data)
+		return len(data), nil
+	}
+	h.cfg.attentionIsTTY = func() bool { return false }
+	h.cfg.injectVia = "/bin/false"
+	h.cfg.injectMode = wakeInjectModeRaw
+
+	h.send("a", format.PriorityNormal)
+	h.scan(h.cfg)
+	if len(h.injected) != 0 {
+		t.Fatalf("attended seat wrote to the terminal: %q, want nothing", h.injected)
+	}
+	if !strings.Contains(attention.String(), "a") {
+		t.Fatalf("attention output = %q, want the mail notice", attention.String())
 	}
 }
 
@@ -168,5 +190,111 @@ func TestAttendedSeatOffRingsOneDoorbellForThePendingCohort(t *testing.T) {
 	h.scan(h.cfg)
 	if got := h.rings(); got != 1 {
 		t.Fatalf("attended-off scan typed %d doorbell(s), want 1 for the pending cohort", got)
+	}
+}
+
+// The claude-native transport is gated too: on an attended seat a Notify
+// that would send a frame never runs, and the mail routes to the one
+// notice instead.
+func TestAttendedSeatClaudeNativeSendsNoFrame(t *testing.T) {
+	h := newWakeHoldHarness(t, wakeHoldPolicy{})
+	setAttendedForTest(t, h.root, "codex")
+	h.cfg.settings.attended = true
+	notifies := 0
+	h.cfg.native = countingNativeNotifier{onNotify: func() { notifies++ }}
+	attention := &strings.Builder{}
+	h.cfg.attentionWrite = func(data []byte) (int, error) {
+		attention.Write(data)
+		return len(data), nil
+	}
+	h.cfg.attentionIsTTY = func() bool { return false }
+
+	h.send("a", format.PriorityNormal)
+	h.cfg.injectMode = wakeInjectModeClaudeNative
+	h.scan(h.cfg)
+	if notifies != 0 {
+		t.Fatalf("attended seat sent %d native frame(s), want none", notifies)
+	}
+	if !strings.Contains(attention.String(), "a") {
+		t.Fatalf("attention output = %q, want the mail notice", attention.String())
+	}
+}
+
+// countingNativeNotifier is a wakeNativeNotifier whose Notify the test
+// counts; Observe and Close never fire in these scans.
+type countingNativeNotifier struct {
+	onNotify func()
+}
+
+func (n countingNativeNotifier) Notify(map[string]os.FileInfo, time.Time) (bool, error) {
+	n.onNotify()
+	return false, nil
+}
+func (countingNativeNotifier) Observe() (bool, error) { return false, nil }
+func (countingNativeNotifier) Close() error           { return nil }
+
+// The interrupt key is a transport: urgent mail on an attended seat with
+// interrupt configured and no owner-bound doorbell types no 0x03, and the
+// notice is the delivery.
+func TestAttendedSeatNeverTypesTheInterruptKey(t *testing.T) {
+	h := newWakeHoldHarness(t, wakeHoldPolicy{})
+	setAttendedForTest(t, h.root, "codex")
+	h.cfg.settings.attended = true
+	h.cfg.settings.interrupt = true
+	h.cfg.settings.interruptPriority = "urgent"
+	h.cfg.settings.interruptLabel = "interrupt"
+	h.cfg.interruptKey = "\x03"
+	h.cfg.settings.previewLen = 48
+	attention := &strings.Builder{}
+	h.cfg.attentionWrite = func(data []byte) (int, error) {
+		attention.Write(data)
+		return len(data), nil
+	}
+	h.cfg.attentionIsTTY = func() bool { return false }
+
+	h.send("urgent", format.PriorityUrgent)
+	h.scan(h.cfg)
+	for _, typed := range h.injected {
+		if strings.Contains(typed, "\x03") {
+			t.Fatalf("attended seat typed the interrupt key: %q", typed)
+		}
+	}
+	h.injected = nil
+	if !strings.Contains(attention.String(), "urgent") {
+		t.Fatalf("attention output = %q, want the urgent-mail notice", attention.String())
+	}
+}
+
+// An Enter an unattended delivery owed, then attended turned on through the
+// live reload, then the inbox drained and a scan: nothing is typed. The
+// reload-time clear and the defence at the write site both gate it.
+func TestAttendedSeatOnOwesNoEnterAfterTheDrain(t *testing.T) {
+	h := newWakeHoldHarness(t, wakeHoldPolicy{})
+	h.cfg.settingsSource = func() ([]byte, bool, error) {
+		raw, err := os.ReadFile(filepath.Join(fsq.AgentBase(h.root, "codex"), wakeSettingsFileName))
+		if err != nil {
+			return nil, false, err
+		}
+		return raw, true, nil
+	}
+	h.send("a", format.PriorityNormal)
+	h.scan(h.cfg)
+	if got := h.rings(); got != 1 {
+		t.Fatalf("unattended scan typed %d doorbell(s), want 1", got)
+	}
+	if err := os.WriteFile(
+		filepath.Join(fsq.AgentBase(h.root, "codex"), wakeSettingsFileName),
+		[]byte(`{"schema":1,"settings":{"attended":true}}`), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !h.cfg.reloadSettings() || !h.cfg.settings.attended {
+		t.Fatal("reloadSettings did not turn attended on")
+	}
+	h.drain()
+	h.advance(time.Minute)
+	h.scan(h.cfg)
+	if len(h.injected) != 0 {
+		t.Fatalf("attended seat after the drain typed %q, want nothing", h.injected)
 	}
 }

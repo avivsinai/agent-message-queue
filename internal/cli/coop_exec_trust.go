@@ -226,11 +226,6 @@ func syncStartupDialogMarker(root, handle, binaryPath string, args []string, rec
 			return err
 		}
 	}
-	if guard == "" {
-		// A launch with no dialog guard still names its harness for the
-		// attended delivery line.
-		marker.Harness = facts.Name
-	}
 	return publishStartupDialogMarker(root, handle, marker, hold, guard)
 }
 

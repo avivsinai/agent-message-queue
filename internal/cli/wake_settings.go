@@ -911,11 +911,14 @@ func (cfg *wakeConfig) reloadSettings() bool {
 		if cfg.settings.holdPolicy() != next.holdPolicy() {
 			cfg.holdPolicyChanged = true
 		}
-		if !next.attended && cfg.settings.attended {
-			// The seat is no longer attended: the doorbell can ring again, so
-			// the next scan announces the pending cohort fresh instead of
-			// staying silent in the announced-attended state.
+		if next.attended != cfg.settings.attended {
+			// Either direction: the cohort state belongs to the delivery the
+			// old setting chose. Off to on, a parked or announced cohort would
+			// stay silent for ever under the attended notice; on to off, the
+			// announced-attended state would hold the doorbell back. The next
+			// scan announces what waits under the new setting.
 			cfg.doorbell.reset()
+			cfg.attendedChanged = true
 		}
 		if next.attended && !cfg.settings.attended && cfg.inputDelivery.pending() && !cfg.inputDelivery.oneSubmit {
 			// The seat just became attended: an owed Enter or pending payload of
