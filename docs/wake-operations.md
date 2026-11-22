@@ -244,10 +244,18 @@ to switch a running seat back to its typed doorbell.
 A built-in typing wake yields only when the hook covers every unread
 message. A message is covered when a waiter holds its lock and no hook
 announced the message yet, or when a hook announced it less than 2 minutes
-ago: the waiter rang for it, or the turn-end hook reported it. In every
-other case the wake types the doorbell when the usual delivery guards allow
-it. This also covers a missing or stopped hook, and new mail that arrives
-while no waiter runs, such as during the turn that a ring started.
+ago: the waiter rang for it, or the turn-end hook reported it. When no
+waiter runs, mail that arrives during a turn that a ring started waits for
+that turn's end, at most 2 minutes after the ring: the waiter that starts
+at the turn's end rings it. In every other case the wake types the
+doorbell when the usual delivery guards allow it. This also covers a
+missing or stopped hook, and an unread file whose header cannot be read
+(only a drain resolves it, by moving it to the dead-letter queue).
+
+With no typing wake (`--no-wake`, or a notify-only wake), nothing rings a
+message a second time: the waiter rings it one time, and the turn-end hook
+reports it at most one time. Under a notify-only wake, the turn-end hook
+reports only mail that arrived before the wake started.
 
 The grace runs from the announcement. After a ring that no drain followed
 within 2 minutes, the wake starts its typed doorbell one time (the doorbell,

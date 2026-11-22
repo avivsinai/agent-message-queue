@@ -109,7 +109,7 @@ func TestCoopWaitOnAttendedSeatDoesNotRing(t *testing.T) {
 	if elapsed := time.Since(start); elapsed < quiet/2 {
 		t.Fatalf("attended waiter ended after %s, want it to run its whole %s window", elapsed, quiet)
 	}
-	if rang := readCoopWaitState(filepath.Join(root, "agents", "claude", coopWaitStateFile), claudeSession); len(rang.RangIDs) != 0 {
+	if rang := coopAnnounced(filepath.Join(root, "agents", "claude"), claudeSession, false).rang; len(rang.RangIDs) != 0 {
 		t.Fatalf("attended waiter rang %v, want no rang ids", rang.RangIDs)
 	}
 }

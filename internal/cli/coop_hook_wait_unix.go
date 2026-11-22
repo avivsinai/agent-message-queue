@@ -174,11 +174,10 @@ func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 			if err == nil && len(pending) > 0 {
 				var settings wakeSettings
 				settings, layers = coopWaitSettings(root, me, layers)
-				rang := readCoopWaitState(statePath, w.session)
-				announced := coopAnnounced(agent, w.session, false)
+				seen := coopAnnounced(agent, w.session, false)
 				now := time.Now()
 				var next time.Time
-				due, next = decideCoopWait(pending, announced, settings.holdPolicy(), now)
+				due, next = decideCoopWait(pending, seen.ids, settings.holdPolicy(), now)
 				if wake.ringer(settings.attended) != doorbellHook {
 					due, next = nil, time.Time{}
 				}
@@ -192,12 +191,12 @@ func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 					// Ring only after the record is stored: a ring the next
 					// waiter cannot see would repeat at every turn end.
 					before, beforeErr := os.Lstat(statePath)
-					if err := writeCoopHookState(statePath, nextCoopWaitState(rang, pending, due)); err != nil {
+					if err := writeCoopHookState(statePath, nextCoopWaitState(seen.rang, pending, due)); err != nil {
 						return nil
 					}
 					undo, err := w.ring()
 					if undo {
-						undoCoopWaitRing(statePath, rang, before, beforeErr)
+						undoCoopWaitRing(statePath, seen.rang, before, beforeErr)
 					}
 					return err
 				default:
@@ -285,23 +284,6 @@ func nextCoopWaitState(old coopWaitState, pending []coopStopMessage, due []strin
 	}
 	slices.Sort(next.RangIDs)
 	return next
-}
-
-// readCoopWaitState reads the ids rung for claudeSession. A record of
-// another session says nothing about what this one heard, so it reads as
-// none.
-func readCoopWaitState(path, claudeSession string) coopWaitState {
-	state := coopWaitState{Schema: 1, ClaudeSession: claudeSession}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return state
-	}
-	var read coopWaitState
-	if json.Unmarshal(raw, &read) != nil || read.ClaudeSession != claudeSession {
-		return state
-	}
-	read.Schema = 1
-	return read
 }
 
 // coopWaitSettings is the wake policy for (root, me): the defaults, the

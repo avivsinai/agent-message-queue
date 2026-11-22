@@ -64,6 +64,7 @@ type wakeConfig struct {
 	doorbell                  wakeDoorbellState
 	holds                     map[string]wakeHold // set by each inbox scan for the doorbell plan
 	cohortIDs                 []string            // set by each inbox scan: the header ids of the mail it would announce
+	cohortUnreadable          bool                // set by each inbox scan: a pending file has no readable header id
 	// settingsSource reads .wake.settings (raw bytes, whether it exists). nil
 	// disables live settings: direct loop tests and legacy callers.
 	settingsSource                func() ([]byte, bool, error)
@@ -648,6 +649,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 	var interruptMessages []wakeMsgInfo
 	interruptCounts := make(map[string]int)
 	currentPending := make(map[string]os.FileInfo)
+	unreadable := false
 	// Every message gets a hold, priority holds or not: the doorbell reads
 	// an addition's urgency from it. A zero policy makes each hold due at
 	// arrival, which holds nothing.
@@ -697,6 +699,10 @@ func notifyNewMessages(cfg *wakeConfig) error {
 			holdPriority = header.Priority
 		}
 		holds[name] = newWakeHold(cfg.settings.holdPolicy(), holdPriority, pendingInfo, scanTime)
+		if err != nil || header.ID == "" {
+			// Its id is not a header id, so no hook can announce it.
+			unreadable = true
+		}
 		if err != nil {
 			// Count corrupt messages too
 			messages = append(messages, wakeMsgInfo{id: strings.TrimSuffix(name, filepath.Ext(name)), from: "unknown", subject: "(parse error)"})
@@ -742,6 +748,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 	}
 	cfg.holds = holds
 	cfg.cohortIDs = wakeMessageIDs(messages)
+	cfg.cohortUnreadable = unreadable
 	if cfg.holdPolicyChanged {
 		// A live hold change re-times a held cohort from the same scan's holds,
 		// before planHeld reads the deadline.

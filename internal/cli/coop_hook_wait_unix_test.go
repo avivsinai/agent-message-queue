@@ -125,17 +125,35 @@ func TestCoopWaitRingsOnceForNewMail(t *testing.T) {
 	if !errors.Is(err, errCoopWaitRing) || GetExitCode(err) != harness.ClaudeRewakeRingExit || err.Error() != harness.Doorbell {
 		t.Fatalf("new mail: %v (exit %d), want the doorbell with the ring code", err, GetExitCode(err))
 	}
-	statePath := filepath.Join(root, "agents", "claude", coopWaitStateFile)
-	if rang := readCoopWaitState(statePath, claudeSession); len(rang.RangIDs) != 1 {
+	agentDir := filepath.Join(root, "agents", "claude")
+	statePath := filepath.Join(agentDir, coopWaitStateFile)
+	rang := coopAnnounced(agentDir, claudeSession, false).rang
+	if len(rang.RangIDs) != 1 {
 		t.Fatalf("rang ids = %v, want the one message", rang.RangIDs)
 	}
 	// A ring is what one session heard: another session that takes the
 	// handle must not inherit it.
-	if rang := readCoopWaitState(statePath, "0c29e148-77eb-47c0-8984-10c13b4700b2"); len(rang.RangIDs) != 0 {
-		t.Fatalf("another session reads rang ids %v, want none", rang.RangIDs)
+	if other := coopAnnounced(agentDir, "0c29e148-77eb-47c0-8984-10c13b4700b2", false).rang; len(other.RangIDs) != 0 {
+		t.Fatalf("another session reads rang ids %v, want none", other.RangIDs)
 	}
 	if err := wait(quiet); err != nil {
 		t.Fatalf("same mail again: %v, want no second ring", err)
+	}
+
+	// Commit 90080c7e: a rang record over 64 KiB read as empty, so the
+	// waiter rang the whole backlog again at each turn end.
+	large := coopWaitState{Schema: 1, ClaudeSession: claudeSession, RangIDs: slices.Clone(rang.RangIDs)}
+	for i := 0; i < 4000; i++ {
+		large.RangIDs = append(large.RangIDs, fmt.Sprintf("2026-11-23T00-00-00.%06dZ_pid1_backlog", i))
+	}
+	if err := writeCoopHookState(statePath, large); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(statePath); err != nil || info.Size() <= 64*1024 {
+		t.Fatalf("rang record = %v, %v; want one over 64 KiB", info, err)
+	}
+	if err := wait(quiet); err != nil {
+		t.Fatalf("a rang record over 64 KiB that names the mail: %v, want no ring", err)
 	}
 
 	// Review finding H7: a ring the waiter undoes (its queue failed) left a

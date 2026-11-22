@@ -30,7 +30,10 @@ func holdWaiterForTest(t *testing.T, root, me string) func() {
 // H9 and H14: an announced message that nobody drained left the waiter
 // silent on it and the wake yielding to that waiter, so it was never
 // announced again (a Stop-guard report and an inbox file not named
-// <id>.md escaped the first fix).
+// <id>.md escaped the first fix). Rows 9 and 10 come from finding H17: mail
+// that arrived in the turn a ring started, when no waiter runs, was typed
+// into that running turn. Row 11 comes from H18: the wake yielded for an
+// inbox file with no readable header, which the waiter cannot ring.
 func TestHookDoorbellYieldsOnlyToCurrentDeliveryEvidence(t *testing.T) {
 	type record struct {
 		ids []string
@@ -58,6 +61,10 @@ func TestHookDoorbellYieldsOnlyToCurrentDeliveryEvidence(t *testing.T) {
 			&record{[]string{"mail"}, 3 * time.Minute}, nil, []mail{{"bridged-copy.md", "mail"}}, false},
 		{"7 no waiter, mail rung 30 s ago", wakeChannelHook, false, &record{[]string{"mail"}, 30 * time.Second}, nil, one, true},
 		{"8 no waiter, nothing announced", wakeChannelHook, false, nil, nil, one, false},
+		{"9 no waiter, another message rung 30 s ago", wakeChannelHook, false, &record{[]string{"other"}, 30 * time.Second}, nil, one, true},
+		{"10 no waiter, another message rung 3 minutes ago", wakeChannelHook, false, &record{[]string{"other"}, 3 * time.Minute}, nil, one, false},
+		// An empty id stands for a file with no readable header.
+		{"11 waiter, an inbox file with no readable header", wakeChannelHook, true, nil, nil, []mail{{"broken.md", ""}}, false},
 		{"unpublished", "", true, nil, nil, one, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -87,7 +94,17 @@ func TestHookDoorbellYieldsOnlyToCurrentDeliveryEvidence(t *testing.T) {
 				}
 			}
 			for _, m := range tc.inbox {
-				h.sendAs(m.file, m.id)
+				if m.id != "" {
+					h.sendAs(m.file, m.id)
+					continue
+				}
+				path, err := deliverToInboxForTest(t, h.root, "codex", m.file, []byte("not a message\n"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chtimes(path, h.now, h.now); err != nil {
+					t.Fatal(err)
+				}
 			}
 			h.scan(h.cfg)
 			want := 1
