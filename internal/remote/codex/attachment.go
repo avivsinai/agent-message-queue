@@ -311,6 +311,7 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 				Type string `json:"type"`
 			} `json:"status"`
 		} `json:"thread"`
+		Cwd               string          `json:"cwd"`
 		ApprovalsReviewer string          `json:"approvalsReviewer"`
 		ApprovalPolicy    json.RawMessage `json:"approvalPolicy"`
 		Sandbox           json.RawMessage `json:"sandbox"`
@@ -345,7 +346,11 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 		a.reviewer = autoReviewer(resumed.ApprovalsReviewer)
 	}
 	if !a.permSeen {
-		a.perm = readPerm(resumed.ApprovalPolicy, resumed.ApprovalsReviewer, resumed.Sandbox)
+		cwd := resumed.Cwd
+		if cwd == "" {
+			cwd = resumed.Thread.Cwd
+		}
+		a.perm = readPerm(resumed.ApprovalPolicy, resumed.ApprovalsReviewer, resumed.Sandbox, cwd)
 	}
 	a.mu.Unlock()
 	go func() {
@@ -371,24 +376,28 @@ func autoReviewer(v string) string {
 
 // perm is a thread's permission mode as the app-server reported it. known
 // is true only when the approval policy is a plain string and the reviewer
-// and the sandbox type are both present.
+// and the sandbox type are both present. cwd and roots are the working
+// directory and the sandbox's writable roots of the same report.
 type perm struct {
 	known                     bool
 	policy, reviewer, sandbox string
+	cwd                       string
+	roots                     []string
 }
 
 // readPerm reads a permission mode from the app-server's approvalPolicy,
-// approvalsReviewer and sandbox policy values. Anything it cannot read
-// leaves the mode unknown.
-func readPerm(policy json.RawMessage, reviewer string, sandbox json.RawMessage) perm {
+// approvalsReviewer and sandbox policy values and the thread's working
+// directory. Anything it cannot read leaves the mode unknown.
+func readPerm(policy json.RawMessage, reviewer string, sandbox json.RawMessage, cwd string) perm {
 	var p perm
 	var sb struct {
-		Type string `json:"type"`
+		Type          string   `json:"type"`
+		WritableRoots []string `json:"writableRoots"`
 	}
 	if json.Unmarshal(policy, &p.policy) != nil || json.Unmarshal(sandbox, &sb) != nil {
 		return perm{}
 	}
-	p.reviewer, p.sandbox = reviewer, sb.Type
+	p.reviewer, p.sandbox, p.cwd, p.roots = reviewer, sb.Type, cwd, sb.WritableRoots
 	p.known = p.policy != "" && p.reviewer != "" && p.sandbox != ""
 	return p
 }
@@ -417,6 +426,55 @@ func (a *Attachment) sessionAsksLocked() (bool, string) {
 		return false, "mode_unreadable"
 	}
 	return asks(a.perm), fmt.Sprintf("approvalPolicy=%s approvalsReviewer=%s sandbox=%s", a.perm.policy, a.perm.reviewer, a.perm.sandbox)
+}
+
+// WritesWithoutAsking implements core.PermissionReader from the settings
+// this connection last heard: the thread's working directory or a writable
+// root of its sandbox is dir, holds it or lies inside it. An offline
+// attachment, an unknown mode, or a working directory or root that is
+// missing or not absolute counts as writing dir.
+func (a *Attachment) WritesWithoutAsking(dir string) bool {
+	a.mu.Lock()
+	p, offline := a.perm, a.offline
+	a.mu.Unlock()
+	if offline || !p.known || !filepath.IsAbs(dir) {
+		return true
+	}
+	for _, root := range append([]string{p.cwd}, p.roots...) {
+		if !filepath.IsAbs(root) || pathsOverlap(root, dir) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathsOverlap reports whether one of two absolute paths is the other or
+// lies inside it, compared as written and with symbolic links resolved.
+func pathsOverlap(a, b string) bool {
+	for _, x := range pathForms(a) {
+		for _, y := range pathForms(b) {
+			if within(x, y) || within(y, x) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// pathForms is p cleaned and, when it resolves, p with its symbolic links
+// resolved.
+func pathForms(p string) []string {
+	p = filepath.Clean(p)
+	if r, err := filepath.EvalSymlinks(p); err == nil && r != p {
+		return []string{p, r}
+	}
+	return []string{p}
+}
+
+// within reports whether path p is dir or lies inside it.
+func within(p, dir string) bool {
+	rel, err := filepath.Rel(dir, p)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // TargetID derives the stable target id for a thread.
@@ -1264,6 +1322,7 @@ func (a *Attachment) onNotification(n Notification) {
 		var p struct {
 			ThreadID       string `json:"threadId"`
 			ThreadSettings struct {
+				Cwd               string          `json:"cwd"`
 				ApprovalsReviewer string          `json:"approvalsReviewer"`
 				ApprovalPolicy    json.RawMessage `json:"approvalPolicy"`
 				SandboxPolicy     json.RawMessage `json:"sandboxPolicy"`
@@ -1275,7 +1334,7 @@ func (a *Attachment) onNotification(n Notification) {
 		s := p.ThreadSettings
 		a.mu.Lock()
 		a.reviewer, a.reviewerSeen = autoReviewer(s.ApprovalsReviewer), true
-		a.perm, a.permSeen = readPerm(s.ApprovalPolicy, s.ApprovalsReviewer, s.SandboxPolicy), true
+		a.perm, a.permSeen = readPerm(s.ApprovalPolicy, s.ApprovalsReviewer, s.SandboxPolicy, s.Cwd), true
 		a.mu.Unlock()
 	case "item/started", "item/completed":
 		a.onItem(n)

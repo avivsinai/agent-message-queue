@@ -158,6 +158,8 @@ const (
 	GrantReasonConsentLocal       = "consent_local"
 	GrantReasonModeUnreadable     = "mode_unreadable"
 	GrantReasonHarnessUnsupported = "harness_unsupported"
+	// The session can write the machine's state directory with no dialog.
+	GrantReasonStateInWorkspace = "state_in_workspace"
 )
 
 // GrantInfoReply answers grant_info. available false carries reason;

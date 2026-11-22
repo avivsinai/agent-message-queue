@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
@@ -46,6 +47,10 @@ type Grants map[string]GrantRecord
 // ErrGrantGeneration is returned by StoreGrant when the binding's generation
 // is no longer the one the grant was signed for.
 var ErrGrantGeneration = errors.New("the binding's grant generation changed since the grant was signed")
+
+// ErrGrantNotNewer is returned by StoreGrant for a grant that was not issued
+// after the grant stored for its binding: a replaced grant stays retired.
+var ErrGrantNotNewer = errors.New("the binding holds a grant issued at the same time or later")
 
 // LoadGrants reads a link's grant records. No file is an empty map; an
 // unreadable file is an error, so a caller deciding on a grant fails closed.
@@ -121,8 +126,10 @@ func MintGeneration(stateDir, link string, bindings ...string) error {
 
 // StoreGrant stores an accepted grant for its binding, replacing an older
 // one. It refuses with ErrGrantGeneration unless the record's generation is
-// the one the grant was signed for, read under the lock. Without an
-// advisory file lock it refuses: storing a grant raises authority.
+// the one the grant was signed for, and with ErrGrantNotNewer unless the
+// grant was issued after the stored one, both read under the lock. The
+// stored grant itself is a no-op. Without an advisory file lock it refuses:
+// storing a grant raises authority.
 func StoreGrant(stateDir, link string, sg StoredGrant) error {
 	if !lock.AdvisoryLockAvailable() {
 		return errors.New("refusing to store a grant without an advisory file lock")
@@ -136,10 +143,26 @@ func StoreGrant(stateDir, link string, sg StoredGrant) error {
 		if !ok || rec.Generation == "" || rec.Generation != sg.Generation {
 			return ErrGrantGeneration
 		}
+		if old := rec.Grant; old != nil {
+			if old.Digest == sg.Digest {
+				return nil
+			}
+			if !issuedAfter(sg.IssuedAt, old.IssuedAt) {
+				return ErrGrantNotNewer
+			}
+		}
 		rec.Grant = &sg
 		g[sg.Binding] = rec
 		return writeJSON(LinkDir(stateDir, link), grantsFile, g)
 	})
+}
+
+// issuedAfter reports whether issued_at a is strictly later than b. A value
+// that does not parse is never later.
+func issuedAfter(a, b string) bool {
+	ta, errA := time.Parse(time.RFC3339, a)
+	tb, errB := time.Parse(time.RFC3339, b)
+	return errA == nil && errB == nil && ta.After(tb)
 }
 
 // GrantStore is one link's grant records as the carrier reads and writes

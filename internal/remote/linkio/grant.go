@@ -49,7 +49,7 @@ type GrantInput struct {
 type GrantState struct {
 	Generation string       // the binding's grant generation now
 	Stored     *StoredGrant // the grant stored for the binding; nil when none
-	Available  bool         // the harness reports now that the session asks
+	Available  bool         // the share is passkey and the harness reports now that the session asks
 	Reason     string       // why it is not available (GrantReason*)
 }
 
@@ -82,18 +82,13 @@ func VerifySignedGrant(view *ConsentView, m SignedGrant, st GrantState, now time
 	if err != nil {
 		return StoredGrant{}, refuse(CodeConsentInvalid, "%v", err)
 	}
-	b, shared := view.Bindings[d.Binding]
-	switch {
-	case d.ServerID != view.ServerID || d.StoreID != view.StoreID:
+	if d.ServerID != view.ServerID || d.StoreID != view.StoreID {
 		return StoredGrant{}, refuse(CodeConsentInvalid, "the grant is for another server or store")
-	case !shared:
-		return StoredGrant{}, refuse(string(protocol.CodeUnshared), "binding %q is not shared with this link", d.Binding)
-	case d.TargetID != b.TargetID || d.Epoch != b.Epoch || d.Labels != b.Labels:
-		return StoredGrant{}, refuse(string(protocol.CodeStaleEpoch), "the binding changed since you signed; read it again and sign again")
-	case d.NativeSessionID == "" || d.NativeSessionID != b.NativeSessionID:
-		return StoredGrant{}, refuse(CodeSessionChanged, "the session behind %s changed since you signed", d.Binding)
-	case b.Consent != "passkey":
-		return StoredGrant{}, refuse(CodeGrantUnsupported, "%s: binding %q takes no grant: its consent is %q", GrantReasonConsentLocal, d.Binding, b.Consent)
+	}
+	if _, err := matchBinding(view, d.Binding, d.TargetID, d.Epoch, d.Labels, d.NativeSessionID); err != nil {
+		return StoredGrant{}, err
+	}
+	switch {
 	case !st.Available:
 		reason := st.Reason
 		if reason == "" {

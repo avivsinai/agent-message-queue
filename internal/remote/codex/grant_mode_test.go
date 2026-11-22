@@ -2,6 +2,7 @@ package codex
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -113,6 +114,30 @@ func TestGrantedSubmitIsRefusedAfterTheThreadStopsAsking(t *testing.T) {
 	adm := grantedSubmit(t, att, "11111111-1111-4111-8111-111111111602")
 	if adm.Admitted || adm.Code != protocol.CodeConsentInvalid || !adm.NothingSent || !strings.HasPrefix(adm.Message, "grant_needs_signature: ") {
 		t.Fatalf("granted submit after the change to never = %+v; want consent_invalid grant_needs_signature, nothing sent", adm)
+	}
+}
+
+// Contract section 4: a session that can write the machine's state directory
+// with no dialog takes no grant. The thread's working directory, or a
+// writable root of its sandbox, that holds the directory or lies inside it
+// counts (review of the session grant branch: a granted task could have the
+// session rewrite the grant state).
+func TestSessionThatWritesTheStateDirectory(t *testing.T) {
+	work, elsewhere, outside := t.TempDir(), t.TempDir(), t.TempDir()
+	byCwd := filepath.Join(work, ".agent-mail", "extensions", "remote")
+	byRoot := filepath.Join(elsewhere, "remote")
+	cwd, _ := json.Marshal(work)
+	roots, _ := json.Marshal([]string{filepath.Join(byRoot, "link")})
+	sock, srv := startFakeAppServer(t)
+	srv.setResumeMode(`,"cwd":`+string(cwd)+`,"approvalPolicy":"on-request","sandbox":{"type":"workspaceWrite","writableRoots":`+string(roots)+`,"networkAccess":false}`, nil)
+	att := attachWithMode(t, srv, sock)
+	if asks, why := att.SessionAsks(); !asks {
+		t.Fatalf("after resume: asks false (%s), want true", why)
+	}
+	for dir, want := range map[string]bool{byCwd: true, byRoot: true, outside: false} {
+		if got := att.WritesWithoutAsking(dir); got != want {
+			t.Errorf("WritesWithoutAsking(%s) = %v, want %v", dir, got, want)
+		}
 	}
 }
 

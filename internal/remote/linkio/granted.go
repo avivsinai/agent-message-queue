@@ -119,6 +119,13 @@ func (c *Carrier) grantInfo(binding string) (any, error) {
 	return GrantInfoReply{GrantInfo: info}, nil
 }
 
+// grantUnsupported reports whether a reason grant_info gives ends a grant
+// rather than asking for a signature on one task: a share that takes no
+// grant, or a session that can write the grant state with no dialog.
+func grantUnsupported(reason string) bool {
+	return reason == GrantReasonConsentLocal || reason == GrantReasonStateInWorkspace
+}
+
 // grantAvailable reports whether b's session takes a grant now. Only a
 // share whose consent is passkey does.
 func (c *Carrier) grantAvailable(b Binding) (bool, string, int) {
@@ -160,8 +167,11 @@ func (c *Carrier) acceptGrant(m SignedGrant, binding string) (any, error) {
 		return reply, nil
 	}
 	if err := c.cfg.Grants.Store(sg); err != nil {
-		if errors.Is(err, ErrGrantGeneration) {
+		switch {
+		case errors.Is(err, ErrGrantGeneration):
 			return nil, refuse(CodeGrantRevoked, "binding %q has another grant generation now; ask grant_info and sign again", sg.Binding)
+		case errors.Is(err, ErrGrantNotNewer):
+			return nil, refuse(CodeGrantStale, "binding %q holds a grant issued at or after %s; sign again", sg.Binding, sg.IssuedAt)
 		}
 		return nil, err
 	}
@@ -190,14 +200,7 @@ func (c *Carrier) admitGranted(digest string, cmd *protocol.Command) (any, error
 	view := c.view()
 	now := c.cfg.Now()
 	c.gmu.Lock()
-	var rec GrantRecord
-	var sg *StoredGrant
-	for _, r := range c.refreshGrantsLocked() {
-		if r.Grant != nil && r.Grant.Digest == digest && r.Grant.TargetID == cmd.TargetID {
-			rec, sg = r, r.Grant
-			break
-		}
-	}
+	rec, sg := findGrant(c.refreshGrantsLocked(), cmd.TargetID, digest)
 	ended := c.grantEnded[digest]
 	c.gmu.Unlock()
 	if sg == nil {
@@ -206,26 +209,22 @@ func (c *Carrier) admitGranted(digest string, cmd *protocol.Command) (any, error
 		}
 		return nil, refuse(CodeGrantUnknown, "no grant with this digest is stored for target %s", cmd.TargetID)
 	}
-	grantEnd, err := time.Parse(time.RFC3339, sg.NotAfter)
-	switch {
-	case rec.Generation != sg.Generation || c.deadGeneration(sg.Generation):
-		return nil, refuse(CodeGrantRevoked, "binding %q has another grant generation now; ask grant_info and sign again", sg.Binding)
-	case err != nil || !now.Before(grantEnd):
-		return nil, refuse(CodeGrantExpired, "the grant expired at %s", sg.NotAfter)
+	if code, why := c.grantEnd(rec, sg, now); code != "" {
+		return nil, refuse(code, "%s; ask grant_info and sign again", why)
 	}
-	if _, ok := view.Keys[sg.CredentialID]; !ok {
-		return nil, refuse(CodeGrantRevoked, "the key that signed the grant is no longer accepted")
-	}
-	b, ok := view.Bindings[sg.Binding]
+	until, _ := time.Parse(time.RFC3339, sg.NotAfter) // grantEnd parsed it
+	b, err := matchBinding(view, sg.Binding, sg.TargetID, sg.Epoch, sg.Labels, sg.NativeSessionID)
 	switch {
-	case !ok:
-		return nil, refuse(string(protocol.CodeUnshared), "binding %q is not shared with this link", sg.Binding)
-	case b.TargetID != sg.TargetID || b.Epoch != sg.Epoch || b.Labels != sg.Labels || cmd.Epoch != sg.Epoch:
-		return nil, refuse(string(protocol.CodeStaleEpoch), "the binding changed since the grant was signed; read it again")
-	case b.NativeSessionID != sg.NativeSessionID:
-		return nil, refuse(CodeSessionChanged, "the session behind %s changed since the grant was signed", sg.Binding)
-	case b.Consent != "passkey":
-		return nil, refuse(CodeGrantUnsupported, "%s: binding %q takes no grant: its consent is %q", GrantReasonConsentLocal, sg.Binding, b.Consent)
+	case err != nil:
+		return nil, err
+	case cmd.Epoch != sg.Epoch:
+		return nil, refuse(string(protocol.CodeStaleEpoch), "the binding changed since you signed; read it again and sign again")
+	}
+	// The share's consent and the harness's own state decide before the
+	// command's bounds; the mode the session asks in is read once, here.
+	available, reason, maxText := c.grantAvailable(b)
+	if !available && grantUnsupported(reason) {
+		return nil, refuse(CodeGrantUnsupported, "%s: binding %q takes no grant now", reason, sg.Binding)
 	}
 	in := cmd.Input
 	if in.Busy != protocol.BusyReject || in.Deliver != protocol.DeliverTurn || in.MinEvidence != sg.MinEvidence {
@@ -237,10 +236,9 @@ func (c *Carrier) admitGranted(digest string, cmd *protocol.Command) (any, error
 		return nil, refuse(CodeConsentInvalid, "not_after is not RFC 3339")
 	case !now.Before(cmdEnd):
 		return nil, refuse(string(protocol.CodeExpired), "the task expired at %s", cmd.NotAfter)
-	case cmdEnd.After(now.Add(grantedCommandAhead)) || cmdEnd.After(grantEnd):
+	case cmdEnd.After(now.Add(grantedCommandAhead)) || cmdEnd.After(until):
 		return nil, refuse(CodeConsentInvalid, "a granted task's not_after is at most %s ahead and within the grant", grantedCommandAhead)
 	}
-	available, reason, maxText := c.grantAvailable(b)
 	switch {
 	case !available:
 		return nil, refuse(CodeGrantNeedsSignature, "%s: the session does not ask for permissions now; sign this task", reason)
@@ -312,25 +310,50 @@ func (c *Carrier) RefreshGrants() {
 }
 
 // refreshGrantsLocked reads the store, stores the snapshot and returns it.
-// An unreadable store is no grant. A grant live at the last read that is no
-// longer live has ended: revoked, replaced or expired.
+// An unreadable store is no grant. A grant first read now starts its
+// remaining life on the monotonic clock; a stored grant seen expired is
+// ended in the store, by a new generation. A grant live at the last read
+// that is no longer live has ended: revoked, replaced or expired.
 func (c *Carrier) refreshGrantsLocked() Grants {
-	g, err := c.cfg.Grants.Load()
-	if err != nil {
-		if msg := err.Error(); msg != c.grantsErr {
-			c.grantsErr = msg
-			c.cfg.Logf("link %s: read grants: %v", c.cfg.Name, err)
+	g := c.loadGrantsLocked()
+	now, mono := c.cfg.Now(), c.cfg.Mono()
+	var known map[string]time.Duration
+	if p := c.grantLife.Load(); p != nil {
+		known = *p
+	}
+	life := map[string]time.Duration{}
+	for _, r := range g {
+		sg := r.Grant
+		if sg == nil {
+			continue
 		}
-		g = Grants{}
-	} else {
-		c.grantsErr = ""
+		if deadline, ok := known[sg.Digest]; ok {
+			life[sg.Digest] = deadline
+		} else if end, err := time.Parse(time.RFC3339, sg.NotAfter); err == nil {
+			life[sg.Digest] = mono + end.Sub(now)
+		}
+	}
+	c.grantLife.Store(&life)
+	minted := false
+	for binding, r := range g {
+		if r.Grant != nil && c.grantExpired(r.Grant, now) {
+			if _, err := c.cfg.Grants.Mint(binding); err != nil {
+				c.cfg.Logf("link %s: end the expired grant of %s: %v", c.cfg.Name, binding, err)
+				continue
+			}
+			minted = true
+		}
+	}
+	if minted {
+		g = c.loadGrantsLocked()
 	}
 	c.grants.Store(&g)
-	now := c.cfg.Now()
 	live := map[string]StoredGrant{}
 	for _, r := range g {
-		if sg := r.Grant; sg != nil && sg.Generation == r.Generation && !c.deadGeneration(sg.Generation) && !grantExpired(sg, now) {
-			live[sg.Digest] = *sg
+		if sg := r.Grant; sg != nil {
+			if code, _ := c.grantEnd(r, sg, now); code == "" {
+				live[sg.Digest] = *sg
+			}
 		}
 	}
 	for d, sg := range c.grantSeen {
@@ -338,7 +361,7 @@ func (c *Carrier) refreshGrantsLocked() Grants {
 			continue
 		}
 		code, why := CodeGrantRevoked, "revoked"
-		if grantExpired(&sg, now) {
+		if c.grantExpired(&sg, now) {
 			code, why = CodeGrantExpired, "expired"
 		}
 		delete(c.grantSeen, d)
@@ -353,9 +376,63 @@ func (c *Carrier) refreshGrantsLocked() Grants {
 	return g
 }
 
-func grantExpired(sg *StoredGrant, now time.Time) bool {
+// loadGrantsLocked reads the store; an unreadable store is no grant, and
+// its error is logged once.
+func (c *Carrier) loadGrantsLocked() Grants {
+	g, err := c.cfg.Grants.Load()
+	if err != nil {
+		if msg := err.Error(); msg != c.grantsErr {
+			c.grantsErr = msg
+			c.cfg.Logf("link %s: read grants: %v", c.cfg.Name, err)
+		}
+		return Grants{}
+	}
+	c.grantsErr = ""
+	return g
+}
+
+// findGrant returns the record whose stored grant has digest and is for
+// targetID, or a nil grant.
+func findGrant(g Grants, targetID, digest string) (GrantRecord, *StoredGrant) {
+	for _, r := range g {
+		if sg := r.Grant; sg != nil && sg.Digest == digest && sg.TargetID == targetID {
+			return r, sg
+		}
+	}
+	return GrantRecord{}, nil
+}
+
+// grantEnd is "" while the grant sg stored in record r still admits a task:
+// its generation is the record's and is not dead, it has not expired, and
+// the key that signed it is still accepted. Else it is the grant code and
+// why. It reads only snapshots and does no I/O.
+func (c *Carrier) grantEnd(r GrantRecord, sg *StoredGrant, now time.Time) (code, why string) {
+	switch {
+	case r.Generation != sg.Generation || c.deadGeneration(sg.Generation):
+		return CodeGrantRevoked, fmt.Sprintf("binding %q has another grant generation now", sg.Binding)
+	case c.grantExpired(sg, now):
+		return CodeGrantExpired, "the grant expired at " + sg.NotAfter
+	case !c.ConsentLive(sg.CredentialID):
+		return CodeGrantRevoked, "the key that signed the grant is no longer accepted"
+	}
+	return "", ""
+}
+
+// grantExpired reports whether sg has expired: the wall clock is at or
+// after its not_after, or the life it had left when this run first read it
+// is used up on the monotonic clock, so a wall clock set back extends no
+// grant.
+func (c *Carrier) grantExpired(sg *StoredGrant, now time.Time) bool {
 	end, err := time.Parse(time.RFC3339, sg.NotAfter)
-	return err != nil || !now.Before(end)
+	if err != nil || !now.Before(end) {
+		return true
+	}
+	life := c.grantLife.Load()
+	if life == nil {
+		return false
+	}
+	deadline, ok := (*life)[sg.Digest]
+	return ok && c.cfg.Mono() >= deadline
 }
 
 // notify shows the owner a notice off every lock and off the reader.
@@ -369,26 +446,18 @@ func (c *Carrier) notify(body string) {
 // with that digest for that target still admits it, else the reason, which
 // starts with the grant code. It also names the grant's binding. Core asks
 // it under its own lock, so it reads only snapshots: the grant records, the
-// dead generations and the live consent keys.
+// remaining lives, the dead generations and the live consent keys.
 func (c *Carrier) GrantLive(targetID, digest string) (binding, reason string) {
 	g := c.grants.Load()
 	if g == nil {
 		return "", CodeGrantRevoked + ": this link holds no grant"
 	}
-	for _, r := range *g {
-		sg := r.Grant
-		if sg == nil || sg.Digest != digest || sg.TargetID != targetID {
-			continue
-		}
-		switch {
-		case r.Generation != sg.Generation || c.deadGeneration(sg.Generation):
-			return sg.Binding, fmt.Sprintf("%s: binding %q has another grant generation now", CodeGrantRevoked, sg.Binding)
-		case !c.ConsentLive(sg.CredentialID):
-			return sg.Binding, CodeGrantRevoked + ": the key that signed the grant is no longer accepted"
-		case grantExpired(sg, c.cfg.Now()):
-			return sg.Binding, fmt.Sprintf("%s: the grant expired at %s", CodeGrantExpired, sg.NotAfter)
-		}
-		return sg.Binding, ""
+	r, sg := findGrant(*g, targetID, digest)
+	if sg == nil {
+		return "", CodeGrantRevoked + ": the grant is no longer stored"
 	}
-	return "", CodeGrantRevoked + ": the grant is no longer stored"
+	if code, why := c.grantEnd(r, sg, c.cfg.Now()); code != "" {
+		return sg.Binding, code + ": " + why
+	}
+	return sg.Binding, ""
 }

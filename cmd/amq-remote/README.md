@@ -578,10 +578,15 @@ Protocol: [`amq.remote.link/1`](../../docs/remote-link-protocol.md).
    revokes it. A granted task runs only while the harness reports that the
    session asks before a tool acts: on Codex, an approval policy of
    `untrusted` or `on-request` with the user as reviewer and a `readOnly` or
-   `workspaceWrite` sandbox. Otherwise the server must ask for a signature
-   per task. Claude Code and pi sessions take no grant yet.
+   `workspaceWrite` sandbox, and a working directory and writable roots that
+   neither hold nor lie inside the endpoint's state directory. Otherwise the
+   server must ask for a signature per task. Claude Code and pi sessions take
+   no grant yet.
 
    What you accept when you sign a grant:
+   - Every passkey share takes grants: one touch on a compromised server's
+     page can sign a grant where you meant to sign one task. The notice on
+     this machine shows it; run `link grant revoke` if you did not mean it.
    - The server writes the task text; your passkey no longer sees each task.
    - The session reads with no dialog what it reads with no dialog now, and
      the server gets the answer back. On Codex, that is every file your user
@@ -602,6 +607,8 @@ Protocol: [`amq.remote.link/1`](../../docs/remote-link-protocol.md).
      granted task applies to the rest of that task. A restore of the
      machine's state from a backup can bring back a grant that has not
      expired.
+   - On Codex another local client of yours can change the thread's
+     settings between the machine's read and the turn.
 
 ### Restart after a reboot
 

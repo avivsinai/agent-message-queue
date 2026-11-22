@@ -201,8 +201,12 @@ type SubmitBlocker interface {
 // from the harness itself whether the session asks the user before a tool
 // acts. asks is false when the mode does not ask or cannot be read; why names
 // the mode, or why it cannot be read. It reads only the adapter's own state.
+// WritesWithoutAsking reports whether the session can write the absolute
+// directory dir with no dialog, as the adapter last read the session's
+// settings; true when it cannot tell.
 type PermissionReader interface {
 	SessionAsks() (asks bool, why string)
+	WritesWithoutAsking(dir string) bool
 }
 
 type Attachment interface {

@@ -271,7 +271,9 @@ func (ls *linkSet) newRun(ctx context.Context, l manifest.Link) (*linkRun, error
 
 // grantInfoFor reports whether a shared binding's session takes a grant
 // now: its adapter reads from the harness that the session asks before a
-// tool acts. An adapter that cannot read the mode takes no grant.
+// tool acts, and that the session cannot write this machine's state
+// directory with no dialog. An adapter that cannot read the mode takes no
+// grant.
 func (ls *linkSet) grantInfoFor(b linkio.Binding) (bool, string, int) {
 	ls.mu.Lock()
 	ep := ls.ep
@@ -289,6 +291,9 @@ func (ls *linkSet) grantInfoFor(b linkio.Binding) (bool, string, int) {
 	}
 	if asks, _ := pr.SessionAsks(); !asks {
 		return false, linkio.GrantReasonModeUnreadable, 0
+	}
+	if dir, err := filepath.Abs(ls.stateDir); err != nil || pr.WritesWithoutAsking(dir) {
+		return false, linkio.GrantReasonStateInWorkspace, 0
 	}
 	return true, "", protocol.MaxInputBytes
 }

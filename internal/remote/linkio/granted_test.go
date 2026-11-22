@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -154,6 +155,48 @@ func TestGrantedSubmitRunsOverTheLink(t *testing.T) {
 		t.Fatal("the granted task never reached the endpoint")
 	}
 	sameBody(t, fs.next(), "m_gs1", "50-granted_submit_outcome.json")
+}
+
+// Contract section 4, expiry is kept: inside one run, a wall clock set back
+// after the grant was read extends nothing. The grant ends when the life it
+// had left is used up on the monotonic clock, and the store ends it (review
+// of the session grant branch: expiry compared only the wall clock).
+func TestGrantExpiryIsKeptWhenTheWallClockGoesBack(t *testing.T) {
+	view, key := goldenView(t)
+	b := view.Bindings["pi-demo"]
+	const gen = "g_3jx7k2m4qv5w6y7zab2cd3ef4g"
+	digest := goldenGrantDigest(t)
+	store := &memGrants{mint: "g_5p2r6t3v7x4z2b5d6f3h7j4l2n", g: Grants{b.Binding: {Generation: gen, Grant: &StoredGrant{
+		GrantID: "6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7", Digest: digest, CredentialID: key.CredentialID,
+		Binding: b.Binding, TargetID: b.TargetID, Epoch: b.Epoch, NativeSessionID: b.NativeSessionID, Labels: b.Labels,
+		Generation: gen, IssuedAt: "2026-10-09T14:10:00Z", NotAfter: "2026-10-09T15:10:00Z", MinEvidence: protocol.EvidenceSubmitted,
+	}}}}
+	devKey, err := MintDeviceKey(t.TempDir(), "example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mono atomic.Int64
+	c, err := New(Config{
+		Name: "example", Pin: Pin{URL: "wss://link.example.invalid/v1", ServerID: testServerID}, StoreID: view.StoreID, Key: devKey,
+		Now: grantClock().now, Mono: func() time.Duration { return time.Duration(mono.Load()) },
+		ConsentKeys: func() []ConsentKey { return []ConsentKey{key} }, Bindings: func() []Binding { return []Binding{b} }, Grants: store,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, reason := c.GrantLive(b.TargetID, digest); reason != "" {
+		t.Fatalf("hand-over check of the loaded grant = %q, want live", reason)
+	}
+	// The grant's hour passes on the monotonic clock; the wall clock was set
+	// back by as much and still reads the time the grant was loaded.
+	mono.Store(int64(time.Hour))
+	if _, reason := c.GrantLive(b.TargetID, digest); !strings.HasPrefix(reason, CodeGrantExpired+":") {
+		t.Fatalf("hand-over check after its hour = %q, want %s", reason, CodeGrantExpired)
+	}
+	c.RefreshGrants()
+	if g, _ := store.Load(); g[b.Binding].Grant != nil {
+		t.Fatalf("the expired grant is still stored: %+v", g[b.Binding])
+	}
 }
 
 // A granted_submit read right after a grant_revoke is refused grant_revoked,

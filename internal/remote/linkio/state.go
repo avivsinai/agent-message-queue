@@ -309,7 +309,8 @@ func AddConsentKey(stateDir, name string, ck ConsentKey) (int, error) {
 // server. It runs under the link's key lock so a concurrent add cannot
 // write the key back; without an advisory file lock it still drops, since
 // refusing would keep authority the server took away. A key that is dropped
-// ends every grant of the link first; a failed end keeps the key.
+// then ends every grant of the link. The drop stands when that end fails:
+// every grant the key signed is refused with the key gone.
 func DropConsentKey(stateDir, name, credentialID string) (bool, error) {
 	dropped := false
 	drop := func() error {
@@ -326,11 +327,11 @@ func DropConsentKey(stateDir, name, credentialID string) (bool, error) {
 		if len(kept) == len(keys) {
 			return nil
 		}
-		if err := MintGeneration(stateDir, name); err != nil {
+		if err := WriteConsentKeys(stateDir, name, kept); err != nil {
 			return err
 		}
 		dropped = true
-		return WriteConsentKeys(stateDir, name, kept)
+		return MintGeneration(stateDir, name)
 	}
 	if !lock.AdvisoryLockAvailable() {
 		err := drop()

@@ -122,6 +122,22 @@ func VerifySignedSubmit(view *ConsentView, m SignedSubmit, now time.Time) (*Veri
 	return &Verified{Cmd: cmd, Native: native, Binding: b, Digest: "sha256:" + hex.EncodeToString(sum[:]), Text: cmd.Input.Text, NotAfter: notAfter}, nil
 }
 
+// matchBinding returns the binding a signed document names when it is
+// shared with the link and still has the target, epoch, labels and native
+// session that were signed.
+func matchBinding(view *ConsentView, binding, targetID, epoch string, labels Labels, native string) (Binding, error) {
+	b, shared := view.Bindings[binding]
+	switch {
+	case !shared:
+		return Binding{}, refuse(string(protocol.CodeUnshared), "binding %q is not shared with this link", binding)
+	case targetID != b.TargetID || epoch != b.Epoch || labels != b.Labels:
+		return Binding{}, refuse(string(protocol.CodeStaleEpoch), "the binding changed since you signed; read it again and sign again")
+	case native == "" || native != b.NativeSessionID:
+		return Binding{}, refuse(CodeSessionChanged, "the session behind %s changed since you signed", binding)
+	}
+	return b, nil
+}
+
 func verifySignedSubmit(view *ConsentView, m SignedSubmit, now time.Time) (*protocol.Command, string, Binding, []byte, error) {
 	doc, _, err := verifySigned(view, m.DocumentB64, m.CredentialID, m.AuthenticatorData, m.ClientDataJSON, m.Signature)
 	if err != nil {
@@ -131,16 +147,12 @@ func verifySignedSubmit(view *ConsentView, m SignedSubmit, now time.Time) (*prot
 	if err != nil {
 		return nil, "", Binding{}, nil, refuse(CodeConsentInvalid, "%v", err)
 	}
-	b, shared := view.Bindings[d.Binding]
-	switch {
-	case d.ServerID != view.ServerID || d.StoreID != view.StoreID:
+	if d.ServerID != view.ServerID || d.StoreID != view.StoreID {
 		return nil, "", Binding{}, nil, refuse(CodeConsentInvalid, "the consent is for another server or store")
-	case !shared:
-		return nil, "", Binding{}, nil, refuse(string(protocol.CodeUnshared), "binding %q is not shared with this link", d.Binding)
-	case d.Command.TargetID != b.TargetID || d.Command.Epoch != b.Epoch || d.Labels != b.Labels:
-		return nil, "", Binding{}, nil, refuse(string(protocol.CodeStaleEpoch), "the binding changed since you signed; read it again and sign again")
-	case d.NativeSessionID == "" || d.NativeSessionID != b.NativeSessionID:
-		return nil, "", Binding{}, nil, refuse(CodeSessionChanged, "the session behind %s changed since you signed", d.Binding)
+	}
+	b, err := matchBinding(view, d.Binding, d.Command.TargetID, d.Command.Epoch, d.Labels, d.NativeSessionID)
+	if err != nil {
+		return nil, "", Binding{}, nil, err
 	}
 	issued, err := time.Parse(time.RFC3339, d.IssuedAt)
 	if err != nil {

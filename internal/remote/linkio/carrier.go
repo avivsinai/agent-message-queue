@@ -100,7 +100,11 @@ type Config struct {
 	Notify func(title, body string)
 	Logf   func(format string, args ...any)
 
-	Now          func() time.Time
+	Now func() time.Time
+	// Mono is the time since a fixed start on a clock that never goes back.
+	// A grant's remaining life is measured on it. With none, the process's
+	// monotonic clock.
+	Mono         func() time.Duration
 	OfferTTL     time.Duration
 	PingTimeout  time.Duration
 	MinBackoff   time.Duration
@@ -163,8 +167,11 @@ type Carrier struct {
 	maxCalls   int                             // tool calls in flight, from welcome
 	shared     atomic.Pointer[map[string]bool] // binding names shared with the link when last read
 	grants     atomic.Pointer[Grants]          // the grant records as last read from the store
-	deadMu     sync.Mutex                      // serializes writers of deadGens
-	deadGens   atomic.Pointer[map[string]bool] // generations the server revoked here: never live again
+	// grantLife maps a stored grant's digest to the Mono reading at which
+	// its life ends, set when this run first read the grant.
+	grantLife atomic.Pointer[map[string]time.Duration]
+	deadMu    sync.Mutex                      // serializes writers of deadGens
+	deadGens  atomic.Pointer[map[string]bool] // generations the server revoked here: never live again
 	// gmu serializes grant store reads and writes, so a snapshot read before
 	// a write never replaces one read after it. It is never held across a
 	// call into the endpoint.
@@ -200,6 +207,10 @@ func New(cfg Config) (*Carrier, error) {
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
+	}
+	if cfg.Mono == nil {
+		start := time.Now()
+		cfg.Mono = func() time.Duration { return time.Since(start) }
 	}
 	if cfg.OfferTTL <= 0 {
 		cfg.OfferTTL = DefaultOfferTTL

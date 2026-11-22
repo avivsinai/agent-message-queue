@@ -280,7 +280,7 @@
           "properties": {
             "binding": { "$ref": "#/$defs/opaque" },
             "available": { "type": "boolean" },
-            "reason": { "enum": ["consent_local", "mode_unreadable", "harness_unsupported"], "description": "Present when available is false." },
+            "reason": { "$ref": "#/$defs/code", "description": "Present when available is false: consent_local, mode_unreadable, harness_unsupported or state_in_workspace. A server shows any other value as not available." },
             "grant_generation": { "$ref": "#/$defs/opaque", "description": "Present when available is true: the value a grant for this binding must carry." },
             "max_lifetime_s": { "type": "integer", "minimum": 1, "description": "Present when available is true: the longest not_after - issued_at of a grant." },
             "max_text_bytes": { "type": "integer", "minimum": 1, "description": "Present when available is true: the longest task text a grant carries on this binding." },
