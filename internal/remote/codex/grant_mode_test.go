@@ -118,25 +118,54 @@ func TestGrantedSubmitIsRefusedAfterTheThreadStopsAsking(t *testing.T) {
 }
 
 // Contract section 4: a session that can write the machine's state directory
-// with no dialog takes no grant. The thread's working directory, or a
-// writable root of its sandbox, that holds the directory or lies inside it
-// counts (review of the session grant branch: a granted task could have the
-// session rewrite the grant state).
+// with no dialog takes no grant. The thread's working directory, a writable
+// root of its sandbox, a runtime workspace root of the thread (from
+// thread/resume only), or /tmp and $TMPDIR under workspaceWrite unless the
+// policy excludes them, that holds the directory or lies inside it counts
+// (review of the session grant branch: a granted task could have the session
+// rewrite the grant state, also through the roots it missed).
 func TestSessionThatWritesTheStateDirectory(t *testing.T) {
-	work, elsewhere, outside := t.TempDir(), t.TempDir(), t.TempDir()
+	work, elsewhere, runtimeRoot, tmp, outside := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
 	byCwd := filepath.Join(work, ".agent-mail", "extensions", "remote")
 	byRoot := filepath.Join(elsewhere, "remote")
+	byRuntime := filepath.Join(runtimeRoot, "remote")
+	byTmpdir := filepath.Join(tmp, "amq", "remote")
 	cwd, _ := json.Marshal(work)
 	roots, _ := json.Marshal([]string{filepath.Join(byRoot, "link")})
+	runtimeRoots, _ := json.Marshal([]string{runtimeRoot})
 	sock, srv := startFakeAppServer(t)
-	srv.setResumeMode(`,"cwd":`+string(cwd)+`,"approvalPolicy":"on-request","sandbox":{"type":"workspaceWrite","writableRoots":`+string(roots)+`,"networkAccess":false}`, nil)
+	t.Setenv("TMPDIR", tmp) // after the socket, whose path stays short
+	srv.setResumeMode(`,"cwd":`+string(cwd)+`,"runtimeWorkspaceRoots":`+string(runtimeRoots)+`,"approvalPolicy":"on-request","sandbox":{"type":"workspaceWrite","writableRoots":`+string(roots)+`,"networkAccess":false,"excludeTmpdirEnvVar":false,"excludeSlashTmp":false}`, nil)
 	att := attachWithMode(t, srv, sock)
 	if asks, why := att.SessionAsks(); !asks {
 		t.Fatalf("after resume: asks false (%s), want true", why)
 	}
-	for dir, want := range map[string]bool{byCwd: true, byRoot: true, outside: false} {
-		if got := att.WritesWithoutAsking(dir); got != want {
-			t.Errorf("WritesWithoutAsking(%s) = %v, want %v", dir, got, want)
+	want := map[string]bool{byCwd: true, byRoot: true, byRuntime: true, byTmpdir: true, outside: false}
+	bySlashTmp := "/tmp/amq/remote"
+	if filepath.Separator == '/' {
+		want[bySlashTmp] = true
+	}
+	for dir, w := range want {
+		if got := att.WritesWithoutAsking(dir); got != w {
+			t.Errorf("after resume: WritesWithoutAsking(%s) = %v, want %v", dir, got, w)
+		}
+	}
+	// The policy excludes both temporary directories; the runtime root stays.
+	srv.notify(t, "thread/settings/updated", `{"threadId":"t1","threadSettings":{"cwd":`+string(cwd)+`,"approvalPolicy":"on-request","approvalsReviewer":"user","sandboxPolicy":{"type":"workspaceWrite","writableRoots":`+string(roots)+`,"networkAccess":false,"excludeTmpdirEnvVar":true,"excludeSlashTmp":true}}}`)
+	deadline := time.Now().Add(5 * time.Second)
+	for att.WritesWithoutAsking(byTmpdir) {
+		if time.Now().After(deadline) {
+			t.Fatal("the settings update that excludes $TMPDIR was not applied")
+		}
+		runtime.Gosched()
+	}
+	want[byTmpdir] = false
+	if filepath.Separator == '/' {
+		want[bySlashTmp] = false
+	}
+	for dir, w := range want {
+		if got := att.WritesWithoutAsking(dir); got != w {
+			t.Errorf("after the update: WritesWithoutAsking(%s) = %v, want %v", dir, got, w)
 		}
 	}
 }

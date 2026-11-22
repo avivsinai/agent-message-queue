@@ -6,7 +6,7 @@
     "body": {
       "error": {
         "code": "grant_needs_signature",
-        "message": "mode_unreadable: the session does not ask for permissions now; sign this task"
+        "message": "harness_unsupported: the session does not ask for permissions now; sign this task"
       }
     },
     "gen": 12,

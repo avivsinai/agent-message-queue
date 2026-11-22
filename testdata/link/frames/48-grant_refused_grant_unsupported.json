@@ -6,7 +6,7 @@
     "body": {
       "error": {
         "code": "grant_unsupported",
-        "message": "mode_unreadable: binding \"pi-demo\" takes no grant now"
+        "message": "harness_unsupported: binding \"pi-demo\" takes no grant now"
       }
     },
     "gen": 12,

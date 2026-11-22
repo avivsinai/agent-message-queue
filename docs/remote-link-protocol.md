@@ -159,8 +159,10 @@ retired.
   `reason`: `consent_local`, `mode_unreadable` (the harness has not
   reported a mode that asks), `harness_unsupported` or
   `state_in_workspace` (the session can write the machine's state
-  directory with no dialog: its working directory or a writable root of
-  its sandbox holds that directory or lies inside it). A server shows an
+  directory with no dialog: its working directory, a writable root of its
+  sandbox, a runtime workspace root of the thread, or `/tmp` or `$TMPDIR`
+  of a `workspaceWrite` sandbox that does not exclude them, holds that
+  directory or lies inside it). A server shows an
   unknown reason as not available. `available` true
   carries `grant_generation`, `max_lifetime_s` (86400) and `max_text_bytes`.
   `now` is the machine's clock, for `issued_at` and a command's `not_after`.
@@ -227,7 +229,12 @@ outcome of `request.get`.
 - A newer grant accepted for the same binding.
 - A new epoch or another native session behind the binding.
 - The session can write the machine's state directory with no dialog: the
-  binding then takes no grant (`state_in_workspace`).
+  binding then takes no grant (`state_in_workspace`). A link in the machine
+  root (the default) can grant; a link kept inside a project cannot grant to
+  that project's sessions. A link's state is never moved: to grant there,
+  remove the link (`amq-remote link remove NAME`) and add it again in the
+  machine root (`amq-remote link add` without `--root`), or keep a signature
+  per task.
 
 The machine shows a desktop notice when it accepts a grant and when a grant
 ends by revoke or expiry; `amq-remote link status` lists the stored grants.
@@ -257,6 +264,12 @@ record or a revision. Outcome replies to `granted_submit` are as for a
 signed submit: no code (admitted), `busy`, `request_conflict` (the request
 id is in use with another input, `not_after`, signature or grant),
 `storage_full`, `attachment_lost`.
+
+The reason a grant ended depends on what the machine saw. After the machine
+cleared an expired grant from its stored state, a later hand-over reason
+reads `grant_revoked: the grant is no longer stored`, not `grant_expired`;
+a grant that expired while the machine was down answers `grant_unknown`.
+The server does the same in each case: it signs again.
 
 ## Link info
 

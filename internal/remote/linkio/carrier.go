@@ -83,8 +83,9 @@ type Config struct {
 	Revoked func()
 	// Handle runs an admitted command (core.Endpoint.Handle).
 	Handle Handler
-	// ConsentKeys returns the consent keys this machine trusts now.
-	ConsentKeys func() []ConsentKey
+	// ConsentKeys returns the consent keys this machine trusts now, or the
+	// error that kept it from reading them.
+	ConsentKeys func() ([]ConsentKey, error)
 	// LocalKey returns this link's local confirmation passkey, if any.
 	LocalKey func() (ConsentKey, bool)
 	// Grants is this link's grant store. With none, the four grant requests
@@ -160,7 +161,7 @@ type Carrier struct {
 	oversize   map[string]int64                // request_ref -> a revision already logged as over the frame limit
 	revokes    map[string]bool                 // consent keys the server removed, waiting for the revoke worker
 	revokeWake chan struct{}                   // wakes the revoke worker; holds at most one signal
-	liveKeys   atomic.Pointer[map[string]bool] // consent credential ids accepted now
+	liveKeys   atomic.Pointer[keySet]          // consent credential ids accepted now
 	revoked    atomic.Pointer[map[string]bool] // consent credential ids the server removed in this process
 	held       held                            // signed tasks waiting for the local confirmation
 	waiters    map[string]waiter               // frame id -> the request waiting for its reply
@@ -179,6 +180,7 @@ type Carrier struct {
 	grantSeen  map[string]StoredGrant // under gmu: digest -> a grant live at the last read
 	grantEnded map[string]string      // under gmu: digest -> the code its grant ended with
 	grantsErr  string                 // under gmu: the store read error last logged
+	mintErr    map[string]string      // under gmu: binding -> the mint error last logged
 	// logged is the link state Run last logged: "online" or an offline
 	// error's class (offlineKey). Only Run's goroutine reads or writes it, so a link that
 	// stays down logs one line, not one per redial.
@@ -197,7 +199,7 @@ func New(cfg Config) (*Carrier, error) {
 		cfg.Bindings = func() []Binding { return nil }
 	}
 	if cfg.ConsentKeys == nil {
-		cfg.ConsentKeys = func() []ConsentKey { return nil }
+		cfg.ConsentKeys = func() ([]ConsentKey, error) { return nil, nil }
 	}
 	if cfg.LocalKey == nil {
 		cfg.LocalKey = func() (ConsentKey, bool) { return ConsentKey{}, false }
@@ -243,7 +245,7 @@ func New(cfg Config) (*Carrier, error) {
 	}
 	c.held.tasks = map[string]*HeldTask{}
 	c.held.confirmed = map[string]time.Time{}
-	c.grantSeen, c.grantEnded = map[string]StoredGrant{}, map[string]string{}
+	c.grantSeen, c.grantEnded, c.mintErr = map[string]StoredGrant{}, map[string]string{}, map[string]string{}
 	c.refreshKeys()   // the consent snapshot exists before the first handoff check
 	c.RefreshGrants() // and so does the grant snapshot
 	return c, nil
@@ -488,6 +490,7 @@ func (c *Carrier) Request(ctx context.Context, body any) (json.RawMessage, error
 // every sweep. With no session there is no one to tell: the handshake of the
 // next session sends the bindings as they are then.
 func (c *Carrier) Tick() {
+	c.writeDeadGenerations()
 	c.RefreshGrants() // a grant ended by the owner or by its expiry is seen here
 	c.mu.Lock()
 	connected := c.sess != nil
@@ -898,8 +901,14 @@ func (c *Carrier) handleRequest(sess *session, f Frame) {
 		var b keyRevokedBody
 		if err := decodeStrict(f.Body, SchemaKeyRevoked, &b); err == nil && c.cfg.ConsentKeyRevoked != nil {
 			// The key stops counting now, before any later frame is read; the
-			// disk write follows on the revoke worker.
+			// disk write follows on the revoke worker. A change of the key
+			// list ends every grant of the link, so every generation stops
+			// now too; the tick writes any new generation the drop could not.
+			changes := c.keyMayBeListed(b.CredentialID)
 			c.markRevoked(b.CredentialID)
+			if changes {
+				c.endEveryGeneration()
+			}
 			c.mu.Lock()
 			c.revokes[b.CredentialID] = true // the revoke worker does the disk work
 			c.mu.Unlock()
@@ -1066,7 +1075,15 @@ func (c *Carrier) ConsentLive(credentialID string) bool {
 		return false
 	}
 	live := c.liveKeys.Load()
-	return live != nil && (*live)[credentialID]
+	return live != nil && live.live[credentialID]
+}
+
+// keySet is the snapshot of the consent keys accepted now. unread is true
+// when the last read of the key list failed: then no key is accepted, and
+// no key is known to be gone.
+type keySet struct {
+	live   map[string]bool
+	unread bool
 }
 
 // RefreshConsentKeys re-reads the consent keys into the snapshot, after a
@@ -1080,7 +1097,10 @@ func (c *Carrier) RefreshConsentKeys() { c.refreshKeys() }
 func (c *Carrier) refreshKeys() map[string]ConsentKey {
 	keys := map[string]ConsentKey{}
 	live := map[string]bool{}
-	onDisk := c.cfg.ConsentKeys()
+	onDisk, err := c.cfg.ConsentKeys()
+	if err != nil {
+		onDisk = nil
+	}
 	revoked := c.revoked.Load()
 	for _, k := range onDisk {
 		if revoked != nil && (*revoked)[k.CredentialID] {
@@ -1089,7 +1109,7 @@ func (c *Carrier) refreshKeys() map[string]ConsentKey {
 		keys[k.CredentialID] = k
 		live[k.CredentialID] = true
 	}
-	c.liveKeys.Store(&live)
+	c.liveKeys.Store(&keySet{live: live, unread: err != nil})
 	return keys
 }
 
@@ -1103,11 +1123,12 @@ func (c *Carrier) markRevoked(id string) {
 		}
 	}
 	c.revoked.Store(&next)
-	live := map[string]bool{}
+	live := keySet{live: map[string]bool{}}
 	if old := c.liveKeys.Load(); old != nil {
-		for k := range *old {
+		live.unread = old.unread
+		for k := range old.live {
 			if k != id {
-				live[k] = true
+				live.live[k] = true
 			}
 		}
 	}

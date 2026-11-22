@@ -236,7 +236,12 @@ func (ls *linkSet) newRun(ctx context.Context, l manifest.Link) (*linkRun, error
 		Connected: func() { go ls.refreshToolProfiles(ctx, name) },
 		Bindings:  func() []linkio.Binding { return ls.bindings(run, pin) },
 		ConsentKeyRevoked: func(id string) {
-			if _, err := linkio.DropConsentKey(ls.stateDir, name, id); err != nil {
+			// The carrier already ended every grant of the link in memory; its
+			// tick writes the new generation when the drop's own write fails.
+			switch dropped, err := linkio.DropConsentKey(ls.stateDir, name, id); {
+			case err != nil && dropped:
+				say(ls.stderr, "link %s: key dropped; the grant generation is not yet changed: %v", name, err)
+			case err != nil:
 				say(ls.stderr, "link %s: drop consent key: %v", name, err)
 			}
 			if run.carrier != nil {
@@ -250,12 +255,12 @@ func (ls *linkSet) newRun(ctx context.Context, l manifest.Link) (*linkRun, error
 			k, err := linkio.LoadLocalKey(ls.stateDir, name)
 			return k, err == nil
 		},
-		ConsentKeys: func() []linkio.ConsentKey {
+		ConsentKeys: func() ([]linkio.ConsentKey, error) {
 			keys, err := linkio.LoadConsentKeys(ls.stateDir, name)
 			if err != nil {
 				say(ls.stderr, "link %s: read consent keys: %v", name, err)
 			}
-			return keys
+			return keys, err
 		},
 		Grants:       linkio.FileGrants(ls.stateDir, name),
 		GrantInfoFor: ls.grantInfoFor,

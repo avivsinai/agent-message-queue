@@ -578,10 +578,14 @@ Protocol: [`amq.remote.link/1`](../../docs/remote-link-protocol.md).
    revokes it. A granted task runs only while the harness reports that the
    session asks before a tool acts: on Codex, an approval policy of
    `untrusted` or `on-request` with the user as reviewer and a `readOnly` or
-   `workspaceWrite` sandbox, and a working directory and writable roots that
-   neither hold nor lie inside the endpoint's state directory. Otherwise the
-   server must ask for a signature per task. Claude Code and pi sessions take
-   no grant yet.
+   `workspaceWrite` sandbox, and a working directory, writable roots, runtime
+   workspace roots and (under `workspaceWrite`, unless excluded) `/tmp` and
+   `$TMPDIR` that neither hold nor lie inside the endpoint's state directory.
+   Otherwise the server must ask for a signature per task. Claude Code and pi
+   sessions take no grant yet. A link in the machine root (the default) can
+   grant; a link kept inside a project cannot grant to that project's
+   sessions. A link's state is never moved: to grant there, `link remove` it
+   and `link add` it again without `--root`, or keep a signature per task.
 
    What you accept when you sign a grant:
    - Every passkey share takes grants: one touch on a compromised server's

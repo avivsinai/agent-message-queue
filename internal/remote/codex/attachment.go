@@ -111,8 +111,11 @@ type Attachment struct {
 	// perm is the thread's permission mode as this connection last heard
 	// it: from thread/resume, then each thread/settings/updated. permSeen
 	// keeps an update newer than the resume snapshot.
-	perm         perm
-	permSeen     bool
+	perm     perm
+	permSeen bool
+	// runtimeRoots are the thread's runtime workspace roots from
+	// thread/resume; a settings update does not carry them.
+	runtimeRoots []string
 	runs         map[requests.Key]*run
 	byTurn       map[string]*run
 	byClientID   map[string]*run // keyed by clientIDFor(key), not bare RequestID
@@ -311,10 +314,11 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 				Type string `json:"type"`
 			} `json:"status"`
 		} `json:"thread"`
-		Cwd               string          `json:"cwd"`
-		ApprovalsReviewer string          `json:"approvalsReviewer"`
-		ApprovalPolicy    json.RawMessage `json:"approvalPolicy"`
-		Sandbox           json.RawMessage `json:"sandbox"`
+		Cwd                   string          `json:"cwd"`
+		RuntimeWorkspaceRoots []string        `json:"runtimeWorkspaceRoots"`
+		ApprovalsReviewer     string          `json:"approvalsReviewer"`
+		ApprovalPolicy        json.RawMessage `json:"approvalPolicy"`
+		Sandbox               json.RawMessage `json:"sandbox"`
 	}
 	if err := client.Call(ctx, "thread/resume", map[string]any{"threadId": threadID}, &resumed); err != nil {
 		_ = client.Close()
@@ -352,6 +356,7 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 		}
 		a.perm = readPerm(resumed.ApprovalPolicy, resumed.ApprovalsReviewer, resumed.Sandbox, cwd)
 	}
+	a.runtimeRoots = resumed.RuntimeWorkspaceRoots
 	a.mu.Unlock()
 	go func() {
 		<-client.Done()
@@ -377,12 +382,15 @@ func autoReviewer(v string) string {
 // perm is a thread's permission mode as the app-server reported it. known
 // is true only when the approval policy is a plain string and the reviewer
 // and the sandbox type are both present. cwd and roots are the working
-// directory and the sandbox's writable roots of the same report.
+// directory and the sandbox's writable roots of the same report; slashTmp
+// and tmpdir are whether a workspaceWrite sandbox also writes /tmp and
+// $TMPDIR, which it does unless its policy excludes them.
 type perm struct {
 	known                     bool
 	policy, reviewer, sandbox string
 	cwd                       string
 	roots                     []string
+	slashTmp, tmpdir          bool
 }
 
 // readPerm reads a permission mode from the app-server's approvalPolicy,
@@ -391,15 +399,35 @@ type perm struct {
 func readPerm(policy json.RawMessage, reviewer string, sandbox json.RawMessage, cwd string) perm {
 	var p perm
 	var sb struct {
-		Type          string   `json:"type"`
-		WritableRoots []string `json:"writableRoots"`
+		Type                string   `json:"type"`
+		WritableRoots       []string `json:"writableRoots"`
+		ExcludeTmpdirEnvVar bool     `json:"excludeTmpdirEnvVar"`
+		ExcludeSlashTmp     bool     `json:"excludeSlashTmp"`
 	}
 	if json.Unmarshal(policy, &p.policy) != nil || json.Unmarshal(sandbox, &sb) != nil {
 		return perm{}
 	}
 	p.reviewer, p.sandbox, p.cwd, p.roots = reviewer, sb.Type, cwd, sb.WritableRoots
+	if sb.Type == "workspaceWrite" {
+		p.slashTmp, p.tmpdir = !sb.ExcludeSlashTmp, !sb.ExcludeTmpdirEnvVar
+	}
 	p.known = p.policy != "" && p.reviewer != "" && p.sandbox != ""
 	return p
+}
+
+// tmpRoots are the temporary directories the sandbox of p writes: /tmp on
+// Unix, and $TMPDIR. Codex takes TMPDIR from its own environment, which the
+// app-server does not report; this process's value stands in for it, the
+// same per-user directory when both run as one user.
+func (p perm) tmpRoots() []string {
+	var roots []string
+	if p.slashTmp && filepath.Separator == '/' {
+		roots = append(roots, "/tmp")
+	}
+	if dir := os.Getenv("TMPDIR"); p.tmpdir && filepath.IsAbs(dir) {
+		roots = append(roots, dir)
+	}
+	return roots
 }
 
 // asks reports whether a thread in mode p asks the user before a tool acts
@@ -429,18 +457,21 @@ func (a *Attachment) sessionAsksLocked() (bool, string) {
 }
 
 // WritesWithoutAsking implements core.PermissionReader from the settings
-// this connection last heard: the thread's working directory or a writable
-// root of its sandbox is dir, holds it or lies inside it. An offline
-// attachment, an unknown mode, or a working directory or root that is
-// missing or not absolute counts as writing dir.
+// this connection last heard: the thread's working directory, a writable
+// root of its sandbox, a runtime workspace root of the thread, or a
+// temporary directory its sandbox writes is dir, holds it or lies inside
+// it. An offline attachment, an unknown mode, or a working directory or root
+// that is missing or not absolute counts as writing dir.
 func (a *Attachment) WritesWithoutAsking(dir string) bool {
 	a.mu.Lock()
-	p, offline := a.perm, a.offline
+	p, offline, runtimeRoots := a.perm, a.offline, a.runtimeRoots
 	a.mu.Unlock()
 	if offline || !p.known || !filepath.IsAbs(dir) {
 		return true
 	}
-	for _, root := range append([]string{p.cwd}, p.roots...) {
+	roots := append([]string{p.cwd}, p.roots...)
+	roots = append(roots, runtimeRoots...)
+	for _, root := range append(roots, p.tmpRoots()...) {
 		if !filepath.IsAbs(root) || pathsOverlap(root, dir) {
 			return true
 		}
