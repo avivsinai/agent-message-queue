@@ -169,6 +169,7 @@ func TestSignedSubmitRunsOverTheLink(t *testing.T) {
 	clk.ns.Store(time.Date(2026, 10, 9, 14, 2, 10, 0, time.UTC).UnixNano())
 	got := make(chan *protocol.Command, 1)
 	var host string
+	var calls atomic.Int32
 	c, _ := startCarrier(t, fs, clk, func(cfg *Config) {
 		cfg.StoreID = view.StoreID
 		cfg.ConsentKeys = func() []ConsentKey { return []ConsentKey{key} }
@@ -178,6 +179,9 @@ func TestSignedSubmitRunsOverTheLink(t *testing.T) {
 				src.NativeSession != doc.NativeSessionID || src.Credential != key.CredentialID ||
 				len(src.Shared) != 1 || src.Shared[0] != doc.Command.TargetID {
 				t.Errorf("source %+v, want this link's sink %s with the signed session, key and shared target", src, host)
+			}
+			if calls.Add(1) > 1 {
+				return protocol.Reply{Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeBusy}}, nil
 			}
 			got <- cmd
 			return protocol.Reply{Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Evidence: "submitted"}}, nil
@@ -197,8 +201,15 @@ func TestSignedSubmitRunsOverTheLink(t *testing.T) {
 	}
 	r := fs.next()
 	var rep outcomeReply
-	if err := decodeStrict(r.Body, "", &rep); err != nil || r.Re != "m_s1" || rep.Outcome.Evidence != "submitted" {
-		t.Fatalf("reply %s: want the submit's Outcome", r.Body)
+	if err := decodeStrict(r.Body, "", &rep); err != nil || r.Re != "m_s1" || rep.Outcome.Evidence != "submitted" || rep.RetryAfterMS != 0 {
+		t.Fatalf("reply %s: want the submit's Outcome, no retry_after_ms", r.Body)
+	}
+	// A busy outcome tells the server when the same signed document may be
+	// sent again.
+	fs.send(Frame{Schema: SchemaFrame, ID: "m_s2", Gen: gen, Body: frame.Frame.Body})
+	r = fs.next()
+	if err := decodeStrict(r.Body, "", &rep); err != nil || r.Re != "m_s2" || rep.Outcome.Code != protocol.CodeBusy || rep.RetryAfterMS != busyRetryAfterMS {
+		t.Fatalf("busy reply %s: want outcome busy with retry_after_ms %d", r.Body, busyRetryAfterMS)
 	}
 }
 

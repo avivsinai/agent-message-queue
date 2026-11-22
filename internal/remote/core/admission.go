@@ -41,14 +41,13 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 	}
 	if exists {
 		// A busy-rejected tombstone from a previous attempt is not the
-		// request itself: the identical resubmit must be admitted normally,
-		// not answered from the tombstone (minimal tombstone semantics;
-		// full safety/reset is not handled here). Recognizable as a
-		// tombstoned rejected record with no dispatch behind it and the same
-		// digest; only a DIFFERENT digest is a conflict. A link request is
-		// never re-admitted: its busy refusal is a terminal record, which
-		// compaction later turns into this same tombstone shape.
-		retryable := readmittableBusy(rec) && rec.InputDigest == digest
+		// request itself: the same request sent again must be admitted
+		// normally, not answered from the tombstone (minimal tombstone
+		// semantics; full safety/reset is not handled here). Recognizable as
+		// a tombstoned rejected record with no dispatch behind it and the
+		// same request (sameRequest); only a DIFFERENT digest is a conflict,
+		// and any other resubmit is answered from the stored record.
+		retryable := readmittableBusy(rec) && sameRequest(rec, cmd, digest)
 		if !retryable {
 			e.mu.Unlock()
 			out := protocol.Outcome{Op: protocol.OpRequestSubmit}
@@ -62,10 +61,9 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 			return protocol.Reply{Snapshot: rec.Snapshot, Outcome: out}, nil
 		}
 		// Fall through to the normal admission path with the existing
-		// record: the deferred/Tick machinery owns it from here. A link
-		// record never gets here (retryable is false for it); a Buzz one
-		// does, so this third entrance to native Submit checks the native
-		// session too.
+		// record: the deferred/Tick machinery owns it from here. A link or
+		// Buzz record gets here too, so this third entrance to native Submit
+		// checks the native session and a link's own gates as well.
 		return e.resubmitTombstoneLocked(cmd, src, key, rec)
 	}
 	rec = &requests.Record{
@@ -159,18 +157,10 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 	}
 	if reserved {
 		// Persist a TERMINAL rejected+busy tombstone directly (one write, no
-		// received-then-reject window). The tombstone keeps dedup and makes an
-		// identical resubmit re-admittable. A link gets an ordinary refused
-		// record instead: it compacts after the horizon and is never
-		// re-admitted; sending again is a new request id.
-		if isLink(src) {
-			e.transitionLocked(rec, causeRefused, nativeEvidence{code: protocol.CodeBusy})
-			// Nothing reads the input of a request that never runs, and the
-			// record waits for the sink's acknowledgement before it compacts.
-			rec.Input = nil
-		} else {
-			e.transitionLocked(rec, causeBusyTombstone, nativeEvidence{})
-		}
+		// received-then-reject window). The tombstone keeps dedup and lets the
+		// same request sent again re-admit it, for every carrier: a link's
+		// only with the same signed document (sameRequest).
+		e.busyTombstoneLocked(rec, nativeEvidence{})
 		rec.Revision = 1
 		rec.ObservedAt = protocol.FormatTime(e.now())
 		if err := e.store.Create(rec); err != nil {
@@ -190,6 +180,17 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 // tombstone rec by src. The caller holds e.mu; it unlocks exactly once on
 // every return.
 func (e *Endpoint) resubmitTombstoneLocked(cmd *protocol.Command, src Source, key requests.Key, rec *requests.Record) (protocol.Reply, error) {
+	// A link re-admits under the gates of a fresh link submit: verified
+	// signed bytes and a target still shared with it here, its bound of open
+	// requests before the reservation below.
+	if isLink(src) && (src.NativeSession == "" || src.Credential == "") {
+		e.mu.Unlock()
+		return protocol.Reply{}, protocol.Refuse(protocol.CodeConsentInvalid, "a link submit runs only from verified signed bytes")
+	}
+	if src.Shared != nil && !slices.Contains(src.Shared, cmd.TargetID) {
+		e.mu.Unlock()
+		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeUnshared}}, nil
+	}
 	t, code, reason := e.admissibleLocked(cmd.TargetID, cmd.Epoch, cmd.NotAfter, cmd.Input.MinEvidence)
 	if code != "" {
 		e.mu.Unlock()
@@ -221,7 +222,7 @@ func (e *Endpoint) resubmitTombstoneLocked(cmd *protocol.Command, src Source, ke
 	if reserved {
 		// Still reserved: refresh the terminal busy tombstone and refuse
 		// again — never a Tick-admissible placeholder.
-		e.transitionLocked(rec, causeBusyTombstone, nativeEvidence{})
+		e.busyTombstoneLocked(rec, nativeEvidence{})
 		if _, err := e.commitLocked(rec, e.targets[rec.TargetID]); err != nil {
 			e.mu.Unlock()
 			return protocol.Reply{}, err
@@ -230,6 +231,18 @@ func (e *Endpoint) resubmitTombstoneLocked(cmd *protocol.Command, src Source, ke
 		e.mu.Unlock()
 		e.publishRevision(rec)
 		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code}}, nil
+	}
+	if isLink(src) {
+		full, ferr := e.linkFullLocked(src.Host)
+		if ferr != nil {
+			e.mu.Unlock()
+			return protocol.Reply{}, protocol.Refuse(protocol.CodeAttachmentLost, "%s", ferr.Error())
+		}
+		if full {
+			// The tombstone stays as it is, still re-admittable.
+			e.mu.Unlock()
+			return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeBusy, Message: fmt.Sprintf("this link already has %d requests open", maxLinkInFlight)}}, nil
+		}
 	}
 	// Same reservation as a fresh admission: the room
 	// for the result is taken before dispatch, and released on every
@@ -479,17 +492,42 @@ func (e *Endpoint) handoffLocked(rec *requests.Record, t *target) protocol.Code 
 	return ""
 }
 
-// readmittableBusy reports whether rec is a busy tombstone that an identical
-// resubmit may still run: a local busy refusal with no dispatch behind it and
-// no cancel asked. It is the only terminal record a later submit can execute,
-// so cancel treats it as open.
+// readmittableBusy reports whether rec is a busy tombstone that the same
+// request sent again (sameRequest) may still run: a busy refusal with no
+// dispatch behind it and no cancel asked. It is the only terminal record a
+// later submit can execute, so cancel treats it as open. A request id causes
+// at most one native dispatch: the tombstone needs NativeDispatches == 0, and
+// its admission clears the tombstone.
 func readmittableBusy(rec *requests.Record) bool {
-	return rec.Origin["carrier"] != CarrierLink &&
-		rec.Tombstone &&
+	return rec.Tombstone &&
 		rec.State == protocol.StateRejected &&
 		rec.Code == protocol.CodeBusy &&
 		rec.NativeDispatches == 0 &&
 		rec.Cancel == nil
+}
+
+// sameRequest reports whether cmd, whose input digest is digest, is the
+// request rec stores. The digest does not cover not_after, so a link record
+// also needs the same not_after: only the same signed document re-admits a
+// link's busy tombstone, and another signature for the same request id is
+// answered from the stored record. Nothing is admitted after not_after, so
+// a link record whose deadline passed never runs.
+func sameRequest(rec *requests.Record, cmd *protocol.Command, digest string) bool {
+	if rec.InputDigest != digest {
+		return false
+	}
+	return rec.Origin["carrier"] != CarrierLink || rec.NotAfter == cmd.NotAfter
+}
+
+// busyTombstoneLocked moves rec to the busy tombstone of a refusal that
+// dispatched nothing. A link's tombstone keeps no input: the signed resubmit
+// that re-admits it carries its own, and the stored digest keeps the
+// conflict check.
+func (e *Endpoint) busyTombstoneLocked(rec *requests.Record, ev nativeEvidence) {
+	e.transitionLocked(rec, causeBusyTombstone, ev)
+	if rec.Origin["carrier"] == CarrierLink {
+		rec.Input = nil
+	}
 }
 
 // sessionBound reports whether requests that arrived with origin may run in
@@ -697,9 +735,9 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 // justifies. It is the ONE reading of (adm, nerr): a transport failure
 // proves nothing (attachment_lost keeps the correlation), admitted binds the
 // run, a cancelled-before-admission code is a positive non-admission, busy
-// for a local request that the adapter sent nothing for leaves the busy
-// tombstone an identical resubmit re-admits, and any other code (busy after
-// a native call, or for a Buzz or link request, included) is a positive
+// that the adapter sent nothing for leaves the busy tombstone the same
+// request sent again re-admits (a link's included), and any other code (busy
+// after a native call, or for a Buzz share's request, included) is a positive
 // refusal.
 func admissionCause(rec *requests.Record, adm Admission, nerr error) (cause, nativeEvidence) {
 	nev := nativeEvidence{runID: adm.RunID}
@@ -710,7 +748,7 @@ func admissionCause(rec *requests.Record, adm Admission, nerr error) (cause, nat
 		return causeAdmitted, nev
 	case adm.Code == protocol.CodeCancelledBeforeAdmission:
 		return causeCancelledBeforeAdmission, nev
-	case adm.Code == protocol.CodeBusy && adm.NothingSent && !sessionBound(rec.Origin):
+	case adm.Code == protocol.CodeBusy && adm.NothingSent && rec.Origin["carrier"] != "buzz":
 		if rec.Cancel != nil && rec.Cancel.Disposition == protocol.CancelRequested {
 			// A cancel arrived while Submit was out and nothing was sent:
 			// the request ends cancelled, never a tombstone a retry runs.
@@ -723,6 +761,17 @@ func admissionCause(rec *requests.Record, adm Admission, nerr error) (cause, nat
 		nev.reason = adm.Message
 		return causeRefused, nev
 	}
+}
+
+// applyAdmissionLocked applies admissionCause's transition to rec; a busy
+// tombstone goes through busyTombstoneLocked, so a link's keeps no input.
+func (e *Endpoint) applyAdmissionLocked(rec *requests.Record, adm Admission, nerr error) {
+	c, nev := admissionCause(rec, adm, nerr)
+	if c == causeBusyTombstone {
+		e.busyTombstoneLocked(rec, nev)
+		return
+	}
+	e.transitionLocked(rec, c, nev)
 }
 
 // finishAdmissionLocked applies one native Submit outcome to the durable
@@ -755,8 +804,7 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 		}
 		// The normal path: no native event moved the record while Submit was
 		// in flight. Apply the admission outcome directly.
-		c, nev := admissionCause(rec, adm, nerr)
-		e.transitionLocked(rec, c, nev)
+		e.applyAdmissionLocked(rec, adm, nerr)
 		if _, err := e.commitLocked(rec, t); err != nil {
 			e.mu.Unlock()
 			return protocol.Reply{}, err
@@ -817,8 +865,7 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 	// this the record stays uncertain and the reservation blocks every later
 	// request for that target forever.
 	if rec.State == protocol.StateUncertain && nerr == nil && (adm.Admitted || adm.Code != "") {
-		c, nev := admissionCause(rec, adm, nil)
-		e.transitionLocked(rec, c, nev)
+		e.applyAdmissionLocked(rec, adm, nil)
 		if _, err := e.commitLocked(rec, t); err != nil {
 			e.notifyStorageFailureLocked(rec, err)
 			e.mu.Unlock()

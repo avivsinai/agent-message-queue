@@ -139,7 +139,9 @@ func replyFrame(sess *session, re string, body any) ([]byte, error) {
 }
 
 // outcomeReply is the reply to a signed submit: AMQ's Outcome, never a
-// revision.
+// revision. A busy outcome carries RetryAfterMS: the same signed document
+// may be sent again after it.
 type outcomeReply struct {
-	Outcome protocol.Outcome `json:"outcome"`
+	Outcome      protocol.Outcome `json:"outcome"`
+	RetryAfterMS int              `json:"retry_after_ms,omitempty"`
 }

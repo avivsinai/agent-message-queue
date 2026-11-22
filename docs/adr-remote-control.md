@@ -70,10 +70,11 @@ invariants.
    them. A link reads and cancels only the requests it created, submits only
    to the sessions shared with it, and sees only those sessions, with other
    sources' request and interaction references removed; it never answers an
-   interaction and never reads session events. A link creates no
-   tombstones: its cancel of an absent request is refused, and its busy
-   request ends as an ordinary refused record that compacts and is never
-   admitted again. A link holds at most four open requests.
+   interaction and never reads session events. A link's cancel of an
+   absent request is refused and leaves no record. Its busy request leaves
+   a busy tombstone with no input, which only the same signed document (the
+   same request id, input and `not_after`) re-admits, at most once and never
+   after `not_after`. A link holds at most four open requests.
 5. **Capabilities are observed, not inferred.** Each attachment publishes a
    projection (`inspect`, `submit`, `cancel_request`, `answer_question`,
    `approve_tool`, `steer`, `terminal`). Values come from the installed

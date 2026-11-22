@@ -150,41 +150,75 @@ func TestLinkReadsAndCancelsOnlyItsOwnRequests(t *testing.T) {
 	}
 }
 
-func TestLinkBusyEndsRefusedCompactsAndIsNeverReadmitted(t *testing.T) {
+// The contract changed by design: a link's busy refusal was a terminal record,
+// so sending again needed a new request id and a second passkey signature. It
+// is now re-admitted only by the same signed request (id, input and
+// not_after) before its deadline, and runs at most once.
+func TestLinkBusyIsReadmittedOnlyByTheSameSignedRequest(t *testing.T) {
 	rt := fake.New("fake", "e_1")
 	ep, store, clk := newLinkEndpoint(t, rt)
-	const idA, idB = "11111111-1111-4111-8111-1111111111a2", "11111111-1111-4111-8111-1111111111b2"
+	const idA = "11111111-1111-4111-8111-1111111111a2"
 	submitReply(t, ep, linkSubmit(clk, "fake", idA), linkSource(hostA, "fake"))
 
-	busy := submitReply(t, ep, linkSubmit(clk, "fake", idB), linkSource(hostB, "fake"))
-	keyB := requests.Key{CreatorHost: hostB, TargetID: "fake", RequestID: idB}
-	rec, _, err := store.Get(keyB)
-	if err != nil || rec == nil {
-		t.Fatalf("busy link request left no record: %v", err)
+	// Three busy requests of B while A runs; each is a busy tombstone with no
+	// input. Each command is kept: sending it again is the same signed
+	// document.
+	runs := linkSubmit(clk, "fake", "11111111-1111-4111-8111-1111111111b2")
+	expires := linkSubmit(clk, "fake", "11111111-1111-4111-8111-1111111111b3")
+	resigned := linkSubmit(clk, "fake", "11111111-1111-4111-8111-1111111111b4")
+	keyOf := func(cmd *protocol.Command) requests.Key {
+		return requests.Key{CreatorHost: hostB, TargetID: "fake", RequestID: cmd.RequestID}
 	}
-	if busy.Outcome.Code != protocol.CodeBusy || rec.State != protocol.StateRejected || rec.Code != protocol.CodeBusy || rec.Tombstone || rec.Input != nil {
-		t.Fatalf("busy link submit = outcome %q, record %s/%s tombstone=%v input=%v; want a refused busy record, no tombstone, no input",
-			busy.Outcome.Code, rec.State, rec.Code, rec.Tombstone, rec.Input)
+	for _, cmd := range []*protocol.Command{runs, expires, resigned} {
+		busy := submitReply(t, ep, cmd, linkSource(hostB, "fake"))
+		rec, _, err := store.Get(keyOf(cmd))
+		if err != nil || rec == nil {
+			t.Fatalf("busy link request left no record: %v", err)
+		}
+		if busy.Outcome.Code != protocol.CodeBusy || rec.State != protocol.StateRejected || rec.Code != protocol.CodeBusy || !rec.Tombstone || rec.Input != nil {
+			t.Fatalf("busy link submit = outcome %q, record %s/%s tombstone=%v input=%v; want a busy tombstone with no input",
+				busy.Outcome.Code, rec.State, rec.Code, rec.Tombstone, rec.Input)
+		}
+	}
+	rt.Complete(idA, "done")
+	dispatches := func() int { return rt.Snapshot().Dispatches }
+
+	// Another signature for the same id (a later not_after) does not run: it
+	// is answered from the stored record.
+	later := *resigned
+	later.NotAfter = protocol.FormatTime(clk.now().Add(3 * time.Minute))
+	before := dispatches()
+	if r := submitReply(t, ep, &later, linkSource(hostB, "fake")); r.Snapshot.State != protocol.StateRejected || r.Snapshot.Code != protocol.CodeBusy || dispatches() != before || rt.HasRun(resigned.RequestID) {
+		t.Fatalf("resubmit with a later not_after = %s/%s, dispatches %d -> %d; want the stored busy record, no run",
+			r.Snapshot.State, r.Snapshot.Code, before, dispatches())
 	}
 
-	rt.Complete(idA, "done")
+	// The same signed document runs once the target is free, and only once.
+	if r := submitReply(t, ep, runs, linkSource(hostB, "fake")); r.Snapshot.State != protocol.StateRunning || dispatches() != before+1 || !rt.HasRun(runs.RequestID) {
+		t.Fatalf("same signed resubmit = %s %q, dispatches %d -> %d; want it to run", r.Snapshot.State, r.Outcome.Code, before, dispatches())
+	}
+	submitReply(t, ep, runs, linkSource(hostB, "fake"))
+	if dispatches() != before+1 {
+		t.Fatalf("a third identical submit dispatched again: %d -> %d", before, dispatches())
+	}
+
+	// Past its not_after the same document is refused expired, and after the
+	// compaction horizon it still never runs.
+	rt.Complete(runs.RequestID, "done")
+	clk.advance(3 * time.Minute)
+	before = dispatches()
+	if r := submitReply(t, ep, expires, linkSource(hostB, "fake")); r.Outcome.Code != protocol.CodeExpired || dispatches() != before || rt.HasRun(expires.RequestID) {
+		t.Fatalf("resubmit past not_after = %q, dispatches %d -> %d; want expired, no run", r.Outcome.Code, before, dispatches())
+	}
 	clk.advance(protocol.DefaultCompactHorizon + time.Minute)
 	if err := ep.Tick(); err != nil {
 		t.Fatalf("tick: %v", err)
 	}
-	if rec, _, _ = store.Get(keyB); !rec.Tombstone {
-		t.Fatalf("refused busy link record not compacted after the horizon: %+v", rec)
+	if rec, _, _ := store.Get(keyOf(expires)); rec == nil || !rec.Tombstone || rec.Input != nil {
+		t.Fatalf("busy link record after the horizon = %+v, want a tombstone with no input", rec)
 	}
-
-	// The target is free now; the same request id must still not run.
-	if n := rt.UnacknowledgedResults(); n != 0 {
-		t.Fatalf("fake still holds %d unacknowledged results", n)
-	}
-	before := rt.Snapshot().Dispatches
-	again := submitReply(t, ep, linkSubmit(clk, "fake", idB), linkSource(hostB, "fake"))
-	if again.Snapshot.State != protocol.StateRejected || rt.Snapshot().Dispatches != before || rt.HasRun(idB) {
-		t.Fatalf("resubmit of compacted busy link request = %s, dispatches %d -> %d: re-admitted",
-			again.Snapshot.State, before, rt.Snapshot().Dispatches)
+	if r := submitReply(t, ep, expires, linkSource(hostB, "fake")); r.Snapshot.State != protocol.StateRejected || dispatches() != before || rt.HasRun(expires.RequestID) {
+		t.Fatalf("resubmit after the horizon = %s, dispatches %d -> %d; want no run", r.Snapshot.State, before, dispatches())
 	}
 }
 

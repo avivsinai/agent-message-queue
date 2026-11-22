@@ -989,7 +989,11 @@ func (c *Carrier) admitSigned(m SignedSubmit) (any, error) {
 	if !ok {
 		return nil, errors.New("the endpoint returned no submit reply")
 	}
-	return outcomeReply{Outcome: reply.Outcome}, nil
+	rep := outcomeReply{Outcome: reply.Outcome}
+	if reply.Outcome.Code == protocol.CodeBusy {
+		rep.RetryAfterMS = busyRetryAfterMS
+	}
+	return rep, nil
 }
 
 // view is what the machine trusts right now. It is rebuilt for each signed
@@ -1219,8 +1223,10 @@ func (c *Carrier) ConfirmLocal(id, digest, authenticatorData, clientDataJSON, si
 	}
 	out, err := c.cfg.Handle(t.verified.Cmd, c.source(c.view(), t.verified.Native, t.credential))
 	if reply, ok := out.(protocol.Reply); err != nil || (ok && reply.Outcome.Code != "") {
-		// Refused: core keeps no record of an unadmitted link submit, so the
-		// press that was told "not handed to" must not let a resend run.
+		// Refused, busy included: a press that was told "not handed to" must
+		// not let a resend run on it, even where core keeps a busy record
+		// that the same request could re-admit. The resend is held and
+		// confirmed again.
 		c.held.forget(digest)
 	}
 	return out, err
