@@ -53,6 +53,31 @@ func adoptCodexThreadIdentity() error {
 	return adoptIdentity(id, "this Codex thread's")
 }
 
+// isCodexHookReceiver reports whether args run a Codex hook receiver: amq
+// coop hook codex-wait or codex-prompt, or amq wake dialog --harness codex.
+// A receiver takes its thread from the hook input (adoptCodexHookIdentity).
+func isCodexHookReceiver(args []string) bool {
+	if len(args) < 3 {
+		return false
+	}
+	switch {
+	case args[0] == "coop" && args[1] == "hook":
+		return slices.Contains(args[2:], "codex-wait") || slices.Contains(args[2:], "codex-prompt")
+	case args[0] == "wake" && args[1] == "dialog":
+		for i, arg := range args[2:] {
+			name, value, inline := strings.Cut(strings.TrimLeft(arg, "-"), "=")
+			if !strings.HasPrefix(arg, "-") || name != "harness" {
+				continue
+			}
+			if !inline && i+3 < len(args) {
+				value = args[i+3]
+			}
+			return value == "codex"
+		}
+	}
+	return false
+}
+
 // recordedCodexIdentity returns the validated identity AMQ recorded for
 // thread. The error is codexidentity.ErrNone when the thread has no record,
 // and a context mismatch when a record exists and cannot be used.

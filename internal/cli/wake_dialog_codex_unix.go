@@ -93,38 +93,27 @@ func codexDialogStore() (string, error) {
 	return codexidentity.CurrentDir(home), nil
 }
 
-// adoptCodexHookIdentity gives a Codex hook with no AM_* the identity amq
-// coop exec recorded for its thread. The thread is the hook input's
-// session_id, never the environment's CODEX_THREAD_ID: a Codex that was
-// started from a Codex shell tool inherits its parent's id, and amq adopts
-// the identity of that id before a verb runs. An identity that came from
-// another thread's record is dropped first. A recorded identity that cannot
-// be used is an error, so the receiver does nothing.
+// adoptCodexHookIdentity gives a Codex hook with no AM_* the identity AMQ
+// recorded for its thread. The thread is the hook input's session_id. The
+// environment's CODEX_THREAD_ID does not name it: Codex gives its hooks
+// none, and a Codex that was started from a Codex shell tool inherits its
+// parent's. So amq adopts no thread identity before a hook receiver runs
+// (isCodexHookReceiver), and AM_* here are the process's own pins. A
+// recorded identity that cannot be used is an error, so the receiver does
+// nothing.
 func adoptCodexHookIdentity(sessionID string) error {
-	if !codexidentity.ValidThread(sessionID) {
-		return nil
-	}
-	if env := strings.TrimSpace(os.Getenv("CODEX_THREAD_ID")); env != "" && env != sessionID && codexEnvIdentityIsOf(env) {
-		for _, key := range identityEnvKeys {
-			_ = os.Unsetenv(key)
-		}
-	}
 	for _, key := range identityEnvKeys {
 		if _, present := os.LookupEnv(key); present {
 			return nil
 		}
 	}
+	if !codexidentity.ValidThread(sessionID) {
+		return nil
+	}
 	if err := os.Setenv("CODEX_THREAD_ID", sessionID); err != nil {
 		return err
 	}
 	return adoptCodexThreadIdentity()
-}
-
-// codexEnvIdentityIsOf reports whether the identity in the environment is
-// the one recorded for thread.
-func codexEnvIdentityIsOf(thread string) bool {
-	id, err := recordedCodexIdentity(thread)
-	return err == nil && id.Me == os.Getenv(envMe) && canonicalWakeRoot(id.Root) == canonicalWakeRoot(os.Getenv(envRoot))
 }
 
 // writeTurnDialogMarker opens the hold of a Codex or Cursor guard, whose

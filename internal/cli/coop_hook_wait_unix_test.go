@@ -269,6 +269,12 @@ func joinCodexThread(t *testing.T, thread string) {
 	if _, err := captureStdout(t, func() error { return runCoopInit([]string{"--agents", "claude,codex", "--no-gitignore"}) }); err != nil {
 		t.Fatal(err)
 	}
+	bindCodexThread(t, codexHome, thread, "codex")
+}
+
+// bindCodexThread joins a loaded thread of codexHome as me.
+func bindCodexThread(t *testing.T, codexHome, thread, me string) {
+	t.Helper()
 	holdCodexThread(t, codexHome, thread)
 	rollout := filepath.Join(codexHome, "sessions", "2026", "11", "13", "rollout-2026-11-13T10-00-00-"+thread+".jsonl")
 	if err := os.MkdirAll(filepath.Dir(rollout), 0o700); err != nil {
@@ -278,10 +284,38 @@ func joinCodexThread(t *testing.T, thread string) {
 		t.Fatal(err)
 	}
 	t.Setenv("CODEX_THREAD_ID", thread)
-	if _, err := captureStdout(t, func() error { return runCoopJoin(nil) }); err != nil {
+	if _, err := captureStdout(t, func() error { return runCoopJoin([]string{"--me", me}) }); err != nil {
 		t.Fatal(err)
 	}
 	setOptionalEnv(t, "CODEX_THREAD_ID", "", false)
+}
+
+// Review of PR 1585: a Codex started from a Codex shell tool inherits its
+// parent's CODEX_THREAD_ID. amq adopted the parent's identity before the
+// hook receiver read its input, so a permission dialog of the child marked
+// the parent's mailbox.
+func TestCodexHookReceiverTakesItsThreadFromTheHookInput(t *testing.T) {
+	const parent, child = "019a1166-dd8e-77c0-bc3b-a4b7e24e91f1", "019a1166-dd8e-77c0-bc3b-a4b7e24e91f3"
+	joinCodexThread(t, parent)
+	bindCodexThread(t, os.Getenv("CODEX_HOME"), child, "claude")
+	root := absPath(filepath.Join(defaultCoopRoot, defaultSessionName))
+	t.Setenv("CODEX_THREAD_ID", parent)
+	t.Cleanup(func() {
+		for _, key := range identityEnvKeys {
+			_ = os.Unsetenv(key)
+		}
+	})
+	defer withStdin(t, fmt.Sprintf(`{"session_id":%q,"turn_id":"t-1","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"touch hello.txt"}}`, child))()
+	if err := Run([]string{"--no-update-check", "wake", "dialog", "--harness", "codex", "open"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	held := func(me string) bool {
+		_, err := os.Lstat(filepath.Join(fsq.AgentBase(root, me), wakeDialogFileName))
+		return err == nil
+	}
+	if !held("claude") || held("codex") {
+		t.Fatalf("the child's dialog marked claude=%v codex=%v, want only the child's mailbox (claude)", held("claude"), held("codex"))
+	}
 }
 
 func TestCodexPromptAddsUnreadContextToAJoinedChat(t *testing.T) {
@@ -334,11 +368,7 @@ func TestCodexPromptAddsUnreadContextToAJoinedChat(t *testing.T) {
 	for _, key := range append([]string{"CODEX_THREAD_ID"}, identityEnvKeys...) {
 		_ = os.Unsetenv(key)
 	}
-	// amq adopts the identity of the environment's thread before a verb runs.
 	t.Setenv("CODEX_THREAD_ID", thread)
-	if err := adoptCodexThreadIdentity(); err != nil {
-		t.Fatal(err)
-	}
 	if got := run(fmt.Sprintf(`{"session_id":%q,"prompt":"hello"}`, unbound)); got != "" {
 		t.Fatalf("an environment that names another thread than the input got %q, want nothing", got)
 	}
