@@ -298,3 +298,64 @@ func TestAttendedSeatOnOwesNoEnterAfterTheDrain(t *testing.T) {
 		t.Fatalf("attended seat after the drain typed %q, want nothing", h.injected)
 	}
 }
+
+// The motivating case of a live attended change: a cohort parked at the
+// typed ladder's lifetime cap (a person ignored eight doorbells), then
+// attended turns on. The reload resets the cohort, and the settings tick's
+// rescan delivers exactly one notice for what waits — not silence until a
+// drain, and not a second notice at later scans.
+func TestAttendedSeatOnNotifiesAParkedCohortAtTheLifetimeCap(t *testing.T) {
+	h := newWakeHoldHarness(t, wakeHoldPolicy{})
+	h.cfg.settingsSource = func() ([]byte, bool, error) {
+		raw, err := os.ReadFile(filepath.Join(fsq.AgentBase(h.root, "codex"), wakeSettingsFileName))
+		if err != nil {
+			return nil, false, err
+		}
+		return raw, true, nil
+	}
+	attention := &strings.Builder{}
+	h.cfg.attentionWrite = func(data []byte) (int, error) {
+		attention.Write(data)
+		return len(data), nil
+	}
+	h.cfg.attentionIsTTY = func() bool { return false }
+	h.cfg.recordAttention = func(wakeAttentionEmission) error { return nil }
+
+	// Park the cohort, then spend the whole lifetime budget on it.
+	h.send("old", format.PriorityNormal)
+	h.scan(h.cfg)
+	h.rings()
+	for i := uint(0); h.cfg.doorbell.phase != wakeDoorbellParked && i < 20; i++ {
+		h.advance(wakeDoorbellRetryMax)
+		h.scan(h.cfg)
+		h.rings()
+	}
+	if h.cfg.doorbell.phase != wakeDoorbellParked {
+		t.Fatalf("setup: phase = %v, want parked", h.cfg.doorbell.phase)
+	}
+	h.cfg.doorbell.attemptBudget = wakeDoorbellLifetimeAttemptCap
+
+	// The person turns attended on through the live reload.
+	if err := os.WriteFile(
+		filepath.Join(fsq.AgentBase(h.root, "codex"), wakeSettingsFileName),
+		[]byte(`{"schema":1,"settings":{"attended":true}}`), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !h.cfg.reloadSettings() || !h.cfg.settings.attended {
+		t.Fatal("reloadSettings did not turn attended on")
+	}
+	h.scan(h.cfg)
+	if got := h.rings(); got != 0 {
+		t.Fatalf("attended scan typed %d doorbell(s), want none", got)
+	}
+	emissions := func() int { return strings.Count(attention.String(), "AMQ [s]") }
+	if got := emissions(); got != 1 {
+		t.Fatalf("attended-on scan emitted %d notice(s) for the parked cohort, want 1", got)
+	}
+	h.advance(time.Minute)
+	h.scan(h.cfg)
+	if got := emissions(); got != 1 {
+		t.Fatalf("a later scan emitted %d notice(s) total, want 1", got)
+	}
+}
