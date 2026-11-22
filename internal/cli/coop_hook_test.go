@@ -204,8 +204,22 @@ func TestCoopInstallHooksWritesTheGatedEntryAndListsOldOnes(t *testing.T) {
 			t.Fatalf("Codex %s = %+v, want one async entry running %q", event, groups, wait)
 		}
 	}
-	if len(codex.Hooks["UserPromptSubmit"]) != 0 || len(codex.Hooks) != 2 {
-		t.Fatalf("Codex hooks expanded beyond SessionStart and Stop: %+v", codex.Hooks)
+	prompt := strings.Replace(wait, "codex-wait", "codex-prompt", 1)
+	if groups := codex.Hooks["UserPromptSubmit"]; len(codex.Hooks) != 3 || len(groups) != 1 || groups[0].Matcher != nil || len(groups[0].Hooks) != 1 ||
+		groups[0].Hooks[0].Command != prompt || groups[0].Hooks[0].Async || groups[0].Hooks[0].Timeout != 2 {
+		t.Fatalf("Codex UserPromptSubmit = %+v of %d events, want one entry running %q", groups, len(codex.Hooks), prompt)
+	}
+	if _, err := captureStdout(t, func() error { return runCoopInstallHooks([]string{"--harness", "codex"}) }); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := os.ReadFile(filepath.Join(codexHome, "hooks.json")); err != nil || !bytes.Equal(again, raw) {
+		t.Fatalf("second Codex install changed the hooks (%v):\n%s", err, again)
+	}
+	if _, err := captureStdout(t, func() error { return runCoopUninstallHooks([]string{"--harness", "codex"}) }); err != nil {
+		t.Fatal(err)
+	}
+	if left, err := os.ReadFile(filepath.Join(codexHome, "hooks.json")); err != nil || bytes.Contains(left, []byte(coopHookMarker)) {
+		t.Fatalf("Codex uninstall left co-op entries (%v):\n%s", err, left)
 	}
 }
 
