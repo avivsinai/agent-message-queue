@@ -215,6 +215,12 @@ type wakeInputGuardPTYSeat struct {
 }
 
 func newWakeInputGuardPTYSeat(t *testing.T, mode string, enabled bool) *wakeInputGuardPTYSeat {
+	return newWakeInputGuardPTYSeatAttended(t, mode, enabled, false)
+}
+
+// newWakeInputGuardPTYSeatAttended turns attended on for the seat when
+// attended is true, through the same wake config the guard flag uses.
+func newWakeInputGuardPTYSeatAttended(t *testing.T, mode string, enabled, attended bool) *wakeInputGuardPTYSeat {
 	t.Helper()
 	temp := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(temp, "home"), 0o700); err != nil {
@@ -258,6 +264,10 @@ func newWakeInputGuardPTYSeat(t *testing.T, mode string, enabled bool) *wakeInpu
 	}
 	s.fail("wake did not become ready")
 ready:
+	if attended {
+		config := s.run("wake", "config", "--root", root, "--me", "seat", "--attended=true", "--wait")
+		t.Logf("wake configuration after --wait: %s", config)
+	}
 	if enabled {
 		config := s.run("wake", "config", "--root", root, "--me", "seat", "--input-guard=true", "--input-stale-for=12s", "--wait")
 		t.Logf("wake configuration after --wait: %s", config)
@@ -589,6 +599,33 @@ func TestWakeInputGuardRealPTY(t *testing.T) {
 		s.sendAndSubmit(30*time.Second, 1)
 		s.drain()
 		s.sendAndSubmit(2*time.Second, 2)
+	})
+	// The end-to-end proof of the attended invariant: with a
+	// draft in the editor, three mails five seconds apart type no byte and
+	// submit nothing. The wake's attention output is the only face the mail
+	// gets; the model learns of it at the person's submit.
+	t.Run("attended seat is never typed into", func(t *testing.T) {
+		s := newWakeInputGuardPTYSeatAttended(t, wakeInjectModeRaw, false, true)
+		s.typeInput("draft")
+		if !s.waitUntil(2*time.Second, func(records []wakeInputGuardEditorRecord) bool {
+			return len(records) > 0 && records[len(records)-1].Buffer == "draft"
+		}) {
+			t.Fatal("editor did not read the human draft")
+		}
+		sent := time.Now()
+		for i := 0; i < 3; i++ {
+			s.run("send", "--root", s.root, "--me", "sender", "--to", "seat", "--subject", "attended-case", "--body", "attended PTY test; no model required")
+			s.sleep(5 * time.Second)
+		}
+		s.requireDuring(20*time.Second, func(records []wakeInputGuardEditorRecord) bool {
+			for _, record := range records {
+				if record.Kind == "submit" && record.At.After(sent) {
+					s.fail("attended seat submitted the draft or typed the doorbell")
+					return false
+				}
+			}
+			return records[len(records)-1].Buffer == "draft"
+		}, "the editor lost its draft, or the wake typed input on an attended seat")
 	})
 
 }

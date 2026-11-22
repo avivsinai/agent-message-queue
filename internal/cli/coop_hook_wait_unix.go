@@ -164,16 +164,17 @@ func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 			if err == nil && len(pending) > 0 {
 				var settings wakeSettings
 				settings, layers = coopWaitSettings(root, me, layers)
-				// An attended seat is never rung: the hooks carry the mail to the
-				// person and the model without a keystroke (bead gijx). The read has
-				// no wake-lock dependency, so it holds on an app seat too. Nothing
-				// is due, so the loop's one select below waits the poll interval.
-				if !settings.attended {
-					rang := readCoopWaitState(statePath, w.session)
-					announced := append(readCoopStopState(filepath.Join(agent, coopStopStateFile)).BlockedIDs, rang.RangIDs...)
-					now := time.Now()
-					var next time.Time
-					due, next = decideCoopWait(pending, announced, settings.holdPolicy(), now)
+				// An attended seat is never rung: the hooks carry the mail to
+				// the person and the model without a keystroke. The read has no
+				// wake-lock dependency, so it holds on an app seat too.
+				rang := readCoopWaitState(statePath, w.session)
+				announced := append(readCoopStopState(filepath.Join(agent, coopStopStateFile)).BlockedIDs, rang.RangIDs...)
+				now := time.Now()
+				var next time.Time
+				due, next = decideCoopWait(pending, announced, settings.holdPolicy(), now)
+				if settings.attended {
+					due, next = nil, time.Time{}
+				} else {
 					switch {
 					case len(due) > 0 && !debounced:
 						// The Stop guard of the same turn end may be about to

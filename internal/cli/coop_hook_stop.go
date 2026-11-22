@@ -27,6 +27,7 @@ const (
 type coopStopState struct {
 	Schema      int      `json:"schema"`
 	BlockedIDs  []string `json:"blocked_ids"`
+	NoticedIDs  []string `json:"noticed_ids,omitempty"`
 	ChainBlocks int      `json:"chain_blocks"`
 }
 
@@ -107,8 +108,20 @@ func writeCoopStop(stdin io.Reader, w io.Writer) error {
 	if err != nil {
 		return writeCoopHookJSON(w, map[string]string{"systemMessage": fmt.Sprintf("AMQ mailbox unreadable at %s; pending messages may exist.", root)})
 	}
+	statePath := filepath.Join(fsq.AgentBase(root, me), coopStopStateFile)
+	old := readCoopStopState(statePath)
+	// The settings are read before the wake baseline, and only when mail is
+	// pending or a notice is already recorded: most turn ends have neither,
+	// and the two settings files are the only reads here that touch the
+	// disk.
+	attended := false
+	if len(pending) > 0 || len(old.NoticedIDs) > 0 {
+		if settings, _ := coopWaitSettings(root, me, wakeSettingsLayers{}); settings.attended {
+			attended = true
+		}
+	}
 	var baseline *time.Time
-	if len(pending) > 0 {
+	if len(pending) > 0 && !attended {
 		if at, ok := coopHookWakeBaseline(root, me); ok {
 			baseline = &at
 		}
@@ -116,22 +129,18 @@ func writeCoopStop(stdin io.Reader, w io.Writer) error {
 	if session == "" {
 		session = "(none)"
 	}
-	statePath := filepath.Join(fsq.AgentBase(root, me), coopStopStateFile)
-	old := readCoopStopState(statePath)
 	// An attended seat never blocks: the person reads the systemMessage and
 	// the model learns of the mail at their next prompt. Every unread
 	// message counts, with no wake baseline: the attended wake types
 	// nothing, so mail after its baseline would otherwise never be reported
-	// at a turn end (bead gijx, spec item K). The reported-ids state is
-	// kept, so the notice shows once per message. R2: a seat that is not
-	// attended keeps the block below.
-	attendedSettings, _ := coopWaitSettings(root, me, wakeSettingsLayers{})
-	if attendedSettings.attended {
+	// at a turn end. A seat that is not attended keeps the block below.
+	if attended {
 		next := decideCoopStopAttended(pending, old)
-		if !slices.Equal(next.BlockedIDs, old.BlockedIDs) || next.ChainBlocks != old.ChainBlocks {
+		fresh := freshAttendedIDs(pending, old.NoticedIDs)
+		if !slices.Equal(next.NoticedIDs, old.NoticedIDs) {
 			_ = writeCoopHookState(statePath, next)
 		}
-		if len(freshAttendedIDs(pending, old)) == 0 {
+		if len(fresh) == 0 {
 			return nil
 		}
 		return writeCoopHookJSON(w, map[string]string{"systemMessage": fmt.Sprintf(
@@ -152,45 +161,36 @@ func writeCoopStop(stdin io.Reader, w io.Writer) error {
 // rings for mail created later, and mail created at or before it may be the
 // cohort it baselined and never rings for, so only that mail counts. A
 // message whose creation time does not parse counts.
-// decideCoopStopAttended is the attended-seat Stop state: every pending id
-// is recorded as reported so the notice does not repeat at each turn end.
-// The chain block count is kept at zero: an attended seat never blocks.
+// decideCoopStopAttended is the attended-seat Stop state: noticed = the ids
+// that are pending now, in NoticedIDs. The systemMessage prints when a
+// pending id is not in the old NoticedIDs, so the notice shows once per
+// message and a drained message leaves the state. BlockedIDs and the chain
+// block count stay as they are: an attended seat never blocks.
 func decideCoopStopAttended(pending []coopStopMessage, old coopStopState) coopStopState {
-	next := coopStopState{Schema: 1, BlockedIDs: []string{}}
-	next.BlockedIDs = append(next.BlockedIDs, freshAttendedIDs(pending, old)...)
-	next.BlockedIDs = append(next.BlockedIDs, coopAttendedReported(pending, old)...)
-	slices.Sort(next.BlockedIDs)
-	next.BlockedIDs = slices.Compact(next.BlockedIDs)
-	return next
+	ids := make([]string, 0, len(pending))
+	for _, msg := range pending {
+		if msg.ID != "" {
+			ids = append(ids, msg.ID)
+		}
+	}
+	slices.Sort(ids)
+	return coopStopState{Schema: 1, NoticedIDs: slices.Compact(ids), BlockedIDs: old.BlockedIDs}
 }
 
 // freshAttendedIDs is the pending ids the attended Stop guard has not
-// reported yet. There is no wake-baseline cut: an attended wake types
+// noticed yet. There is no wake-baseline cut: an attended wake types
 // nothing, so mail created after its baseline is still only reported here.
-func freshAttendedIDs(pending []coopStopMessage, old coopStopState) []string {
-	reported := coopIDSet(old.BlockedIDs)
+func freshAttendedIDs(pending []coopStopMessage, noticed []string) []string {
+	seen := coopIDSet(noticed)
 	var fresh []string
 	for _, msg := range pending {
-		if msg.ID == "" || reported[msg.ID] {
+		if msg.ID == "" || seen[msg.ID] {
 			continue
 		}
 		fresh = append(fresh, msg.ID)
 	}
 	slices.Sort(fresh)
 	return fresh
-}
-
-// coopAttendedReported keeps the recorded ids that are still unread, as the
-// block path does, so a drained message leaves the state.
-func coopAttendedReported(pending []coopStopMessage, old coopStopState) []string {
-	unread := coopIDSet(freshAttendedIDs(pending, old))
-	var kept []string
-	for _, id := range old.BlockedIDs {
-		if !unread[id] {
-			kept = append(kept, id)
-		}
-	}
-	return kept
 }
 
 func decideCoopStop(pending []coopStopMessage, baseline *time.Time, old coopStopState, active bool, where string) (coopStopState, map[string]string) {

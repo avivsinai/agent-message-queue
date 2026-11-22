@@ -198,6 +198,40 @@ The guard does not change hold by priority, urgent and interrupt delivery,
 the bounded wait while the person types (at most 15 seconds, then attention
 only and a retry), or the opt-in `claude-native` injector.
 
+## Attended seats
+
+Attended is off by default. Turn it on for one seat with
+`amq wake config --attended=true`, or for every seat of the user with
+`--machine`. A person works in that terminal, so the wake never writes to
+its input: no doorbell text, no Enter, no interrupt key — whatever else is
+true. The one exception is the owner's own command from the chat app: it is
+the owner's input, typed on the owner's order.
+
+The person sees the mail as a notice (terminal title, bell, desktop notice),
+once per unread cohort, and one more notice when more mail arrives —
+whatever transport the wake would otherwise use, including the external
+injector (`--inject-via`). On Claude Code with the co-op hooks installed,
+the model learns of the mail at the person's next submit through the
+`UserPromptSubmit` hook, and the Stop guard reports unread mail at a turn
+end without extending the turn. The input guard is not needed on an
+attended seat: nothing is typed into the terminal anyway.
+
+`attended` is read from the settings file at each wake. A running wake
+applies the change without a restart: attended on drops an owed Enter or
+pending payload of an earlier delivery (the owner's own queued command
+stays), and attended off announces the pending cohort fresh at the next
+scan. A wake of an older
+release refuses a settings file that carries the key, so before you rely
+on it: upgrade and restart every wake, then confirm the live wake took the
+setting with `amq wake check --json` (look for `"attended": true`). When
+`amq wake config --attended=true` accepts the value it prints one reminder:
+attended applies to a wake of this release or newer; check with
+`amq wake check`.
+
+In `amq wake check --json`, `attended` is the live wake's applied value: a
+seat with no wake reads `false` even when the settings file says otherwise.
+A seat with no wake reads the setting with `amq wake config`.
+
 ## Input guard (macOS)
 
 The input guard is off by default: the wake then uses the quiet window of

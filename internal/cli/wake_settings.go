@@ -195,7 +195,7 @@ var wakeSettingDefs = []wakeSettingDef{
 		func(s *wakeSettings) any { return &s.selfUpgrade }},
 	{"held_notice", "held-notice", "Show a desktop notification at once when a harness dialog holds the doorbell (macOS osascript, Linux notify-send)",
 		func(s *wakeSettings) any { return &s.heldNotice }},
-	{"attended", "attended", "A person works in this terminal: never type the doorbell; show a notice only",
+	{"attended", "attended", "A person works in this terminal: never type the doorbell; show a notice only. Applies to a wake of this release or newer; a live wake reports its applied value as attended in amq wake check --json (false with no live wake; read the setting with amq wake config)",
 		func(s *wakeSettings) any { return &s.attended }},
 }
 
@@ -910,6 +910,12 @@ func (cfg *wakeConfig) reloadSettings() bool {
 	if len(changed) > 0 {
 		if cfg.settings.holdPolicy() != next.holdPolicy() {
 			cfg.holdPolicyChanged = true
+		}
+		if !next.attended && cfg.settings.attended {
+			// The seat is no longer attended: the doorbell can ring again, so
+			// the next scan announces the pending cohort fresh instead of
+			// staying silent in the announced-attended state.
+			cfg.doorbell.reset()
 		}
 		if next.attended && !cfg.settings.attended && cfg.inputDelivery.pending() && !cfg.inputDelivery.oneSubmit {
 			// The seat just became attended: an owed Enter or pending payload of

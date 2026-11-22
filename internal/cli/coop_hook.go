@@ -151,7 +151,7 @@ func writeCoopSessionStart(w io.Writer, now time.Time) error {
 	switch {
 	case attended:
 		// An attended seat is never typed into, so no wake mode changes the
-		// wording (bead gijx, spec item L).
+		// wording.
 		b.WriteString("\nThis seat is attended: no doorbell is typed and no hook wakes it. Mail is announced at the person's next prompt and at a turn end; run amq drain --include-body then. Do not run amq watch, amq monitor or a polling loop.")
 	case coopHookWakeRings(root, me):
 		b.WriteString("\nA wake rings this terminal when mail arrives; do not run amq watch, amq monitor or a polling loop.")

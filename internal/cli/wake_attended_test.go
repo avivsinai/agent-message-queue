@@ -1,13 +1,15 @@
+//go:build darwin || linux
+
 package cli
 
-// Purpose: the attended seat (bead agent-message-queue-gijx). On a seat with
+// Purpose: the attended seat. On a seat with
 // attended=true the wake never types: no doorbell text, no Enter, no
 // interrupt key. Mail shows as a notice only, the Stop guard reports with a
 // systemMessage and does not extend the turn, and the wait hook does not
 // ring. The owner's own queued command stays typed (the one exception).
 
 import (
-	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -19,22 +21,10 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
-// setAttendedForTest writes attended=true into the agent's .wake.settings.
-func setAttendedForTest(t *testing.T, root, me string) {
-	t.Helper()
-	path := filepath.Join(fsq.AgentBase(root, me), wakeSettingsFileName)
-	raw, err := json.Marshal(map[string]any{"schema": 1, "settings": map[string]bool{"attended": true}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // Happy path: an attended seat is never typed into. Mail arrives, the wake
 // emits the attention output, and the terminal writer records nothing; the
-// reminder scan writes nothing either.
+// reminder scan writes nothing either. The external injector (--inject-via)
+// is a transport too, so an attended seat routes it to the notice as well.
 func TestAttendedSeatNeverTypesTheDoorbell(t *testing.T) {
 	h := newWakeHoldHarness(t, wakeHoldPolicy{})
 	setAttendedForTest(t, h.root, "codex")
@@ -45,11 +35,18 @@ func TestAttendedSeatNeverTypesTheDoorbell(t *testing.T) {
 		return len(data), nil
 	}
 	h.cfg.attentionIsTTY = func() bool { return false }
+	h.cfg.injectViaHook = func(text string) (string, error) {
+		h.injected = append(h.injected, text)
+		return "", nil
+	}
 
 	h.send("a", format.PriorityNormal)
 	h.scan(h.cfg)
 	if got := h.rings(); got != 0 {
 		t.Fatalf("attended seat typed %d doorbell(s), want none", got)
+	}
+	if len(h.injected) != 0 {
+		t.Fatalf("attended seat routed mail to the injector: %q, want the notice only", h.injected)
 	}
 	if !strings.Contains(attention.String(), "a") {
 		t.Fatalf("attention output = %q, want the mail notice", attention.String())
@@ -87,11 +84,12 @@ func TestAttendedSeatStillTypesTheOwnerCommand(t *testing.T) {
 	}
 }
 
-// The notice cadence (spec item O): one unread message over ten minutes of
-// retries produces exactly one attention emission — not one per retry. The
-// cohort parks after the first notice like a presented cohort; an addition
-// (the reminder cohort) revives it for at most one more notice. The status
-// is not degraded (item N): the notice is the designed channel.
+// The notice cadence: one unread message over ten minutes of retries
+// produces exactly one attention emission — not one per retry. The cohort
+// is recorded as announced after the first notice; an addition is mail the
+// person has not been told about and gives exactly one more notice. There
+// is no lifetime cap on the attended notice: the cap bounds synthetic
+// input, and an attended seat types none.
 func TestAttendedSeatNoticeCadenceOverTenMinutes(t *testing.T) {
 	h := newWakeHoldHarness(t, wakeHoldPolicy{})
 	setAttendedForTest(t, h.root, "codex")
@@ -102,6 +100,11 @@ func TestAttendedSeatNoticeCadenceOverTenMinutes(t *testing.T) {
 		return len(data), nil
 	}
 	h.cfg.attentionIsTTY = func() bool { return false }
+	var statuses []string
+	h.cfg.recordNotifierStatus = func(status, mode, reason string) error {
+		statuses = append(statuses, status)
+		return nil
+	}
 
 	emissions := func() int { return strings.Count(attention.String(), "AMQ [s]") }
 	h.send("a", format.PriorityNormal)
@@ -116,22 +119,54 @@ func TestAttendedSeatNoticeCadenceOverTenMinutes(t *testing.T) {
 	if got := emissions(); got != 1 {
 		t.Fatalf("ten minutes of retries emitted %d notice(s), want 1 for the unchanged message", got)
 	}
-	// An addition is mail the person has not been told about: one more notice,
-	// then parked again.
-	h.advance(time.Minute)
-	h.send("b", format.PriorityNormal)
-	h.scan(h.cfg)
-	if got := emissions(); got > 2 {
-		t.Fatalf("addition emitted %d notice(s) total, want at most 2", got)
-	}
-	for minute := 1; minute <= 10; minute++ {
-		h.advance(time.Minute)
+	// Ten more messages, none drained: each gets its one notice.
+	for i := 0; i < 10; i++ {
+		h.advance(10 * time.Minute)
+		h.send(fmt.Sprintf("m%d", i), format.PriorityNormal)
 		h.scan(h.cfg)
 	}
-	if got := emissions(); got != 2 {
-		t.Fatalf("ten more minutes emitted %d notice(s) total, want 2 (message + addition)", got)
+	if got := emissions(); got != 11 {
+		t.Fatalf("ten additions emitted %d notice(s) total, want 11 (one per cohort)", got)
 	}
-	if h.cfg.lastPersistedNotifierStatus == "degraded" {
-		t.Fatal("attended notice recorded a degraded notifier status, want none")
+	for _, status := range statuses {
+		if status == "degraded" {
+			t.Fatal("attended notice recorded a degraded notifier status, want none")
+		}
+	}
+}
+
+// A live attended→off change lets the doorbell ring again: the next scan
+// announces the pending cohort fresh and types one doorbell.
+func TestAttendedSeatOffRingsOneDoorbellForThePendingCohort(t *testing.T) {
+	h := newWakeHoldHarness(t, wakeHoldPolicy{})
+	setAttendedForTest(t, h.root, "codex")
+	h.cfg.settingsSource = func() ([]byte, bool, error) {
+		raw, err := os.ReadFile(filepath.Join(fsq.AgentBase(h.root, "codex"), wakeSettingsFileName))
+		if err != nil {
+			return nil, false, err
+		}
+		return raw, true, nil
+	}
+	if changed := h.cfg.reloadSettings(); !changed || !h.cfg.settings.attended {
+		t.Fatalf("attended = %v, changed = %v; want the file's attended", h.cfg.settings.attended, changed)
+	}
+	h.send("a", format.PriorityNormal)
+	h.scan(h.cfg)
+	if got := h.rings(); got != 0 {
+		t.Fatalf("attended scan typed %d doorbell(s), want none", got)
+	}
+	// Turn attended off in the same file the live reload reads.
+	if err := os.WriteFile(
+		filepath.Join(fsq.AgentBase(h.root, "codex"), wakeSettingsFileName),
+		[]byte(`{"schema":1,"settings":{"attended":false}}`), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if h.cfg.reloadSettings() != true {
+		t.Fatal("reloadSettings did not report the change")
+	}
+	h.scan(h.cfg)
+	if got := h.rings(); got != 1 {
+		t.Fatalf("attended-off scan typed %d doorbell(s), want 1 for the pending cohort", got)
 	}
 }

@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 )
 
@@ -358,21 +359,77 @@ func TestCoopStopUnderALiveWakeCountsOnlyBaselineMail(t *testing.T) {
 	}
 }
 
-// An attended seat has no baseline cut (spec item K): the attended wake
+// An attended seat has no baseline cut: the attended wake
 // types nothing, so mail created after its baseline would never be
 // reported anywhere else. The decide function takes no baseline, so the
 // unit case is that mail after a live wake's baseline is reported.
-func TestCoopStopAttendedReportsMailAfterTheWakeBaseline(t *testing.T) {
-	baseline := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
-	after := coopStopMessage{ID: "after", Created: baseline.Add(time.Second).Format(time.RFC3339Nano)}
-	fresh := coopStopState{Schema: 1, BlockedIDs: []string{}}
-
-	next := decideCoopStopAttended([]coopStopMessage{after}, fresh)
-	if !slices.Equal(next.BlockedIDs, []string{"after"}) {
-		t.Fatalf("attended mail after the baseline: reported %v, want \"after\"", next.BlockedIDs)
+// An attended seat reports mail created after the wake baseline too, at a
+// real turn end through writeCoopStop: the attended wake types nothing, so
+// a baseline cut would leave that mail unreported for ever.
+func sendCodexToClaudeForAttendedTest(t *testing.T, root string) {
+	t.Helper()
+	if _, err := captureStdout(t, func() error {
+		return runSend([]string{"--root", root, "--me", "codex", "--to", "claude", "--body", "hi"})
+	}); err != nil {
+		t.Fatal(err)
 	}
-	if got := freshAttendedIDs([]coopStopMessage{after}, fresh); !slices.Equal(got, []string{"after"}) {
-		t.Fatalf("attended fresh ids after the baseline = %v, want \"after\"", got)
+}
+
+// setAttendedForTest writes the agent's settings file with attended on.
+func setAttendedForTest(t *testing.T, root, me string) {
+	t.Helper()
+	path := filepath.Join(fsq.AgentBase(root, me), wakeSettingsFileName)
+	raw, err := json.Marshal(map[string]any{"schema": 1, "settings": map[string]bool{"attended": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCoopStopAttendedReportsMailAfterTheWakeBaseline(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	base := filepath.Join(t.TempDir(), ".agent-mail")
+	root := filepath.Join(base, "collab")
+	if err := runInit([]string{"--root", root, "--agents", "claude,codex"}); err != nil {
+		t.Fatal(err)
+	}
+	sendCodexToClaudeForAttendedTest(t, root)
+	t.Setenv(envMe, "claude")
+	t.Setenv(envRoot, root)
+	t.Setenv(envBaseRoot, base)
+	t.Setenv(envSession, "collab")
+	setAttendedForTest(t, root, "claude")
+
+	var out bytes.Buffer
+	if err := writeCoopStop(strings.NewReader(`{"stop_hook_active":false}`), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "unread message(s)") {
+		t.Fatalf("attended stop = %q, want the unread notice", out.String())
+	}
+	if strings.Contains(out.String(), `"decision":"block"`) {
+		t.Fatalf("attended stop = %q, want no block", out.String())
+	}
+}
+
+// A drained message leaves the attended Stop state at the next turn end:
+// the state holds exactly the ids still pending, so it does not grow with
+// every message ever reported. The previous ids are what keeps the notice
+// from repeating, not what the state keeps.
+func TestCoopStopAttendedStateHoldsOnlyPendingIDs(t *testing.T) {
+	old := coopStopState{Schema: 1, NoticedIDs: []string{"already-drained"}}
+	if got := decideCoopStopAttended(nil, old); len(got.NoticedIDs) != 0 {
+		t.Fatalf("empty inbox still records %v, want an empty state", got.NoticedIDs)
+	}
+	kept := coopStopMessage{ID: "kept", Created: "2026-11-22T12:00:00Z"}
+	got := decideCoopStopAttended([]coopStopMessage{kept}, old)
+	if !slices.Equal(got.NoticedIDs, []string{"kept"}) {
+		t.Fatalf("drained mail kept in state: %v, want [kept]", got.NoticedIDs)
+	}
+	if !slices.Equal(got.BlockedIDs, old.BlockedIDs) {
+		t.Fatalf("attended seat changed BlockedIDs: %v, want it untouched", got.BlockedIDs)
 	}
 }
 
