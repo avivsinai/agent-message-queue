@@ -8,6 +8,22 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.161.0](https://github.com/avivsinai/agent-message-queue/compare/v0.160.0...v0.161.0) (2026-11-22)
+
+
+### Features
+
+* **coop:** the Codex prompt hook tells the model about waiting mail ([#1585](https://github.com/avivsinai/agent-message-queue/issues/1585)) ([5b07676](https://github.com/avivsinai/agent-message-queue/commit/5b07676b1755ac2d79d9b9be1489cdc41ba25451))
+* **coop:** the wait hook waits on file events ([#1587](https://github.com/avivsinai/agent-message-queue/issues/1587)) ([5a8a3fa](https://github.com/avivsinai/agent-message-queue/commit/5a8a3fa31b4a1eece10b84f8784e21a6d56c4854))
+* **remote:** a link can send the same signed task again after a busy refusal ([#1590](https://github.com/avivsinai/agent-message-queue/issues/1590)) ([8165f76](https://github.com/avivsinai/agent-message-queue/commit/8165f7698f6a82a6ac4a062cc156e32cbac96e21))
+
+
+### Dependencies
+
+* bump golang.org/x/crypto from 0.58.0 to 0.59.0 ([#1569](https://github.com/avivsinai/agent-message-queue/issues/1569)) ([af4d716](https://github.com/avivsinai/agent-message-queue/commit/af4d71687ae7c55b7d93eaf3b7a34e27c924c34e))
+* bump golang.org/x/sys from 0.49.0 to 0.50.0 ([#1567](https://github.com/avivsinai/agent-message-queue/issues/1567)) ([2a8ca5b](https://github.com/avivsinai/agent-message-queue/commit/2a8ca5b209e9fbd5a1e67c385a84c220d668efd9))
+* bump golang.org/x/term from 0.47.0 to 0.48.0 ([#1568](https://github.com/avivsinai/agent-message-queue/issues/1568)) ([630c9b0](https://github.com/avivsinai/agent-message-queue/commit/630c9b05d848548b2242be5fb5d37a7aa6e92f9c))
+
 ## [0.160.0](https://github.com/avivsinai/agent-message-queue/compare/v0.159.2...v0.160.0) (2026-11-21)
 
 
