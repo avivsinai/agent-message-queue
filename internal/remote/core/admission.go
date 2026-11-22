@@ -46,8 +46,9 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		// semantics; full safety/reset is not handled here). Recognizable as
 		// a tombstoned rejected record with no dispatch behind it and the
 		// same request (sameRequest). A different digest, or another signed
-		// document for a link's busy tombstone, is a conflict; any other
-		// resubmit is answered from the stored record.
+		// document (another not_after) or another grant for any link record,
+		// is a conflict; any other resubmit is answered from the stored
+		// record.
 		retryable := readmittableBusy(rec) && sameRequest(rec, cmd, digest, src.GrantDigest)
 		if !retryable {
 			e.mu.Unlock()
@@ -562,10 +563,10 @@ func readmittableBusy(rec *requests.Record) bool {
 // the grant grantDigest ("" for none), is the request rec stores. The digest
 // does not cover not_after, so a link record also needs the same not_after
 // and the same grant: only the same signed document, or the same command
-// under the same grant, re-admits a link's busy tombstone, and anything else
-// for the same request id is answered from the stored record with
-// request_conflict. Nothing is admitted after not_after, so a link record
-// whose deadline passed never runs.
+// under the same grant, re-admits a link's busy tombstone, and another
+// signature or another grant for the same request id is answered from the
+// stored record with request_conflict. Nothing is admitted after not_after,
+// so a link record whose deadline passed never runs.
 func sameRequest(rec *requests.Record, cmd *protocol.Command, digest, grantDigest string) bool {
 	if rec.InputDigest != digest {
 		return false
