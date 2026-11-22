@@ -67,23 +67,30 @@ func (h *wakeHoldHarness) newConfig(policy wakeHoldPolicy) *wakeConfig {
 // send delivers a message whose arrival (file mtime) is the fake now. An
 // empty priority leaves the header without one.
 func (h *wakeHoldHarness) send(name, priority string) {
+	h.sendLabeled(name, priority, nil)
+}
+
+// sendLabeled delivers a message with explicit labels; an empty priority
+// leaves the header without one.
+func (h *wakeHoldHarness) sendLabeled(name, priority string, labels []string) {
 	h.t.Helper()
-	h.deliver(name+".md", name, priority)
+	h.deliver(name+".md", name, priority, labels)
 }
 
 // sendAs delivers a normal message with header id id in the inbox file
 // file, as a bridge or a DLQ retry can.
 func (h *wakeHoldHarness) sendAs(file, id string) {
 	h.t.Helper()
-	h.deliver(file, id, format.PriorityNormal)
+	h.deliver(file, id, format.PriorityNormal, nil)
 }
 
-func (h *wakeHoldHarness) deliver(file, id, priority string) {
+func (h *wakeHoldHarness) deliver(file, id, priority string, labels []string) {
 	h.t.Helper()
 	msg := format.Message{
 		Header: format.Header{
 			Schema: 1, ID: id, From: "peer", To: []string{"codex"},
 			Thread: "p2p/codex__peer", Subject: id, Priority: priority,
+			Labels:  labels,
 			Created: "2026-07-28T15:00:00Z",
 		},
 		Body: "body",

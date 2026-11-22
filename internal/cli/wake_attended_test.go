@@ -157,8 +157,55 @@ func TestAttendedSeatNoticeCadenceOverTenMinutes(t *testing.T) {
 	}
 }
 
+// runSettingsTicks drives the real wake-loop settings tick on cfg: the
+// loop takes n ticks and stops. Regression harness for the 837d0b93 live
+// finding: the tick must start a scan when the reload changed the hold
+// policy or attended, not only the hold policy.
+func runSettingsTicks(t *testing.T, h *wakeHoldHarness, n int) *wakeConfig {
+	t.Helper()
+	stop := make(chan struct{})
+	ticks := make(chan time.Time)
+	done := make(chan error, 1)
+	cfg := *h.cfg
+	cfg.controlStop = stop
+	l := &wakeLoop{
+		cfg:               cfg,
+		inboxNew:          fsq.AgentInboxNew(h.root, "codex"),
+		watcher:           idleWakeEventWatcher{},
+		preconditionCheck: func(*wakeConfig) error { return nil },
+	}
+	t.Cleanup(l.stopTimers)
+	go func() { done <- l.run(nil, ticks) }()
+	for i := 0; i < n; i++ {
+		ticks <- h.now
+	}
+	close(stop)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("loop: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("loop did not stop")
+	}
+	// The loop runs on its own copy of cfg, so copy the settings state back:
+	// callers that continue on h.cfg (a hand scan after the ticks) need the
+	// setting and the doorbell cohort the loop actually delivered with.
+	h.cfg.settings = l.cfg.settings
+	h.cfg.doorbell = l.cfg.doorbell
+	h.cfg.attendedChanged = l.cfg.attendedChanged
+	h.cfg.holdPolicyChanged = l.cfg.holdPolicyChanged
+	return &l.cfg
+}
+
 // A live attended→off change lets the doorbell ring again: the next scan
-// announces the pending cohort fresh and types one doorbell.
+// announces the pending cohort fresh and types one doorbell. Regression
+// from codex's live review of 837d0b93 on a real terminal seat: after
+// `amq wake config --attended=false` with one unread message, no doorbell
+// was typed for 12.6 s, because the settings tick scanned only on a
+// hold-policy change and the reset cohort waited for the next unrelated
+// scan. The change goes through the live settings tick, not a hand-called
+// scan.
 func TestAttendedSeatOffRingsOneDoorbellForThePendingCohort(t *testing.T) {
 	h := newWakeHoldHarness(t, wakeHoldPolicy{})
 	setAttendedForTest(t, h.root, "codex")
@@ -184,12 +231,12 @@ func TestAttendedSeatOffRingsOneDoorbellForThePendingCohort(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if h.cfg.reloadSettings() != true {
-		t.Fatal("reloadSettings did not report the change")
+	cfg := runSettingsTicks(t, h, 3)
+	if cfg.settings.attended {
+		t.Fatal("tick did not apply attended off")
 	}
-	h.scan(h.cfg)
 	if got := h.rings(); got != 1 {
-		t.Fatalf("attended-off scan typed %d doorbell(s), want 1 for the pending cohort", got)
+		t.Fatalf("attended-off tick typed %d doorbell(s), want 1 for the pending cohort", got)
 	}
 }
 
@@ -245,6 +292,10 @@ func TestAttendedSeatNeverTypesTheInterruptKey(t *testing.T) {
 	h.cfg.settings.interruptLabel = "interrupt"
 	h.cfg.interruptKey = "\x03"
 	h.cfg.settings.previewLen = 48
+	// The doorbell owner is dropped, so the only gate left between the
+	// urgent interrupt mail and the typed key is the attended check in
+	// injectWakeInterruptKey: an unattended seat would type it.
+	h.cfg.wakeOwner = nil
 	attention := &strings.Builder{}
 	h.cfg.attentionWrite = func(data []byte) (int, error) {
 		attention.Write(data)
@@ -252,7 +303,7 @@ func TestAttendedSeatNeverTypesTheInterruptKey(t *testing.T) {
 	}
 	h.cfg.attentionIsTTY = func() bool { return false }
 
-	h.send("urgent", format.PriorityUrgent)
+	h.sendLabeled("urgent", format.PriorityUrgent, []string{"interrupt"})
 	h.scan(h.cfg)
 	for _, typed := range h.injected {
 		if strings.Contains(typed, "\x03") {
@@ -290,6 +341,13 @@ func TestAttendedSeatOnOwesNoEnterAfterTheDrain(t *testing.T) {
 	}
 	if !h.cfg.reloadSettings() || !h.cfg.settings.attended {
 		t.Fatal("reloadSettings did not turn attended on")
+	}
+	// An owed Enter of the unattended delivery, still pending when attended
+	// turned on: the reload-time clear drops it, and the defence at the
+	// write site drops it again if the clear ever regressed.
+	h.cfg.inputDelivery = wakeInputDeliveryState{
+		phase: wakeInputPrimarySubmitPending,
+		mode:  wakeInjectModeRaw,
 	}
 	h.drain()
 	h.advance(time.Minute)
@@ -335,19 +393,19 @@ func TestAttendedSeatOnNotifiesAParkedCohortAtTheLifetimeCap(t *testing.T) {
 	}
 	h.cfg.doorbell.attemptBudget = wakeDoorbellLifetimeAttemptCap
 
-	// The person turns attended on through the live reload.
+	// The person turns attended on through the live settings tick.
 	if err := os.WriteFile(
 		filepath.Join(fsq.AgentBase(h.root, "codex"), wakeSettingsFileName),
 		[]byte(`{"schema":1,"settings":{"attended":true}}`), 0o600,
 	); err != nil {
 		t.Fatal(err)
 	}
-	if !h.cfg.reloadSettings() || !h.cfg.settings.attended {
-		t.Fatal("reloadSettings did not turn attended on")
+	cfg := runSettingsTicks(t, h, 3)
+	if !cfg.settings.attended {
+		t.Fatal("tick did not apply attended on")
 	}
-	h.scan(h.cfg)
 	if got := h.rings(); got != 0 {
-		t.Fatalf("attended scan typed %d doorbell(s), want none", got)
+		t.Fatalf("attended tick typed %d doorbell(s), want none", got)
 	}
 	emissions := func() int { return strings.Count(attention.String(), "AMQ [s]") }
 	if got := emissions(); got != 1 {

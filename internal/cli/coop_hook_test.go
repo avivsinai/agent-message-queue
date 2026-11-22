@@ -466,6 +466,24 @@ func TestCoopStopAttendedStateHoldsOnlyPendingIDs(t *testing.T) {
 	if !slices.Equal(got.BlockedIDs, old.BlockedIDs) {
 		t.Fatalf("attended seat changed BlockedIDs: %v, want it untouched", got.BlockedIDs)
 	}
+	// An id an earlier unattended block reported stays reported: an attended
+	// seat that keeps it pending reports it again only as a systemMessage
+	// count, never as a second block.
+	blockedOld := coopStopState{Schema: 1, BlockedIDs: []string{"kept"}}
+	blockedGot := decideCoopStopAttended([]coopStopMessage{kept}, blockedOld)
+	if fresh := freshAttendedIDs([]coopStopMessage{kept}, blockedGot.NoticedIDs, blockedGot.BlockedIDs); len(fresh) != 0 {
+		t.Fatalf("blocked id reported again by freshAttendedIDs: %v, want none", fresh)
+	}
+	// Drained mail leaves the unattended state too: decideCoopStop prunes
+	// NoticedIDs to ids still pending at the same turn end.
+	drained := coopStopState{Schema: 1, NoticedIDs: []string{"gone", "kept"}}
+	next, out := decideCoopStop([]coopStopMessage{kept}, nil, drained, false, "root=r session=s")
+	if !slices.Equal(next.NoticedIDs, []string{"kept"}) {
+		t.Fatalf("unattended state keeps drained mail: %v, want [kept]", next.NoticedIDs)
+	}
+	if out == nil {
+		t.Fatal("unattended stop with fresh mail blocked, want a block decision")
+	}
 }
 
 func TestCoopStopAllowsTheStopAfterFiveBlocksInAChain(t *testing.T) {

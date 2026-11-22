@@ -752,14 +752,10 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		// A live attended change reset the cohort: this scan delivers one
 		// notice for what waits under the new setting even with no inbox
 		// event; the recorded cohort makes every later scan quiet again.
+		// The normal path below delivers it: every pending file is a
+		// message here, so an empty messages slice with pending files
+		// cannot happen.
 		cfg.attendedChanged = false
-		if len(messages) == 0 && len(currentPending) > 0 {
-			text := fmt.Sprintf(
-				"%s: %d unread message(s). Drain with: amq drain --include-body — then act on it",
-				notificationPrefix("AMQ", cfg.session), len(currentPending),
-			)
-			return deliverNewMessageNotification(cfg, peerWakeNotification(text), true, currentPending)
-		}
 	}
 	if cfg.inputRecoveryRequired &&
 		dischargeWakeInputRecoveryAfterProgress(cfg, currentPending) &&
@@ -1307,7 +1303,7 @@ func deliverNewMessageNotification(
 			}
 		}
 		notice.submitOnly = plan.submitOnly
-		deliveryErr := deliverWakeNotificationCohort(cfg, notice, deferForInput, currentPending)
+		deliveryErr := deliverWakeNotificationCohort(cfg, notice, deferForInput)
 		if isWakeInputDemotionBlocked(deliveryErr) {
 			return enterWakeInputRecovery(cfg, currentPending, deliveryErr)
 		}
@@ -1352,7 +1348,7 @@ func deliverNewMessageNotification(
 		return deliveryErr
 	}
 
-	deliveryErr := deliverWakeNotificationCohort(cfg, notice, deferForInput, currentPending)
+	deliveryErr := deliverWakeNotificationCohort(cfg, notice, deferForInput)
 	if isWakeInputDemotionBlocked(deliveryErr) {
 		return enterWakeInputRecovery(cfg, currentPending, deliveryErr)
 	}
@@ -1804,10 +1800,10 @@ func normalizeWakeInjectMode(raw string) (string, error) {
 }
 
 func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForInput bool) error {
-	return deliverWakeNotificationCohort(cfg, notice, deferForInput, nil)
+	return deliverWakeNotificationCohort(cfg, notice, deferForInput)
 }
 
-func deliverWakeNotificationCohort(cfg *wakeConfig, notice wakeNotification, deferForInput bool, currentPending map[string]os.FileInfo) error {
+func deliverWakeNotificationCohort(cfg *wakeConfig, notice wakeNotification, deferForInput bool) error {
 	if cfg.injectMode == wakeInjectModeClaudeNative {
 		return errors.New("native wake cannot use terminal delivery")
 	}
@@ -1817,18 +1813,6 @@ func deliverWakeNotificationCohort(cfg *wakeConfig, notice wakeNotification, def
 	cfg.lastInjectorOutcome = wakeInjectorOutcomeNone
 	cfg.lastInjectorDetail = ""
 	ownerBound := usesCoopDoorbell(cfg)
-	if cfg.settings.attended && notice.input.provenance != wakePayloadOwnerCommand {
-		// Attended seat: the person reads the notice; the model learns of the
-		// mail at their next prompt. No keystroke, whatever else is true, on
-		// every transport. The input state is not cleared here: an owner
-		// command may sit pending in oneSubmit, and dropping it would drop
-		// the owner's own input.
-		err := cfg.deliverAttended(notice.output, currentPending)
-		if err == nil {
-			persistWakeDoorbellStatusBestEffort(cfg)
-		}
-		return err
-	}
 	if ownerBound {
 		if notice.submitOnly && notice.input.provenance == wakePayloadSystemFixed {
 			// A submit-only reminder is system-created from cohort state. It has
