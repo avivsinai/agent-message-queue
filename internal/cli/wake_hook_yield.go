@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -42,23 +44,28 @@ func (cfg *wakeConfig) applyPublishedChannel(channel wakeChannel) {
 	}
 }
 
-// hookYield checks the waiter's lock and the time of its last ring. Both
-// are delivery evidence; only a drain receipt establishes consumption.
-func (cfg *wakeConfig) hookYield(now time.Time) (time.Duration, bool) {
+// hookYield checks the waiter's lock and its last ring against pending, the
+// inbox file names of the cohort the wake would announce. Both are delivery
+// evidence; only a drain receipt establishes consumption. A ring at least
+// hookRingGrace old that named a message still pending was not followed by
+// a drain, so the wake types for it even while a waiter holds the lock.
+func (cfg *wakeConfig) hookYield(now time.Time, pending map[string]os.FileInfo) (time.Duration, bool) {
 	if cfg.publishedChannel != wakeChannelHook {
 		return 0, false
 	}
 	reason := "no waiter and no recent ring; typing"
 	var wait time.Duration
-	if coopWaitRuns(cfg.root, cfg.me) {
+	rang, ringAt, ok := readHookRing(filepath.Join(fsq.AgentBase(cfg.root, cfg.me), coopWaitStateFile))
+	age := now.Sub(ringAt)
+	switch {
+	case ok && age >= hookRingGrace && hookRingNamesAny(rang, pending):
+		reason = "a ring was not followed by a drain within its grace period; typing"
+	case coopWaitRuns(cfg.root, cfg.me):
 		wait = wakeDoorbellRetryBase
 		reason = "a waiter holds the doorbell"
-	} else if info, err := os.Lstat(filepath.Join(fsq.AgentBase(cfg.root, cfg.me), coopWaitStateFile)); err == nil && info.Mode().IsRegular() {
-		age := now.Sub(info.ModTime())
-		if age >= 0 && age < hookRingGrace {
-			wait = min(wakeDoorbellRetryBase, hookRingGrace-age)
-			reason = "the last ring is within its grace period"
-		}
+	case ok && age >= 0 && age < hookRingGrace:
+		wait = min(wakeDoorbellRetryBase, hookRingGrace-age)
+		reason = "the last ring is within its grace period"
 	}
 	if cfg.hookYieldReason != reason {
 		cfg.hookYieldReason = reason
@@ -67,8 +74,38 @@ func (cfg *wakeConfig) hookYield(now time.Time) (time.Duration, bool) {
 	return wait, wait > 0
 }
 
-func (cfg *wakeConfig) preAttemptHold(now time.Time, reminder bool) (time.Duration, bool) {
-	if wait, held := cfg.hookYield(now); held {
+// readHookRing reads the ids of the waiter's last ring and the record's
+// file time, which is the time of that ring. The ids of every session
+// count: the wake asks only whether a message it would announce was rung.
+func readHookRing(path string) ([]string, time.Time, bool) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, time.Time{}, false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, info.ModTime(), true
+	}
+	defer func() { _ = f.Close() }()
+	var record struct {
+		RangIDs []string `json:"rang_ids"`
+	}
+	_ = json.NewDecoder(io.LimitReader(f, maxWakeMetadataFileBytes)).Decode(&record)
+	return record.RangIDs, info.ModTime(), true
+}
+
+// hookRingNamesAny reports whether a rang id names an inbox file in pending.
+func hookRingNamesAny(rang []string, pending map[string]os.FileInfo) bool {
+	for _, id := range rang {
+		if _, ok := pending[id+".md"]; id != "" && ok {
+			return true
+		}
+	}
+	return false
+}
+
+func (cfg *wakeConfig) preAttemptHold(now time.Time, reminder bool, pending map[string]os.FileInfo) (time.Duration, bool) {
+	if wait, held := cfg.hookYield(now, pending); held {
 		return wait, true
 	}
 	if reminder {

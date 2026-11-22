@@ -244,9 +244,11 @@ to switch a running seat back to its typed doorbell.
 A built-in typing wake yields while the waiter holds its lock and for up to
 two minutes after a ring. If mail is still unread and neither condition holds,
 the wake types the doorbell when the usual delivery guards allow it. This
-also covers a missing or stopped hook. The grace runs from the ring. When
-the turn that follows lasts longer than 2 minutes and the mail is not
-drained, the wake types the doorbell one time. A wake from an older release
+also covers a missing or stopped hook. The grace runs from the ring. When a
+ring is 2 minutes old and the mail it named is not drained, the wake types
+the doorbell one time, also while a waiter holds its lock. So when the turn
+that follows a ring lasts longer than 2 minutes, the wake can type during
+that turn. A wake from an older release
 refuses a settings file that holds `hook_doorbell` and keeps its last
 settings until it upgrades; it keeps typing.
 

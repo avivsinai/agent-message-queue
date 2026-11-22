@@ -168,8 +168,10 @@ func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 		}
 		quiet := false
 		var due []string
-		seat := layers.readSeatDoorbell(root, me)
-		if release != nil && seat.ringer == doorbellHook {
+		// The lock-bound half of the seat read is taken at every look; the
+		// settings files are read only when mail is unread.
+		wake := observeSeatWake(root, me)
+		if release != nil && wake.ringer(false) == doorbellHook {
 			if now := time.Now(); now.Sub(promoted) >= coopWaitFollowUpEvery {
 				promoted = now
 				// The hook's stderr is the ring text, so a failure stays
@@ -180,16 +182,15 @@ func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 			pending, err := inbox.pending(root, me)
 			if err == nil && len(pending) > 0 {
 				var settings wakeSettings
-				if seat.settings != nil {
-					settings = *seat.settings
-				} else {
-					settings, layers = coopWaitSettings(root, me, layers)
-				}
+				settings, layers = coopWaitSettings(root, me, layers)
 				rang := readCoopWaitState(statePath, w.session)
 				announced := append(readCoopStopState(filepath.Join(agent, coopStopStateFile)).BlockedIDs, rang.RangIDs...)
 				now := time.Now()
 				var next time.Time
 				due, next = decideCoopWait(pending, announced, settings.holdPolicy(), now)
+				if wake.ringer(settings.attended) != doorbellHook {
+					due, next = nil, time.Time{}
+				}
 				switch {
 				case len(due) > 0 && !debounced:
 					// The Stop guard of the same turn end may be about to

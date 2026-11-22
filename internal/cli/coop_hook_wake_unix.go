@@ -9,11 +9,14 @@ import (
 )
 
 // coopHookWakeObservation is one read of the wake lock and prepared marker.
+// recorded is true when the wake's applied record for this generation
+// carries a doorbell value; only then is attended the wake's own value.
 type coopHookWakeObservation struct {
 	pid        int
 	generation string
 	baselineAt string
 	channel    wakeChannel
+	recorded   bool
 	attended   bool
 }
 
@@ -55,6 +58,7 @@ func observeCoopHookWake(root, me string, withBaseline bool) (coopHookWakeObserv
 		applied, _ := readWakeSettingsAppliedAt(dirfd, agentDir, inspection)
 		obs = coopHookWakeObservation{
 			channel:    publishedWakeChannel(applied.Doorbell, inspection.Lock.WakeMode),
+			recorded:   applied.Doorbell != "",
 			attended:   applied.Attended,
 			pid:        inspection.PID,
 			generation: inspection.Lock.Generation,

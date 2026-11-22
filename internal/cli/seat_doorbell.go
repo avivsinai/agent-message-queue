@@ -20,13 +20,11 @@ const (
 // seatDoorbellRead is one read of who rings a seat. hookPublished is true
 // only when a live wake published the hook channel for its generation.
 // optIn is whether the seat takes the hook doorbell: hookPublished under a
-// live wake, else the seat's hook_doorbell setting. settings is the merged
-// settings files when the read took them (no live wake), else nil.
+// live wake, else the seat's hook_doorbell setting.
 type seatDoorbellRead struct {
 	ringer        seatDoorbell
 	hookPublished bool
 	optIn         bool
-	settings      *wakeSettings
 }
 
 // decideSeatDoorbell selects the sender of the automatic mail notification.

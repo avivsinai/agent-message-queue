@@ -157,8 +157,48 @@ func TestCoopWaitRingsOnceForNewMail(t *testing.T) {
 		t.Fatalf("undone ring: %v", err)
 	}
 	yield := &wakeConfig{root: root, me: "claude", publishedChannel: wakeChannelHook}
-	if wait, held := yield.hookYield(time.Now()); held {
+	if wait, held := yield.hookYield(time.Now(), nil); held {
 		t.Fatalf("the wake yields %s after an undone ring, want it to type", wait)
+	}
+
+	// Review finding H12: no test covered the lock mode that H1 passes to
+	// publishedWakeChannel. A notify-only wake with no applied record types
+	// nothing, so its waiter is the seat's ringer and must ring.
+	if err := fsq.EnsureAgentDirs(root, "notifyring"); err != nil {
+		t.Fatal(err)
+	}
+	stopNotify, err := acquireWakeLockWithOptions(root, "notifyring", wakeLockAcquireOptions{wakeMode: wakeInjectModeNone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stopNotify()
+	if _, err := captureStdout(t, func() error {
+		return runSend([]string{"--root", root, "--me", "codex", "--to", "notifyring", "--body", "notify-only"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	notifyCtx, notifyCancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer notifyCancel()
+	if err := waitCoopMail(notifyCtx, root, "notifyring", claudeWaiter(claudeSession, os.Getppid(), launch.HolderIdentity{})); !errors.Is(err, errCoopWaitRing) {
+		t.Fatalf("notify-only wake with no record: %v, want the doorbell", err)
+	}
+
+	// Review finding H10: under a live wake whose record has no doorbell
+	// value (an older wake image), the hooks took attended only from that
+	// record, so a seat whose settings file says attended was rung.
+	if err := fsq.EnsureAgentDirs(root, "olderwake"); err != nil {
+		t.Fatal(err)
+	}
+	stopOlder, err := acquireWakeLockWithOptions(root, "olderwake", wakeLockAcquireOptions{wakeMode: wakeInjectModeRaw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stopOlder()
+	if err := os.WriteFile(filepath.Join(fsq.AgentBase(root, "olderwake"), wakeSettingsFileName), []byte(`{"schema":1,"settings":{"attended":true}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readSeatDoorbell(root, "olderwake").ringer; got != doorbellNone {
+		t.Fatalf("live wake with no record, attended in the settings file: doorbell = %v, want none", got)
 	}
 
 	// Review finding H3: the Stop guard keeps the baseline cut of #1152 under

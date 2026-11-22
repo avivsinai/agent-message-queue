@@ -820,7 +820,7 @@ func injectWakeInterruptKey(
 	currentPending map[string]os.FileInfo,
 ) (bool, error) {
 	now := time.Now()
-	if _, held := cfg.hookYield(cfg.wakeDoorbellNow()); held {
+	if _, held := cfg.hookYield(cfg.wakeDoorbellNow(), currentPending); held {
 		return false, nil
 	}
 	if !cfg.settings.attended &&
@@ -1278,7 +1278,7 @@ func deliverNewMessageNotification(
 		cfg.dialogHold, cfg.dialogHoldBusy, cfg.dialogHoldGeneration = wakeDialogClosed, false, ""
 	}
 	reminder := plan.submitOnly && shouldDeferBeforeInject(cfg, deferForInput)
-	if wait, held := cfg.preAttemptHold(now, reminder); held {
+	if wait, held := cfg.preAttemptHold(now, reminder, currentPending); held {
 		cfg.doorbell.recordDialogHold(now, wait)
 		persistWakeDoorbellStatusBestEffort(cfg)
 		return nil

@@ -30,12 +30,18 @@ func TestHookDoorbellYieldsOnlyToCurrentDeliveryEvidence(t *testing.T) {
 		published wakeChannel
 		locked    bool
 		ringAge   time.Duration
+		pending   string
 		wait      time.Duration
 	}{
-		{"live waiter", wakeChannelHook, true, 0, wakeDoorbellRetryBase},
-		{"recent ring", wakeChannelHook, false, hookRingGrace - time.Second, time.Second},
-		{"expired ring", wakeChannelHook, false, hookRingGrace, 0},
-		{"unpublished", "", true, 0, 0},
+		{"live waiter", wakeChannelHook, true, 0, "", wakeDoorbellRetryBase},
+		{"recent ring", wakeChannelHook, false, hookRingGrace - time.Second, "", time.Second},
+		{"expired ring", wakeChannelHook, false, hookRingGrace, "", 0},
+		{"unpublished", "", true, 0, "", 0},
+		// Review finding H9: a ring that no drain followed left the next
+		// waiter silent on the rang id and the wake yielding to that waiter,
+		// so the mail was never announced again.
+		{"undrained ring", wakeChannelHook, true, 3 * time.Minute, "mail.md", 0},
+		{"older ring for other mail", wakeChannelHook, true, 3 * time.Minute, "other.md", wakeDoorbellRetryBase},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newWakeHoldHarness(t, wakeHoldPolicy{})
@@ -53,7 +59,11 @@ func TestHookDoorbellYieldsOnlyToCurrentDeliveryEvidence(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			wait, held := h.cfg.hookYield(h.now)
+			var pending map[string]os.FileInfo
+			if tc.pending != "" {
+				pending = map[string]os.FileInfo{tc.pending: nil}
+			}
+			wait, held := h.cfg.hookYield(h.now, pending)
 			if wait != tc.wait || held != (tc.wait > 0) {
 				t.Fatalf("hold = %v, %t; want %v", wait, held, tc.wait)
 			}
@@ -67,7 +77,7 @@ func TestHookDoorbellResumesTypingWhenTheWaiterEnds(t *testing.T) {
 	h.cfg.recordSettingsApplied = func(wakeSettingsAppliedStatus) error { return errors.New("write failed") }
 	noteWakeSettingsApplied(h.cfg, wakeSettingsAppliedStatus{})
 	release := holdWaiterForTest(t, h.root, "codex")
-	if _, held := h.cfg.hookYield(h.now); held {
+	if _, held := h.cfg.hookYield(h.now, nil); held {
 		release()
 		t.Fatal("yielded before the channel was published")
 	}
