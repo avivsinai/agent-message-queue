@@ -41,8 +41,15 @@ const (
 	// coopWaitLockFile is held by the one waiter of an agent that may ring.
 	coopWaitLockFile = ".rewake-hook.lock"
 	// coopWaitPoll is how often the waiter looks at the inbox, its owner
-	// file and its binding. It reads the wake settings when mail is unread.
+	// file and its binding when it has no file watcher, and while it waits
+	// for the waiter lock, whose release makes no file event. It reads the
+	// wake settings when mail is unread.
 	coopWaitPoll = time.Second
+	// coopWaitIdle is how often a waiter that holds the lock and watches its
+	// files looks again with no file event: for the facts that make none, such
+	// as its parent, its host session, its binding, a wake that died with
+	// its lock in place, and due follow-ups.
+	coopWaitIdle = 30 * time.Second
 	// coopWaitFollowUpEvery bounds how often the waiter promotes due
 	// follow-ups into the inbox it watches.
 	coopWaitFollowUpEvery = 30 * time.Second
@@ -115,7 +122,9 @@ func claudeWaiter(claudeSession string, parent int, claude launch.HolderIdentity
 // process parent changed (the harness ended the hook), when the host
 // session is gone (a process that was killed leaves the hook's shell
 // behind), when a newer waiter took over, or when the session's binding is
-// no longer held. While a wake rings the agent it stays silent.
+// no longer held. While a wake rings the agent it stays silent. Between
+// looks it waits for a file event of the inbox or of a file it reads, or
+// for its next tick; the debounce runs on its clock alone.
 func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 	agent := fsq.AgentBase(root, me)
 	statePath := filepath.Join(agent, coopWaitStateFile)
@@ -124,6 +133,12 @@ func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 	if err := writeCoopHookState(ownerPath, owner); err != nil {
 		return nil
 	}
+	var extra []string
+	if path, err := machineWakeSettingsPath(); err == nil {
+		extra = append(extra, path)
+	}
+	events := newCoopWaitEvents(agent, extra...)
+	defer events.close()
 	var (
 		release   func()
 		layers    wakeSettingsLayers
@@ -152,6 +167,10 @@ func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 			}
 		}
 		wait := coopWaitPoll
+		if events.live() && release != nil {
+			wait = coopWaitIdle
+		}
+		quiet := false
 		var due []string
 		if release != nil && !coopHookWakeRings(root, me) {
 			if now := time.Now(); now.Sub(promoted) >= coopWaitFollowUpEvery {
@@ -174,6 +193,7 @@ func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 					// The Stop guard of the same turn end may be about to
 					// report this mail; let it, and batch a burst.
 					wait = settings.debounce
+					quiet = true
 				case len(due) > 0:
 					// Ring only after the record is stored: a ring the next
 					// waiter cannot see would repeat at every turn end.
@@ -191,10 +211,14 @@ func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 			}
 		}
 		debounced = len(due) > 0
-		select {
-		case <-ctx.Done():
+		if quiet {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(wait):
+			}
+		} else if !events.wait(ctx, wait) {
 			return nil
-		case <-time.After(wait):
 		}
 	}
 }
