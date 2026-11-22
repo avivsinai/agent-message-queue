@@ -140,7 +140,9 @@ func TestSessionThatWritesTheStateDirectory(t *testing.T) {
 	if asks, why := att.SessionAsks(); !asks {
 		t.Fatalf("after resume: asks false (%s), want true", why)
 	}
-	want := map[string]bool{byCwd: true, byRoot: true, byRuntime: true, byTmpdir: true, outside: false}
+	// With /tmp writable, a test directory under /tmp is written too, so
+	// outside is checked only once the policy excludes /tmp.
+	want := map[string]bool{byCwd: true, byRoot: true, byRuntime: true, byTmpdir: true}
 	bySlashTmp := "/tmp/amq/remote"
 	if filepath.Separator == '/' {
 		want[bySlashTmp] = true
@@ -159,7 +161,7 @@ func TestSessionThatWritesTheStateDirectory(t *testing.T) {
 		}
 		runtime.Gosched()
 	}
-	want[byTmpdir] = false
+	want[byTmpdir], want[outside] = false, false
 	if filepath.Separator == '/' {
 		want[bySlashTmp] = false
 	}
