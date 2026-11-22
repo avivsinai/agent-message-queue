@@ -28,7 +28,7 @@ const coopHookPeerActive = 10 * time.Minute
 
 func runCoopHook(args []string) error {
 	fs := flag.NewFlagSet("coop hook", flag.ContinueOnError)
-	usage := usageWithFlags(fs, "amq coop hook session-start|stop|prompt|wait|codex-wait",
+	usage := usageWithFlags(fs, "amq coop hook session-start|stop|prompt|wait|codex-wait|codex-prompt",
 		"Hook receivers for the co-op hooks; amq coop install-hooks installs them.",
 		"They read AM_ME, AM_ROOT and the session pin from the environment, or the",
 		"identity amq coop join bound to the session, and never read .amqrc. They exit",
@@ -63,14 +63,17 @@ func runCoopHook(args []string) error {
 		"It rings by queueing the doorbell to the thread with codex queue (the",
 		"desktop app's binary when CODEX_APP_RUNTIME_CLI_PATH names it), and always",
 		"exits 0; a ring that fails prints a systemMessage and is rung again by the",
-		"next waiter.")
+		"next waiter.",
+		"",
+		"codex-prompt is prompt for a joined Codex chat: it reads the thread id from",
+		"the hook input's session_id, and always exits 0.")
 	if handled, err := parseFlagsAllowPositionals(fs, args, usage); err != nil {
 		return err
 	} else if handled {
 		return nil
 	}
 	if fs.NArg() != 1 {
-		return UsageError("coop hook needs exactly one of: session-start, stop, prompt, wait, codex-wait")
+		return UsageError("coop hook needs exactly one of: session-start, stop, prompt, wait, codex-wait, codex-prompt")
 	}
 	switch fs.Arg(0) {
 	case "session-start":
@@ -83,8 +86,10 @@ func runCoopHook(args []string) error {
 		return runCoopWait(context.Background())
 	case "codex-wait":
 		return runCoopWaitCodex(context.Background(), os.Stdin)
+	case "codex-prompt":
+		return runCoopPromptCodex(os.Stdin, os.Stdout)
 	default:
-		return UsageError("coop hook needs exactly one of: session-start, stop, prompt, wait, codex-wait")
+		return UsageError("coop hook needs exactly one of: session-start, stop, prompt, wait, codex-wait, codex-prompt")
 	}
 }
 
