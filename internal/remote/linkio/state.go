@@ -28,6 +28,7 @@ import (
 //	link/<name>/device.key      the link's Ed25519 device key, 0600
 //	link/<name>/link.json       what was pinned at linking
 //	link/<name>/consent_keys.json  the consent public keys this machine trusts
+//	link/<name>/grants.json     each binding's grant generation and stored grant
 //	link/retired/<host>         a retired sink; its records settle without network
 const (
 	deviceKeyFile   = "device.key"
@@ -277,7 +278,8 @@ var ErrConsentKeyExists = errors.New("consent key already accepted")
 // accepts. It reads the list again under the link's key lock, so a key the
 // endpoint dropped meanwhile stays dropped. The caller holds no lock across
 // the redeem call or the typed fingerprint; it calls this only after both.
-// Without an advisory file lock it refuses: an add raises authority.
+// Without an advisory file lock it refuses: an add raises authority. A
+// change of the key list ends every grant of the link first.
 func AddConsentKey(stateDir, name string, ck ConsentKey) (int, error) {
 	if !lock.AdvisoryLockAvailable() {
 		return 0, errors.New("refusing to add a consent key without an advisory file lock")
@@ -294,6 +296,9 @@ func AddConsentKey(stateDir, name string, ck ConsentKey) (int, error) {
 			}
 		}
 		n = len(keys) + 1
+		if err := MintGeneration(stateDir, name); err != nil {
+			return err
+		}
 		return WriteConsentKeys(stateDir, name, append(keys, ck))
 	})
 	return n, err
@@ -303,7 +308,8 @@ func AddConsentKey(stateDir, name string, ck ConsentKey) (int, error) {
 // authority, so the server may ask for it; adding one never comes from the
 // server. It runs under the link's key lock so a concurrent add cannot
 // write the key back; without an advisory file lock it still drops, since
-// refusing would keep authority the server took away.
+// refusing would keep authority the server took away. A key that is dropped
+// ends every grant of the link first; a failed end keeps the key.
 func DropConsentKey(stateDir, name, credentialID string) (bool, error) {
 	dropped := false
 	drop := func() error {
@@ -319,6 +325,9 @@ func DropConsentKey(stateDir, name, credentialID string) (bool, error) {
 		}
 		if len(kept) == len(keys) {
 			return nil
+		}
+		if err := MintGeneration(stateDir, name); err != nil {
+			return err
 		}
 		dropped = true
 		return WriteConsentKeys(stateDir, name, kept)

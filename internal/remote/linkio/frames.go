@@ -26,6 +26,11 @@ const (
 	SchemaRevision     = "amq.remote.link.revision/1"
 	SchemaBindings     = "amq.remote.link.bindings/1"
 	SchemaKeyRevoked   = "amq.remote.link.key_revoked/1"
+
+	SchemaGrantInfo     = "amq.remote.link.grant_info/1"
+	SchemaSignedGrant   = "amq.remote.link.signed_grant/1"
+	SchemaGrantedSubmit = "amq.remote.link.granted_submit/1"
+	SchemaGrantRevoke   = "amq.remote.link.grant_revoke/1"
 )
 
 // Frame is the envelope. id names a frame that expects a reply, re answers
@@ -115,6 +120,82 @@ type bindingsReply struct {
 type keyRevokedBody struct {
 	Schema       string `json:"schema"`
 	CredentialID string `json:"credential_id"`
+}
+
+// GrantInfoRequest is amq.remote.link.grant_info/1 and GrantRevokeRequest
+// is amq.remote.link.grant_revoke/1: each names one binding of the link.
+type GrantInfoRequest struct {
+	Schema  string `json:"schema"`
+	Binding string `json:"binding"`
+}
+
+type GrantRevokeRequest struct {
+	Schema  string `json:"schema"`
+	Binding string `json:"binding"`
+}
+
+// SignedGrant is the body of amq.remote.link.signed_grant/1: the keys of a
+// signed submit, over a grant document.
+type SignedGrant struct {
+	Schema            string `json:"schema"`
+	DocumentB64       string `json:"document_b64"`
+	CredentialID      string `json:"credential_id"`
+	AuthenticatorData string `json:"authenticator_data"`
+	ClientDataJSON    string `json:"client_data_json"`
+	Signature         string `json:"signature"`
+}
+
+// GrantedSubmit is amq.remote.link.granted_submit/1. Command is a plain
+// request.submit, decoded and validated by protocol.DecodeCommand.
+type GrantedSubmit struct {
+	Schema      string          `json:"schema"`
+	GrantDigest string          `json:"grant_digest"`
+	Command     json.RawMessage `json:"command"`
+}
+
+// Why grant_info is not available for a binding.
+const (
+	GrantReasonConsentLocal       = "consent_local"
+	GrantReasonModeUnreadable     = "mode_unreadable"
+	GrantReasonHarnessUnsupported = "harness_unsupported"
+)
+
+// GrantInfoReply answers grant_info. available false carries reason;
+// available true carries the generation and the two limits.
+type GrantInfoReply struct {
+	GrantInfo GrantInfo `json:"grant_info"`
+}
+
+type GrantInfo struct {
+	Binding         string `json:"binding"`
+	Available       bool   `json:"available"`
+	Reason          string `json:"reason,omitempty"`
+	GrantGeneration string `json:"grant_generation,omitempty"`
+	MaxLifetimeS    int64  `json:"max_lifetime_s,omitempty"`
+	MaxTextBytes    int    `json:"max_text_bytes,omitempty"`
+	Now             string `json:"now"`
+}
+
+// GrantReply answers an accepted signed_grant.
+type GrantReply struct {
+	Grant GrantAccepted `json:"grant"`
+}
+
+type GrantAccepted struct {
+	Digest   string `json:"digest"`
+	GrantID  string `json:"grant_id"`
+	Binding  string `json:"binding"`
+	NotAfter string `json:"not_after"`
+}
+
+// RevokedReply answers grant_revoke after the new generation is written.
+type RevokedReply struct {
+	Revoked GrantRevoked `json:"revoked"`
+}
+
+type GrantRevoked struct {
+	Binding         string `json:"binding"`
+	GrantGeneration string `json:"grant_generation"`
 }
 
 // ErrorBody is a typed refusal. busy carries retry_after_ms.
