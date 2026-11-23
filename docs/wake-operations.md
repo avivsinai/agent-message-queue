@@ -333,6 +333,9 @@ starts, so an existing session takes the new hook at its next start.
 seat, `proper (cursor)` for an armed raw or paste Cursor seat, and
 `input guard: plain` for a seat without the hook. `amq wake check
 --json` records this as `input_guard` (`wake.input_guard` in schema v2).
+For a doorbell pass that consults the input guard, the notification result records `input_guard` and, when enabled, `input_decision` (`plain`, `clean_submit`, `clean_own`, `unknown`, or `stale`).
+A `written` result with `input_decision: unknown` means the wake did not type the doorbell text on that pass, so measure an observed hold from the first such result to the later write for the same pending messages and use that pass’s decision to identify the release reason.
+
 Each submit hook records the time and host identity in
 `agents/<me>/.wake.submit`.
 

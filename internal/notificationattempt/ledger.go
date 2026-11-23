@@ -99,17 +99,19 @@ const (
 // Version 1 result records carry Outcome (written/failed). Version 2
 // lifecycle records carry State and Sequence instead.
 type Record struct {
-	Schema     int      `json:"schema"`
-	AttemptID  string   `json:"attempt_id"`
-	Phase      string   `json:"phase"`
-	MessageIDs []string `json:"message_ids"`
-	Agent      string   `json:"agent"`
-	Mode       string   `json:"mode"`
-	RecordedAt string   `json:"recorded_at"`
-	Outcome    string   `json:"outcome,omitempty"`
-	Detail     string   `json:"detail,omitempty"`
-	State      string   `json:"state,omitempty"`
-	Sequence   uint64   `json:"sequence,omitempty"`
+	Schema        int      `json:"schema"`
+	AttemptID     string   `json:"attempt_id"`
+	Phase         string   `json:"phase"`
+	MessageIDs    []string `json:"message_ids"`
+	Agent         string   `json:"agent"`
+	Mode          string   `json:"mode"`
+	RecordedAt    string   `json:"recorded_at"`
+	Outcome       string   `json:"outcome,omitempty"`
+	Detail        string   `json:"detail,omitempty"`
+	State         string   `json:"state,omitempty"`
+	Sequence      uint64   `json:"sequence,omitempty"`
+	InputGuard    string   `json:"input_guard,omitempty"`
+	InputDecision string   `json:"input_decision,omitempty"`
 }
 
 // Attempt is the joined view of a prepared record and its optional result,
@@ -317,15 +319,17 @@ func (w *Writer) Result(prepared Record, outcome, detail string) error {
 		return fmt.Errorf("notification attempt agent mismatch: prepared %q writer %q", prepared.Agent, w.agent)
 	}
 	record := Record{
-		Schema:     SchemaVersion,
-		AttemptID:  prepared.AttemptID,
-		Phase:      PhaseResult,
-		MessageIDs: append([]string{}, prepared.MessageIDs...),
-		Agent:      w.agent,
-		Mode:       prepared.Mode,
-		RecordedAt: w.now().UTC().Format(time.RFC3339Nano),
-		Outcome:    outcome,
-		Detail:     strings.TrimSpace(detail),
+		Schema:        SchemaVersion,
+		AttemptID:     prepared.AttemptID,
+		Phase:         PhaseResult,
+		MessageIDs:    append([]string{}, prepared.MessageIDs...),
+		Agent:         w.agent,
+		Mode:          prepared.Mode,
+		RecordedAt:    w.now().UTC().Format(time.RFC3339Nano),
+		InputGuard:    prepared.InputGuard,
+		InputDecision: prepared.InputDecision,
+		Outcome:       outcome,
+		Detail:        strings.TrimSpace(detail),
 	}
 	if err := w.append(record); err != nil {
 		return fmt.Errorf("persist notification attempt result: %w", err)

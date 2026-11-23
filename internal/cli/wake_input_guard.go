@@ -27,14 +27,14 @@ const (
 	inputGuardLinux           = "off (Linux)"
 )
 
-type wakeInputDecision uint8
+type wakeInputDecision string
 
 const (
-	inputPlain wakeInputDecision = iota
-	inputCleanSubmit
-	inputCleanOwn
-	inputUnknown
-	inputStale
+	inputPlain       wakeInputDecision = "plain"
+	inputCleanSubmit wakeInputDecision = "clean_submit"
+	inputCleanOwn    wakeInputDecision = "clean_own"
+	inputUnknown     wakeInputDecision = "unknown"
+	inputStale       wakeInputDecision = "stale"
 )
 
 func (g *wakeInputGuard) status(settings wakeSettings) string {
@@ -98,8 +98,12 @@ func (cfg *wakeConfig) hasCurrentSubmit() bool {
 	if !cfg.guardedInputEnabled() {
 		return false
 	}
+	return cfg.observeSubmit(cfg.inputGuard.installation())
+}
+
+func (cfg *wakeConfig) observeSubmit(status string) bool {
 	g := cfg.inputGuard
-	if !inputGuardHasSubmit(g.installation()) {
+	if !inputGuardHasSubmit(status) {
 		g.lastSubmit = time.Time{}
 		return false
 	}
@@ -118,12 +122,12 @@ func (cfg *wakeConfig) observeArmedInput() {
 	}
 }
 
-func (cfg *wakeConfig) inputDecision(owedEnter bool) wakeInputDecision {
+func (cfg *wakeConfig) inputDecision(owedEnter bool, status string) wakeInputDecision {
 	if cfg.inputGuard == nil || cfg.inputGuard.plainAttempt || !cfg.guardedInputEnabled() {
 		return inputPlain
 	}
 	g := cfg.inputGuard
-	armed := cfg.hasCurrentSubmit()
+	armed := cfg.observeSubmit(status)
 	if !owedEnter && !armed && g.lastOwnRead.IsZero() {
 		// No fact about this terminal yet: the quiet window decides.
 		return inputPlain
@@ -165,7 +169,7 @@ func (cfg *wakeConfig) inputDecision(owedEnter bool) wakeInputDecision {
 // such an Enter; it releases only a full doorbell. A seat with no usable
 // sample keeps the plain wake's Enter.
 func (cfg *wakeConfig) enterHeld() bool {
-	switch cfg.inputDecision(true) {
+	switch cfg.inputDecision(true, cfg.inputGuard.status(cfg.settings)) {
 	case inputUnknown, inputStale:
 		return true
 	}
