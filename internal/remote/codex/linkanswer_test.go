@@ -98,8 +98,8 @@ func (s *linkChainSource) WriteAnswer(host, bindingName, id, label, role, intera
 
 func linkChainResolution(r dialog.Resolved) protocol.Resolution {
 	out := protocol.Resolution{InteractionID: r.ID, Option: r.Label}
-	switch {
-	case r.By == dialog.ByLink:
+	switch r.By {
+	case dialog.ByLink:
 		out.Outcome = protocol.ResolutionAnswered
 	default:
 		out.Outcome = protocol.ResolutionElsewhere

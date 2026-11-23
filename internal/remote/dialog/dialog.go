@@ -173,15 +173,6 @@ func NewID() string {
 	return "d-" + hex.EncodeToString(b[:])
 }
 
-// randToken is a short random name part for a temp file.
-func randToken() string {
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		panic(err) // crypto/rand never fails on supported platforms
-	}
-	return hex.EncodeToString(b[:])
-}
-
 // The roles a link answer can carry, as the stored interaction names them.
 const (
 	RoleApprove = "approve"
