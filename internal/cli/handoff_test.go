@@ -228,6 +228,28 @@ func TestHandoffRefusalsAndReruns(t *testing.T) {
 			}
 			nothingSent(t, root, err, "mailbox for \"alice\" is incomplete")
 		}},
+		// Independent check of the hand-off: with the caller's outbox not
+		// writable the run exited 0, and the next run sent both legs again.
+		{"a leg that is not recorded in the outbox fails the run", func(t *testing.T) {
+			if runtime.GOOS == "windows" {
+				return
+			}
+			root, request := handoffFixture(t)
+			sent := fsq.AgentOutboxSent(root, "bob")
+			if err := os.Chmod(sent, 0o500); err != nil {
+				t.Fatal(err)
+			}
+			out, err := runHandoffAs(t, root, "bob", request, "carol")
+			if chmodErr := os.Chmod(sent, 0o700); chmodErr != nil {
+				t.Fatal(chmodErr)
+			}
+			if GetExitCode(err) != 1 || strings.Count(out, handoffUnrecorded) != 2 || strings.Contains(out, "run the same command again") {
+				t.Fatalf("handoff = %q (err %v), want exit 1 and both legs reported as not recorded", out, err)
+			}
+			if count(t, root, "carol") != 1 || count(t, root, "alice") != 1 {
+				t.Fatal("want both legs delivered once")
+			}
+		}},
 		{"a request the caller sent", func(t *testing.T) {
 			root, _ := handoffFixture(t)
 			mine := handoffSend(t, root, "bob", "dave", "todo", "mine")

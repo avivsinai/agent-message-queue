@@ -28,6 +28,7 @@ const (
 	handoffFailed      = "failed"
 	handoffNotSent     = "not sent"
 	handoffTextStands  = "the earlier text stands"
+	handoffUnrecorded  = "delivered, but not recorded in your outbox: do not run the command again for it, a rerun sends it again"
 )
 
 // commitIDPattern is a full object id: SHA-1 or SHA-256, lowercase hex.
@@ -68,6 +69,9 @@ type handoff struct {
 	reviewOut outgoingOutcome
 	reviewMsg outgoingMessage
 	legErr    error
+	// unrecorded is the outbox error of a delivered leg. The outbox copy is
+	// what a rerun finds, so such a leg is delivered again by a rerun.
+	unrecorded error
 }
 
 // runHandoff implements amq handoff: a review request for an exact commit to
@@ -314,6 +318,9 @@ func (h *handoff) handOff(m1, m2 outgoingMessage) {
 	if found, ok := h.findSent(m1.sourceFS, h.isReview); ok {
 		review.ID, review.State = found.ID, handoffAlreadySent
 		review.Note = h.earlierText(m1.sourceFS, found, m1.body)
+		if found.Subject != m1.subject {
+			review.Note = handoffTextStands
+		}
 	} else {
 		o, err := sendOutgoing(m1)
 		review.ID = o.ID
@@ -324,9 +331,7 @@ func (h *handoff) handOff(m1, m2 outgoingMessage) {
 		}
 		h.reviewOut = o
 		review.State, review.FollowUp, review.News = handoffSent, o.FollowUp, o.News
-		if o.OutboxErr != nil {
-			review.Error = "outbox: " + o.OutboxErr.Error()
-		}
+		h.unrecord(review, o.OutboxErr)
 	}
 
 	m2.body = fmt.Sprintf("Handed to %s for review: %s. Review request %s.\n\n%s", h.reviewerLabel, h.commit, review.ID, h.body)
@@ -349,9 +354,16 @@ func (h *handoff) handOff(m1, m2 outgoingMessage) {
 		return
 	}
 	notice.State = handoffSent
-	if o.OutboxErr != nil {
-		notice.Error = "outbox: " + o.OutboxErr.Error()
+	h.unrecord(notice, o.OutboxErr)
+}
+
+// unrecord marks a delivered leg whose outbox copy failed.
+func (h *handoff) unrecord(leg *handoffLeg, outboxErr error) {
+	if outboxErr == nil {
+		return
 	}
+	leg.Error, leg.Note = "outbox: "+outboxErr.Error(), handoffUnrecorded
+	h.unrecorded = errors.Join(h.unrecorded, fmt.Errorf("hand-off message %s to %s was delivered, but not recorded in your outbox: %w", leg.ID, leg.To, outboxErr))
 }
 
 // isReview matches the review request of this hand-off.
@@ -377,8 +389,9 @@ func handoffContext(hdr format.Header) map[string]any {
 
 // sentMessage is a message found in the caller's outbox/sent.
 type sentMessage struct {
-	ID   string
-	Name string
+	ID      string
+	Name    string
+	Subject string
 }
 
 // findSent returns the oldest message in the caller's outbox/sent whose
@@ -398,7 +411,7 @@ func (h *handoff) findSent(root *fsq.DeliveryRoot, match func(format.Header) boo
 		if err != nil || !match(hdr) {
 			continue
 		}
-		return sentMessage{ID: hdr.ID, Name: name}, true
+		return sentMessage{ID: hdr.ID, Name: name, Subject: hdr.Subject}, true
 	}
 	return sentMessage{}, false
 }
@@ -429,6 +442,9 @@ func (h *handoff) print(asJSON bool) error {
 	if h.reviewOut.ClockErr != nil {
 		errs = append(errs, h.reviewOut.ClockErr)
 	}
+	if h.unrecorded != nil {
+		errs = append(errs, h.unrecorded)
+	}
 	var outErr error
 	if len(errs) > 0 {
 		outErr = WithExitCode(1, errors.Join(errs...))
@@ -450,7 +466,7 @@ func (h *handoff) print(asJSON bool) error {
 	if err := writeStdout("%s\n", legLine("Notice", notice)); err != nil {
 		return err
 	}
-	if done(review) && !done(notice) {
+	if done(review) && !done(notice) && review.Note != handoffUnrecorded {
 		if err := writeStdout("run the same command again to complete the hand-off\n"); err != nil {
 			return err
 		}
