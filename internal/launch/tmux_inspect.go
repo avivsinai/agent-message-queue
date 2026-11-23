@@ -77,14 +77,14 @@ func (b *TmuxBackend) validateBindingContext(binding BindingRecord) error {
 }
 
 func (b *TmuxBackend) liveResources(ctx context.Context, name string) ([]ResourceIdentity, error) {
-	paneOut, paneErr := b.run(ctx, b.args("list-panes", "-s", "-t", "="+name, "-F", "#{session_id}\t#{session_name}\t#{pane_id}\t#{@amq_pane_agent}")...)
+	paneOut, paneErr := b.run(ctx, b.args("list-panes", "-s", "-t", "="+name, "-F", tmuxFormat("session_id", "session_name", "pane_id", "@amq_pane_agent"))...)
 	if paneErr == nil {
 		paneResources, parseErr := parseTmuxPaneInventory(strings.TrimSpace(paneOut), name)
 		if parseErr == nil && tmuxAgentCount(paneResources) > 0 {
 			return paneResources, nil
 		}
 	}
-	out, err := b.run(ctx, b.args("list-windows", "-t", "="+name, "-F", "#{session_id}\t#{session_name}\t#{window_id}\t#{@amq_agent}")...)
+	out, err := b.run(ctx, b.args("list-windows", "-t", "="+name, "-F", tmuxFormat("session_id", "session_name", "window_id", "@amq_agent"))...)
 	if err != nil {
 		return nil, fmt.Errorf("inspect tmux windows: %w", err)
 	}
@@ -95,7 +95,7 @@ func (b *TmuxBackend) liveResources(ctx context.Context, name string) ([]Resourc
 	resources := make([]ResourceIdentity, 0, len(lines)+1)
 	var sessionID string
 	for i, line := range lines {
-		fields := strings.Split(line, "\t")
+		fields := strings.Split(line, tmuxFieldSeparator)
 		if len(fields) != 4 || fields[0] == "" || fields[1] != name || fields[2] == "" || fields[3] == "" {
 			return nil, fmt.Errorf("invalid tmux resource inventory line %q", line)
 		}

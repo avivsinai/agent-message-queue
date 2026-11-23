@@ -153,12 +153,12 @@ func (b *TmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 
 	first := req.Plan.Agents[0]
 	firstLine := agentCommand(req, first)
-	out, err := b.runNewSessionWithTransientRetry(ctx, b.args("new-session", "-d", "-P", "-F", "#{session_id}\t#{window_id}\t#{pane_id}",
+	out, err := b.runNewSessionWithTransientRetry(ctx, b.args("new-session", "-d", "-P", "-F", tmuxFormat("session_id", "window_id", "pane_id"),
 		"-s", name, "-n", first.Handle, "-e", tmuxNonceEnvironment+"="+first.LaunchNonce, firstLine)...)
 	if err != nil {
 		return CreateResult{}, fmt.Errorf("create tmux session: %w", err)
 	}
-	fields := strings.Split(strings.TrimSpace(out), "\t")
+	fields := strings.Split(strings.TrimSpace(out), tmuxFieldSeparator)
 	if len(fields) != 3 || fields[0] == "" || fields[1] == "" || !tmuxPaneID(fields[2]) {
 		return CreateResult{}, fmt.Errorf("tmux create returned invalid resource identities %q", strings.TrimSpace(out))
 	}
@@ -170,12 +170,12 @@ func (b *TmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 		return CreateResult{}, err
 	}
 	for _, agent := range req.Plan.Agents[1:] {
-		createdWindow, createErr := b.run(ctx, b.args("new-window", "-d", "-P", "-F", "#{window_id}\t#{pane_id}",
+		createdWindow, createErr := b.run(ctx, b.args("new-window", "-d", "-P", "-F", tmuxFormat("window_id", "pane_id"),
 			"-t", "="+name, "-n", agent.Handle, agentCommand(req, agent))...)
 		if createErr != nil {
 			return CreateResult{}, fmt.Errorf("create tmux window for %s: %w", agent.Handle, createErr)
 		}
-		windowFields := strings.Split(strings.TrimSpace(createdWindow), "\t")
+		windowFields := strings.Split(strings.TrimSpace(createdWindow), tmuxFieldSeparator)
 		if len(windowFields) != 2 || windowFields[0] == "" || !tmuxPaneID(windowFields[1]) {
 			return CreateResult{}, fmt.Errorf("tmux returned no window identity for %s", agent.Handle)
 		}

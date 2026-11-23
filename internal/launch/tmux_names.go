@@ -8,6 +8,16 @@ import (
 	"strings"
 )
 
+// tmux sanitizes control bytes in command output for non-UTF-8 clients.
+// Managed session names, numeric tmux IDs, AMQ handles and launch nonces
+// contain no pipe. Readers require the exact field count so an unexpected
+// separator in a foreign name or option cannot shift an identity.
+const tmuxFieldSeparator = "|"
+
+func tmuxFormat(fields ...string) string {
+	return "#{" + strings.Join(fields, "}"+tmuxFieldSeparator+"#{") + "}"
+}
+
 func tmuxSessionName(projectRoot, session string) (string, error) {
 	canonical, err := canonicalIdentity(projectRoot)
 	if err != nil {
@@ -98,7 +108,7 @@ func parseTmuxPaneInventory(out, name string) ([]ResourceIdentity, error) {
 	resources := make([]ResourceIdentity, 0, len(lines)+1)
 	var sessionID string
 	for i, line := range lines {
-		fields := strings.Split(line, "\t")
+		fields := strings.Split(line, tmuxFieldSeparator)
 		if len(fields) != 4 || fields[0] == "" || fields[1] != name || fields[2] == "" {
 			return nil, fmt.Errorf("invalid tmux pane inventory line %q", line)
 		}
