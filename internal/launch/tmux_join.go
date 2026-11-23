@@ -45,12 +45,12 @@ func (b *TmuxBackend) joinExistingSession(req CreateRequest, detect DetectResult
 		if err := b.validateJoinSession(ctx, *req.JoinBinding, sessionID, name); err != nil {
 			return CreateResult{}, &DefinitePreCreateError{Err: err}
 		}
-		createdWindow, createErr := b.run(ctx, b.args("new-window", "-d", "-P", "-F", "#{window_id}\t#{pane_id}",
+		createdWindow, createErr := b.run(ctx, b.args("new-window", "-d", "-P", "-F", tmuxFormat("window_id", "pane_id"),
 			"-t", sessionID, "-n", agent.Handle, agentCommand(req, agent))...)
 		if createErr != nil {
 			return CreateResult{}, fmt.Errorf("join tmux window for %s: %w", agent.Handle, createErr)
 		}
-		windowFields := strings.Split(strings.TrimSpace(createdWindow), "\t")
+		windowFields := strings.Split(strings.TrimSpace(createdWindow), tmuxFieldSeparator)
 		if len(windowFields) != 2 || windowFields[0] == "" || !tmuxPaneID(windowFields[1]) {
 			return CreateResult{}, fmt.Errorf("tmux returned no window identity for %s", agent.Handle)
 		}
@@ -125,12 +125,12 @@ func (b *TmuxBackend) validateJoinSession(ctx context.Context, binding BindingRe
 }
 
 func (b *TmuxBackend) sessionIDForName(ctx context.Context, name string) (string, error) {
-	out, err := b.run(ctx, b.args("list-sessions", "-F", "#{session_id}\t#{session_name}")...)
+	out, err := b.run(ctx, b.args("list-sessions", "-F", tmuxFormat("session_id", "session_name"))...)
 	if err != nil {
 		return "", err
 	}
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		fields := strings.Split(line, "\t")
+		fields := strings.Split(line, tmuxFieldSeparator)
 		if len(fields) == 2 && fields[1] == name && strings.HasPrefix(fields[0], "$") {
 			return fields[0], nil
 		}

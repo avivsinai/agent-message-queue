@@ -45,7 +45,7 @@ func (b *TmuxBackend) paneWindowID(ctx context.Context, paneID string) (string, 
 }
 
 func (b *TmuxBackend) windowsWithNonce(ctx context.Context, nonce string) ([]string, error) {
-	out, err := b.run(ctx, b.args("list-windows", "-a", "-F", "#{window_id}\t#{@amq_launch_nonce}")...)
+	out, err := b.run(ctx, b.args("list-windows", "-a", "-F", tmuxFormat("window_id", "@amq_launch_nonce"))...)
 	if err != nil {
 		return nil, err
 	}
@@ -54,7 +54,7 @@ func (b *TmuxBackend) windowsWithNonce(ctx context.Context, nonce string) ([]str
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		fields := strings.Split(line, "\t")
+		fields := strings.Split(line, tmuxFieldSeparator)
 		if len(fields) != 2 {
 			return nil, fmt.Errorf("invalid tmux window inventory line %q", line)
 		}
@@ -159,19 +159,15 @@ func (b *TmuxBackend) authorizedOwnedPanes(ctx context.Context, binding BindingR
 }
 
 func (b *TmuxBackend) paneMarkers(ctx context.Context, paneID string) (string, string, error) {
-	out, err := b.run(ctx, b.args("display-message", "-p", "-t", paneID, "#{@amq_pane_agent}\t#{@amq_launch_nonce}")...)
+	out, err := b.run(ctx, b.args("display-message", "-p", "-t", paneID, tmuxFormat("@amq_pane_agent", "@amq_launch_nonce"))...)
 	if err != nil {
 		return "", "", err
 	}
-	fields := strings.Split(strings.TrimSpace(out), "\t")
-	handle, nonce := "", ""
-	if len(fields) > 0 {
-		handle = fields[0]
+	fields := strings.Split(strings.TrimSpace(out), tmuxFieldSeparator)
+	if len(fields) != 2 {
+		return "", "", fmt.Errorf("invalid tmux ownership markers for pane %s", paneID)
 	}
-	if len(fields) > 1 {
-		nonce = fields[1]
-	}
-	return handle, nonce, nil
+	return fields[0], fields[1], nil
 }
 
 func (b *TmuxBackend) paneAuthenticated(ctx context.Context, paneID, expectedHandle, nonce string) (bool, error) {
