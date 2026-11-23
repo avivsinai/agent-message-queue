@@ -80,6 +80,11 @@ when the lock changes while the hook reads it. A live wake that is demoted
 or parked signals through its own pane attention and `doctor --ops`
 (`doorbell_parked`); the Stop hook does not duplicate that.
 
+At startup, a wake prepares a missing mailbox, resumes interrupted preparation,
+and publishes its complete inbox last unless a sender creates the inbox first.
+For an established mailbox the watcher retries a temporarily missing `inbox/new`,
+and for a preparation error the wake names the path to fix before restarting.
+
 The wake child appends full runtime diagnostics to the private
 `agents/<agent>/.wake.log`; the controlling terminal receives only
 terminal-safe attention output, so fatal-error text stays out of full-screen
