@@ -1227,7 +1227,11 @@ stub's id when the prompt is a granted task's stub, to each endpoint that
 serves the session. When an endpoint gives the stub's task text, the
 receiver prints it as the prompt's added context, after one line that
 names the request and the text's SHA-256; for any other prompt it prints
-nothing. Its timeout is 10 seconds, and it always exits 0.
+nothing. Its timeout is 10 seconds, and it always exits 0. A receiver
+that cannot finish, for example on a filesystem that does not answer,
+delays that one prompt by at most those 10 seconds; the prompt then goes
+on with no added context, and a granted task whose text was not given
+ends `rejected` at its deadline.
 
 With the hook installed, a session takes a link session grant while the
 latest prompt the hook reported is in a mode that asks, or refuses, before
