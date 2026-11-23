@@ -256,6 +256,21 @@ func TestFoldRendersEachMeasuredShape(t *testing.T) {
 		events: []string{Opened, Ended},
 		posts:  []string{"▶ deploy\n✓ 1 tool (Bash) · 4s"},
 	}, {
+		// Field, 2026-10-27: a prompt queued with a pasted image is a list of
+		// blocks, and the line did not parse. It folds in as a string does.
+		name: "a prompt with an image queued during the turn",
+		lines: []string{
+			prompt("o1", "p1", 0, "deploy"),
+			assistant("m1", "tool_use", 1, nil, tool("Bash")),
+			line(map[string]any{"type": "attachment", "uuid": "q1", "timestamp": at(2),
+				"attachment": map[string]any{"type": "queued_command", "origin": map[string]any{"kind": "human"}, "prompt": []any{text("[Image #20]"),
+					map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}}}}}),
+			user("p1", 3, nil, result("t-Bash", false)),
+			assistant("m2", "end_turn", 4, nil, text("Deployed.")),
+		},
+		events: []string{Opened, Ended},
+		posts:  []string{"▶ deploy\n✓ 1 tool (Bash) · 4s\nDeployed."},
+	}, {
 		// Review of the mirror: the closing message's later text block
 		// replaced its first, so the post lost the answer's start.
 		name: "a closing message with two text blocks",

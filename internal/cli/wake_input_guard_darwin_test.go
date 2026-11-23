@@ -177,6 +177,27 @@ func TestWakeHoldsDoorbellAfterInputSinceSubmit(t *testing.T) {
 	}
 }
 
+// The input-guard brief for sy9c could not distinguish a held pass from a typed doorbell.
+func TestDoorbellResultsRecordGuardHoldAndStaleRelease(t *testing.T) {
+	h, read, _ := guardedClaudeDoorbell(t)
+	read("draft")
+	h.send("pending", "normal")
+	h.scan(h.cfg)
+	h.advance(35 * time.Second)
+	h.scan(h.cfg)
+
+	attempts := listNotificationAttemptsForTest(t, h.root, "pending")
+	if len(attempts) != 2 {
+		t.Fatalf("got %d attempts, want the hold and release", len(attempts))
+	}
+	for i, decision := range []string{"unknown", "stale"} {
+		result := attempts[i].Result
+		if result == nil || result.Outcome != "written" || result.InputGuard != "proper (claude)" || result.InputDecision != decision {
+			t.Fatalf("pass %d result = %+v, want written with proper (claude) and %s", i+1, result, decision)
+		}
+	}
+}
+
 func TestClaudePasteSubmitStaysPlain(t *testing.T) {
 	// agent-message-queue-nkky review: only Cursor gained paste-mode submit
 	// support. Keep the established raw-only Claude Code contract explicit.

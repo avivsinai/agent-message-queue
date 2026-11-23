@@ -368,6 +368,22 @@ A progress reply keeps the completion timer armed and ends the news clock. The
 closing reply cancels both. The drain's `Close with:` line gives the command
 for that request kind.
 
+When the brief names the reviewer, the builder hands the candidate off in
+one command instead of the closing reply:
+
+```sh
+amq handoff --id "$brief_id" --to reviewer --commit "$(git rev-parse HEAD)" \
+  --follow-up 30m --body @review.md
+```
+
+The reviewer gets a review request for that commit. The lead gets a status
+labelled `handed-off` that names the reviewer, the commit and the review
+request, and the assignment stays open. The reviewer answers the builder, and
+the builder sends the closing reply when the reviewed candidate is ready. If a
+leg fails, run the same command again: a leg already sent is not sent again.
+An assignment that asks only "send this for review" gets an ordinary closing
+reply instead.
+
 **Lead.** Drain the result. Run `amq-board sync --init` once to initialize
 this project's board. At each later check:
 

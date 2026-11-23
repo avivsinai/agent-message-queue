@@ -221,8 +221,8 @@ type transcriptEntry struct {
 	// delivery (MsgID set) is never Meta.
 	Meta bool
 	// Text is the content string, or the joined text blocks of a block
-	// array; for an absorbed frame, the queued prompt. Tool results decode
-	// to "".
+	// array; for an absorbed frame, the queued prompt decoded the same way.
+	// Tool results decode to "".
 	Text string
 	// Blocks are the content blocks the line actually carried, except that
 	// a peer delivery's text is the envelope body. Text stays the joined
@@ -331,7 +331,7 @@ func parseTranscriptLine(line string) (transcriptEntry, bool) {
 		Origin        *peerOrigin `json:"origin"`
 		Attachment    *struct {
 			Type      string          `json:"type"`
-			Prompt    string          `json:"prompt"`
+			Prompt    json.RawMessage `json:"prompt"`
 			Origin    *peerOrigin     `json:"origin"`
 			HookEvent string          `json:"hookEvent"`
 			Content   json.RawMessage `json:"content"`
@@ -345,6 +345,15 @@ func parseTranscriptLine(line string) (transcriptEntry, bool) {
 	}
 	if err := json.Unmarshal([]byte(line), &raw); err != nil || raw.Type == "" {
 		return transcriptEntry{}, false
+	}
+	var prompt string
+	var promptBlocks []TranscriptBlock
+	if a := raw.Attachment; a != nil && len(a.Prompt) > 0 {
+		var promptOK bool
+		prompt, promptBlocks, promptOK = decodePrompt(a.Prompt, raw.Type == "attachment" && a.Type == "queued_command")
+		if !promptOK {
+			return transcriptEntry{}, false
+		}
 	}
 	text, blocks, uses, shape := decodeContentWalk(raw.Message.Content)
 	e := transcriptEntry{Type: raw.Type, Meta: raw.IsMeta, Text: text, Blocks: blocks, SessionID: raw.SessionID, UUID: raw.UUID, PromptID: raw.PromptID, ToolUses: uses,
@@ -361,11 +370,8 @@ func parseTranscriptLine(line string) (transcriptEntry, bool) {
 		e.HookContext = hookContent(raw.Attachment.Content)
 	}
 	if raw.Type == "attachment" && raw.Attachment != nil && raw.Attachment.Type == "queued_command" {
-		e.Type, e.Absorbed, e.Meta, e.Text, origin = "user", true, false, raw.Attachment.Prompt, raw.Attachment.Origin
-		e.Blocks, e.ToolUses, e.ToolResults, e.PromptID = nil, nil, nil, ""
-		if e.Text != "" {
-			e.Blocks = []TranscriptBlock{{Type: "text", Text: e.Text}}
-		}
+		e.Type, e.Absorbed, e.Meta, e.Text, origin = "user", true, false, prompt, raw.Attachment.Origin
+		e.Blocks, e.ToolUses, e.ToolResults, e.PromptID = promptBlocks, nil, nil, ""
 	}
 	if origin != nil {
 		e.OriginKind = origin.Kind
@@ -394,6 +400,35 @@ func parseTranscriptLine(line string) (transcriptEntry, bool) {
 		e.TS = ts.UnixMilli()
 	}
 	return e, true
+}
+
+// decodePrompt reads an attachment's prompt: a string, or, when list is
+// set, a list of content blocks of which only the text blocks are read. A
+// prompt shows text and nothing else, so no other block is decoded. ok is
+// false for any other value.
+func decodePrompt(raw json.RawMessage, list bool) (text string, blocks []TranscriptBlock, ok bool) {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		if s == "" {
+			return "", nil, true
+		}
+		return s, []TranscriptBlock{{Type: "text", Text: s}}, true
+	}
+	var items []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if !list || json.Unmarshal(raw, &items) != nil {
+		return "", nil, false
+	}
+	var parts []string
+	for _, b := range items {
+		if b.Type == "text" && b.Text != "" {
+			parts = append(parts, b.Text)
+			blocks = append(blocks, TranscriptBlock{Type: "text", Text: b.Text})
+		}
+	}
+	return strings.Join(parts, "\n"), blocks, true
 }
 
 // hookContent is the content of a hook's added-context entry: its strings,
