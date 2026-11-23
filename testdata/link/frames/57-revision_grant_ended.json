@@ -1,0 +1,32 @@
+{
+  "body_def": "revision",
+  "description": "A granted request stopped after admission (here a busy request sent again after its grant ended) ends rejected with code consent_invalid. The reason (grant_revoked: ..., grant_expired: ..., grant_needs_signature: ...) is the message of the outcome of request.get; a snapshot has no message.",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "digest": "sha256:980c5cc986a1e664551508a357683fb4f752e768546c164374710c3c40d32ed0",
+      "request_ref": "amqr1_nruw42znmvtgknbzmmytmyzyha4tmobtguaha2j2mrsw23zngvrdszbqmmywkabzmizgindggzqs2mldgnss2ndbgvrc2odeg5tc2mdfgfqteyrtmm2ginlf",
+      "revision": 2,
+      "schema": "amq.remote.link.revision/1",
+      "snapshot": {
+        "code": "consent_invalid",
+        "creator_host": "link-efe49c16c8896835",
+        "epoch": "e_4c0e1a",
+        "input_digest": "sha256:e9858185986d3c3404bc6b1fd18daa32f66503e5626b93a371eb562e326ad5bc",
+        "native_run": null,
+        "not_after": "2026-10-09T14:12:00Z",
+        "observed_at": "2026-10-09T14:10:20Z",
+        "request_id": "9b2d4f6a-1c3e-4a5b-8d7f-0e1a2b3c4d5e",
+        "request_ref": "amqr1_nruw42znmvtgknbzmmytmyzyha4tmobtguaha2j2mrsw23zngvrdszbqmmywkabzmizgindggzqs2mldgnss2ndbgvrc2odeg5tc2mdfgfqteyrtmm2ginlf",
+        "revision": 2,
+        "schema": "amq.remote.request/1",
+        "state": "rejected",
+        "target_id": "pi:demo-5b9d0c1e"
+      },
+      "store_id": "st_5d1e0c2a"
+    },
+    "gen": 12,
+    "id": "m_e12",
+    "schema": "amq.remote.link/1"
+  }
+}

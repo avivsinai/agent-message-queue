@@ -1,0 +1,16 @@
+{
+  "body_def": "error_reply",
+  "description": "issued_at is more than 60 s behind the machine's clock and this is not the stored grant. Sign again.",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "error": {
+        "code": "grant_stale",
+        "message": "the grant was issued at 2026-10-09T14:10:00Z, more than 1m0s before this machine's 2026-10-09T14:11:30Z; sign again"
+      }
+    },
+    "gen": 12,
+    "re": "m_sg1",
+    "schema": "amq.remote.link/1"
+  }
+}

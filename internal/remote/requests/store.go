@@ -70,6 +70,11 @@ type Record struct {
 	// the consent key that signed a link request, empty on every other one.
 	NativeSession     string `json:"signed_native_session,omitempty"`
 	ConsentCredential string `json:"consent_credential,omitempty"`
+	// GrantDigest is the digest of the session grant that admitted a link
+	// request with no signature of its own; empty on every other request.
+	// The grant is checked again right before the handoff. It stays on the
+	// durable record and is never published.
+	GrantDigest string `json:"grant_digest,omitempty"`
 
 	// PublishedRevision is the last revision known to have left through AMQ.
 	PublishedRevision int64 `json:"published_revision"`

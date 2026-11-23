@@ -127,6 +127,7 @@ internal/cli/                 Command handlers and routing policy
 internal/codexidentity/       AMQ identity of Codex threads, from coop exec or coop join
 internal/codexlaunch/         Managed launch tickets on Codex's native daemon
 internal/config/              Queue and project configuration
+internal/desktopnotice/       One short desktop notice through the platform's own tool
 internal/dialogguard/         Wake dialog guard marker, hook command, and Claude guard
 internal/execidentity/        AMQ identity of each process coop exec became
 internal/exitcode/            Command exit codes and the errors that carry them

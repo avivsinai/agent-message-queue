@@ -96,6 +96,9 @@ type Attachment struct {
 	// codexHome is the daemon's Codex home that the thread's rollout path
 	// proves, or "" when thread/resume did not report one.
 	codexHome string
+	// stateDir is the endpoint's absolute state directory, set at build and
+	// never changed; "" refuses every granted request.
+	stateDir string
 	// confirmTimeout is how long Submit waits for our own userMessage item.
 	// Overridable for tests.
 	confirmTimeout time.Duration
@@ -108,6 +111,14 @@ type Attachment struct {
 	// reviewerSeen keeps an update newer than the resume snapshot.
 	reviewer     string
 	reviewerSeen bool
+	// perm is the thread's permission mode as this connection last heard
+	// it: from thread/resume, then each thread/settings/updated. permSeen
+	// keeps an update newer than the resume snapshot.
+	perm     perm
+	permSeen bool
+	// runtimeRoots are the thread's runtime workspace roots from
+	// thread/resume; a settings update does not carry them.
+	runtimeRoots []string
 	runs         map[requests.Key]*run
 	byTurn       map[string]*run
 	byClientID   map[string]*run // keyed by clientIDFor(key), not bare RequestID
@@ -243,6 +254,17 @@ func WithTarget(targetID string) Option {
 	}
 }
 
+// WithStateDir names the endpoint's state directory, which a granted request
+// runs only while the thread cannot write it with no dialog. A directory
+// that cannot be made absolute is left unset.
+func WithStateDir(dir string) Option {
+	return func(a *Attachment) {
+		if abs, err := filepath.Abs(dir); err == nil && dir != "" {
+			a.stateDir = abs
+		}
+	}
+}
+
 // Attach connects to the daemon socket, resumes threadID as a second client,
 // and starts consuming its notifications.
 func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
@@ -306,7 +328,11 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 				Type string `json:"type"`
 			} `json:"status"`
 		} `json:"thread"`
-		ApprovalsReviewer string `json:"approvalsReviewer"`
+		Cwd                   string          `json:"cwd"`
+		RuntimeWorkspaceRoots []string        `json:"runtimeWorkspaceRoots"`
+		ApprovalsReviewer     string          `json:"approvalsReviewer"`
+		ApprovalPolicy        json.RawMessage `json:"approvalPolicy"`
+		Sandbox               json.RawMessage `json:"sandbox"`
 	}
 	if err := client.Call(ctx, "thread/resume", map[string]any{"threadId": threadID}, &resumed); err != nil {
 		_ = client.Close()
@@ -337,6 +363,14 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 	if !a.reviewerSeen {
 		a.reviewer = autoReviewer(resumed.ApprovalsReviewer)
 	}
+	if !a.permSeen {
+		cwd := resumed.Cwd
+		if cwd == "" {
+			cwd = resumed.Thread.Cwd
+		}
+		a.perm = readPerm(resumed.ApprovalPolicy, resumed.ApprovalsReviewer, resumed.Sandbox, cwd)
+	}
+	a.runtimeRoots = resumed.RuntimeWorkspaceRoots
 	a.mu.Unlock()
 	go func() {
 		<-client.Done()
@@ -357,6 +391,166 @@ func autoReviewer(v string) string {
 		return ""
 	}
 	return v
+}
+
+// perm is a thread's permission mode as the app-server reported it. known
+// is true only when the approval policy is a plain string and the reviewer
+// and the sandbox type are both present. cwd and roots are the working
+// directory and the sandbox's writable roots of the same report; slashTmp
+// and tmpdir are whether a workspaceWrite sandbox also writes /tmp and
+// $TMPDIR, which it does unless its policy excludes them.
+type perm struct {
+	known                     bool
+	policy, reviewer, sandbox string
+	cwd                       string
+	roots                     []string
+	slashTmp, tmpdir          bool
+}
+
+// readPerm reads a permission mode from the app-server's approvalPolicy,
+// approvalsReviewer and sandbox policy values and the thread's working
+// directory. Anything it cannot read leaves the mode unknown.
+func readPerm(policy json.RawMessage, reviewer string, sandbox json.RawMessage, cwd string) perm {
+	var p perm
+	var sb struct {
+		Type                string   `json:"type"`
+		WritableRoots       []string `json:"writableRoots"`
+		ExcludeTmpdirEnvVar bool     `json:"excludeTmpdirEnvVar"`
+		ExcludeSlashTmp     bool     `json:"excludeSlashTmp"`
+	}
+	if json.Unmarshal(policy, &p.policy) != nil || json.Unmarshal(sandbox, &sb) != nil {
+		return perm{}
+	}
+	p.reviewer, p.sandbox, p.cwd, p.roots = reviewer, sb.Type, cwd, sb.WritableRoots
+	if sb.Type == "workspaceWrite" {
+		p.slashTmp, p.tmpdir = !sb.ExcludeSlashTmp, !sb.ExcludeTmpdirEnvVar
+	}
+	p.known = p.policy != "" && p.reviewer != "" && p.sandbox != ""
+	return p
+}
+
+// tmpRoots are the temporary directories the sandbox of p writes: /tmp on
+// Unix, and $TMPDIR. Codex takes TMPDIR from its own environment, which the
+// app-server does not report; this process's value stands in for it, the
+// same per-user directory when both run as one user.
+func (p perm) tmpRoots() []string {
+	var roots []string
+	if p.slashTmp && filepath.Separator == '/' {
+		roots = append(roots, "/tmp")
+	}
+	if dir := os.Getenv("TMPDIR"); p.tmpdir && filepath.IsAbs(dir) {
+		roots = append(roots, dir)
+	}
+	return roots
+}
+
+// asks reports whether a thread in mode p asks the user before a tool acts
+// outside what the sandbox already allows: the policy asks, the user (not an
+// automatic reviewer) answers, and the sandbox is not full access.
+func asks(p perm) bool {
+	return p.known &&
+		(p.policy == "untrusted" || p.policy == "on-request") &&
+		p.reviewer == "user" &&
+		(p.sandbox == "readOnly" || p.sandbox == "workspaceWrite")
+}
+
+// SessionAsks implements core.PermissionReader from the mode this connection
+// last heard. An offline attachment, or a mode it could not read, does not
+// ask.
+func (a *Attachment) SessionAsks() (bool, string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.sessionAsksLocked()
+}
+
+func (a *Attachment) sessionAsksLocked() (bool, string) {
+	if a.offline || !a.perm.known {
+		return false, "mode_unreadable"
+	}
+	return asks(a.perm), fmt.Sprintf("approvalPolicy=%s approvalsReviewer=%s sandbox=%s", a.perm.policy, a.perm.reviewer, a.perm.sandbox)
+}
+
+// WritesWithoutAsking implements core.PermissionReader from the settings
+// this connection last heard: the thread's working directory, a writable
+// root of its sandbox, a runtime workspace root of the thread, or a
+// temporary directory its sandbox writes is dir, holds it or lies inside
+// it. An offline attachment, an unknown mode, or a working directory or root
+// that is missing or not absolute counts as writing dir.
+func (a *Attachment) WritesWithoutAsking(dir string) bool {
+	a.mu.Lock()
+	p, offline, runtimeRoots := a.perm, a.offline, a.runtimeRoots
+	a.mu.Unlock()
+	return writesWithoutAsking(p, offline, runtimeRoots, dir)
+}
+
+// writesWithoutAsking is WritesWithoutAsking for the settings p and
+// runtimeRoots read under one hold of the lock. It reads the file system, so
+// it runs off the lock.
+func writesWithoutAsking(p perm, offline bool, runtimeRoots []string, dir string) bool {
+	if offline || !p.known || !filepath.IsAbs(dir) {
+		return true
+	}
+	roots := append([]string{p.cwd}, p.roots...)
+	roots = append(roots, runtimeRoots...)
+	for _, root := range append(roots, p.tmpRoots()...) {
+		if !filepath.IsAbs(root) || pathsOverlap(root, dir) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathsOverlap reports whether one of two absolute paths is the other or
+// lies inside it. Each path is compared in each of its forms, as written
+// and with its symbolic links resolved, so a link in any component is
+// seen; and by file identity, so a spelling in another letter case on a
+// case-insensitive file system is seen. A path that does not exist is
+// compared as written.
+func pathsOverlap(a, b string) bool {
+	for _, x := range pathForms(a) {
+		for _, y := range pathForms(b) {
+			if within(x, y) || within(y, x) {
+				return true
+			}
+		}
+	}
+	a, b = filepath.Clean(a), filepath.Clean(b)
+	return sameFileWithin(a, b) || sameFileWithin(b, a)
+}
+
+// pathForms is p cleaned and, when it resolves, p with its symbolic links
+// resolved.
+func pathForms(p string) []string {
+	p = filepath.Clean(p)
+	if r, err := filepath.EvalSymlinks(p); err == nil && r != p {
+		return []string{p, r}
+	}
+	return []string{p}
+}
+
+// sameFileWithin reports whether dir exists and p, or an ancestor of p, is
+// the same file as dir.
+func sameFileWithin(p, dir string) bool {
+	di, err := os.Stat(dir)
+	if err != nil {
+		return false
+	}
+	for {
+		if pi, err := os.Stat(p); err == nil && os.SameFile(pi, di) {
+			return true
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return false
+		}
+		p = parent
+	}
+}
+
+// within reports whether path p is dir or lies inside it.
+func within(p, dir string) bool {
+	rel, err := filepath.Rel(dir, p)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // TargetID derives the stable target id for a thread.
@@ -447,7 +641,18 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	}
 	busy := a.status == "busy" || a.activeTurn != ""
 	codexHome := a.codexHome
+	sessionAsks, why := a.sessionAsksLocked()
+	p, runtimeRoots := a.perm, a.runtimeRoots
 	a.mu.Unlock()
+	// A granted request runs only while the session asks the user before a
+	// tool acts and cannot write the endpoint's state with no dialog, both
+	// read with busy above. The turn carries no override.
+	if req.Granted && !sessionAsks {
+		return core.Admission{Code: protocol.CodeConsentInvalid, Message: "grant_needs_signature: " + why, NothingSent: true}, nil
+	}
+	if req.Granted && writesWithoutAsking(p, false, runtimeRoots, a.stateDir) {
+		return core.Admission{Code: protocol.CodeConsentInvalid, Message: "grant_unsupported: state_in_workspace: the session can write this machine's state with no dialog", NothingSent: true}, nil
+	}
 	// A turn sent while the seat's TUI still shows a startup screen would
 	// end the hold that keeps the seat's own doorbell out of that screen.
 	if held, why := seatStartupHeld(a.threadID, codexHome); held {
@@ -1198,14 +1403,19 @@ func (a *Attachment) onNotification(n Notification) {
 		var p struct {
 			ThreadID       string `json:"threadId"`
 			ThreadSettings struct {
-				ApprovalsReviewer string `json:"approvalsReviewer"`
+				Cwd               string          `json:"cwd"`
+				ApprovalsReviewer string          `json:"approvalsReviewer"`
+				ApprovalPolicy    json.RawMessage `json:"approvalPolicy"`
+				SandboxPolicy     json.RawMessage `json:"sandboxPolicy"`
 			} `json:"threadSettings"`
 		}
 		if json.Unmarshal(n.Params, &p) != nil || p.ThreadID != a.threadID {
 			return
 		}
+		s := p.ThreadSettings
 		a.mu.Lock()
-		a.reviewer, a.reviewerSeen = autoReviewer(p.ThreadSettings.ApprovalsReviewer), true
+		a.reviewer, a.reviewerSeen = autoReviewer(s.ApprovalsReviewer), true
+		a.perm, a.permSeen = readPerm(s.ApprovalPolicy, s.ApprovalsReviewer, s.SandboxPolicy, s.Cwd), true
 		a.mu.Unlock()
 	case "item/started", "item/completed":
 		a.onItem(n)

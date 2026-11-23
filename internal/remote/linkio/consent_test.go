@@ -172,7 +172,7 @@ func TestSignedSubmitRunsOverTheLink(t *testing.T) {
 	var calls atomic.Int32
 	c, _ := startCarrier(t, fs, clk, func(cfg *Config) {
 		cfg.StoreID = view.StoreID
-		cfg.ConsentKeys = func() []ConsentKey { return []ConsentKey{key} }
+		cfg.ConsentKeys = func() ([]ConsentKey, error) { return []ConsentKey{key}, nil }
 		cfg.Bindings = func() []Binding { return []Binding{view.Bindings["pi-demo"]} }
 		cfg.Handle = func(cmd *protocol.Command, src core.Source) (any, error) {
 			if src.Host != host || src.Origin["carrier"] != "link" || src.Origin["sink"] != host || src.Origin["name"] != "example" ||
@@ -283,7 +283,7 @@ func TestCancelWaitsForItsOwnSubmit(t *testing.T) {
 	release := make(chan struct{})
 	c, _ := startCarrier(t, fs, clk, func(cfg *Config) {
 		cfg.StoreID = view.StoreID
-		cfg.ConsentKeys = func() []ConsentKey { return []ConsentKey{key} }
+		cfg.ConsentKeys = func() ([]ConsentKey, error) { return []ConsentKey{key}, nil }
 		cfg.Bindings = func() []Binding { return []Binding{view.Bindings["pi-demo"]} }
 		cfg.Handle = func(cmd *protocol.Command, _ core.Source) (any, error) {
 			if cmd.Op == protocol.OpRequestSubmit {
@@ -335,12 +335,12 @@ func TestRevokedKeyStaysRevokedPastAStaleKeyRead(t *testing.T) {
 		Name: "example", Pin: Pin{URL: "wss://link.example.test/link", ServerID: testServerID}, StoreID: view.StoreID, Key: dk,
 		Now:      func() time.Time { return time.Date(2026, 10, 9, 14, 2, 10, 0, time.UTC) },
 		Bindings: func() []Binding { return []Binding{view.Bindings["pi-demo"]} },
-		ConsentKeys: func() []ConsentKey {
+		ConsentKeys: func() ([]ConsentKey, error) {
 			if calls.Add(1) == 2 { // the submit's read, still listing the key
 				close(entered)
 				<-release
 			}
-			return []ConsentKey{key}
+			return []ConsentKey{key}, nil
 		},
 		ConsentKeyRevoked: func(string) {},
 		Handle: func(*protocol.Command, core.Source) (any, error) {

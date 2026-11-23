@@ -1,0 +1,14 @@
+{
+  "body_def": "grant_revoke",
+  "description": "End the binding's grant. Granted tasks read after this frame are refused; a task already handed to the harness is not recalled.",
+  "direction": "server_to_endpoint",
+  "frame": {
+    "body": {
+      "binding": "pi-demo",
+      "schema": "amq.remote.link.grant_revoke/1"
+    },
+    "gen": 12,
+    "id": "m_gr1",
+    "schema": "amq.remote.link/1"
+  }
+}

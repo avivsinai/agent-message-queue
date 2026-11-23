@@ -28,6 +28,7 @@ import (
 //	link/<name>/device.key      the link's Ed25519 device key, 0600
 //	link/<name>/link.json       what was pinned at linking
 //	link/<name>/consent_keys.json  the consent public keys this machine trusts
+//	link/<name>/grants.json     each binding's grant generation and stored grant
 //	link/retired/<host>         a retired sink; its records settle without network
 const (
 	deviceKeyFile   = "device.key"

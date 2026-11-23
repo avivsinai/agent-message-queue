@@ -64,6 +64,7 @@ amq-remote link add NAME URL --code CODE
 amq-remote link keys add NAME --code CODE
 amq-remote link local-key NAME
 amq-remote link confirm ID
+amq-remote link grant revoke NAME [BINDING]
 amq-remote link remove NAME
 amq-remote link status
 amq-remote link tools [--link NAME]
@@ -566,6 +567,53 @@ Protocol: [`amq.remote.link/1`](../../docs/remote-link-protocol.md).
    settle without network. The server keeps the machine until you unlink it
    on the server's connections page. `detach` removes the share's entry, and
    a detached session never comes back by itself.
+8. A share with `--consent passkey` can take a session grant: you sign one
+   grant in the server, and for up to 24 hours the server sends tasks to that
+   one session with no touch per task. The machine shows a notice when it
+   accepts a grant and when a grant ends, and `link status` lists each stored
+   grant (binding, grant id, expiry).
+   `amq-remote link grant revoke NAME [BINDING]` ends the grant of one
+   binding, or of every binding of the link, at once; it needs no running
+   endpoint. A grant also ends at its expiry, at `attach --self --link` again,
+   at `detach`, when a consent key is added or removed, and when the server
+   revokes it. A granted task runs only while the harness reports that the
+   session asks before a tool acts: on Codex, an approval policy of
+   `untrusted` or `on-request` with the user as reviewer and a `readOnly` or
+   `workspaceWrite` sandbox, and a working directory, writable roots, runtime
+   workspace roots and (under `workspaceWrite`, unless excluded) `/tmp` and
+   `$TMPDIR` that neither hold nor lie inside the endpoint's state directory.
+   Otherwise the server must ask for a signature per task. Claude Code and pi
+   sessions take no grant yet. A link in the machine root (the default) can
+   grant; a link kept inside a project cannot grant to that project's
+   sessions. A link's state is never moved: to grant there, `link remove` it
+   and `link add` it again without `--root`, or keep a signature per task.
+
+   What you accept when you sign a grant:
+   - Every passkey share takes grants: one touch on a compromised server's
+     page can sign a grant where you meant to sign one task. The notice on
+     this machine shows it; run `link grant revoke` if you did not mean it.
+   - The server writes the task text; your passkey no longer sees each task.
+   - The session reads with no dialog what it reads with no dialog now, and
+     the server gets the answer back. On Codex, that is every file your user
+     can read.
+   - What a prompt can do with no dialog in that session, a granted task can
+     do, including everything you pre-allowed in the harness. A pre-allowed
+     command that runs project code (tests, a build) runs code the task
+     wrote.
+   - On Codex `on-request`, commands that stay inside the sandbox run with no
+     dialog. With network access in the sandbox, that includes commands that
+     send data to any address.
+   - The server can keep the session busy and spend your usage until the
+     grant ends or you revoke it.
+   - Every permission dialog stays yours; a link never answers one. A dialog
+     you answer "yes, and do not ask again" during a granted task leaves a
+     rule that later granted tasks use.
+   - The mode is a report, not a lock: a change you make in the middle of a
+     granted task applies to the rest of that task. A restore of the
+     machine's state from a backup can bring back a grant that has not
+     expired.
+   - On Codex another local client of yours can change the thread's
+     settings between the machine's read and the turn.
 
 ### Restart after a reboot
 

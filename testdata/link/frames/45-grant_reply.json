@@ -1,0 +1,18 @@
+{
+  "body_def": "grant_reply",
+  "description": "The machine stored the grant and showed the owner a notice. digest is sha256 of the document bytes; the stored grant presented again gets this same reply. Send tasks under the grant only after this reply.",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "grant": {
+        "binding": "pi-demo",
+        "digest": "sha256:3facc1dcb7764712e7e7ba8ae18f0a18e4504e1e81ef58ae189680e6a41da2ac",
+        "grant_id": "6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7",
+        "not_after": "2026-10-09T22:10:00Z"
+      }
+    },
+    "gen": 12,
+    "re": "m_sg1",
+    "schema": "amq.remote.link/1"
+  }
+}
