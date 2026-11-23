@@ -29,6 +29,10 @@ const (
 	handoffNotSent     = "not sent"
 	handoffTextStands  = "the earlier text stands"
 	handoffUnrecorded  = "delivered, but not recorded in your outbox: do not run the command again for it, a rerun sends it again"
+	// handoffUncertain is a leg that is in its recipient's inbox with a
+	// durability that is not confirmed. Its outbox copy was not written.
+	handoffUncertain  = "delivered, not confirmed"
+	handoffCheckFirst = "check it with amq trace before you send it again; a rerun sends it again"
 )
 
 // commitIDPattern is a full object id: SHA-1 or SHA-256, lowercase hex.
@@ -69,8 +73,9 @@ type handoff struct {
 	reviewOut outgoingOutcome
 	reviewMsg outgoingMessage
 	legErr    error
-	// unrecorded is the outbox error of a delivered leg. The outbox copy is
-	// what a rerun finds, so such a leg is delivered again by a rerun.
+	// unrecorded is the error of a delivered leg that a rerun does not find:
+	// its outbox copy failed, or its delivery is committed with a durability
+	// that is not confirmed. A rerun delivers such a leg again.
 	unrecorded error
 }
 
@@ -310,60 +315,102 @@ func findOwedRequest(entries []thread.Entry, obligations []*thread.Obligation, i
 }
 
 // handOff writes the legs the caller's outbox does not hold yet: the review
-// request, then, once it is sent or already sent, the notice.
+// request, then, once it is delivered or already sent, the notice. The
+// request's state and the strict registration of a same-project leg were
+// read once, before the legs: a request that closes meanwhile still gets its
+// hand-off, as it would from the two commands typed one after the other.
 func (h *handoff) handOff(m1, m2 outgoingMessage) {
 	m1.body = h.body
 	h.reviewMsg = m1
 	review := &h.report.Review
-	if found, ok := h.findSent(m1.sourceFS, h.isReview); ok {
+	found, ok, err := h.findSent(m1.sourceFS, h.isReview)
+	switch {
+	case err != nil:
+		h.fail(review, err)
+		return
+	case ok:
 		review.ID, review.State = found.ID, handoffAlreadySent
 		review.Note = h.earlierText(m1.sourceFS, found, m1.body)
 		if found.Subject != m1.subject {
 			review.Note = handoffTextStands
 		}
-	} else {
-		o, err := sendOutgoing(m1)
-		review.ID = o.ID
-		if err != nil {
-			review.State, review.Error = handoffFailed, err.Error()
-			h.legErr = err
+	default:
+		o, delivered := h.send(review, m1)
+		if !delivered {
 			return
 		}
 		h.reviewOut = o
-		review.State, review.FollowUp, review.News = handoffSent, o.FollowUp, o.News
-		h.unrecord(review, o.OutboxErr)
+		review.FollowUp, review.News = o.FollowUp, o.News
 	}
 
-	m2.body = fmt.Sprintf("Handed to %s for review: %s. Review request %s.\n\n%s", h.reviewerLabel, h.commit, review.ID, h.body)
+	m2.body = fmt.Sprintf("%s\n\n%s", h.noticeLine(), h.body)
 	m2.context = map[string]any{"handoff": map[string]any{
 		"review":   review.ID,
 		"reviewer": h.reviewerLabel,
 		"commit":   h.commit,
 	}}
 	notice := &h.report.Notice
-	if found, ok := h.findSent(m2.sourceFS, h.isNotice); ok {
+	found, ok, err = h.findSent(m2.sourceFS, h.isNotice)
+	switch {
+	case err != nil:
+		h.fail(notice, err)
+	case ok:
 		notice.ID, notice.State = found.ID, handoffAlreadySent
 		notice.Note = h.earlierText(m2.sourceFS, found, m2.body)
-		return
+	default:
+		h.send(notice, m2)
 	}
-	o, err := sendOutgoing(m2)
-	notice.ID = o.ID
-	if err != nil {
-		notice.State, notice.Error = handoffFailed, err.Error()
-		h.legErr = err
-		return
-	}
-	notice.State = handoffSent
-	h.unrecord(notice, o.OutboxErr)
 }
 
-// unrecord marks a delivered leg whose outbox copy failed.
-func (h *handoff) unrecord(leg *handoffLeg, outboxErr error) {
-	if outboxErr == nil {
-		return
+// noticeLine is the generated first line of the notice to the requester.
+func (h *handoff) noticeLine() string {
+	return fmt.Sprintf("Handed to %s for review: %s. Review request %s.", h.reviewerLabel, h.commit, h.report.Review.ID)
+}
+
+// send writes one leg and records what happened to it. delivered reports
+// that the message is in its recipient's inbox.
+func (h *handoff) send(leg *handoffLeg, m outgoingMessage) (o outgoingOutcome, delivered bool) {
+	o, err := sendOutgoing(m)
+	leg.ID = o.ID
+	leg.State, leg.Error, leg.Note = legOutcome(o, err)
+	switch leg.State {
+	case handoffFailed:
+		h.legErr = err
+		return o, false
+	case handoffUncertain:
+		h.unrecorded = errors.Join(h.unrecorded, err)
+	default:
+		if leg.Note == handoffUnrecorded {
+			h.unrecorded = errors.Join(h.unrecorded, fmt.Errorf("hand-off message %s to %s was delivered, but not recorded in your outbox: %w", leg.ID, leg.To, o.OutboxErr))
+		}
 	}
-	leg.Error, leg.Note = "outbox: "+outboxErr.Error(), handoffUnrecorded
-	h.unrecorded = errors.Join(h.unrecorded, fmt.Errorf("hand-off message %s to %s was delivered, but not recorded in your outbox: %w", leg.ID, leg.To, outboxErr))
+	return o, true
+}
+
+// legOutcome classifies one send. A delivery error that is committed with
+// an indeterminate durability left the message in the inbox and no outbox
+// copy; any other delivery error left nothing. An outbox error that is
+// committed left a copy that a rerun finds; any other outbox error left
+// none.
+func legOutcome(o outgoingOutcome, err error) (state, errText, note string) {
+	var committed *fsq.CommittedDurabilityError
+	switch {
+	case err != nil && errors.As(err, &committed):
+		return handoffUncertain, err.Error(), handoffCheckFirst
+	case err != nil:
+		return handoffFailed, err.Error(), ""
+	case o.OutboxErr != nil && errors.As(o.OutboxErr, &committed):
+		return handoffSent, "outbox: " + o.OutboxErr.Error(), ""
+	case o.OutboxErr != nil:
+		return handoffSent, "outbox: " + o.OutboxErr.Error(), handoffUnrecorded
+	}
+	return handoffSent, "", ""
+}
+
+// fail marks a leg that was not written.
+func (h *handoff) fail(leg *handoffLeg, err error) {
+	leg.State, leg.Error = handoffFailed, err.Error()
+	h.legErr = err
 }
 
 // isReview matches the review request of this hand-off.
@@ -395,12 +442,17 @@ type sentMessage struct {
 }
 
 // findSent returns the oldest message in the caller's outbox/sent whose
-// header matches, reading headers only.
-func (h *handoff) findSent(root *fsq.DeliveryRoot, match func(format.Header) bool) (sentMessage, bool) {
+// header matches, reading headers only. An outbox that cannot be listed, or
+// a message in it whose header cannot be read, is an error: that message can
+// be the leg, so the leg is not written.
+func (h *handoff) findSent(root *fsq.DeliveryRoot, match func(format.Header) bool) (sentMessage, bool, error) {
 	dir := filepath.Join("agents", h.me, "outbox", "sent")
 	entries, err := root.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return sentMessage{}, false, nil
+	}
 	if err != nil {
-		return sentMessage{}, false
+		return sentMessage{}, false, fmt.Errorf("cannot check your outbox for an earlier hand-off: %w", err)
 	}
 	for _, entry := range entries {
 		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".md") {
@@ -408,12 +460,14 @@ func (h *handoff) findSent(root *fsq.DeliveryRoot, match func(format.Header) boo
 		}
 		name := filepath.Join(dir, entry.Name())
 		hdr, err := format.ReadHeaderFileRoot(root, name)
-		if err != nil || !match(hdr) {
-			continue
+		if err != nil {
+			return sentMessage{}, false, fmt.Errorf("cannot check your outbox for an earlier hand-off: %s: %w", name, err)
 		}
-		return sentMessage{ID: hdr.ID, Name: name, Subject: hdr.Subject}, true
+		if match(hdr) {
+			return sentMessage{ID: hdr.ID, Name: name, Subject: hdr.Subject}, true, nil
+		}
 	}
-	return sentMessage{}, false
+	return sentMessage{}, false, nil
 }
 
 // earlierText returns the note for a leg found already sent whose stored
@@ -466,16 +520,23 @@ func (h *handoff) print(asJSON bool) error {
 	if err := writeStdout("%s\n", legLine("Notice", notice)); err != nil {
 		return err
 	}
-	if done(review) && !done(notice) && review.Note != handoffUnrecorded {
-		if err := writeStdout("run the same command again to complete the hand-off\n"); err != nil {
+	if notice.State == handoffFailed {
+		// A rerun finds a recorded review and sends the notice only. For a
+		// review it does not find, the notice goes out by hand.
+		next := "run the same command again to complete the hand-off\n"
+		if !recorded(review) {
+			next = fmt.Sprintf("do not run the command again; tell the requester yourself: amq reply --id %s --kind status --labels %s --body %q\n", h.request, handedOffLabel, h.noticeLine())
+		}
+		if err := writeStdout("%s", next); err != nil {
 			return err
 		}
 	}
 	return outErr
 }
 
-func done(leg handoffLeg) bool {
-	return leg.State == handoffSent || leg.State == handoffAlreadySent
+// recorded reports whether a rerun finds leg in the caller's outbox.
+func recorded(leg handoffLeg) bool {
+	return leg.State == handoffAlreadySent || leg.State == handoffSent && leg.Note != handoffUnrecorded
 }
 
 // legLine is one line of the text report: "<what> <id> to <who>: <state>".

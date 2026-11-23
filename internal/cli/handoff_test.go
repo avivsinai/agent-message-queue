@@ -251,6 +251,22 @@ func TestHandoffRefusalsAndReruns(t *testing.T) {
 				t.Fatal("want both legs delivered once")
 			}
 		}},
+		// Review of the hand-off: a message in the outbox that could not be
+		// read was skipped, so a rerun could send a leg a second time.
+		{"an outbox message that cannot be read stops the run before a write", func(t *testing.T) {
+			root, request := handoffFixture(t)
+			bad := filepath.Join(fsq.AgentOutboxSent(root, "bob"), "2026-01-01T00-00-00.000Z_pid1_00000000.md")
+			if err := os.WriteFile(bad, []byte("not a message"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			out, err := runHandoffAs(t, root, "bob", request, "carol")
+			if GetExitCode(err) != 1 || !strings.Contains(out, "cannot check your outbox") {
+				t.Fatalf("handoff = %q (err %v), want a failed review that names the outbox", out, err)
+			}
+			if count(t, root, "carol") != 0 || count(t, root, "alice") != 0 {
+				t.Fatal("a leg was written although the outbox could not be checked")
+			}
+		}},
 		{"a request the caller sent", func(t *testing.T) {
 			root, _ := handoffFixture(t)
 			mine := handoffSend(t, root, "bob", "dave", "todo", "mine")
@@ -308,5 +324,33 @@ func TestHandoffRefusalsAndReruns(t *testing.T) {
 	}
 	for _, row := range rows {
 		t.Run(row.name, row.run)
+	}
+}
+
+// Review of the hand-off: a delivery that is committed with a durability
+// that is not confirmed was reported as failed with the advice to run the
+// command again, and a committed outbox copy was reported as not written.
+func TestHandoffLegOutcomeTellsCommittedFromFailed(t *testing.T) {
+	committed := &fsq.CommittedDurabilityError{FinalPath: "agents/carol/inbox/new/m.md", Recipient: "carol", Err: os.ErrDeadlineExceeded}
+	rows := []struct {
+		name        string
+		o           outgoingOutcome
+		err         error
+		state, note string
+	}{
+		{"delivered and recorded", outgoingOutcome{}, nil, handoffSent, ""},
+		{"not delivered", outgoingOutcome{}, os.ErrPermission, handoffFailed, ""},
+		{"delivery committed, durability not confirmed", outgoingOutcome{}, reportDeliveryError("m", committed), handoffUncertain, handoffCheckFirst},
+		{"outbox copy committed, durability not confirmed", outgoingOutcome{OutboxErr: committed}, nil, handoffSent, ""},
+		{"no outbox copy", outgoingOutcome{OutboxErr: os.ErrPermission}, nil, handoffSent, handoffUnrecorded},
+	}
+	for _, row := range rows {
+		state, _, note := legOutcome(row.o, row.err)
+		if state != row.state || note != row.note {
+			t.Errorf("%s: state %q note %q, want %q %q", row.name, state, note, row.state, row.note)
+		}
+		if leg := (handoffLeg{State: state, Note: note}); recorded(leg) != (state == handoffSent && note == "") {
+			t.Errorf("%s: recorded = %v", row.name, recorded(leg))
+		}
 	}
 }
