@@ -270,12 +270,23 @@ func TestNotifyReadErrorRetainsDeliveredPairs(t *testing.T) {
 		t.Fatal(err)
 	}
 	report := Notify(ctx, plan)
-	if report.Err == nil || len(r.calls) != 0 {
-		t.Fatalf("partial state generated notices: %+v %v", r.calls, report.Err)
+	if report.Err == nil || report.Evaluated || len(r.calls) != 0 {
+		t.Fatalf("partial state generated a report: %+v %v", r.calls, report.Err)
 	}
 	delivered, err := plan.Store.readDelivered()
 	if err != nil || len(delivered) != 2 {
 		t.Fatalf("read error pruned pairs: %+v %v", delivered, err)
+	}
+}
+
+func TestNotifyLedgerErrorRetainsProjection(t *testing.T) {
+	plan, r := noticeTestPlan(t, noticeStore(t))
+	if err := os.WriteFile(filepath.Join(plan.Store.Dir, "floor-notices.json"), []byte("bad ledger"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	report := Notify(context.Background(), plan)
+	if !report.Evaluated || report.Err != nil || report.NoticeErr == nil || len(r.calls) != 0 {
+		t.Fatalf("ledger failure replaced or hid evaluation: %+v %v", r.calls, report.Err)
 	}
 }
 
@@ -302,7 +313,7 @@ func TestNotifyRetriesOnlyFailedRecipientAndScopesSessions(t *testing.T) {
 	plan, r := noticeTestPlan(t, noticeStore(t))
 	publishNotificationNews(t, context.Background(), plan.Store, "request-retry")
 	r.failTo = "lead"
-	if report := Notify(context.Background(), plan); report.Err != nil || report.NoticeErr == nil || len(r.calls) != 2 {
+	if report := Notify(context.Background(), plan); !report.Evaluated || report.Err != nil || report.NoticeErr == nil || len(r.calls) != 2 {
 		t.Fatalf("delivery failure hid a valid observation: %+v %v", r.calls, report)
 	}
 	r.failTo = ""

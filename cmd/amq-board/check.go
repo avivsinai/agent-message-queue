@@ -80,6 +80,14 @@ func runCheckContext(ctx context.Context, args []string) int {
 		return exitGeneral
 	}
 	report := board.Notify(ctx, board.NotifyPlan{Sender: *as, Recipients: recipients, Roster: roster, Env: env, Session: session, Store: store, Config: cfg.Board})
+	if !report.Evaluated {
+		for _, err := range []error{report.Err, report.NoticeErr} {
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "amq-board check:", err)
+			}
+		}
+		return exitGeneral
+	}
 	code := writeCheck(*asJSON, time.Now(), report.Model, report.Problems, report.Err)
 	if report.NoticeErr != nil {
 		fmt.Fprintln(os.Stderr, "amq-board check: floor notification:", report.NoticeErr)

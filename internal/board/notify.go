@@ -39,6 +39,8 @@ type NotifyReport struct {
 	Problems  []Problem
 	Err       error
 	NoticeErr error
+	// Evaluated reports that a real projection was produced under the lock.
+	Evaluated bool
 }
 
 type deliveredEntry struct {
@@ -82,15 +84,16 @@ func Notify(ctx context.Context, plan NotifyPlan) NotifyReport {
 	}
 	var report NotifyReport
 	err := lock.WithExclusiveFileLockUntil(filepath.Join(plan.Store.Dir, "notify.lock"), func() bool { return ctx.Err() != nil }, func() error {
-		delivered, err := plan.Store.readDelivered()
-		if err != nil {
-			return err
-		}
 		state, readErr := plan.Store.ReadContext(ctx)
 		report.State = state
 		if readErr == nil {
 			report.Model = state.Project(plan.Config, time.Now(), "notice")
 			report.Problems, report.Err = Check(report.Model, plan.Config, report.Model.GeneratedAt)
+			report.Evaluated = true
+		}
+		delivered, err := plan.Store.readDelivered()
+		if err != nil {
+			return err
 		}
 		stale := readErr != nil || report.Err != nil
 		problems := report.Problems
