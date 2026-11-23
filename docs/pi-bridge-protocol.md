@@ -31,6 +31,7 @@ another root than the endpoint's.
   cancels/<ref>.json     adapter -> extension: cancel of one request (revision 5)
   activity/<session_id>.jsonl  extension -> adapter: whole-session activity
   bridge.liveness        extension -> adapter: heartbeat
+  granted-guard.<pid>.json  extension only: the guard of one pi process (revision 6)
 ```
 
 Directories are mode 0700 and files are mode 0600.
@@ -44,7 +45,8 @@ adapter's temporary files.
 ## Ownership
 
 The adapter writes only `requests/` and `cancels/`. The extension writes only
-`receipts/`, `events/`, `activity/`, and `bridge.liveness`.
+`receipts/`, `events/`, `activity/`, `bridge.liveness`, and the guard file of
+its own pi process, `granted-guard.<pid>.json`, which no other party reads.
 Neither side deletes or rewrites a file the other side owns. The extension
 never deletes or rewrites a request; the adapter never deletes a request it
 published. Cleanup of old files is an explicit operator action outside this
@@ -113,6 +115,7 @@ non-empty protocol string instead of guessing its meaning:
 | `bridge_revision` | The bridge revision the adapter requires. Always set. |
 | `origin` | Optional: where the task came from, `{"carrier": "link", "name": "example"}`. `name` is the carrier's own name for the source that sent the task (for a link, the link's name in the AMQ manifest); `carrier` is the AMQ carrier that received it. Both are non-empty, and `name` is at most 64 bytes. The adapter writes `origin` only when both hold, and otherwise leaves the whole object out, so a local, mailbox or Buzz request has none. The extension may show "from <name>"; it is display text, never authority. |
 | `event` | Optional: `nostr:<eventID>`, where `<eventID>` is the lowercase hex id of the owner's Buzz event that caused the request. The adapter writes it only for a request from the Buzz carrier, and the value is the same as the `nostr:<eventID>` label on a Buzz DM's AMQ prompt. See [The Buzz event](#the-buzz-event). |
+| `granted` | Optional, from revision 6: `true` for a task that a link sent under a session grant, with no signature of its own. The adapter writes it only to a bridge that publishes `gate`, with `bridge_revision` 6, and leaves it out of every other request. See [Bridge revision 6](#bridge-revision-6-the-guard-of-granted-tasks). |
 
 The adapter publishes create-new: it writes and fsyncs a temporary file in
 `requests/`, hard-links it onto `<ref>.json`, removes the temporary name, and
@@ -265,7 +268,8 @@ nothing: it never decides a request outcome.
   "pid": 4242,
   "surface": "tui",
   "session_generation": "3f0c...",
-  "bridge_revision": 4,
+  "bridge_revision": 6,
+  "gate": true,
   "session_id": "0199c0de-0000-7000-8000-000000000000",
   "activity": 2
 }
@@ -288,14 +292,18 @@ line. The record may also carry `session_id` (see
 [session identity](#bridge-revision-4-session-identity)); from revision 4 it must.
 `activity` is the version of the activity records the extension writes; a
 record without it writes version 1, which has no runs. The activity version is
-separate from `bridge_revision`, which names the request rules.
+separate from `bridge_revision`, which names the request rules. `gate: true`
+(revision 6) says that the extension asks the person at pi's terminal before
+a granted task's tool calls; it is absent when the extension cannot (see
+[Bridge revision 6](#bridge-revision-6-the-guard-of-granted-tasks)).
 
 ## Bridge revision
 
 The protocol string names the file formats; `bridge_revision` names the
 extension rules the adapter relies on. Revision 3 is the rule set of every
-section except [Bridge revision 4](#bridge-revision-4-session-identity) and
-[Bridge revision 5](#bridge-revision-5-exact-cancel): exact
+section except [Bridge revision 4](#bridge-revision-4-session-identity),
+[Bridge revision 5](#bridge-revision-5-exact-cancel) and
+[Bridge revision 6](#bridge-revision-6-the-guard-of-granted-tasks): exact
 generation addressing, busy refusal at the admission boundary, request ownership that ends at the next user message and completes
 only on a final answer, retained terminal and refusal decisions, and orphan
 recovery that retries until it succeeds. The protocol string stays
@@ -326,7 +334,7 @@ The fence holds in both directions, and a missing field is revision 0, never
 
 A request's `bridge_revision` is the minimum rule set the adapter relies on
 for that request. The adapter sends 3 on every request, also to a bridge of a
-later revision. A bridge implements every revision from 3 up to the one it
+later revision, except a granted request, which carries 6. A bridge implements every revision from 3 up to the one it
 advertises, so a revision-4 bridge accepts a request that carries 3 or 4. It
 refuses with reason `revision` only a request with no `bridge_revision`, one
 below 3, or one above the revision it advertises.
@@ -379,6 +387,103 @@ The extension applies a cancel file with this `protocol` and `ref`:
 
 A cancel never reaches any other request or a local turn.
 
+## Bridge revision 6: the guard of granted tasks
+
+Revision 6 is revision 5 plus the request field `granted`, the liveness field
+`gate`, and a guard in the extension. A link can send tasks to a pi session
+under a session grant (see
+[the link protocol](remote-link-protocol.md#session-grant)); pi has no
+approval mode of its own, so the extension asks the person at pi's terminal
+before each tool call of such a task.
+
+**The gate.** The extension publishes `gate: true` in liveness only when pi
+runs in its terminal UI (`surface` is `tui`) and the extension hands
+requests to pi with its own `sendUserMessage`, not through a host's
+`deliver` (see [Embedding](#embedding)). The adapter reads the session as
+one that asks only while the live record is fresh, has `bridge_revision` 6 or
+later, `gate: true` and `surface: "tui"`. Otherwise a link's `grant_info` is
+not available with reason `mode_unreadable`, and a granted submit is refused
+`consent_invalid` with a message that starts `grant_needs_signature:`, with
+nothing written. The acp-host wire publishes no `gate`, so it takes no
+grant.
+
+**A granted request.** The adapter writes `"granted": true` and
+`bridge_revision` 6. Before its receipt, and with nothing sent to pi, the
+extension refuses a granted request whose `bridge_revision` is below 6
+(reason `revision`), and a granted request while pi is not in its terminal
+UI or while a host delivers its requests (reason `unsupported`, "a granted
+task needs the pi terminal UI"). A `granted` value that is not a boolean is
+`invalid`. These checks run after the generation check and before the busy
+check. Busy is as for every request: a granted request that arrives while pi
+is busy is refused `busy`, and its request id is spent; the server sends the
+task again with a new `request_id`.
+
+**The guard.** Right before it hands a granted request to pi, the extension
+arms the guard: it makes a random arm id (16 bytes, hex), adds it to the
+guard's state, and writes `granted-guard.<pid>.json` (mode 0600, replaced
+whole), which holds `{"pid": <pid>, "arms": [{"arm", "ref", "armed_at"}]}`
+for every open arm of that pi process. A write that fails sends nothing and
+settles the request `failed`. The text handed to pi is the request's text, an
+empty line, and the line `[AMQ granted task <arm>]`, so only that message
+carries the arm. The guard is the state of the pi process, not of the
+mailbox: a bridge that loses its mailbox, a new session and a reload keep it,
+and the extension never reads, changes or removes another process's file. A
+reload loads the extension again in the same process; the new instance reads
+the file of its own process id and keeps those arms open. pi does not reload
+while a run is active.
+
+**When an arm ends.** An arm ends when the user message that carries its line
+started and, after that, pi emits `agent_settled` while it holds no pending
+message; or when `sendUserMessage` throws, which proves that nothing was
+delivered. Each arm ends on its own evidence; one granted task that settles
+ends only its own arm. An arm with no such evidence stays open until the pi
+process exits: for example when an input extension removed the line from the
+message, and across an abort, a retry, a compaction and a reload. The file is
+removed when no arm is open.
+
+**What the guard asks.** While any arm is open, every tool call pi makes,
+including a nested call (`parentToolCallId`), an MCP tool and any other
+extension's tool, stops in the extension's `tool_call` handler, in the
+person's own runs too:
+
+- A call to `read`, `grep`, `find` or `ls` runs with no dialog only when pi
+  reports that tool as its own built-in (`sourceInfo.path` is
+  `builtin:<name>`). A tool that an extension registers under one of these
+  names asks.
+- A session that is not in the terminal UI at that moment blocks the call.
+- The call's text is its whole input as indented JSON. A text longer than
+  2000 characters blocks the call with no dialog: a task that needs such a
+  call is sent with a signature.
+- Otherwise pi's terminal shows a dialog. Its title is "A task that a linked
+  server sent wants to run `<tool>`:", or, when no open arm's message has
+  started, "A task that a linked server sent may still run in this session.
+  `<tool>` wants to run:", then the call's text. A tool that is not pi's own
+  built-in adds "This is a tool of an extension. AMQ cannot see what it does
+  or starts; one yes covers the whole call." The options are `No` (first, so
+  Enter does not approve) and `Yes, run it`. Only `Yes, run it` runs the
+  call. `No`, Escape, an aborted run and a dialog that fails block it.
+
+A message that the person types into the granted run does not end the guard,
+so the person is asked for those calls too. When the end of a granted run
+cannot be proven, the guard keeps asking in the person's own later runs, with
+the second title; a restart of pi ends that. The bridge's Buzz copy of the
+dialog has no options: only the person at the terminal answers, and a link's
+`interaction.respond` is refused.
+
+The model sees the reason of a blocked call as the tool's error:
+
+| Cause | Reason |
+| --- | --- |
+| Not approved | The person at the terminal did not approve this call. It is a call of a task that a linked server sent under a session grant. |
+| No terminal UI | This call needs the person's yes at the terminal, and this pi session has no terminal UI. |
+| Too long | This call is too long to show whole at the terminal for approval. A task that needs it must be sent with a signature. |
+
+**Older parties.** A bridge of revision 5 or older publishes no `gate`, so
+the adapter sends it no granted request, and it refuses one that carries
+`bridge_revision` 6 with reason `revision`. An adapter that predates
+revision 6 never writes `granted`; a revision-6 bridge serves its requests
+as before.
+
 ## Session generation and epoch
 
 A session generation is an opaque token (`^[A-Za-z0-9_.:-]{1,128}$`) that
@@ -426,13 +531,15 @@ nor a terminal event, in publication order, it:
    event (`invalid` or `unsupported`). A missing or unsupported
    `bridge_revision` is a `refused` event with reason `revision`.
 2. refuses with reason `expired` when `not_after` has passed.
-3. applies the epoch rule above.
+3. applies the epoch rule above, and for a granted request the checks of
+   [revision 6](#bridge-revision-6-the-guard-of-granted-tasks).
 4. refuses with reason `busy` when pi is busy: `ctx.isIdle()` is false,
    `ctx.hasPendingMessages()` is true, or another remote request is in
    flight. v1 never queues a request behind other work.
 5. claims the receipt and calls `sendUserMessage(text, { deliverAs: "followUp" })`
    without prompt-template expansion, so a body that starts with `/` stays
-   text.
+   text. For a granted request it arms the guard first, and `text` ends with
+   the arm's line.
 
 Steps 2 to 5 run in one synchronous pass, so `not_after` and idleness are
 checked at the admission boundary, immediately before the receipt. A request
@@ -514,7 +621,8 @@ applies with these differences:
 - The directory is `<AM_ROOT>/agents/<handle>/extensions/acp-host/`, which
   the host shares with its own state (`host.lock`, `session.json`,
   `turns/`). The protocol string is `amq:acp-host:v1`.
-- Liveness carries `surface: "acp"`, `bridge_revision` 5, `session_id` (the
+- Liveness carries `surface: "acp"`, `bridge_revision` 5, no `gate` (so the
+  host takes no session grant), `session_id` (the
   ACP `sessionId`, when it matches the session identity grammar), and
   `agent` (the agent's name and version from `initialize`). The host mints a
   new `session_generation` each time it starts and opens or loads its ACP
@@ -562,6 +670,9 @@ is optional; without options the extension behaves as described above.
 | `deliver.send(ctx, request, report)` | `sendUserMessage(text, { deliverAs: "followUp" })` with the correlation above | Hands `{ref, text, notAfter, origin}` to the host. `origin` is present only when the request carries a valid one. |
 | `upgrade` | none | The liveness `upgrade` remedy. |
 
+With `deliver` set, the work runs where the host sends it, so the extension
+publishes no `gate` and refuses a granted request.
+
 `registerAmqBridge` returns a handle whose `openDialog` lets the owner answer
 an extension's own prompt from Buzz; see
 [the pi bridge README](../integrations/pi/README.md#answer-an-extension-prompt-from-buzz).
@@ -587,8 +698,10 @@ described above.
 
 ## Capabilities
 
-v1 supports inspect and submit with `deliver_as: followUp` only, and exact
-cancel through `cancels/` from bridge revision 5. Steering, question answers,
-tool approvals, and terminal access are not part of the protocol; the adapter
+v1 supports inspect and submit with `deliver_as: followUp` only, exact
+cancel through `cancels/` from bridge revision 5, and granted tasks under a
+terminal guard from bridge revision 6. Steering, question answers, tool
+approvals, and terminal access are not part of the protocol; the adapter
 refuses a steer submit before it writes anything. A tool approval is a
-[dialog in Buzz](amq-remote-approvals.md).
+[dialog in Buzz](amq-remote-approvals.md); the guard's dialog is answered
+only at pi's terminal.
