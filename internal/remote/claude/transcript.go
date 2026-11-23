@@ -349,22 +349,10 @@ func parseTranscriptLine(line string) (transcriptEntry, bool) {
 	var prompt string
 	var promptBlocks []TranscriptBlock
 	if a := raw.Attachment; a != nil && len(a.Prompt) > 0 {
-		// A prompt is a string. A queued prompt may also be a list of
-		// content blocks, decoded as message.content is, and it shows its
-		// text blocks only, as a string prompt does. Any other value makes
-		// the line unreadable.
-		queued := raw.Type == "attachment" && a.Type == "queued_command"
-		isString := json.Unmarshal(a.Prompt, new(string)) == nil
-		var blocks []TranscriptBlock
-		var promptShape contentShape
-		prompt, blocks, _, promptShape = decodeContentWalk(a.Prompt)
-		if !isString && (!queued || promptShape == contentNone) {
+		var promptOK bool
+		prompt, promptBlocks, promptOK = decodePrompt(a.Prompt, raw.Type == "attachment" && a.Type == "queued_command")
+		if !promptOK {
 			return transcriptEntry{}, false
-		}
-		for _, b := range blocks {
-			if b.Type == "text" {
-				promptBlocks = append(promptBlocks, b)
-			}
 		}
 	}
 	text, blocks, uses, shape := decodeContentWalk(raw.Message.Content)
@@ -412,6 +400,35 @@ func parseTranscriptLine(line string) (transcriptEntry, bool) {
 		e.TS = ts.UnixMilli()
 	}
 	return e, true
+}
+
+// decodePrompt reads an attachment's prompt: a string, or, when list is
+// set, a list of content blocks of which only the text blocks are read. A
+// prompt shows text and nothing else, so no other block is decoded. ok is
+// false for any other value.
+func decodePrompt(raw json.RawMessage, list bool) (text string, blocks []TranscriptBlock, ok bool) {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		if s == "" {
+			return "", nil, true
+		}
+		return s, []TranscriptBlock{{Type: "text", Text: s}}, true
+	}
+	var items []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if !list || json.Unmarshal(raw, &items) != nil {
+		return "", nil, false
+	}
+	var parts []string
+	for _, b := range items {
+		if b.Type == "text" && b.Text != "" {
+			parts = append(parts, b.Text)
+			blocks = append(blocks, TranscriptBlock{Type: "text", Text: b.Text})
+		}
+	}
+	return strings.Join(parts, "\n"), blocks, true
 }
 
 // hookContent is the content of a hook's added-context entry: its strings,
