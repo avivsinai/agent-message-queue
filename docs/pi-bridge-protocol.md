@@ -412,8 +412,8 @@ grant.
 extension refuses a granted request whose `bridge_revision` is below 6
 (reason `revision`), and a granted request while pi is not in its terminal
 UI or while a host delivers its requests (reason `unsupported`, "a granted
-task needs the pi terminal UI"). A `granted` value that is not a boolean is
-`invalid`. These checks run after the generation check and before the busy
+task needs the pi terminal UI"). A `granted` of `false` or `null` reads as absent;
+any other value that is not `true` is `invalid`. These checks run after the generation check and before the busy
 check. Busy is as for every request: a granted request that arrives while pi
 is busy is refused `busy`, and its request id is spent; the server sends the
 task again with a new `request_id`.

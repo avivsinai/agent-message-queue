@@ -691,8 +691,7 @@ func TestSubmitKeepsInspectedGeneration(t *testing.T) {
 // Pro review of #920, 2026-09-29, #5: a busy refusal writes no receipt, so a restarted adapter
 // answered unknown for it, and Submit waited out its receipt window and
 // reported uncertainty. Both must return the typed rejection, never
-// admission. A granted request refused busy spends its ref the same way
-// (the pi gate spec, test 5).
+// admission. A granted request refused busy spends its ref the same way.
 func TestReceiptlessRefusalIsRecovered(t *testing.T) {
 	for _, granted := range []bool{false, true} {
 		a, dir := newTestAttachment(t)

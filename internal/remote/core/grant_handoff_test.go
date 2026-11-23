@@ -83,7 +83,7 @@ func TestGrantedRequestAtTheHandover(t *testing.T) {
 
 // The pi gate's dialog is answered only at the terminal: a link that sent a
 // granted request cannot answer an interaction of that request, and the
-// refusal comes before any lookup (the pi gate spec, invariant 6).
+// refusal comes before any lookup.
 func TestLinkNeverAnswersAGrantedRequestsInteraction(t *testing.T) {
 	rt := fake.New("fake", "e_1")
 	ep, _, clk := newLinkEndpoint(t, rt)
