@@ -427,7 +427,9 @@ whole), which holds `{"pid": <pid>, "started": <seconds>, "arms": [{"arm",
 process's stable time origin in Unix seconds, rounded to the millisecond. A write that fails sends nothing and
 settles the request `failed`. The text handed to pi is the request's text, an
 empty line, and the line `[AMQ granted task <arm>]`, so only that message
-carries the arm. The user activity record carries the original request text.
+carries the arm. When the bridge matches the request's own message, its user
+activity record carries the original request text. If another extension changes
+the text, the record holds what pi received, including any arm line still present.
 Another extension's input handler can see, change or consume the tagged text,
 in which case a failed ownership match leaves the outcome uncertain and the guard armed.
 The guard is the state of the pi process, not of the
@@ -446,14 +448,11 @@ reload while a run is active.
 **When an arm ends.** An arm ends in three steps, all in the pi session that
 ran its granted message: the user message that carries its line starts;
 after that, that session emits `agent_settled` while pi holds no pending
-message; after that, the person types a prompt in that session (pi's
-`input` event with source `interactive`, which pi emits before the run that
-the prompt starts). The arm ends at that prompt, so the person's own run is
-not guarded by it. A run that no person typed, such as a turn that another
-extension starts after the settle, stays guarded until the person types;
-a message that the person types into such a run, as steering or a
-follow-up, ends the arm too. A message typed while the granted run is
-active ends nothing. An arm also ends when `sendUserMessage` throws, which
+message; after that, the person starts a new run in that session. Pi emits
+an `input` event with source `interactive` and no `streamingBehavior`
+before that run starts. Steering and follow-ups typed into an active run
+keep the guard in place, including during a run another extension started.
+An arm also ends when `sendUserMessage` throws, which
 proves that nothing was delivered. Each arm ends on its own evidence: the
 end of one granted task removes only its own arm, and the events of another
 session do not move it. An arm with no such
@@ -476,10 +475,13 @@ person's own runs too:
   tool names. DEL, C1 controls, Unicode format characters and the Unicode
   line and paragraph separators appear as escapes in both.
 - The input is limited to 2000 characters and 20 wrapped rows. Pi's text
-  wrapper counts displayed cells at the terminal's current width (at least
-  20 columns, or 80 if unknown), allowing one cell of padding on each side.
+  wrapper counts displayed cells at the terminal's current width (80 columns
+  if unknown), allowing one cell of padding on each side. Widths below 40
+  columns are refused because the input key hints can wrap.
   The whole title, including the question and any extension notice, must fit
-  the terminal height after reserving eight rows for the input dialog.
+  the terminal height after reserving eight rows for the input dialog and
+  four for the dock. In fullscreen mode, extension widgets and queued
+  messages can still clip the top. The last instruction names the tool.
   A call that exceeds a limit is refused without opening a dialog.
 - Otherwise pi's terminal shows a text input. Its title is "A task that a
   linked server sent wants to run `<tool>`:", or, when no open arm's
@@ -487,7 +489,7 @@ person's own runs too:
   this session. `<tool>` wants to run:", then the call's text. A tool that is
   not pi's own built-in adds "This is a tool of an extension. AMQ cannot see
   what it does or starts; one yes covers the whole call." The title ends with
-  "Type yes to run it. Any other answer does not run it." Only the answer
+  "Type yes to run <tool>. Any other answer does not run it." Only the answer
   `yes`, after spaces are trimmed and case is lowered, runs the call. Any
   other text, including text typed ahead into the input, Enter alone,
   Escape, an aborted run and a dialog that fails block it.
@@ -507,6 +509,7 @@ The model sees the reason of a blocked call as the tool's error:
 | --- | --- |
 | Not approved | The person at the terminal did not approve this call. It is a call of a task that a linked server sent under a session grant. |
 | No terminal UI | This call needs the person's yes at the terminal, and this pi session has no terminal UI. |
+| TUI measurement unavailable | This pi cannot measure the approval dialog; a task that needs this call must be sent with a signature. |
 | Too long | This call is too long to show whole at the terminal for approval. A task that needs it must be sent with a signature. |
 
 **Older parties.** A bridge of revision 5 or older publishes no `gate`, so

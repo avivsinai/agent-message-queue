@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import nodeFs from "node:fs";
-import { syncBuiltinESMExports } from "node:module";
+import { registerHooks, syncBuiltinESMExports } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
@@ -1304,10 +1304,10 @@ const DENIED = { block: true, reason: "The person at the terminal did not approv
 const NO_TERMINAL = { block: true, reason: "This call needs the person's yes at the terminal, and this pi session has no terminal UI." };
 const TOO_LONG = { block: true, reason: "This call is too long to show whole at the terminal for approval. A task that needs it must be sent with a signature." };
 const EXTENSION_LINE = "This is a tool of an extension. AMQ cannot see what it does or starts; one yes covers the whole call.";
-const TYPE_YES = "\n\nType yes to run it. Any other answer does not run it.";
+const typeYes = (tool: string) => `\n\nType yes to run ${tool}. Any other answer does not run it.`;
 const askTitle = (tool: string, input: unknown, extension = false) =>
-	`A task that a linked server sent wants to run \`${tool}\`:\n${JSON.stringify(input, null, 1)}${extension ? `\n${EXTENSION_LINE}` : ""}${TYPE_YES}`;
-const mayStillTitle = (tool: string, input: unknown) => `A task that a linked server sent may still run in this session. \`${tool}\` wants to run:\n${JSON.stringify(input, null, 1)}${TYPE_YES}`;
+	`A task that a linked server sent wants to run \`${tool}\`:\n${JSON.stringify(input, null, 1)}${extension ? `\n${EXTENSION_LINE}` : ""}${typeYes(tool)}`;
+const mayStillTitle = (tool: string, input: unknown) => `A task that a linked server sent may still run in this session. \`${tool}\` wants to run:\n${JSON.stringify(input, null, 1)}${typeYes(tool)}`;
 
 type Harness = ReturnType<typeof harness>;
 
@@ -1466,6 +1466,37 @@ test("guard: only a typed yes runs the call", async () => {
 	}
 });
 
+// A pi host without the optional title measurer can still serve ordinary requests.
+test("guard: an unavailable TUI package refuses only the call that needs measurement", async (t) => {
+	const hooks = registerHooks({
+		resolve(specifier, context, nextResolve) {
+			if (specifier === "@earendil-works/pi-tui") throw new Error("pi-tui unavailable in this host");
+			return nextResolve(specifier, context);
+		},
+	});
+	t.after(() => hooks.deregister());
+	const h = harness(undefined, undefined, await freshBridge());
+	try {
+		await h.start();
+		h.publish(REF, "ordinary request", h.generation());
+		await h.waitFor(() => h.sent.length === 1);
+		assert.equal(h.sent[0].content, "ordinary request");
+		await h.emit("message_start", userMessage("ordinary request"));
+		await h.emit("message_end", assistantMessage("done"));
+		await h.emit("agent_before_settle", { outcome: "completed" });
+		await h.emit("agent_settled", { aborted: false });
+		assert.equal(h.events(REF).at(-1)?.event, "completed");
+		h.publish(OTHER, "guarded request", h.generation(), GRANTED);
+		await h.waitFor(() => h.sent.length === 2);
+		assert.deepEqual(await h.tool("bash", { command: "pwd" }), {
+			block: true, reason: "This pi cannot measure the approval dialog; a task that needs this call must be sent with a signature.",
+		});
+		assert.equal(h.dialogs.length, 0);
+	} finally {
+		await h.done();
+	}
+});
+
 // Guard table, rows "rpc" and "print": with no terminal there is nobody to
 // ask, so the call is blocked and no dialog opens.
 test("guard: a session that is not tui blocks the call with no dialog", async () => {
@@ -1549,6 +1580,10 @@ test("guard: the call must fit the displayed cells and available terminal rows",
 			["wide terminal", 80, 40, "a".repeat(800), true],
 			["narrow terminal", 40, 40, "a".repeat(800), false],
 			["short terminal", 80, 12, "a".repeat(800), false],
+			// The short bash title occupies six rows at this width.
+			["exactly fits the dock", 80, 18, "pwd", true],
+			["one row beyond the dock", 80, 17, "pwd", false],
+			["wrapped key hints", 39, 40, "pwd", false],
 		] as const) {
 			await t.test(name, async () => {
 				const previousColumns = process.stdout.columns;
@@ -1677,7 +1712,13 @@ test("guard: the guard ends at the person's next typed prompt after the granted 
 		assert.deepEqual(await h.tool("bash", { command: "make" }), DENIED, "after the settle, nothing typed");
 		await h.emit("input", { text: "next step", source: "extension" });
 		assert.deepEqual(await h.tool("bash", { command: "make" }), DENIED, "an extension's input");
+		await h.emit("agent_start");
+		for (const streamingBehavior of ["steer", "followUp"]) {
+			await typed(h, { streamingBehavior });
+			assert.deepEqual(await h.tool("bash", { command: "pwd" }), DENIED, streamingBehavior);
+		}
 		assert.equal(guardOf(h)?.arms.length, 1);
+		await h.emit("agent_settled", { aborted: false });
 		await typed(h);
 		assert.equal(await h.tool("bash", { command: "make" }), undefined, "the person's typed prompt");
 		assert.equal(guardOf(h), null);
@@ -1700,9 +1741,12 @@ test("guard: another session of the same module does not end the arm", async () 
 		await parent.waitFor(() => parent.sent.length === 1);
 		await parent.emit("message_start", userMessage(parent.sent[0].content as string));
 		await child.emit("agent_settled", { aborted: false });
-		await typed(child);
+		await typed(parent, { streamingBehavior: "steer" });
 		parent.answer = () => "no";
-		assert.deepEqual(await parent.tool("bash", { command: "make" }), DENIED);
+		assert.deepEqual(await parent.tool("bash", { command: "pwd" }), DENIED, "child settled, parent steered");
+		await parent.emit("agent_settled", { aborted: false });
+		await typed(child);
+		assert.deepEqual(await parent.tool("bash", { command: "pwd" }), DENIED, "parent settled, child typed");
 		assert.equal(guardOf(parent)?.arms.length, 1);
 	} finally {
 		await child.emit("session_shutdown", { reason: "quit" });

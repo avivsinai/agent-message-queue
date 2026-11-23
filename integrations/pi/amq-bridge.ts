@@ -2,7 +2,6 @@
 // `pi`. The wire contract is docs/pi-bridge-protocol.md; this file is the
 // extension side of it. The adapter writes requests/; this extension writes
 // receipts/, events/, and bridge.liveness.
-import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { randomBytes, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
@@ -213,7 +212,7 @@ let inactiveNoticeShown = false;
 // them, so a displaced bridge, a new session or a reload keeps them. An arm
 // ends only when its hand-off failed synchronously, or when its granted
 // message started in a session, that session then settled with no pending
-// message, and after that the person typed a prompt in that session;
+// message, and after that the person started a new run in that session;
 // otherwise it stays for the life of the pi process.
 type Arm = {
 	ref: string;
@@ -243,7 +242,9 @@ const gateRowLimit = 20;
 // Pi 1.5.2 ExtensionInputComponent (extension-input.js:30-49) adds two
 // borders, four single-row spacers, the input and its key hints to the title.
 const inputDialogRows = 8;
-const gateAsk = "\n\nType yes to run it. Any other answer does not run it.";
+// The fullscreen dock reserves a transcript row, a widget spacer and two footer rows.
+const dockRows = 4;
+const gateCannotMeasure = "This pi cannot measure the approval dialog; a task that needs this call must be sent with a signature.";
 const gateDenied = "The person at the terminal did not approve this call. It is a call of a task that a linked server sent under a session grant.";
 const gateNoTerminal = "This call needs the person's yes at the terminal, and this pi session has no terminal UI.";
 const gateTooLong = "This call is too long to show whole at the terminal for approval. A task that needs it must be sent with a signature.";
@@ -414,13 +415,17 @@ async function gate(pi: ExtensionAPI, event: ToolCall, ctx: ExtensionContext): P
 		const head = [...arms.values()].some((a) => a.tagged)
 			? `A task that a linked server sent wants to run \`${shown}\`:`
 			: `A task that a linked server sent may still run in this session. \`${shown}\` wants to run:`;
-		const title = [head, text, ...(builtin ? [] : [gateExtensionLine])].join("\n") + gateAsk;
+		const title = [head, text, ...(builtin ? [] : [gateExtensionLine])].join("\n") + `\n\nType yes to run ${shown}. Any other answer does not run it.`;
 		// The dialog title has one cell of padding on either side. Pi's
 		// wrapper counts glyph cells and uses the same word breaks as its Text.
-		const columns = Math.max(20, process.stdout.columns || 80) - 2;
+		const tui = await import("@earendil-works/pi-tui").catch(() => undefined);
+		if (typeof tui?.wrapTextWithAnsi !== "function") return deny(gateCannotMeasure);
+		const terminalColumns = process.stdout.columns || 80;
+		if (terminalColumns < 40) return deny(gateTooLong);
+		const columns = terminalColumns - 2;
 		const rows = process.stdout.rows || Infinity;
-		const availableTitleRows = Math.max(1, rows - inputDialogRows);
-		if (wrapTextWithAnsi(text, columns).length > gateRowLimit || wrapTextWithAnsi(title, columns).length > availableTitleRows) {
+		const availableTitleRows = rows - inputDialogRows - dockRows;
+		if (tui.wrapTextWithAnsi(text, columns).length > gateRowLimit || tui.wrapTextWithAnsi(title, columns).length > availableTitleRows) {
 			return deny(gateTooLong);
 		}
 		const answer = await ctx.ui.input(title, "", { signal: ctx.signal });
@@ -449,7 +454,7 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 	// pi emits input before the run that the input starts.
 	pi.on("input", (event) => {
 		if (arms.size === 0) return undefined;
-		if (event.source === "interactive") endTypedArms(pi);
+		if (event.source === "interactive" && event.streamingBehavior === undefined) endTypedArms(pi);
 		return undefined;
 	});
 

@@ -118,7 +118,7 @@ not run yet as `cancelled`.
 A pi session in its terminal UI takes a link's session grant (bridge revision
 6): while a granted task may still run, every tool call except pi's own
 `read`, `grep`, `find` and `ls` waits until the person types `yes` at the
-terminal, in the person's own runs too until the person types a prompt after
+terminal, in the person's own runs too until the person starts a new run after
 the granted run settled, or pi restarts. In another mode, or embedded with a host's `deliver`, the session
 takes no grant and each task needs its signature
 ([the guard](../../docs/pi-bridge-protocol.md#bridge-revision-6-the-guard-of-granted-tasks)).
