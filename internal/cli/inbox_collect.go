@@ -440,6 +440,7 @@ func readInboxItem(
 		item.FromProject = header.FromProject
 		item.ReplyProject = header.ReplyProject
 		item.ReplyBy = header.ReplyBy
+		item.NewsBy = header.NewsBy
 		if slices.Contains(thread.OpenerKinds, header.Kind) {
 			recipe := completionRecipe(header.Kind)
 			item.Completion = &recipe

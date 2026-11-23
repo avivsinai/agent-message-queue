@@ -19,6 +19,8 @@ import (
 
 const followUpHelp = "Notify me if the recipient has not closed this request, or for another kind of message not replied, after this duration (e.g. 30m); the recipient sees the reply time"
 
+const newsWithinHelp = "One notice if the recipient sends you nothing about this message within this time (e.g. 20m)"
+
 // outgoingMessage is a send or reply whose route, capabilities, and rosters
 // are authorized. deliverOutgoing owns every step from there to the report.
 type outgoingMessage struct {
@@ -64,6 +66,9 @@ type outgoingMessage struct {
 	// followUp, when positive, arms a follow-up timer in the sender's mailbox
 	// for the one recipient.
 	followUp time.Duration
+	// newsWithin, when positive, arms a news timer in the sender's mailbox
+	// for the one recipient.
+	newsWithin time.Duration
 
 	waitFor     string
 	waitTimeout time.Duration
@@ -130,6 +135,9 @@ func deliverOutgoing(m outgoingMessage) error {
 	}
 	if m.followUp > 0 && !m.silent {
 		msg.Header.ReplyBy = now.Add(m.followUp).UTC().Format(time.RFC3339)
+	}
+	if m.newsWithin > 0 && !m.silent {
+		msg.Header.NewsBy = now.Add(m.newsWithin).UTC().Format(time.RFC3339)
 	}
 	data, err := msg.Marshal()
 	if err != nil {
@@ -212,6 +220,12 @@ func deliverOutgoing(m outgoingMessage) error {
 	if m.followUp > 0 {
 		followUp, followUpErr = armFollowUp(m, id, now)
 	}
+	var news *followUpResult
+	var newsErr error
+	if m.newsWithin > 0 {
+		news, newsErr = armNews(m, id, now)
+	}
+	followUpErr = joinOutcomeErr(followUpErr, newsErr)
 
 	var waitResult *waitForResult
 	var waitErr error
@@ -257,6 +271,9 @@ func deliverOutgoing(m outgoingMessage) error {
 		if followUp != nil {
 			out["follow_up"] = followUp
 		}
+		if news != nil {
+			out["news"] = news
+		}
 		if err := writeJSON(os.Stdout, out); err != nil {
 			return err
 		}
@@ -296,6 +313,11 @@ func deliverOutgoing(m outgoingMessage) error {
 			return err
 		}
 	}
+	if news != nil && news.Due != "" {
+		if err := writeStdout("News notice due %s if %s has sent no reply.\n", news.Due, m.recipients[0]); err != nil {
+			return err
+		}
+	}
 	return joinOutcomeErr(waitErr, followUpErr)
 }
 
@@ -312,24 +334,37 @@ type followUpResult struct {
 // at now, in the sender's mailbox: the reply it waits for lands there.
 func armFollowUp(m outgoingMessage, id string, now time.Time) (*followUpResult, error) {
 	timer, err := followup.New(id, m.recipients[0], m.thread, m.subject, m.kind, now, m.followUp)
+	return armTimer(m, id, timer, err, m.followUp, "follow-up")
+}
+
+// armNews writes the news timer of the delivered message id, sent at now,
+// in the sender's mailbox.
+func armNews(m outgoingMessage, id string, now time.Time) (*followUpResult, error) {
+	timer, err := followup.NewNews(id, m.recipients[0], m.thread, m.subject, m.kind, now, m.newsWithin)
+	return armTimer(m, id, timer, err, m.newsWithin, "news clock")
+}
+
+// armTimer writes timer, which was built with err, and reports it; clock
+// names the timer in errors.
+func armTimer(m outgoingMessage, id string, timer followup.Timer, err error, after time.Duration, clock string) (*followUpResult, error) {
 	if err == nil {
 		timer.TargetSession, timer.TargetProject = m.targetSession, m.targetProject
 		err = followup.Write(m.sourceFS, m.me, timer)
 	}
 	var committed *fsq.CommittedDurabilityError
 	if err != nil && !errors.As(err, &committed) {
-		return &followUpResult{Error: err.Error()}, fmt.Errorf("%s %s was delivered, but its follow-up was not armed: %w", m.command, id, err)
+		return &followUpResult{Error: err.Error()}, fmt.Errorf("%s %s was delivered, but its %s was not armed: %w", m.command, id, clock, err)
 	}
 	result := &followUpResult{
 		Due:      timer.Due.Format(time.RFC3339),
-		After:    m.followUp.String(),
+		After:    after.String(),
 		NoticeID: timer.NoticeID,
 	}
 	if err != nil {
 		// The timer file is in place and fires; only its durability is
 		// uncertain.
 		result.Error = err.Error()
-		return result, fmt.Errorf("%s %s follow-up is armed, but not yet durable: %w", m.command, id, err)
+		return result, fmt.Errorf("%s %s %s is armed, but not yet durable: %w", m.command, id, clock, err)
 	}
 	return result, nil
 }

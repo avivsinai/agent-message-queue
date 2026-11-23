@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/followup"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
@@ -612,7 +613,7 @@ func inspectMailboxDir(root, parent *fsq.DeliveryRoot, handle, name string, orig
 		return state, err
 	}
 	for _, name := range followUps {
-		if !strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".json") {
+		if followup.IsTimerName(name) {
 			state.FollowUps++
 		}
 	}

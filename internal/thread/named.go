@@ -60,7 +60,7 @@ func CollectNamed(root, threadID string, agents, ids []string, includeBody bool)
 		if accepted == nil {
 			return nil, fmt.Errorf("named message not found: %s", id)
 		}
-		entry := entryFromHeader(accepted.Header)
+		entry := EntryFromHeader(accepted.Header)
 		if includeBody {
 			entry.Body = accepted.Body
 		}

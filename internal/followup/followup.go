@@ -1,7 +1,8 @@
 // Package followup notifies the sender when a request remains open or another
-// kind of message remains unanswered at its due time. A timer is a file in the
-// sender's mailbox. Draining, reading, or ringing for that mailbox promotes
-// its due timers.
+// kind of message remains unanswered at its due time (a completion timer), or
+// when the recipient has sent no reply about a request at all (a news timer).
+// A timer is a file in the sender's mailbox. Draining, reading, or ringing for
+// that mailbox promotes its due timers.
 package followup
 
 import (
@@ -27,20 +28,37 @@ const Schema = 1
 // Label marks a follow-up notice.
 const Label = "follow-up"
 
+// NewsLabel marks the notice of a news timer, beside Label.
+const NewsLabel = "no-news"
+
+// Timer kinds. A timer with no kind is a completion timer.
+const (
+	KindCompletion = "completion"
+	KindNews       = "news"
+)
+
 // QuarantineSuffix ends the name of a timer file that could not be parsed.
 // Such a file never fires and is kept for the operator.
 const QuarantineSuffix = ".bad"
 
 const (
-	timerSuffix = ".json"
-	lockName    = ".lock"
+	// A completion timer is <request-id>.json and a news timer is
+	// <request-id>.news, so the two timers of one request never share a
+	// file, and a promoter that knows only completion timers never reads a
+	// news timer.
+	timerSuffix     = ".json"
+	newsTimerSuffix = ".news"
+	lockName        = ".lock"
 )
 
 // Timer is one armed follow-up, written once by the sender and never
 // modified. Its notice is a pure function of the timer and the mailbox owner,
 // so every promotion of it builds the same bytes.
 type Timer struct {
-	Schema        int       `json:"schema"`
+	Schema int `json:"schema"`
+	// Kind is KindNews for a news timer; empty or KindCompletion is a
+	// completion timer.
+	Kind          string    `json:"kind,omitempty"`
 	RequestID     string    `json:"request_id"`
 	To            string    `json:"to"`
 	TargetSession string    `json:"target_session,omitempty"`
@@ -75,10 +93,30 @@ func New(requestID, to, thread, subject, kind string, sent time.Time, after time
 	}, nil
 }
 
+// NewNews builds the news timer for request id: due after the given
+// duration unless the recipient has replied about the request by then.
+func NewNews(requestID, to, thread, subject, kind string, sent time.Time, after time.Duration) (Timer, error) {
+	t, err := New(requestID, to, thread, subject, kind, sent, after)
+	t.Kind = KindNews
+	return t, err
+}
+
+func (t Timer) news() bool { return t.Kind == KindNews }
+
+// fileName is the name of t's file in the follow-ups directory.
+func (t Timer) fileName() string {
+	if t.news() {
+		return t.RequestID + newsTimerSuffix
+	}
+	return t.RequestID + timerSuffix
+}
+
 func (t Timer) validate() error {
 	switch {
 	case t.Schema != Schema:
 		return fmt.Errorf("schema %d, want %d", t.Schema, Schema)
+	case t.Kind != "" && t.Kind != KindCompletion && t.Kind != KindNews:
+		return fmt.Errorf("unknown kind %q", t.Kind)
 	case fsq.ValidateMessageFilename(t.RequestID+".md") != nil:
 		return fmt.Errorf("invalid request_id %q", t.RequestID)
 	case fsq.ValidateHandle(t.To) != nil:
@@ -110,7 +148,7 @@ func Write(root *fsq.DeliveryRoot, me string, t Timer) error {
 	if err := root.EnsureAgentDir(me, fsq.MailboxFollowUps); err != nil {
 		return err
 	}
-	_, err = root.WriteFileAtomic(dir(me), t.RequestID+timerSuffix, append(data, '\n'), 0o600)
+	_, err = root.WriteFileAtomic(dir(me), t.fileName(), append(data, '\n'), 0o600)
 	return err
 }
 
@@ -125,7 +163,17 @@ func List(root *fsq.DeliveryRoot, me string) ([]Timer, error) {
 func Notice(t Timer, me string) format.Message {
 	subject := "No reply from " + t.To
 	firstLine := "No reply to this request arrived before its follow-up time."
-	if slices.Contains(thread.OpenerKinds, t.RequestKind) {
+	labels := []string{Label}
+	switch {
+	case t.news():
+		subject = "No reply seen from " + t.To
+		quoted := t.Subject
+		if quoted == "" {
+			quoted = "(no subject)"
+		}
+		firstLine = fmt.Sprintf("No reply seen from %s about \"%s\" since it was sent %s ago.", t.To, quoted, shortDuration(t.Due.Sub(t.Sent)))
+		labels = []string{Label, NewsLabel}
+	case slices.Contains(thread.OpenerKinds, t.RequestKind):
 		subject = "Still open with " + t.To
 		firstLine = "This request was still open at its follow-up time."
 	}
@@ -144,7 +192,7 @@ func Notice(t Timer, me string) format.Message {
 			Refs:     []string{t.RequestID},
 			Priority: format.PriorityNormal,
 			Kind:     format.KindStatus,
-			Labels:   []string{Label},
+			Labels:   labels,
 			Context: map[string]any{"follow_up": map[string]any{
 				"request_id": t.RequestID,
 				"to":         t.To,
@@ -157,14 +205,19 @@ func Notice(t Timer, me string) format.Message {
 }
 
 // Promote delivers the notice of every timer in me's mailbox that is due at
-// now and unanswered, and drops every due timer it settles.
+// now and unanswered, and drops every due timer it settles. Each timer of a
+// request is promoted by its own due time and settles by its own rule.
 //
-// A recipient response in my inbox must reference the message. For a
-// request its kind or labels must also close the obligation. For other
-// kinds, any referenced reply suffices. Thread is never used, because the
-// default thread is shared by every message between the two agents. A
-// message in me's outbox/sent whose refs name the request and whose labels
-// close it for the requester (withdrawn, done, closed) also settles it.
+// A completion timer: a recipient response in my inbox must reference the
+// message. For a request its kind or labels must also close the obligation.
+// For other kinds, any referenced reply suffices. Thread is never used,
+// because the default thread is shared by every message between the two
+// agents. A requester closure in the outbox that references the request
+// settles both the completion and news timers.
+//
+// Both timers skip message files stamped before the earliest due request.
+// A news timer settles when the recipient sends news about the request to
+// this mailbox. Only messages still in the inbox at promotion time count.
 //
 // Promotion holds a non-blocking lock on follow-ups/.lock; a busy lock means
 // another promoter is working and this one returns. Per due timer, in order:
@@ -175,10 +228,12 @@ func Notice(t Timer, me string) format.Message {
 //
 // A crash after delivery and before the unlink leaves a timer whose notice
 // is in the inbox; the next pass unlinks it without a second notice, because
-// the notice id was minted when the timer was written. A failed delivery or
-// inbox scan keeps the timer for the next pass. A timer never fires before
-// its due time. A timer file that does not parse is renamed with
-// QuarantineSuffix and reported in the returned error; it never fires.
+// the notice id was minted when the timer was written. A notice repeats only
+// when its first copy is gone from both inbox/new and inbox/cur by then. A
+// failed delivery or inbox scan keeps the timer for the next pass. A timer
+// never fires before its due time. A timer file that does not parse is
+// renamed with QuarantineSuffix and reported in the returned error; it never
+// fires.
 func Promote(root *fsq.DeliveryRoot, me string, now time.Time) error {
 	timers, broken, err := scan(root, me)
 	if err != nil || (broken == 0 && !anyDue(timers, now)) {
@@ -244,7 +299,7 @@ func promoteOne(root *fsq.DeliveryRoot, me string, t Timer, box mailbox) error {
 			}
 		}
 	}
-	if err := root.Remove(filepath.Join(dir(me), t.RequestID+timerSuffix)); err != nil && !os.IsNotExist(err) {
+	if err := root.Remove(filepath.Join(dir(me), t.fileName())); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return root.SyncDir(dir(me))
@@ -258,17 +313,30 @@ type mailbox struct {
 }
 
 func (m mailbox) settles(t Timer) bool {
+	for _, h := range m.sent {
+		if h.ID != t.RequestID && slices.Contains(h.Refs, t.RequestID) && thread.RequesterCloses(t.RequestKind, h.Labels) {
+			return true
+		}
+	}
+	if t.news() {
+		request := thread.Entry{ID: t.RequestID, Thread: t.Thread, RawTime: t.Sent}
+		for _, h := range m.inbox {
+			if h.ID == t.RequestID || !sameHandle(h.From, t.To) {
+				continue
+			}
+			entry := thread.EntryFromHeader(h)
+			if thread.NewsAbout(&request, &entry) {
+				return true
+			}
+		}
+		return false
+	}
 	request := slices.Contains(thread.OpenerKinds, t.RequestKind)
 	for _, h := range m.inbox {
 		if h.ID == t.RequestID || !sameHandle(h.From, t.To) || !slices.Contains(h.Refs, t.RequestID) {
 			continue
 		}
 		if !request || thread.OwnerCloses(t.RequestKind, h.Kind, h.Labels) {
-			return true
-		}
-	}
-	for _, h := range m.sent {
-		if h.ID != t.RequestID && slices.Contains(h.Refs, t.RequestID) && thread.RequesterCloses(t.RequestKind, h.Labels) {
 			return true
 		}
 	}
@@ -341,6 +409,18 @@ func readMailbox(root *fsq.DeliveryRoot, me string, due []Timer) (mailbox, error
 	return box, nil
 }
 
+// shortDuration prints d without trailing zero units: 20m, 1h30m, 2h.
+func shortDuration(d time.Duration) string {
+	s := d.Round(time.Second).String()
+	if strings.HasSuffix(s, "m0s") {
+		s = strings.TrimSuffix(s, "0s")
+	}
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m")
+	}
+	return s
+}
+
 // scan reads every timer file. broken counts files that do not parse.
 func scan(root *fsq.DeliveryRoot, me string) (timers []Timer, broken int, err error) {
 	entries, err := root.ReadDir(dir(me))
@@ -406,8 +486,13 @@ func sortByDue(timers []Timer) {
 }
 
 func isTimerEntry(entry os.DirEntry) bool {
-	name := entry.Name()
-	return entry.Type().IsRegular() && !strings.HasPrefix(name, ".") && strings.HasSuffix(name, timerSuffix)
+	return entry.Type().IsRegular() && IsTimerName(entry.Name())
+}
+
+// IsTimerName reports whether name is the name of an armed timer file of
+// either kind: <request-id>.json or <request-id>.news.
+func IsTimerName(name string) bool {
+	return !strings.HasPrefix(name, ".") && (strings.HasSuffix(name, timerSuffix) || strings.HasSuffix(name, newsTimerSuffix))
 }
 
 type timerParseError struct {
@@ -431,7 +516,7 @@ func readTimer(root *fsq.DeliveryRoot, me, name string) (Timer, error) {
 	if err := t.validate(); err != nil {
 		return Timer{}, &timerParseError{name: name, err: err}
 	}
-	if t.RequestID+timerSuffix != name {
+	if t.fileName() != name {
 		return Timer{}, &timerParseError{name: name, err: fmt.Errorf("names request %s", t.RequestID)}
 	}
 	return t, nil

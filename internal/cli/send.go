@@ -34,6 +34,7 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 	waitForFlag := fs.String("wait-for", "", "Wait for receipt stage after send (drained, dlq)")
 	waitTimeoutFlag := fs.Duration("wait-timeout", 120*time.Second, "Timeout for --wait-for (0 = wait forever)")
 	followUpFlag := fs.Duration("follow-up", 0, followUpHelp)
+	newsWithinFlag := fs.Duration("news-within", 0, newsWithinHelp)
 
 	// Co-op mode flags
 	priorityFlag := fs.String("priority", "", "Message priority: urgent, normal, low (default when --kind is set: low for status, normal otherwise)")
@@ -121,6 +122,12 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 	}
 	if *followUpFlag > 0 && len(recipients) != 1 {
 		return UsageError("--follow-up requires exactly one recipient (got %d)", len(recipients))
+	}
+	if *newsWithinFlag < 0 {
+		return UsageError("--news-within must be >= 0")
+	}
+	if *newsWithinFlag > 0 && len(recipients) != 1 {
+		return UsageError("--news-within requires exactly one recipient (got %d)", len(recipients))
 	}
 
 	// Determine delivery root: local, cross-session, or cross-project.
@@ -525,6 +532,7 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 		waitFor:                  waitFor,
 		waitTimeout:              *waitTimeoutFlag,
 		followUp:                 *followUpFlag,
+		newsWithin:               *newsWithinFlag,
 		waitTimeoutHint: fmt.Sprintf(" (delivery session %s, root %s); run %s to diagnose mailbox divergence",
 			targetDisplay, deliveryRoot, doctorRootCommandForOS(deliveryRoot, configAuthorityBaseRoot, runtime.GOOS, "--ops")),
 		json:                       common.JSON,
