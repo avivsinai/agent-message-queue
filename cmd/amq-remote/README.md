@@ -1222,15 +1222,26 @@ amq-remote claude prompt-hook             # the receiver the installed hook runs
 The hook runs at each prompt of each Claude Code session on the machine,
 but its command starts `amq-remote` only when an attachment or a binding
 exists, as the Stop hook's command does. The receiver decides nothing: it
-reports the session id and the `permission_mode` of its input to each
-endpoint that serves the session, and prints the text that endpoint
-answers as the prompt's added context. Its timeout is 10 seconds, and it
-always exits 0.
+reports the session id and the `permission_mode` of its input, and the
+stub's id when the prompt is a granted task's stub, to each endpoint that
+serves the session. When an endpoint gives the stub's task text, the
+receiver prints it as the prompt's added context, after one line that
+names the request and the text's SHA-256; for any other prompt it prints
+nothing. Its timeout is 10 seconds, and it always exits 0.
 
-With the hook installed, a session whose mode asks before risky actions
-(`default`, `acceptEdits` or `dontAsk`) takes a link session grant: a
-granted task from the linked server runs in that session with no signature
-per task. A session in `plan`, `auto` or `bypassPermissions`, and every
+With the hook installed, a session takes a link session grant while the
+latest prompt the hook reported is in a mode that asks, or refuses, before
+an action that is not allowed in advance (`default`, `acceptEdits` or
+`dontAsk`): a granted task from the linked server runs in that session with
+no signature per task. The endpoint keeps that report in memory only, so
+after an endpoint restart the session takes no grant until its next prompt.
+The mode of the prompt that the task's stub raises decides again: in
+another mode the task ends `rejected` (`grant_needs_signature: <mode>`).
+A session whose working directory holds, or is inside, the endpoint's state
+directory, the AMQ home or `~/.claude/sessions` takes no grant
+(`state_in_workspace`), and a session in a turn answers `busy`. A granted
+task's text is at most 8192 bytes. A session in `plan`, `auto` or
+`bypassPermissions`, and every
 session on a machine without the hook, takes no grant: each link task needs
 a signature, as it does with no grant. Nothing changes for a signed task.
 
