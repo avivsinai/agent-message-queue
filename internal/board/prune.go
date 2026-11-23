@@ -246,7 +246,7 @@ func (s Snapshot) openObligations(cutoff time.Time) iter.Seq2[string, *thread.Ob
 // one session, outside the sender's routed session, whose agents name it.
 // Anything else is left to the routing fields and the local fallback.
 func obligationEntry(m Message, project string) thread.Entry {
-	e := thread.Entry{ID: m.ID, From: m.From, To: m.To, Thread: m.Thread, Created: m.Created, Kind: m.Kind, Labels: m.Labels, Refs: m.Refs, ReplyTo: m.ReplyTo, ReplyProject: m.ReplyProject, FromProject: m.FromProject}
+	e := thread.Entry{ID: m.ID, From: m.From, To: m.To, Thread: m.Thread, Created: m.Created, Kind: m.Kind, Labels: m.Labels, Refs: m.Refs, NewsBy: m.NewsBy, ReplyTo: m.ReplyTo, ReplyProject: m.ReplyProject, FromProject: m.FromProject}
 	if at, ok := messageTime(m); ok {
 		e.RawTime = at
 	}
