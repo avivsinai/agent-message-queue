@@ -49,30 +49,37 @@ func TestHookDoorbellYieldsOnlyToCurrentDeliveryEvidence(t *testing.T) {
 		blocked   *record
 		inbox     []mail
 		yield     bool
+		owner     time.Duration // the age of the owner file; zero: no owner file
 	}{
-		{"1 waiter, mail not announced", wakeChannelHook, true, nil, nil, one, true},
-		{"2 waiter, mail rung 3 minutes ago", wakeChannelHook, true, &record{[]string{"mail"}, 3 * time.Minute}, nil, one, false},
-		{"3 waiter, mail rung 30 s ago", wakeChannelHook, true, &record{[]string{"mail"}, 30 * time.Second}, nil, one, true},
-		{"4 waiter, mail reported by the Stop guard 3 minutes ago", wakeChannelHook, true, nil, &record{[]string{"mail"}, 3 * time.Minute}, one, false},
+		{"1 waiter, mail not announced", wakeChannelHook, true, nil, nil, one, true, 0},
+		{"2 waiter, mail rung 3 minutes ago", wakeChannelHook, true, &record{[]string{"mail"}, 3 * time.Minute}, nil, one, false, 0},
+		{"3 waiter, mail rung 30 s ago", wakeChannelHook, true, &record{[]string{"mail"}, 30 * time.Second}, nil, one, true, 0},
+		{"4 waiter, mail reported by the Stop guard 3 minutes ago", wakeChannelHook, true, nil, &record{[]string{"mail"}, 3 * time.Minute}, one, false, 0},
 		{"5 waiter, one message covered and one stale", wakeChannelHook, true,
 			&record{[]string{"fresh"}, 30 * time.Second}, &record{[]string{"stale"}, 3 * time.Minute},
-			[]mail{{"fresh.md", "fresh"}, {"stale.md", "stale"}}, false},
+			[]mail{{"fresh.md", "fresh"}, {"stale.md", "stale"}}, false, 0},
 		{"6 waiter, bridged file name rung 3 minutes ago", wakeChannelHook, true,
-			&record{[]string{"mail"}, 3 * time.Minute}, nil, []mail{{"bridged-copy.md", "mail"}}, false},
-		{"7 no waiter, mail rung 30 s ago", wakeChannelHook, false, &record{[]string{"mail"}, 30 * time.Second}, nil, one, true},
-		{"8 no waiter, nothing announced", wakeChannelHook, false, nil, nil, one, false},
-		{"9 no waiter, another message rung 30 s ago", wakeChannelHook, false, &record{[]string{"other"}, 30 * time.Second}, nil, one, true},
-		{"10 no waiter, another message rung 3 minutes ago", wakeChannelHook, false, &record{[]string{"other"}, 3 * time.Minute}, nil, one, false},
+			&record{[]string{"mail"}, 3 * time.Minute}, nil, []mail{{"bridged-copy.md", "mail"}}, false, 0},
+		{"7 no waiter, mail rung 30 s ago", wakeChannelHook, false, &record{[]string{"mail"}, 30 * time.Second}, nil, one, true, 0},
+		{"8 no waiter, nothing announced", wakeChannelHook, false, nil, nil, one, false, 0},
+		{"9 no waiter, another message rung 30 s ago", wakeChannelHook, false, &record{[]string{"other"}, 30 * time.Second}, nil, one, true, 0},
+		{"10 no waiter, another message rung 3 minutes ago", wakeChannelHook, false, &record{[]string{"other"}, 3 * time.Minute}, nil, one, false, 0},
 		// An empty id stands for a file with no readable header.
-		{"11 waiter, an inbox file with no readable header", wakeChannelHook, true, nil, nil, []mail{{"broken.md", ""}}, false},
+		{"11 waiter, an inbox file with no readable header", wakeChannelHook, true, nil, nil, []mail{{"broken.md", ""}}, false, 0},
 		// Row 12 comes from finding H22, codex's live run T11 on 899a64b0:
 		// the waiter wrote its rang record just after the wake's scan read
 		// its clock, the negative age read as old, and the wake typed the
 		// full doorbell 1.6 s after a fresh ring. Row 13 keeps the guard: a
 		// time far ahead is not a fresh ring.
-		{"12 no waiter, mail rung 50 ms after the scan's now", wakeChannelHook, false, &record{[]string{"mail"}, -50 * time.Millisecond}, nil, one, true},
-		{"13 no waiter, mail rung 1 hour after the scan's now", wakeChannelHook, false, &record{[]string{"mail"}, -time.Hour}, nil, one, false},
-		{"unpublished", "", true, nil, nil, one, false},
+		{"12 no waiter, mail rung 50 ms after the scan's now", wakeChannelHook, false, &record{[]string{"mail"}, -50 * time.Millisecond}, nil, one, true, 0},
+		{"13 no waiter, mail rung 1 hour after the scan's now", wakeChannelHook, false, &record{[]string{"mail"}, -time.Hour}, nil, one, false, 0},
+		// Row 14 comes from the review of 889b523c: a turn end started a
+		// waiter less than one debounce after mail arrived, the older waiter
+		// left without a ring, and the wake scanned while no process held
+		// the lock, so it typed for mail that the new waiter rang 1.1 s
+		// later.
+		{"14 no lock holder, a waiter declared itself 300 ms ago", wakeChannelHook, false, nil, nil, one, true, 300 * time.Millisecond},
+		{"unpublished", "", true, nil, nil, one, false, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newWakeHoldHarness(t, wakeHoldPolicy{})
@@ -96,6 +103,16 @@ func TestHookDoorbellYieldsOnlyToCurrentDeliveryEvidence(t *testing.T) {
 					t.Fatal(err)
 				}
 				at := h.now.Add(-rec.age)
+				if err := os.Chtimes(path, at, at); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.owner != 0 {
+				path := filepath.Join(agent, coopWaitOwnerFile)
+				if err := writeCoopHookState(path, "newer-waiter"); err != nil {
+					t.Fatal(err)
+				}
+				at := h.now.Add(-tc.owner)
 				if err := os.Chtimes(path, at, at); err != nil {
 					t.Fatal(err)
 				}

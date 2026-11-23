@@ -41,6 +41,11 @@ const (
 	// for the waiter lock, whose release makes no file event. It reads the
 	// wake settings when mail is unread.
 	coopWaitPoll = time.Second
+	// coopWaitHandOver bounds the time from a waiter's owner file to its
+	// hold of the waiter lock: the older waiter leaves within one poll of
+	// the file, the newer one tries the lock again within one poll of that,
+	// and the third poll covers a debounce that the older one finishes.
+	coopWaitHandOver = 3 * coopWaitPoll
 	// coopWaitIdle is how often a waiter that holds the lock and watches its
 	// files looks again with no file event: for the facts that make none, such
 	// as its parent, its host session, its binding, a wake that died with
@@ -320,6 +325,20 @@ func coopWaitRuns(root, me string) bool {
 	defer func() { _ = f.Close() }()
 	ok, err := lock.TryLock(f)
 	return err == nil && !ok
+}
+
+// coopWaitStarting reports whether a waiter of (root, me) declared itself
+// less than coopWaitHandOver before now: it is the newest waiter, and it
+// takes the waiter lock when the older one leaves. Between the two no
+// process holds the lock. The owner file is read without following a link
+// and is never created.
+func coopWaitStarting(root, me string, now time.Time) bool {
+	info, err := os.Lstat(filepath.Join(fsq.AgentBase(root, me), coopWaitOwnerFile))
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	age, ok := hookRecordAge(now, info.ModTime())
+	return ok && age < coopWaitHandOver
 }
 
 // coopWaitRunsInBackground reports whether the Claude Code session this

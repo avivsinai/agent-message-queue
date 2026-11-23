@@ -57,24 +57,26 @@ func (cfg *wakeConfig) applyPublishedChannel(channel wakeChannel) {
 
 // hookYield reports whether the harness's own hook covers every message of
 // ids, the header ids of the cohort the wake would announce, and when to
-// look again. A message is covered when a waiter holds its lock and no hook
-// announced it (the waiter rings it); when the record that announced it is
-// younger than hookRingGrace (the agent has the grace to drain); or when no
-// waiter holds the lock, no hook announced it, and the waiter's last ring
-// of any message is younger than hookRingGrace (the turn that ring started
-// runs, and its end starts the waiter that rings this message). A record
-// time ahead of now by at most hookRecordSkew is a record written at now; a
-// time further ahead counts as old. An announced message whose record is
-// old was not followed by a drain, so the wake types for it even while a
-// waiter holds the lock. An empty cohort is not covered, and neither is a
-// cohort with a file that has no readable header id: the waiter cannot
-// ring it. Every fact here is delivery evidence; only a drain receipt
-// establishes consumption.
+// look again. A waiter runs when a process holds the waiter lock, or when
+// the newest waiter declared itself less than coopWaitHandOver ago and
+// takes the lock from the older one. A message is covered when a waiter
+// runs and no hook announced it (the waiter rings it); when the record that
+// announced it is younger than hookRingGrace (the agent has the grace to
+// drain); or when no waiter runs, no hook announced it, and the waiter's
+// last ring of any message is younger than hookRingGrace (the turn that
+// ring started runs, and its end starts the waiter that rings this
+// message). A record time ahead of now by at most hookRecordSkew is a
+// record written at now; a time further ahead counts as old. An announced
+// message whose record is old was not followed by a drain, so the wake
+// types for it even while a waiter runs. An empty cohort is not covered,
+// and neither is a cohort with a file that has no readable header id: the
+// waiter cannot ring it. Every fact here is delivery evidence; only a drain
+// receipt establishes consumption.
 func (cfg *wakeConfig) hookYield(now time.Time, ids []string) (time.Duration, bool) {
 	if cfg.publishedChannel != wakeChannelHook {
 		return 0, false
 	}
-	waiter := coopWaitRuns(cfg.root, cfg.me)
+	waiter := coopWaitRuns(cfg.root, cfg.me) || coopWaitStarting(cfg.root, cfg.me, now)
 	// The wake does not know the waiter's session, so a ring of any session
 	// counts.
 	seen := coopAnnounced(fsq.AgentBase(cfg.root, cfg.me), "", true)
