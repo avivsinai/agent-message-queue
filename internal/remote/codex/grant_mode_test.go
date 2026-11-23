@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
+	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
@@ -174,6 +176,36 @@ func TestGrantedSubmitIsRefusedWhenTheThreadCanWriteTheState(t *testing.T) {
 	case call := <-srv.calls:
 		t.Fatalf("the refused granted submit sent %s", call.Method)
 	default:
+	}
+}
+
+// The adapter's last check needs the endpoint's state directory. An
+// attachment built with none refuses every granted request, and the factory
+// passes the build call's directory (merge check of the session grant
+// branch: without the second, every granted Codex task is refused in
+// production while every other test passes).
+func TestGrantedSubmitNeedsTheStateDirectoryOfItsBuild(t *testing.T) {
+	work, state := t.TempDir(), t.TempDir()
+	const refused = "grant_unsupported: state_in_workspace: the session can write this machine's state with no dialog"
+
+	sock, srv := startFakeAppServer(t)
+	srv.setResumeMode(scopedMode(work), nil)
+	bare := attachWithMode(t, srv, sock)
+	if adm := grantedSubmit(t, bare, "11111111-1111-4111-8111-111111111604"); adm.Admitted || adm.Code != protocol.CodeConsentInvalid || !adm.NothingSent || adm.Message != refused {
+		t.Fatalf("granted submit with no state directory = %+v; want consent_invalid %q, nothing sent", adm, refused)
+	}
+
+	sock, srv = startFakeAppServer(t)
+	srv.setResumeMode(scopedMode(work), nil)
+	conf, _ := json.Marshal(config{Socket: sock, Thread: "t1"})
+	built, err := Factory(context.Background(), registry.FactoryConfig{StateDir: state, Config: conf})
+	if err != nil {
+		t.Fatalf("factory: %v", err)
+	}
+	att := built.(*Attachment)
+	t.Cleanup(func() { _ = att.Close() })
+	if want, _ := filepath.Abs(state); att.stateDir != want {
+		t.Fatalf("the factory's attachment holds state directory %q, want %q", att.stateDir, want)
 	}
 }
 

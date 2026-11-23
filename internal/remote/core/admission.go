@@ -57,10 +57,16 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 				out.Code, out.Message = protocol.CodeRequestConflict, msg
 			} else if rec.State == protocol.StateRejected {
 				// The same request sent again after it ended rejected gets
-				// the answer it got: the stored code and the adapter's text,
-				// as status/get returns them. An empty code would read as
-				// accepted over a link, which carries only the outcome.
-				out.Code, out.Message = rec.Code, rec.RefusalReason
+				// the adapter's text, as status/get returns it. A link
+				// carries only the outcome, where an empty code reads as
+				// accepted, so a link's record also answers its stored
+				// code. Every other caller reads the snapshot beside the
+				// outcome, and an outcome code there speaks of this call:
+				// busy would ask for a resend that never runs.
+				out.Message = rec.RefusalReason
+				if rec.Origin["carrier"] == CarrierLink {
+					out.Code = rec.Code
+				}
 			}
 			return protocol.Reply{Snapshot: rec.Snapshot, Outcome: out}, nil
 		}
@@ -554,7 +560,8 @@ func readmittableBusy(rec *requests.Record) bool {
 		rec.State == protocol.StateRejected &&
 		rec.Code == protocol.CodeBusy &&
 		rec.NativeDispatches == 0 &&
-		rec.Cancel == nil
+		rec.Cancel == nil &&
+		rec.InputDigest != ""
 }
 
 // conflictWith reports whether cmd, whose input digest is digest, sent under
@@ -565,8 +572,8 @@ func readmittableBusy(rec *requests.Record) bool {
 // document, or the same command under the same grant, is a link's stored
 // request, and another signature or another grant for the same request id
 // never runs, whatever the record's state. A record with no stored digest
-// (a cancel that came first) conflicts by its other values only; a busy
-// tombstone always stores one. Nothing is admitted after not_after, so a
+// (a cancel that came first) conflicts by its other values only, and is
+// never re-admitted (readmittableBusy). Nothing is admitted after not_after, so a
 // link record whose deadline passed never runs.
 func conflictWith(rec *requests.Record, cmd *protocol.Command, digest, grantDigest string) (message string, conflict bool) {
 	switch link := rec.Origin["carrier"] == CarrierLink; {

@@ -101,7 +101,7 @@ signed submit is refused before admission with one of:
 | `clock_skew` | `issued_at` is more than 60 s from the machine's clock |
 | `expired` | The consent's `not_after` has passed |
 | `unshared` | The binding is not shared with this link |
-| `busy` | The harness is busy and `input.busy` is `reject`. The reply is `{"outcome": {"op": "request.submit", "code": "busy"}}`. The server may send the same signed document again; wait at least 2 seconds between sends. It is admitted when the session is free, while the document's `issued_at` is within 60 s of the machine's clock and before its `not_after`. A document for the same request id with another input or `not_after` does not run and is answered `request_conflict` |
+| `busy` | The harness is busy and `input.busy` is `reject`. The reply is `{"outcome": {"op": "request.submit", "code": "busy"}}`. The server may send the same signed document again; wait at least 2 seconds between sends. When nothing was sent to the harness for it, it is admitted when the session is free, while the document's `issued_at` is within 60 s of the machine's clock and before its `not_after`. A request sent again after it ended rejected gets the code and reason it ended with. A document for the same request id with another input or `not_after` does not run and is answered `request_conflict` |
 
 `busy` and `request_conflict` arrive as an outcome reply, not as an error
 reply, and `busy` leaves a busy record.
@@ -214,11 +214,13 @@ retired.
    session and signing key; its record keeps the grant's digest.
 
 Right before the hand-over to the harness (also for a busy request sent
-again) the machine checks 3 and 5 again, and the adapter checks 7. A
-granted request stopped there ends `rejected` with code `consent_invalid`.
-A snapshot has no message: the reason (`grant_revoked: ...`,
-`grant_expired: ...`, `grant_needs_signature: ...`) is the message of the
-outcome of `request.get`.
+again) the machine checks 3 and 5 again, and the adapter checks 7 and, on
+the settings of that dispatch, that the session cannot write the machine's
+state directory with no dialog. A granted request stopped there ends
+`rejected` with code `consent_invalid`. A snapshot has no message: the
+reason (`grant_revoked: ...`, `grant_expired: ...`,
+`grant_needs_signature: ...`, `grant_unsupported: state_in_workspace: ...`)
+is the message of the outcome of `request.get`.
 
 ### How a grant ends
 
@@ -296,7 +298,10 @@ Error replies, before admission (nothing was sent):
 record or a revision. Outcome replies to `granted_submit` are as for a
 signed submit: no code (admitted), `busy`, `request_conflict` (the request
 id is in use with another input, `not_after`, signature or grant),
-`storage_full`, `attachment_lost`.
+`storage_full`, `attachment_lost`. A request sent again after it ended
+rejected gets the code and reason it ended with, for example
+`consent_invalid` with a reason that starts with `grant_needs_signature` or
+`grant_unsupported`.
 
 The reason a grant ended depends on what the machine saw. In the run of the
 machine that saw a grant end, every later answer for that grant keeps its
