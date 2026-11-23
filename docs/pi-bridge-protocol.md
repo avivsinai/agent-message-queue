@@ -412,8 +412,9 @@ grant.
 extension refuses a granted request whose `bridge_revision` is below 6
 (reason `revision`), and a granted request while pi is not in its terminal
 UI or while a host delivers its requests (reason `unsupported`, "a granted
-task needs the pi terminal UI"). A `granted` of `false` or `null` reads as absent;
-any other value that is not `true` is `invalid`. These checks run after the generation check and before the busy
+task needs the pi terminal UI"). The `granted` field is optional. When present, it must be a
+JSON boolean. Any other value, including `null`, is refused with reason
+`invalid` before the receipt. These checks run after the generation check and before the busy
 check. Busy is as for every request: a granted request that arrives while pi
 is busy is refused `busy`, and its request id is spent; the server sends the
 task again with a new `request_id`.
@@ -426,7 +427,10 @@ whole), which holds `{"pid": <pid>, "started": <seconds>, "arms": [{"arm",
 process's start in Unix seconds. A write that fails sends nothing and
 settles the request `failed`. The text handed to pi is the request's text, an
 empty line, and the line `[AMQ granted task <arm>]`, so only that message
-carries the arm. The guard is the state of the pi process, not of the
+carries the arm. The user activity record carries the original request text.
+Another extension's input handler can see, change or consume the tagged text,
+in which case a failed ownership match leaves the outcome uncertain and the guard armed.
+The guard is the state of the pi process, not of the
 mailbox: a bridge that loses its mailbox, a new session and a reload keep it,
 and the extension never reads, changes or removes another process's file. A
 reload loads the extension again in the same process; at `session_start`,

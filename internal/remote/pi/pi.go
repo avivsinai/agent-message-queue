@@ -1020,6 +1020,14 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	// filesystem read happens without the lock.
 	a.mu.Unlock()
 	live := a.dir.liveness(a.now())
+	// Check the grant against the same liveness record before the ordinary admission checks.
+	revision := MinBridgeRevision
+	if req.Granted {
+		if asks, why := sessionAsks(live); !asks {
+			return core.Admission{Code: protocol.CodeConsentInvalid, Message: "grant_needs_signature: " + why, NothingSent: true}, nil
+		}
+		revision = GateBridgeRevision
+	}
 	if !live.live {
 		return core.Admission{Code: protocol.CodeAttachmentLost, Message: fmt.Sprintf("no live %s bridge for handle %q (bridge.liveness %s)", a.dir.names.harness, a.handle, live.reason)}, nil
 	}
@@ -1040,16 +1048,6 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		if live.gen != epochHint {
 			return core.Admission{Code: protocol.CodeStaleEpoch, Message: "the pi session changed after inspect; re-inspect"}, nil
 		}
-	}
-	// A granted request runs only where the bridge gates its tool calls,
-	// read from the same liveness as the checks above; it then requires the
-	// gate's revision, so a bridge that does not gate refuses it too.
-	revision := MinBridgeRevision
-	if req.Granted {
-		if asks, why := sessionAsks(live); !asks {
-			return core.Admission{Code: protocol.CodeConsentInvalid, Message: "grant_needs_signature: " + why, NothingSent: true}, nil
-		}
-		revision = GateBridgeRevision
 	}
 	// File I/O outside a.mu: the mutex guards correlation state, not the
 	// seam. A concurrent same-key submit cannot happen (the endpoint's

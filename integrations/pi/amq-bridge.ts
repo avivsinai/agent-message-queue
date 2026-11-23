@@ -175,10 +175,10 @@ type Bridge = {
 	// runStartAt is the byte offset in the activity file where the last
 	// run_start record was written, -1 before the first.
 	runStartAt: number;
-	// requestUser is the ref of the in-flight request whose own user
+	// requestUser identifies the in-flight request whose own user
 	// message started and has not ended yet: the first user message, after
 	// the hand-off, whose text is the request's text.
-	requestUser: string;
+	requestUser: { ref: string; text: string } | null;
 };
 
 type Inflight = {
@@ -260,9 +260,9 @@ function processStarted(): number {
 	return Math.round((Date.now() - process.uptime() * 1000) / 1000);
 }
 
-// armLine is the last line of the text handed to pi for a granted request.
-function armLine(arm: string): string {
-	return `[AMQ granted task ${arm}]`;
+// Only the native hand-off and its ownership match use the tagged text.
+function handoffText(f: Inflight): string {
+	return f.arm ? `${f.text}\n\n[AMQ granted task ${f.arm}]` : f.text;
 }
 
 // writeGuard makes this process's guard file in dir hold the open arms of
@@ -659,10 +659,10 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 		if (!b || !f || f.terminal) return;
 		const msg = event.message as { role?: string; content?: unknown };
 		if (msg.role !== "user") return;
-		const own = !f.tagged && textOf(msg.content) === f.text;
+		const own = !f.tagged && textOf(msg.content) === handoffText(f);
 		if (own) {
 			f.tagged = true;
-			b.requestUser = f.ref;
+			b.requestUser = { ref: f.ref, text: f.text };
 			// A granted request's text ends with its arm line, so this
 			// match is the start of the message that carries the arm.
 			const a = f.arm ? arms.get(f.arm) : undefined;
@@ -876,7 +876,7 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOption
 		runs: 0,
 		runOutcome: "",
 		runStartAt: -1,
-		requestUser: "",
+		requestUser: null,
 	};
 	writeLiveness(b, true);
 	closeOrphanedReceipts(b);
@@ -1162,7 +1162,7 @@ function scan(pi: ExtensionAPI, b: Bridge): void {
 		const arm = verdict.granted ? randomBytes(16).toString("hex") : "";
 		const f: Inflight = {
 			ref,
-			text: arm ? `${verdict.text}\n\n${armLine(arm)}` : verdict.text,
+			text: verdict.text,
 			deliveredAt: Date.now(),
 			started: false,
 			tagged: false,
@@ -1193,7 +1193,7 @@ function scan(pi: ExtensionAPI, b: Bridge): void {
 			continue;
 		}
 		try {
-			pi.sendUserMessage(f.text, { deliverAs: "followUp" });
+			pi.sendUserMessage(handoffText(f), { deliverAs: "followUp" });
 		} catch (err) {
 			if (arm) endArm(arm); // proven non-delivery
 			settle(b, { event: "failed", error: `sendUserMessage: ${String(err)}` });
@@ -1301,7 +1301,7 @@ function examine(b: Bridge, ref: string): Verdict {
 	// absent or empty hint addresses none, so a request retained across
 	// session_start never runs in a session it was not sent to.
 	if (hint !== b.generation) return refuse("generation", "epoch_hint does not match the live session generation");
-	const granted = req.granted ?? false;
+	const { granted = false } = req;
 	if (typeof granted !== "boolean") return refuse("invalid", "granted is not a boolean");
 	if (granted) {
 		// A granted request runs only where the guard asks the person at
@@ -1607,7 +1607,7 @@ function activityHooks(pi: ExtensionAPI, get: () => Bridge | null): void {
 		appendActivity(b, { kind: "settled", status: event.aborted ? "aborted" : b.runOutcome || "error" });
 		b.run = "";
 		b.runOutcome = "";
-		b.requestUser = "";
+		b.requestUser = null;
 	});
 	pi.on("turn_start", () => {
 		const b = get();
@@ -1627,10 +1627,10 @@ function activityHooks(pi: ExtensionAPI, get: () => Bridge | null): void {
 		const msg = event.message as { role?: string; content?: unknown };
 		if (msg.role !== "user" && msg.role !== "assistant") return;
 		// The request's own user message carries its ref.
-		const id = msg.role === "user" ? b.requestUser : "";
-		if (msg.role === "user") b.requestUser = "";
-		const text = truncateUtf8(textOf(msg.content), MAX_ACTIVITY_TEXT);
-		if (text) appendActivity(b, { kind: msg.role, id, text });
+		const request = msg.role === "user" ? b.requestUser : null;
+		if (msg.role === "user") b.requestUser = null;
+		const text = truncateUtf8(request?.text ?? textOf(msg.content), MAX_ACTIVITY_TEXT);
+		if (text) appendActivity(b, { kind: msg.role, id: request?.ref, text });
 	});
 	pi.on("tool_execution_start", (event) => {
 		const b = get();

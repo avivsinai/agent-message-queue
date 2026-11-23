@@ -1254,17 +1254,45 @@ func TestSessionAsksOnlyWithALiveGate(t *testing.T) {
 // A granted Submit to a bridge that does not gate is refused with nothing
 // written, as the Codex adapter refuses a session that does not ask.
 func TestGrantedSubmitToABridgeThatDoesNotGate(t *testing.T) {
-	a, dir := newTestAttachment(t)
-	stampGate(t, dir, fixedNow, 5, "tui", true)
-	req := submitReq(testKey("granted-old"), "hello")
-	req.Granted = true
-	adm, err := a.Submit(req)
-	want := core.Admission{Code: protocol.CodeConsentInvalid, Message: "grant_needs_signature: the pi bridge does not gate tool calls", NothingSent: true}
-	if err != nil || adm != want {
-		t.Fatalf("Submit = %+v, %v; want %+v", adm, err, want)
-	}
-	if entries, err := os.ReadDir(filepath.Join(dir, "requests")); err != nil || len(entries) != 0 {
-		t.Fatalf("requests/ = %v (%v), want empty", entries, err)
+	for _, tc := range []struct {
+		name       string
+		revision   int
+		at         time.Time
+		signedCode protocol.Code
+		why        string
+	}{
+		{"absent", 0, time.Time{}, protocol.CodeAttachmentLost, "mode_unreadable"},
+		{"stale", 6, fixedNow.Add(-time.Minute), protocol.CodeAttachmentLost, "mode_unreadable"},
+		{"revision 2", 2, fixedNow, protocol.CodeUnsupported, "the pi bridge does not gate tool calls"},
+		{"revision 5", 5, fixedNow, "", "the pi bridge does not gate tool calls"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, dir := newTestAttachment(t)
+			if tc.revision == 0 {
+				if err := os.Remove(filepath.Join(dir, "bridge.liveness")); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				stampGate(t, dir, tc.at, tc.revision, "tui", true)
+			}
+			req := submitReq(testKey("granted-old"), "hello")
+			req.Granted = true
+			adm, err := a.Submit(req)
+			want := core.Admission{Code: protocol.CodeConsentInvalid, Message: "grant_needs_signature: " + tc.why, NothingSent: true}
+			if err != nil || adm != want {
+				t.Errorf("granted Submit = %+v, %v; want %+v", adm, err, want)
+			}
+			if tc.signedCode != "" {
+				req.Granted = false
+				adm, err = a.Submit(req)
+				if err != nil || adm.Code != tc.signedCode || adm.NothingSent || adm.Admitted {
+					t.Errorf("signed Submit = %+v, %v; want %v", adm, err, tc.signedCode)
+				}
+			}
+			if entries, err := os.ReadDir(filepath.Join(dir, "requests")); err != nil || len(entries) != 0 {
+				t.Fatalf("requests/ = %v (%v), want empty", entries, err)
+			}
+		})
 	}
 }
 

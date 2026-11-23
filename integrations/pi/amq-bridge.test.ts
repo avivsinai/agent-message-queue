@@ -1335,6 +1335,13 @@ test("a granted task's tool calls ask the person at the terminal until the perso
 		assert.deepEqual(h.sent[0], { content: `remote task\n\n[AMQ granted task ${arm}]`, options: { deliverAs: "followUp" } });
 
 		await h.emit("message_start", userMessage(h.sent[0].content as string));
+		await h.emit("message_end", userMessage(h.sent[0].content as string));
+		const activity = fs
+			.readFileSync(path.join(h.dir, "activity", "pi-session-1.jsonl"), "utf8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line));
+		assert.deepEqual(activity.filter((row) => row.kind === "user").map((row) => [row.id, row.text]), [[REF, "remote task"]]);
 		h.answer = () => "yes";
 		const input = { command: "ls -la" };
 		assert.equal(await h.tool("bash", input), undefined);
@@ -1696,14 +1703,15 @@ test("guard: a guard file that cannot be written sends nothing and settles the r
 });
 
 // Guard table, row "granted not a boolean": only true grants; any other
-// value that is not false or null is refused before anything is sent.
+// present value that is not a boolean is refused before the receipt.
 test("guard: a granted value that is not a boolean is refused invalid with nothing sent", async () => {
-	for (const value of [1, "true"]) {
+	for (const value of [1, "true", null]) {
 		const h = harness(undefined, undefined, await freshBridge());
 		await h.start();
 		try {
 			h.publish(REF, "remote task", h.generation(), { bridge_revision: 6, granted: value });
-			await h.waitFor(() => h.events(REF).length > 0);
+			await h.waitFor(() => h.events(REF).length > 0 || h.sent.length > 0);
+			assert.equal(h.hasReceipt(REF), false, JSON.stringify(value));
 			assert.deepEqual(
 				h.events(REF).map((e) => [e.event, e.reason]),
 				[["refused", "invalid"]],
@@ -1855,18 +1863,20 @@ test("guard: displacement of the mailbox during the run keeps the guard", async 
 });
 
 // Guard table, row "no granted": a request without the field changes nothing.
-test("guard: a request with no granted field arms nothing", async () => {
-	const h = harness(undefined, undefined, await freshBridge());
-	await h.start();
-	try {
-		h.publish(REF, "remote task", h.generation(), { bridge_revision: 6 });
-		await h.waitFor(() => h.sent.length === 1);
-		assert.equal(h.sent[0].content, "remote task");
-		assert.deepEqual(h.guards(), []);
-		assert.equal(await h.tool("bash", { command: "make" }), undefined);
-		assert.equal(h.state.lookups, 0);
-	} finally {
-		await h.done();
+test("guard: a request with an absent or false granted field arms nothing", async () => {
+	for (const fields of [{}, { granted: false }]) {
+		const h = harness(undefined, undefined, await freshBridge());
+		await h.start();
+		try {
+			h.publish(REF, "remote task", h.generation(), { bridge_revision: 6, ...fields });
+			await h.waitFor(() => h.sent.length === 1);
+			assert.equal(h.sent[0].content, "remote task");
+			assert.deepEqual(h.guards(), []);
+			assert.equal(await h.tool("bash", { command: "make" }), undefined);
+			assert.equal(h.state.lookups, 0);
+		} finally {
+			await h.done();
+		}
 	}
 });
 
