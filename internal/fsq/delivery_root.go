@@ -661,15 +661,11 @@ const (
 func (r *DeliveryRoot) mkdirAllSynced(mode durability, dirs ...string) error {
 	created := false
 	for _, dir := range dirs {
-		if err := r.refuseNonDirectoryAncestor(dir); err != nil {
+		made, err := r.mkdirHeld(dir)
+		if err != nil {
 			return err
 		}
-		if !r.dirExists(dir) {
-			created = true
-		}
-		if err := r.root.MkdirAll(dir, 0o700); err != nil {
-			return err
-		}
+		created = created || made
 	}
 	if !created && mode == syncIfCreated {
 		return nil
@@ -697,31 +693,67 @@ func (r *DeliveryRoot) mkdirAllSynced(mode durability, dirs ...string) error {
 	return nil
 }
 
-// refuseNonDirectoryAncestor walks from dir toward the pinned root and fails
-// when any existing level is not a directory. Pinned twin of
-// refuseNonDirectoryAmbient.
-func (r *DeliveryRoot) refuseNonDirectoryAncestor(dir string) error {
-	current := dir
-	for {
-		info, err := r.root.Stat(current)
-		if err == nil {
-			if !info.IsDir() {
-				// A regular file where a mailbox directory must be is a
-				// corrupt layout, not a missing level. Refuse before staging
-				// anything so a multi-recipient delivery fails whole, never
-				// partially committed.
-				return fmt.Errorf("mailbox path %s exists and is not a directory", current)
-			}
-			return nil
-		} else if !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("stat %s: %w", current, err)
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return nil
-		}
-		current = parent
+// mkdirHeld creates dir and its missing ancestors below the pinned root.
+// Each level is created and opened as a direct child of its held parent, and
+// a level that is a symbolic link, is not a directory, or is replaced while
+// it is opened is refused. It reports whether it created a level.
+//
+// A regular file where a mailbox directory must be is a corrupt layout, not a
+// missing level. Delivery runs this before it stages anything, so a
+// multi-recipient delivery fails whole, never partially committed.
+func (r *DeliveryRoot) mkdirHeld(dir string) (created bool, err error) {
+	clean := filepath.Clean(dir)
+	if clean == "." {
+		return false, nil
 	}
+	parent := r.root
+	defer func() {
+		if parent != r.root {
+			_ = parent.Close()
+		}
+	}()
+	parts := strings.Split(filepath.ToSlash(clean), "/")
+	for i, name := range parts {
+		rel := filepath.Join(parts[:i+1]...)
+		info, err := parent.Lstat(name)
+		if errors.Is(err, fs.ErrNotExist) {
+			mkdirErr := parent.Mkdir(name, 0o700)
+			if mkdirErr == nil {
+				created = true
+			} else if !errors.Is(mkdirErr, fs.ErrExist) {
+				return created, fmt.Errorf("create mailbox path %s: %w", rel, mkdirErr)
+			}
+			info, err = parent.Lstat(name)
+		}
+		if err != nil {
+			return created, fmt.Errorf("stat %s: %w", rel, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return created, fmt.Errorf("mailbox path %s is a symbolic link", rel)
+		}
+		if !info.IsDir() {
+			return created, fmt.Errorf("mailbox path %s exists and is not a directory", rel)
+		}
+		// OpenRoot follows a link put in place after the Lstat above; the
+		// identity check refuses whatever it opened instead.
+		child, err := parent.OpenRoot(name)
+		if err != nil {
+			return created, fmt.Errorf("open mailbox path %s: %w", rel, err)
+		}
+		childInfo, err := child.Stat(".")
+		if err == nil && !os.SameFile(info, childInfo) {
+			err = fmt.Errorf("mailbox path %s changed during creation", rel)
+		}
+		if err != nil {
+			_ = child.Close()
+			return created, err
+		}
+		if parent != r.root {
+			_ = parent.Close()
+		}
+		parent = child
+	}
+	return created, nil
 }
 
 // CreateExclusiveFile writes a root-relative regular file and refuses if the
