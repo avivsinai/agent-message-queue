@@ -100,6 +100,8 @@ func TestRunDrainMovesToCur(t *testing.T) {
 	}
 }
 
+// A drain that names another handle than the shell's pin still drains, and
+// says on stderr which handle it acts as.
 func TestRunDrainAsAnotherHandleNamesThePinnedHandle(t *testing.T) {
 	root := t.TempDir()
 	for _, handle := range []string{"alice", "bob"} {

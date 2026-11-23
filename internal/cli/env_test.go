@@ -499,7 +499,8 @@ func TestRunEnvExportSessionEmitsBaseRootAndPinNote(t *testing.T) {
 
 // A seat that coop exec pinned to codex-lead ran
 // `amq env --session session1 --me codex` from a remembered handle; env
-// printed a codex context with no word, and codex-lead's mail stayed unread.
+// printed a codex context with no word, and codex-lead's mail stayed unread
+// (bead agent-message-queue-b6ia, observed 2026-11-22).
 func TestRunEnvNamesPinnedHandleWhenContextIsForAnother(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, "session1")
