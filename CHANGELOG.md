@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.168.0](https://github.com/avivsinai/agent-message-queue/compare/v0.167.0...v0.168.0) (2026-11-23)
+
+
+### Features
+
+* **board:** each new floor problem is sent once to the lead and an alternate ([f272f67](https://github.com/avivsinai/agent-message-queue/commit/f272f678405ca4f7b7f8582fa2bcd175ade8bc50))
+* **wake:** record the input guard decision on doorbell results ([b1debde](https://github.com/avivsinai/agent-message-queue/commit/b1debde47b854ce3681d8c9d6e8fa9540f82bbdf))
+
 ## [0.167.0](https://github.com/avivsinai/agent-message-queue/compare/v0.166.0...v0.167.0) (2026-11-23)
 
 
