@@ -34,6 +34,34 @@ func readPublishedSnapshot() (board.Snapshot, board.FileConfig, error) {
 	return state, cfg, err
 }
 
+// checkNotifyContext resolves and pins the live project route independently
+// of a published snapshot, which is allowed to be stale.
+func checkNotifyContext(ctx context.Context) (board.Store, board.Env, board.FileConfig, string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return board.Store{}, board.Env{}, board.FileConfig{}, "", err
+	}
+	cfg, warnings := loadConfig(dir)
+	for _, w := range warnings {
+		fmt.Fprintln(os.Stderr, "amq-board: config:", w)
+	}
+	store, env, err := resolveBoardContext(ctx, newEnv(dir, execRunner{}))
+	if err != nil {
+		return board.Store{}, board.Env{}, cfg, "", err
+	}
+	if err := env.Run.(execRunner).amqValidate(ctx); err != nil {
+		return board.Store{}, board.Env{}, cfg, "", err
+	}
+	bc, err := readBoardContext(ctx, env)
+	return store, env, cfg, bc.Session, err
+}
+
+// notifyRoster uses the ordinary live source adapter with the pinned route;
+// a past snapshot cannot invent a sender or a recipient.
+func notifyRoster(ctx context.Context, env board.Env) []board.RosterEntry {
+	return (source.AMQ{}).Read(ctx, env).Roster
+}
+
 func runSync(args []string) int {
 	flags := flag.NewFlagSet("amq-board sync", flag.ContinueOnError)
 	init := flags.Bool("init", false, "initialize the project store for the first time")

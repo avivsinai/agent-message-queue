@@ -378,6 +378,21 @@ amq-board check
 amq thread open
 ```
 
+An operator's schedule can notify both `lead` and `alt` about each new
+incident. The dedicated `floor` mailbox must be in the live board session;
+never use a working seat as the sender:
+
+```sh
+amq-board sync && amq-board check --notify lead,alt --as floor
+```
+
+Both listed recipients see every incident with its original observer text;
+there is no rotation. Same handles are refused and all handles resolve before
+the first send. A failed pair retries after the other sends, and stale data
+sends `board_stale` while retaining earlier pairs. A send–record crash can
+repeat one notice on retry. An unread notice itself affects later seat
+activity observations. Plain check's text, JSON and exits are unchanged.
+
 Read the board's source ages and coverage. Exit 6 from `amq-board check`
 means there are problems to investigate, 0 means none were detected, and
 1 means the snapshot could not answer. `amq thread open` lists obligations

@@ -26,9 +26,14 @@ turn.
 1. **Owner first.** Read new owner messages. Record each instruction where it
    stays: a task for work, a ruling for a decision. Act on it before agent
    mail.
-2. **See the floor.** `amq-board sync`, then `amq-board check`. Exit 0: the
-   floor is clean. Each line is a seat or a card that does not move, or a
-   request that passed its reply time.
+2. **See the floor.** `amq-board sync`, then `amq-board check`. A scheduled
+   `check --notify lead,alt --as floor` tells both handles about each new
+   incident. The `floor` sender is a dedicated observer mailbox, never your
+   working seat; all listed recipients are distinct and validated live. Exit 0:
+   the floor is clean. Each line is a seat or a card that does not move, or a
+   request that passed its reply or first-news time. `news_overdue` means
+   no message towards the requester qualifies as news from that owner.
+   Incidents retain identity through prose and example-card changes.
    `amq thread open` lists what is still owed and to whom.
 3. **Free seat, ready work: dispatch.** Give the seat the highest-priority
    ready task with a brief (below). Do not start a new task to keep a seat

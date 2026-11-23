@@ -1,9 +1,9 @@
 package board
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -17,6 +17,7 @@ const (
 	ProblemNotWorked     ProblemKind = "in_progress_not_worked"
 	ProblemReplyOverdue  ProblemKind = "reply_overdue"
 	ProblemNewsOverdue   ProblemKind = "news_overdue"
+	ProblemBoardStale    ProblemKind = "board_stale"
 )
 
 // Incident identifies one delivered observation. Changing rendered prose,
@@ -30,10 +31,15 @@ func (p Problem) Incident() string {
 		parts = append(parts, p.Session, p.Handle, p.CardID)
 	case ProblemReplyOverdue, ProblemNewsOverdue:
 		parts = append(parts, p.Request)
+	case ProblemBoardStale:
 	default:
 		return ""
 	}
-	return strings.Join(parts, "\x00")
+	raw, err := json.Marshal(parts)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
 }
 
 // Problem is one floor problem: a seat or a card that does not move.
