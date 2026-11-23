@@ -144,6 +144,15 @@ func TestPromoteNewsAndCompletionTimers(t *testing.T) {
 			arrange: func(t *testing.T, root *fsq.DeliveryRoot, r format.Header) {
 				deliverToAlice(t, root, r, "carol", format.KindStatus, nil, "")
 			}, steps: []step{{21 * time.Minute, []string{NewsLabel}, 0}}},
+		// The mixed-timer review found a news notice after the sender withdrew the work.
+		{name: "requester withdrawal ends the news clock", news: 20 * time.Minute,
+			arrange: func(t *testing.T, root *fsq.DeliveryRoot, r format.Header) {
+				timer := Timer{RequestID: r.ID, Thread: r.Thread, Sent: mustCreated(t, r)}
+				msg := testMessage(t, timer, "alice", "bob", format.KindDecision, []string{"withdrawn"})
+				if _, err := root.WriteFileAtomic(fsq.MailboxRootRelativePath("alice", fsq.MailboxOutboxSent), msg.Header.ID+".md", marshal(t, msg), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}, steps: []step{{21 * time.Minute, nil, 0}}},
 		{name: "news at 10m comes first and the completion timer stays", news: 10 * time.Minute, completion: time.Hour,
 			steps: []step{{10 * time.Minute, []string{NewsLabel}, 1}}},
 		{name: "completion at 5m and news at 10m both come once", news: 10 * time.Minute, completion: 5 * time.Minute,

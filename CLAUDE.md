@@ -206,7 +206,7 @@ With `--news-within 20m`, the sender gets one notice unless its inbox holds
 a message from the recipient that references the original, or a later message
 from that recipient in the same thread with no refs. Such an unreferenced
 message ends every open news clock for that pair in the thread. Each
-completion timer still follows its own request. The recipient sees `News by:`.
+completion timer still follows its own request. Closing a request also ends its news clock. The recipient sees `News by:`.
 
 **Sessions**: Named sessions are child queue roots. A participating shell is
 pinned by `AM_ROOT`, `AM_BASE_ROOT`, and `AM_SESSION`; AMQ-managed identity
