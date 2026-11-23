@@ -226,7 +226,7 @@ outcome of `request.get`.
   life a grant has left on a clock that does not go back, and when it first
   sees a grant expired it clears it from its stored state. A system clock
   set back across a restart, before the grant was seen expired, extends it
-  by that amount.
+  by that amount; a clock set back after that brings nothing back.
 - A new generation: a random value per binding of a link, never a counter
   and never reused. The machine mints one when the share is written (attach,
   attach again, a change of consent or tools), when the share is removed
@@ -239,9 +239,11 @@ outcome of `request.get`.
   every grant of the link at once (`grant_revoked`). The end is permanent:
   the machine clears the stored grant when it sees the change, and a key
   list that later returns to its earlier value does not bring the grant
-  back. The generation does not change; the owner signs a new grant. Known
-  limit: when that clear fails and the machine restarts while the key list
-  is back at its earlier value, the grant is live again.
+  back. The generation does not change; the owner signs a new grant. When
+  the clear fails, the stored grant stays: inside the run the machine still
+  refuses it, and after a restart in that state, with the key list back at
+  its earlier value, the grant is live again until the next check of its
+  key list or its expiry ends it.
 - A newer grant accepted for the same binding.
 - A new epoch or another native session behind the binding.
 - The session can write the machine's state directory with no dialog: the
@@ -251,6 +253,13 @@ outcome of `request.get`.
   remove the link (`amq-remote link remove NAME`) and add it again in the
   machine root (`amq-remote link add` without `--root`), or keep a signature
   per task.
+
+An end is kept on disk: the machine keeps, per binding, the `issued_at` of
+the newest grant it accepted in the binding's generation, and a cleared
+grant leaves that value in place. A grant that ended, and every grant
+signed before it, is refused `grant_stale` when it is presented again, also
+after a restart and also when the wall clock was set back. A new generation
+drops the value, since a grant names its generation.
 
 The machine shows a desktop notice when it accepts a grant and when a grant
 ends by revoke or expiry; `amq-remote link status` lists the stored grants.
@@ -266,7 +275,7 @@ Error replies, before admission (nothing was sent):
 | `unsupported` | any grant request | An older machine | Signatures per task |
 | `consent_invalid` | `signed_grant`, `granted_submit` | Signature, passkey, WebAuthn profile, strict decoding, server or store id, an input class a grant may not hold, a command out of its bounds | Fix it; for a grant, sign again |
 | `clock_skew` | `signed_grant` | `issued_at` is more than 60 s ahead of the machine's clock | Read `now` from `grant_info`; sign again |
-| `grant_stale` | `signed_grant` | `issued_at` is more than 60 s behind the machine's clock, or not later than the stored grant's, and the digest is not the stored grant's | Sign again |
+| `grant_stale` | `signed_grant` | `issued_at` is more than 60 s behind the machine's clock, or not later than that of the newest grant accepted for the binding, and the digest is not the stored grant's | Sign again |
 | `grant_too_long` | `signed_grant` | The lifetime is not in (0, `max_lifetime_s`] | Sign a shorter grant |
 | `grant_unsupported` | `signed_grant`, `granted_submit` | The binding takes no grant now; the message starts with the reason | End the grant; signatures per task |
 | `grant_unknown` | `granted_submit` | No grant with this digest is stored for the binding | End the grant; sign again |
@@ -285,7 +294,8 @@ The reason a grant ended depends on what the machine saw. In the run of the
 machine that saw a grant end, every later answer for that grant keeps its
 reason, also after the grant is cleared from the stored state. After a
 restart, a grant cleared before it answers `granted_submit` with
-`grant_unknown`, and a hand-over reason reads `grant_revoked: the grant is
+`grant_unknown` and `signed_grant` with `grant_stale`, and a hand-over
+reason reads `grant_revoked: the grant is
 no longer stored`. The server does the same in each case: it signs again.
 
 ## Link info
@@ -329,6 +339,6 @@ in two roots is refused. Per link root, under `<root>/extensions/remote/link/`:
 | `<name>/device.key` | The Ed25519 device key, mode 0600, never overwritten. |
 | `<name>/link.json` | The pinned server id, URL, signing origin, and the tool profiles the server grants. |
 | `<name>/consent_keys.json` | Consent public keys only. |
-| `<name>/grants.json` | Per shared binding, its grant generation and the one grant accepted for it, mode 0600; changed under `grants.json.lock`. |
+| `<name>/grants.json` | Per shared binding, its grant generation, the one grant accepted for it and the `issued_at` of the newest grant accepted in that generation, mode 0600; changed under `grants.json.lock`. |
 | `<name>/status.json` | The link's last recorded status, which `link status` shows. |
 | `retired/<sink>` | Sinks of removed or revoked links. |

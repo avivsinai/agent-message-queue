@@ -51,10 +51,15 @@ func KeyList(credentialIDs []string) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// GrantRecord is one binding's generation and its stored grant, if any.
+// GrantRecord is one binding's generation, its stored grant, if any, and
+// its issued floor: the issued_at of the newest grant the store accepted
+// for the binding in this generation. The floor outlives the grant, so a
+// grant that ended, and every grant signed before it, is never stored
+// again under the same generation.
 type GrantRecord struct {
-	Generation string       `json:"generation"`
-	Grant      *StoredGrant `json:"grant,omitempty"`
+	Generation  string       `json:"generation"`
+	Grant       *StoredGrant `json:"grant,omitempty"`
+	IssuedFloor string       `json:"issued_floor,omitempty"`
 }
 
 // Grants maps a binding name to its record.
@@ -65,11 +70,13 @@ type Grants map[string]GrantRecord
 var ErrGrantGeneration = errors.New("the binding's grant generation changed since the grant was signed")
 
 // ErrGrantNotNewer is returned by StoreGrant for a grant that was not issued
-// after the grant stored for its binding: a replaced grant stays retired.
-var ErrGrantNotNewer = errors.New("the binding holds a grant issued at the same time or later")
+// after the binding's issued floor: a replaced or ended grant stays retired.
+var ErrGrantNotNewer = errors.New("the binding took a grant issued at the same time or later")
 
 // LoadGrants reads a link's grant records. No file is an empty map; an
 // unreadable file is an error, so a caller deciding on a grant fails closed.
+// A record with a stored grant and no issued floor reads with the grant's
+// issued_at as its floor.
 func LoadGrants(stateDir, link string) (Grants, error) {
 	g := Grants{}
 	err := readJSON(filepath.Join(LinkDir(stateDir, link), grantsFile), &g)
@@ -81,6 +88,12 @@ func LoadGrants(stateDir, link string) (Grants, error) {
 	}
 	if g == nil {
 		g = Grants{}
+	}
+	for b, rec := range g {
+		if rec.IssuedFloor == "" && rec.Grant != nil {
+			rec.IssuedFloor = rec.Grant.IssuedAt
+			g[b] = rec
+		}
 	}
 	return g, nil
 }
@@ -108,9 +121,11 @@ func EnsureGeneration(stateDir, link, binding string) (string, error) {
 }
 
 // MintGeneration gives each named binding, or with no names every record,
-// a new generation and clears its stored grant. A mint only lowers
-// authority, so it proceeds without an advisory file lock, and an
-// unreadable file is replaced. A removed link has nothing to end.
+// a new generation and clears its stored grant and its issued floor: a
+// grant names its generation, so nothing signed for the old one is stored
+// again. A mint only lowers authority, so it proceeds without an advisory
+// file lock, and an unreadable file is replaced. A removed link has nothing
+// to end.
 func MintGeneration(stateDir, link string, bindings ...string) error {
 	err := withGrants(stateDir, link, func() error {
 		g, err := LoadGrants(stateDir, link)
@@ -141,8 +156,9 @@ func MintGeneration(stateDir, link string, bindings ...string) error {
 }
 
 // ClearGrant removes the binding's stored grant when its digest is digest,
-// and keeps the binding's generation: the grant ended (it expired, or the
-// link's key list is not the one it was accepted under) and stays ended. A
+// and keeps the binding's generation and issued floor: the grant ended (it
+// expired, or the link's key list is not the one it was accepted under) and
+// stays ended, also after a restart, since StoreGrant refuses it. A
 // clear only lowers authority, so it proceeds without an advisory file
 // lock. A removed link has nothing to clear.
 func ClearGrant(stateDir, link, binding, digest string) error {
@@ -166,10 +182,11 @@ func ClearGrant(stateDir, link, binding, digest string) error {
 }
 
 // StoreGrant stores an accepted grant for its binding, replacing an older
-// one. It refuses with ErrGrantGeneration unless the record's generation is
-// the one the grant was signed for, and with ErrGrantNotNewer unless the
-// grant was issued after the stored one, both read under the lock. The
-// stored grant itself is a no-op. Without an advisory file lock it refuses:
+// one, and raises the binding's issued floor to its issued_at in the same
+// write. It refuses with ErrGrantGeneration unless the record's generation
+// is the one the grant was signed for, and with ErrGrantNotNewer unless the
+// grant was issued after the floor, both read under the lock. The stored
+// grant itself is a no-op. Without an advisory file lock it refuses:
 // storing a grant raises authority.
 func StoreGrant(stateDir, link string, sg StoredGrant) error {
 	if !lock.AdvisoryLockAvailable() {
@@ -184,15 +201,13 @@ func StoreGrant(stateDir, link string, sg StoredGrant) error {
 		if !ok || rec.Generation == "" || rec.Generation != sg.Generation {
 			return ErrGrantGeneration
 		}
-		if old := rec.Grant; old != nil {
-			if old.Digest == sg.Digest {
-				return nil
-			}
-			if !issuedAfter(sg.IssuedAt, old.IssuedAt) {
-				return ErrGrantNotNewer
-			}
+		if old := rec.Grant; old != nil && old.Digest == sg.Digest {
+			return nil
 		}
-		rec.Grant = &sg
+		if (rec.Grant != nil || rec.IssuedFloor != "") && !issuedAfter(sg.IssuedAt, rec.IssuedFloor) {
+			return ErrGrantNotNewer
+		}
+		rec.Grant, rec.IssuedFloor = &sg, sg.IssuedAt
 		g[sg.Binding] = rec
 		return writeJSON(LinkDir(stateDir, link), grantsFile, g)
 	})

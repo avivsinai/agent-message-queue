@@ -157,7 +157,8 @@ func (c *Carrier) grantAvailable(b Binding) (bool, string, int) {
 // acceptGrant verifies a signed grant against the binding's state read from
 // the store now, stores it, and tells the owner. The stored grant presented
 // again is answered unchanged, with no write and no notice, unless a check
-// of this run saw it end: a grant that ended stays refused.
+// of this run saw it end: a grant that ended stays refused, in this run by
+// the ended set and after it by the store's issued floor.
 func (c *Carrier) acceptGrant(m SignedGrant, binding string) (any, error) {
 	view := c.view()
 	var st GrantState
@@ -175,10 +176,13 @@ func (c *Carrier) acceptGrant(m SignedGrant, binding string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if e, ended := c.endedGrant(sg.Digest); ended && (st.Stored == nil || st.Stored.Digest == sg.Digest) {
-		// A grant this run saw end stays ended, also once the store no
-		// longer holds it. One a newer grant replaced is refused by the
-		// store below, as every older grant is.
+	if e, ended := c.endedGrant(sg.Digest); ended {
+		// A grant this run saw end is never accepted again, whatever the
+		// store holds: with how it ended, or grant_stale when another grant
+		// is stored for the binding.
+		if st.Stored != nil && st.Stored.Digest != sg.Digest {
+			return nil, refuse(CodeGrantStale, "binding %q holds another grant; sign again", sg.Binding)
+		}
 		return nil, refuse(e.code, "%s; ask grant_info and sign again", e.why)
 	}
 	reply := GrantReply{Grant: GrantAccepted{Digest: sg.Digest, GrantID: sg.GrantID, Binding: sg.Binding, NotAfter: sg.NotAfter}}
@@ -190,7 +194,7 @@ func (c *Carrier) acceptGrant(m SignedGrant, binding string) (any, error) {
 		case errors.Is(err, ErrGrantGeneration):
 			return nil, refuse(CodeGrantRevoked, "binding %q has another grant generation now; ask grant_info and sign again", sg.Binding)
 		case errors.Is(err, ErrGrantNotNewer):
-			return nil, refuse(CodeGrantStale, "binding %q holds a grant issued at or after %s; sign again", sg.Binding, sg.IssuedAt)
+			return nil, refuse(CodeGrantStale, "binding %q took a grant issued at or after %s; sign again", sg.Binding, sg.IssuedAt)
 		}
 		return nil, err
 	}

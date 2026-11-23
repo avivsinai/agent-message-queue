@@ -165,7 +165,12 @@ invariants.
   asks before a tool acts. Every share write, detach and revoke mints a new
   random generation, which ends the grant; a key added, dropped or revoked
   ends it for good, also when the key list later returns to its earlier
-  value. Within its time the server writes the
+  value. An end is kept on disk: the machine keeps the `issued_at` of the
+  newest grant it accepted for a binding, so after a restart a grant that
+  ended, and every grant signed before it, answers `grant_stale`. A grant
+  whose clear failed stays stored: the run that saw it end refuses it, and
+  after a restart it is live again until the next check of its key list or
+  its expiry ends it. Within its time the server writes the
   task text; the session reads with no dialog what it can read with no
   dialog, rules the owner pre-allowed in the harness apply to granted tasks,
   and the mode is a report, not a lock. The machine shows a notice when it
