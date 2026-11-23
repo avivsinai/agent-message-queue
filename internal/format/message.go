@@ -91,6 +91,10 @@ type Header struct {
 	// ReplyBy is when the sender expects a reply, RFC 3339 UTC; advisory,
 	// set only by a send that arms a follow-up.
 	ReplyBy string `json:"reply_by,omitempty"`
+	// NewsBy is when the sender expects the recipient's first reply about
+	// this request, RFC 3339 UTC; advisory, set only by a send that arms a
+	// news clock.
+	NewsBy string `json:"news_by,omitempty"`
 }
 
 // Message is the in-memory representation of a message file.

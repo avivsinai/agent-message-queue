@@ -76,6 +76,7 @@ type runRecord struct {
 	lastText  string
 	lastCut   bool
 	createdAt time.Time
+	grantedRun
 }
 
 // Submit implements core.Attachment over the pinned wire: the
@@ -137,6 +138,11 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	if req.NativeSession != "" && reg.SessionID != req.NativeSession {
 		return sessionChanged(), nil
 	}
+	if req.Granted {
+		if adm, refused := a.grantedRefusal(reg, req.Input.Text); refused {
+			return adm, nil
+		}
+	}
 	token, err := readPeerToken(a.configDir, a.cfg.Pid, reg.MessagingSocketPath)
 	if err != nil {
 		// The key file is minted by the target when inbound is enabled;
@@ -148,6 +154,11 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	}
 
 	text := req.Input.Text
+	if req.Granted {
+		// The text stays in the endpoint; the stub raises the prompt at
+		// which the prompt hook asks for it.
+		text = grantedStub(frameMsgID(req.Key))
+	}
 	if strings.Contains(text, "</cross-session-message>") || strings.ContainsAny(text, "\x00") {
 		return refusal(fmt.Errorf("%w: submit text contains an envelope terminator", ErrNotSent)), nil
 	}
@@ -179,15 +190,41 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	}
 
 	rec = &runRecord{
-		key:       req.Key,
-		epoch:     req.Epoch,
-		msgID:     frame.MsgID,
-		state:     protocol.StateRunning,
-		fromOff:   fromOff,
-		notAfter:  notAfter,
-		createdAt: a.now(),
+		key:        req.Key,
+		epoch:      req.Epoch,
+		msgID:      frame.MsgID,
+		state:      protocol.StateRunning,
+		fromOff:    fromOff,
+		notAfter:   notAfter,
+		createdAt:  a.now(),
+		grantedRun: grantedRun{granted: req.Granted},
 	}
 	return core.Admission{Admitted: true, RunID: frame.MsgID}, nil
+}
+
+// grantedRefusal is the refusal of a granted request that this session may
+// not take now, before anything is sent: the session's latest prompt report
+// does not ask, the session can write the endpoint's state with no dialog,
+// it is in a turn, its state cannot be read, or the text is longer than the
+// harness gives a hook's context whole. reg is the registry entry Submit read.
+func (a *Attachment) grantedRefusal(reg *sessionRegistry, text string) (core.Admission, bool) {
+	refuse := func(msg string) (core.Admission, bool) {
+		return core.Admission{Code: protocol.CodeConsentInvalid, Message: msg, NothingSent: true}, true
+	}
+	if msg, _ := a.storedRefusal(); msg != "" {
+		return refuse(msg)
+	}
+	switch normalizeStatus(reg.Status) {
+	case "idle":
+	case "busy":
+		return core.Admission{Code: protocol.CodeBusy, NothingSent: true}, true
+	default:
+		return refuse(needsSignature + "the session's state cannot be read")
+	}
+	if len(text) > GrantedTextLimit {
+		return refuse(needsSignature + "the text is longer than this session takes under a grant")
+	}
+	return core.Admission{}, false
 }
 
 // sendFrame dials the target's UDS and writes the framed bytes, all before
@@ -286,7 +323,8 @@ func sanitizeAddr(s string) string {
 func evidenceFor(rec *runRecord) core.Evidence {
 	switch {
 	case rec.admitted:
-		ev := core.Evidence{Known: true, Class: core.EvidenceConfirmed, Admitted: true, RunID: rec.msgID, State: rec.state, LocalIntervention: rec.local}
+		ev := core.Evidence{Known: true, Class: core.EvidenceConfirmed, Admitted: true, RunID: rec.msgID, State: rec.state, LocalIntervention: rec.local,
+			GrantedTextDigest: rec.grantedDigest()}
 		if rec.terminal && rec.result != nil {
 			ev.Result = rec.result
 		}
@@ -394,6 +432,7 @@ func (a *Attachment) idleStop() bool {
 	a.confirmCancel = nil
 	a.cur = transcriptCursor{}
 	a.owner = nil
+	a.turn = turnState{}
 	return true
 }
 
@@ -436,6 +475,7 @@ func (a *Attachment) pollConfirmations() {
 	gen := a.curGen
 	actPath, actNext := a.activityPath, a.activityNext
 	fresh := cur.path != path
+	seed := false
 	if fresh {
 		// New or switched transcript: start at the earliest submit-time
 		// offset of a run still waiting for its delivery entry.
@@ -446,6 +486,10 @@ func (a *Attachment) pollConfirmations() {
 			}
 		}
 		a.owner = nil
+		a.turn = turnState{}
+		// A granted stub is judged by its whole turn, which may begin
+		// before the cursor: read back to the turn's start once.
+		seed = a.grantedPendingLocked()
 	}
 	from := a.stopConsumed
 	a.mu.Unlock()
@@ -466,10 +510,18 @@ func (a *Attachment) pollConfirmations() {
 		}
 		cur.off, cur.skipping = transcriptStartOffset(size)
 	}
+	var seeded turnState
+	if seed {
+		seeded = turnBefore(path, cur.off)
+	}
 	rd, err := readTranscriptFrom(path, cur.off, cur.skipping)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return
 	}
+	// A read that starts or ends inside a line it discards (one longer than
+	// a chunk, or the partial first line of a cursor that starts mid-file)
+	// drops that line before any line it returns.
+	dropped := err == nil && (cur.skipping || rd.skipping)
 	caughtUp := err == nil && !rd.skipping && rd.next >= rd.size
 	truncated := false
 	if err == nil && rd.size < cur.off {
@@ -483,14 +535,22 @@ func (a *Attachment) pollConfirmations() {
 	var events []core.NativeEvent
 	var notes []ActivityNote
 	a.mu.Lock()
+	if seed && a.curGen == gen {
+		a.turn = seeded
+	}
 	if truncated {
 		// The file is a new generation. Recovery rewinds cur without
 		// shrinking the file, so it must not clear this watermark.
 		a.activityNext = 0
+		// The next read starts at the top of the new file.
+		a.turn = turnState{known: true}
+	} else if dropped {
+		a.trackTurnLocked(transcriptEntry{}, entryUnknown)
 	}
 	for i, line := range rd.lines {
 		e, ok := parseTranscriptLine(line)
 		if !ok {
+			a.trackTurnLocked(e, classifyTurnEntry(e, false))
 			continue
 		}
 		events = a.applyEntryLocked(e, events)
@@ -543,6 +603,7 @@ func (a *Attachment) pollConfirmations() {
 //
 // Caller holds a.mu.
 func (a *Attachment) applyEntryLocked(e transcriptEntry, events []core.NativeEvent) []core.NativeEvent {
+	a.trackTurnLocked(e, classifyTurnEntry(e, true))
 	switch {
 	case e.Type == "user" && !e.Meta && e.Text != "":
 		if !e.Absorbed {
@@ -723,7 +784,7 @@ func (a *Attachment) settleRunLocked(rec *runRecord, state protocol.State, typ c
 	if a.owner == rec {
 		a.owner = nil
 	}
-	return append(events, core.NativeEvent{Type: typ, Key: rec.key, RunID: rec.msgID, Result: rec.result})
+	return append(events, core.NativeEvent{Type: typ, Key: rec.key, RunID: rec.msgID, Result: rec.result, GrantedTextDigest: rec.grantedDigest()})
 }
 
 // stopObs is one decoded Stop-marker line: the receiver's wall-clock
@@ -854,7 +915,7 @@ func (a *Attachment) recoverRun(key requests.Key) core.Evidence {
 			scan.off, scan.skipping = fi.Size()-recoverScanBytes, true
 		}
 	}
-	found, off, ts, next, nextSkipping := scanForDelivery(path, scan.off, scan.skipping, msgID)
+	found, off, ts, next, nextSkipping, granted := scanForDelivery(path, scan.off, scan.skipping, msgID)
 
 	a.mu.Lock()
 	if rec, ok := a.runs[key]; ok { // a concurrent Lookup won the race
@@ -881,6 +942,9 @@ func (a *Attachment) recoverRun(key requests.Key) core.Evidence {
 		fromOff:   off,
 		notAfter:  a.now().Add(recoveredStartWindow),
 		createdAt: a.now(),
+		// A recovered granted stub is judged like a live one: the poller
+		// replays from its line and reads back to its turn's start.
+		grantedRun: grantedRun{granted: granted},
 	}
 	a.runs[key] = rec
 	a.cur = transcriptCursor{}
@@ -894,23 +958,25 @@ func (a *Attachment) recoverRun(key requests.Key) core.Evidence {
 
 // scanForDelivery reads the transcript from off to its current end looking
 // for the entry that delivered msgID. It returns that entry's byte offset
-// and timestamp when found, and in every case the position it reached and
+// and timestamp, and whether its body is the granted stub of msgID, when
+// found, and in every case the position it reached and
 // whether it stopped inside an over-long line. It always returns once a
 // read makes no progress, including at an unfinished line at EOF (skipping at
 // EOF would loop forever).
-func scanForDelivery(path string, off int64, skipping bool, msgID string) (found bool, at, ts, next int64, nextSkipping bool) {
+func scanForDelivery(path string, off int64, skipping bool, msgID string) (found bool, at, ts, next int64, nextSkipping bool, granted bool) {
 	for {
 		rd, err := readTranscriptFrom(path, off, skipping)
 		if err != nil {
-			return false, 0, 0, off, skipping
+			return false, 0, 0, off, skipping, false
 		}
 		for i, line := range rd.lines {
 			if e, ok := parseTranscriptLine(line); ok && e.Type == "user" && e.MsgID == msgID {
-				return true, rd.starts[i], e.TS, rd.next, rd.skipping
+				body, _ := crossSessionBodies(e.Text)
+				return true, rd.starts[i], e.TS, rd.next, rd.skipping, strings.TrimSpace(body) == grantedStub(msgID)
 			}
 		}
 		if rd.next == off {
-			return false, 0, 0, off, rd.skipping
+			return false, 0, 0, off, rd.skipping, false
 		}
 		off, skipping = rd.next, rd.skipping
 	}

@@ -28,6 +28,7 @@ type Entry struct {
 	ReplyProject string         `json:"reply_project,omitempty"`
 	FromProject  string         `json:"from_project,omitempty"`
 	ReplyBy      string         `json:"reply_by,omitempty"`
+	NewsBy       string         `json:"news_by,omitempty"`
 	Context      map[string]any `json:"context,omitempty"`
 	RawTime      time.Time      `json:"-"`
 	// Occurrences lists every copy of the message that a scan saw. Only
@@ -59,7 +60,8 @@ type ScanResult struct {
 	Pruned map[string]int
 }
 
-func entryFromHeader(header format.Header) Entry {
+// EntryFromHeader is the entry of one message header, with no copies.
+func EntryFromHeader(header format.Header) Entry {
 	entry := Entry{
 		ID:           header.ID,
 		Refs:         header.Refs,
@@ -76,6 +78,7 @@ func entryFromHeader(header format.Header) Entry {
 		FromProject:  header.FromProject,
 		Context:      header.Context,
 		ReplyBy:      header.ReplyBy,
+		NewsBy:       header.NewsBy,
 	}
 	if ts, err := time.Parse(time.RFC3339Nano, header.Created); err == nil {
 		entry.RawTime = ts
@@ -139,7 +142,7 @@ func Collect(root, threadID string, agents []string, includeBody bool, onError f
 				if _, ok := seen[header.ID]; ok {
 					continue
 				}
-				entry := entryFromHeader(header)
+				entry := EntryFromHeader(header)
 				// Only messages in the thread have their bodies read.
 				if includeBody {
 					msg, err := format.ReadMessageFile(path)
@@ -152,7 +155,7 @@ func Collect(root, threadID string, agents []string, includeBody bool, onError f
 						}
 						continue
 					}
-					entry = entryFromHeader(msg.Header)
+					entry = EntryFromHeader(msg.Header)
 					entry.Body = msg.Body
 				}
 				seen[header.ID] = struct{}{}
@@ -225,7 +228,7 @@ func CollectAll(roots []ScanRoot, cutoff time.Time, onError func(path string, er
 						result.Entries[idx].Occurrences = append(result.Entries[idx].Occurrences, occurrence)
 						continue
 					}
-					entry := entryFromHeader(header)
+					entry := EntryFromHeader(header)
 					entry.Occurrences = []Occurrence{occurrence}
 					byID[header.ID] = len(result.Entries)
 					result.Entries = append(result.Entries, entry)
@@ -268,7 +271,7 @@ func ReadByID(roots []ScanRoot, agents []string, id string) (Entry, bool) {
 				if err != nil || header.ID != id {
 					continue
 				}
-				entry = entryFromHeader(header)
+				entry = EntryFromHeader(header)
 				entry.Occurrences = []Occurrence{occurrence}
 				found = true
 			}

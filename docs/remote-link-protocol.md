@@ -235,6 +235,63 @@ reason (`grant_revoked: ...`, `grant_expired: ...`,
 `grant_needs_signature: ...`, `grant_unsupported: state_in_workspace: ...`)
 is the message of the outcome of `request.get`.
 
+### Claude Code: the task at the prompt
+
+Claude Code shows a session's permission mode only to a hook, at a prompt.
+So a Claude Code session takes a grant only when AMQ's prompt hook
+(`UserPromptSubmit`, `amq-remote claude install-prompt-hook`) is installed,
+and the machine gives a granted task's text at the prompt, not on the
+socket:
+
+- Check 7 reads the latest prompt report of the session: the hook's session
+  id is the session's, and its mode is `default`, `acceptEdits` or
+  `dontAsk`. The report lives in the endpoint's memory only. A restart, a
+  replaced attachment, another session, or a granted task that ended
+  untaken or with its answer withheld drops it, and the next prompt in the
+  session brings it back; until then `grant_info` answers
+  `mode_unreadable` and a granted task `grant_needs_signature`. The state directory check reads the
+  session's working directory; Claude Code reports no additional working
+  directory, so a directory the person added to the session is not seen.
+- `max_text_bytes` is 8192: Claude Code gives a hook's added context to the
+  model whole only below 10,000 characters.
+- A session in a turn answers `busy`; a session whose state cannot be read
+  answers `grant_needs_signature`.
+- The machine sends the session a stub, `AMQ granted task <msg id>`, as a
+  cross-session message. The task's text stays in the request record. The
+  stub raises a prompt; the hook reports its session id, its mode and the
+  stub's id on the endpoint's local socket, and makes no decision.
+- Under its lock, the endpoint checks the request's `not_after`, epoch and
+  native session, checks 3 and 5 again, and checks that the mode of that
+  same prompt asks and that the session still cannot write the machine's
+  state. It then records durably that it gave the text and answers with
+  it. The hook prints it as the prompt's added context, after
+  one line that names the request and the text's SHA-256. The text is given
+  at most once per request, also across a restart. The read of the grant
+  state at that call is the hand-over: a revoke, a key change or an expiry
+  applied before it refuses the text; one applied after it does not recall
+  the task. A refusal ends the request `rejected` (for example
+  `consent_invalid` with `grant_needs_signature: plan`, or with
+  `grant_unsupported: state_in_workspace: ...` as before the send), and
+  the model has only the stub.
+- The request completes only when the session's transcript shows the
+  hook's context with exactly the text the endpoint gave, and the stub was
+  the only prompt of its turn. Claude Code can give queued prompts (another
+  stub, a signed task, the person's own prompt) to the model as one turn;
+  then, or when the context is not whole, the request ends `failed` with no
+  result text, and the message of `request.get` is `the answer cannot be
+  attributed to this task; the task may have run`. A later event or a
+  restart does not bring the answer back.
+- A stub whose text no hook took by the request's `not_after` ends
+  `rejected` `expired` with the message `the session did not take the task
+  before its deadline`, also after a restart and with no attachment.
+
+The endpoint's local socket is a boundary between OS users, not a proof
+that the caller is the session's hook: another process of the same user can
+take the text of a pending request and so make that request fail. It cannot
+put text into the model. An older endpoint, or one that does not serve the
+attachment the hook's locator names, gives no text, and the hook prints
+nothing.
+
 ### How a grant ends
 
 - Its `not_after`. Expiry is kept: inside one run the machine measures the

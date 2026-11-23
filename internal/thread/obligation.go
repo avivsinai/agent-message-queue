@@ -68,6 +68,10 @@ type Obligation struct {
 	// Expired marks an opener created before the reduction's cutoff.
 	Expired bool
 	Last    *Entry
+	// OwnerReplied reports whether a watched opener received news from its
+	// owner addressed to its requester. An unreferenced message must come
+	// from the owner's own session and project.
+	OwnerReplied bool
 }
 
 // HumanHandle is the reserved handle of the human in every project: it
@@ -257,6 +261,24 @@ func (red *Reduction) run() {
 			red.Deferred[rec.sender.Session]++
 		}
 	}
+	for _, ob := range red.Obligations {
+		if ob.Opener.NewsBy == "" {
+			continue
+		}
+		ob.OwnerReplied = slices.ContainsFunc(red.order, func(rec *record) bool {
+			return rec.sender.Handle == ob.Owner.Handle &&
+				slices.Contains(rec.entry.To, ob.Requester.Handle) &&
+				(len(rec.entry.Refs) != 0 || rec.sender == ob.Owner) &&
+				NewsAbout(ob.Opener, rec.entry)
+		})
+	}
+}
+
+// NewsAbout reports whether a message from the recipient to the requester
+// references the request or, without refs, follows it in the same thread.
+func NewsAbout(request, msg *Entry) bool {
+	return slices.Contains(msg.Refs, request.ID) ||
+		(len(msg.Refs) == 0 && msg.Thread == request.Thread && msg.RawTime.After(request.RawTime))
 }
 
 // classifyLineage marks rec unresolved when following direct parents does
@@ -608,6 +630,13 @@ func recipientOf(rec *record, handle string) (Participant, bool) {
 		return Participant{Session: rec.sender.Session, Handle: handle}, true
 	}
 	return Participant{}, false
+}
+
+// OpensObligation reports whether a message of the kind with the labels
+// opens an obligation for its recipients when it continues none: an opener
+// kind without a closing label.
+func OpensObligation(kind string, labels []string) bool {
+	return slices.Contains(OpenerKinds, kind) && !hasClosingLabel(labels, closingLabels...)
 }
 
 // defaultReplyKind is the kind amq reply sends when none is named.

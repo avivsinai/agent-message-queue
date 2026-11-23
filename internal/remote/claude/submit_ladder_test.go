@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -65,6 +66,49 @@ func absorbedLine(t *testing.T, msgID, envelope string) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// Field, 2026-10-27: a prompt the person queued during a turn with a pasted
+// image is a list of content blocks, and the whole line did not decode. It
+// reads as the same blocks on an idle user line read.
+func TestQueuedPromptWithAnImageDecodes(t *testing.T) {
+	content := []any{
+		map[string]any{"type": "text", "text": "[Image #20]"},
+		map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}},
+	}
+	queued, _ := json.Marshal(map[string]any{"type": "attachment", "timestamp": "2026-10-27T18:02:19.427Z",
+		"attachment": map[string]any{"type": "queued_command", "prompt": content, "imagePasteIds": []int{20},
+			"commandMode": "prompt", "origin": map[string]any{"kind": "human"}, "humanTurn": true}})
+	idle, _ := json.Marshal(map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": content}})
+	e, ok := parseTranscriptLine(string(queued))
+	u, _ := parseTranscriptLine(string(idle))
+	want := []TranscriptBlock{{Type: "text", Text: "[Image #20]"}}
+	if !ok || e.Type != "user" || !e.Absorbed || e.OriginKind != "human" || e.Text != "[Image #20]" ||
+		!slices.Equal(e.Blocks, want) || !slices.Equal(u.Blocks, want) {
+		t.Fatalf("queued = %+v, %v; idle blocks %+v", e, ok, u.Blocks)
+	}
+
+	// Independent check of this fix: a tool_result block in a queued prompt
+	// reached the activity view as a tool call update, and a list prompt on
+	// an attachment of another type became readable.
+	line := func(kind string, prompt any) string {
+		raw, _ := json.Marshal(map[string]any{"type": "attachment", "attachment": map[string]any{"type": kind, "prompt": prompt}})
+		return string(raw)
+	}
+	mixed := []any{
+		map[string]any{"type": "tool_result", "tool_use_id": "t1", "content": "tool output"},
+		map[string]any{"type": "text", "text": "and this"},
+	}
+	e, ok = parseTranscriptLine(line("queued_command", mixed))
+	if !ok || !slices.Equal(e.Blocks, []TranscriptBlock{{Type: "text", Text: "and this"}}) || len(e.ToolResults) != 0 {
+		t.Fatalf("queued prompt with a tool result = %+v, %v; want its text block only", e, ok)
+	}
+	if _, ok := parseTranscriptLine(line("other_kind", content)); ok {
+		t.Fatal("a list prompt on an attachment that is not a queued prompt was read")
+	}
+	if e, ok := parseTranscriptLine(line("other_kind", "text")); !ok || e.Absorbed {
+		t.Fatalf("a string prompt on another attachment = %+v, %v; want it read as before", e, ok)
+	}
 }
 
 // appendTranscript appends complete JSONL lines, as the harness does.

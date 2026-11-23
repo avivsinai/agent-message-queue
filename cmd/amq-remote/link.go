@@ -289,6 +289,10 @@ func (ls *linkSet) grantInfoFor(b linkio.Binding) (bool, string, int) {
 	if dir, err := filepath.Abs(ls.stateDir); err != nil || pr.WritesWithoutAsking(dir) {
 		return false, linkio.GrantReasonStateInWorkspace, 0
 	}
+	// A harness that bounds the text a grant may carry names its own limit.
+	if l, ok := att.(core.GrantTextLimiter); ok {
+		return true, "", l.GrantTextLimit()
+	}
 	return true, "", protocol.MaxInputBytes
 }
 
