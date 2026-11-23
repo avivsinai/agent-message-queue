@@ -123,9 +123,10 @@ func (e *Endpoint) stubRecordLocked(targetID string, h PromptHandover, stubID st
 // dispatched as a stub, in order, against the values of the prompt p. A
 // cancel that was asked for ends the record cancelled; a refusal ends it
 // rejected; a pass marks it durably and returns its text. A record with no
-// stored text gets no mark. Nothing is written at or after deadline, which
-// is checked after the reads and right before each write. The caller holds
-// e.mu; it unlocks exactly once.
+// stored text gets no mark. One clock read after the reads decides: at or
+// after deadline nothing is written, and at or after the request's
+// not_after no text is given. The caller holds e.mu; it unlocks exactly
+// once.
 func (e *Endpoint) handGrantedTextLocked(rec *requests.Record, t *target, h PromptHandover, p Prompt, deadline time.Time) string {
 	var code protocol.Code
 	reason := ""
@@ -157,9 +158,14 @@ func (e *Endpoint) handGrantedTextLocked(rec *requests.Record, t *target, h Prom
 	// The decision point: the reads above can outlast the hook's wait, and
 	// past the deadline nothing is written. A write that starts in time
 	// may still finish after the hook disconnected.
-	if !e.now().Before(deadline) {
+	now := e.now()
+	if !now.Before(deadline) {
 		e.mu.Unlock()
 		return ""
+	}
+	if code == "" && !cancelled && !now.Before(notAfter) {
+		// The request's own deadline passed during the reads.
+		code, reason = protocol.CodeExpired, ""
 	}
 	if cancelled {
 		// The requester asked to cancel before the text was given: the

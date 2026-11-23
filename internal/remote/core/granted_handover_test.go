@@ -142,6 +142,25 @@ func TestGrantedHandoverPastItsDeadlineWritesNothing(t *testing.T) {
 	}
 }
 
+// Review of the hand-over: the request's own deadline was read before the
+// hand-over's reads, so a request that expired during them, inside a hook
+// wait that was still open, was marked and its text given.
+func TestGrantedHandoverPastTheRequestDeadlineGivesNoText(t *testing.T) {
+	rt := newPromptRuntime()
+	f := newGrantFixture(t, rt)
+	const id = "11111111-1111-4111-8111-111111111a09"
+	f.submit(t, id, true)
+	r := report(id, "default")
+	r.Wait = 10 * time.Minute
+	rt.set(func(p *promptRuntime) { p.onRefusal = func() { f.clk.advance(3 * time.Minute) } })
+	if got := f.ep.GrantedPrompt(r); got != "" {
+		t.Fatalf("text after the request's deadline = %q", got)
+	}
+	if rec := f.record(t, id); rec.State != protocol.StateRejected || rec.Code != protocol.CodeExpired || rec.GrantTextGiven {
+		t.Fatalf("record = %s/%s mark %v; want rejected expired with no mark", rec.State, rec.Code, rec.GrantTextGiven)
+	}
+}
+
 // Merge check, rows for rules that no test held.
 func TestGrantedStubRulesHoldOnlyForStubs(t *testing.T) {
 	t.Run("a request not dispatched as a stub is not ended at its deadline", func(t *testing.T) {
