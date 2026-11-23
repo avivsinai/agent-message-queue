@@ -60,6 +60,7 @@ func runDrain(args []string) error {
 	if err := guardMailboxContext("drain", root, routed, *ignoreSessionPinFlag, common.rootExplicit()); err != nil {
 		return err
 	}
+	noteActingHandle(root, me)
 	deliveryIdentity, err := snapshotMailboxDeliveryRoot(root, routed, *ignoreSessionPinFlag)
 	if err != nil {
 		return err
