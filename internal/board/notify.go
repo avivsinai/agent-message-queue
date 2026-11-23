@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
@@ -29,11 +30,20 @@ type NotifyPlan struct {
 	Roster          []RosterEntry
 	Env             Env
 	Store           Store
+	Config          Config
+}
+
+type NotifyReport struct {
+	State    Snapshot
+	Model    Model
+	Problems []Problem
+	Err      error
 }
 
 type deliveredEntry struct {
 	Incident string `json:"incident"`
 	To       string `json:"to"`
+	Session  string `json:"session"`
 }
 
 type deliveredSet struct {
@@ -44,16 +54,19 @@ type deliveredSet struct {
 // not under a stale snapshot. The store lock covers the entire run. Each pair
 // is written atomically after its send succeeds. A crash between a send and
 // its record sends that one notice again on the next run.
-func Notify(ctx context.Context, plan NotifyPlan, stale bool, problems []Problem) error {
+func Notify(ctx context.Context, plan NotifyPlan) NotifyReport {
+	if info, err := os.Lstat(plan.Store.Dir); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return NotifyReport{Err: errors.New("the board has no published snapshot; run amq-board sync --init")}
+	}
 	unknown := map[string]bool{}
 	for _, handle := range append([]string{plan.Sender}, plan.Recipients...) {
 		if unknown[handle] {
-			return fmt.Errorf("floor identities must be distinct: %s", handle)
+			return NotifyReport{Err: fmt.Errorf("floor identities must be distinct: %s", handle)}
 		}
 		unknown[handle] = true
 	}
 	if len(unknown) < 2 {
-		return errors.New("--as and --notify are required together")
+		return NotifyReport{Err: errors.New("--as and --notify are required together")}
 	}
 	for _, entry := range plan.Roster {
 		if entry.Session == plan.Session && entry.ValidHandle {
@@ -61,17 +74,30 @@ func Notify(ctx context.Context, plan NotifyPlan, stale bool, problems []Problem
 		}
 	}
 	if len(unknown) > 0 {
-		return fmt.Errorf("notify handle is not in the board's session %q: %s", plan.Session, strings.Join(notifySortedKeys(unknown), ", "))
+		return NotifyReport{Err: fmt.Errorf("notify handle is not in the board's session %q: %s", plan.Session, strings.Join(notifySortedKeys(unknown), ", "))}
 	}
 	if err := plan.Store.ensureDeliveredDir(); err != nil {
-		return err
+		return NotifyReport{Err: err}
 	}
-	return lock.WithExclusiveFileLockUntil(filepath.Join(plan.Store.Dir, "notify.lock"), func() bool { return ctx.Err() != nil }, func() error {
+	var report NotifyReport
+	err := lock.WithExclusiveFileLockUntil(filepath.Join(filepath.Dir(plan.Store.Dir), "notify.lock"), func() bool { return ctx.Err() != nil }, func() error {
 		delivered, err := plan.Store.readDelivered()
 		if err != nil {
 			return err
 		}
+		state, readErr := plan.Store.ReadContext(ctx)
+		report.State = state
+		if readErr == nil {
+			report.Model = state.Project(plan.Config, time.Now(), "notice")
+			report.Problems, report.Err = Check(report.Model, plan.Config, report.Model.GeneratedAt)
+		}
+		stale := readErr != nil || report.Err != nil
+		problems := report.Problems
 		if stale {
+			report.Err = errors.New("the board snapshot is absent or stale; run amq-board sync")
+			if readErr != nil {
+				report.Err = readErr
+			}
 			problems = []Problem{{Kind: ProblemBoardStale, Text: "The board snapshot is absent or stale; run amq-board sync."}}
 		}
 		var failures []error
@@ -81,7 +107,7 @@ func Notify(ctx context.Context, plan NotifyPlan, stale bool, problems []Problem
 				return fmt.Errorf("floor problem has no incident identity: %s", problem.Kind)
 			}
 			for _, recipient := range plan.Recipients {
-				pair := deliveredPair(incident, recipient)
+				pair := plan.deliveredPair(incident, recipient)
 				if delivered[pair] {
 					continue
 				}
@@ -101,7 +127,7 @@ func Notify(ctx context.Context, plan NotifyPlan, stale bool, problems []Problem
 				active[p.Incident()] = true
 			}
 			for entry := range delivered {
-				if !active[entry.Incident] {
+				if entry.Session == plan.Session && !active[entry.Incident] {
 					delete(delivered, entry)
 				}
 			}
@@ -111,6 +137,10 @@ func Notify(ctx context.Context, plan NotifyPlan, stale bool, problems []Problem
 		}
 		return errors.Join(failures...)
 	})
+	if err != nil {
+		report.Err = errors.Join(report.Err, err)
+	}
+	return report
 }
 
 func notifySend(ctx context.Context, plan NotifyPlan, recipient string, problem Problem) error {
@@ -126,8 +156,8 @@ func notifySend(ctx context.Context, plan NotifyPlan, recipient string, problem 
 	return nil
 }
 
-func deliveredPair(incident, recipient string) deliveredEntry {
-	return deliveredEntry{Incident: incident, To: recipient}
+func (plan NotifyPlan) deliveredPair(incident, recipient string) deliveredEntry {
+	return deliveredEntry{Incident: incident, To: recipient, Session: plan.Session}
 }
 
 func notifySortedKeys(set map[string]bool) []string {
@@ -143,22 +173,20 @@ func (s Store) ensureDeliveredDir() error {
 	if err := os.MkdirAll(filepath.Dir(s.Dir), 0o700); err != nil {
 		return err
 	}
-	if err := os.Mkdir(s.Dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-		return err
-	}
 	if err := s.safeDirectory(); err != nil {
 		return err
 	}
-	if info, err := os.Lstat(filepath.Join(s.Dir, "notify.lock")); err == nil && !info.Mode().IsRegular() {
-		return errors.New("floor notification lock is not a regular file")
-	} else if err != nil && !os.IsNotExist(err) {
+	if info, err := os.Lstat(filepath.Dir(filepath.Join(s.Dir, "notify.lock"))); err != nil {
 		return err
+	} else if !info.IsDir() {
+		return errors.New("floor notice state parent is not a directory")
 	}
 	return nil
 }
 
 func (s Store) readDelivered() (map[deliveredEntry]bool, error) {
-	raw, err := fsq.ReadRegularNoFollowBounded(filepath.Join(s.Dir, "floor-notices.json"), 64<<20)
+	file := filepath.Join(filepath.Dir(s.Dir), "floor-notices.json")
+	raw, err := fsq.ReadRegularNoFollowBounded(file, 64<<20)
 	if errors.Is(err, os.ErrNotExist) {
 		return map[deliveredEntry]bool{}, nil
 	}
@@ -171,7 +199,7 @@ func (s Store) readDelivered() (map[deliveredEntry]bool, error) {
 	}
 	set := make(map[deliveredEntry]bool, len(doc.Sent))
 	for _, pair := range doc.Sent {
-		if pair.Incident == "" || fsq.ValidateHandle(pair.To) != nil {
+		if pair.Incident == "" || fsq.ValidateHandle(pair.To) != nil || fsq.ValidateHandle(pair.Session) != nil && pair.Session != "" {
 			return nil, errors.New("floor notification delivery set has an invalid pair")
 		}
 		set[pair] = true
@@ -194,7 +222,7 @@ func (s Store) writeDelivered(set map[deliveredEntry]bool) error {
 	if err != nil {
 		return err
 	}
-	if _, err := s.writeFile("floor-notices.json", append(raw, '\n'), 0o600); err != nil {
+	if _, err := fsq.WriteStateFile(filepath.Dir(s.Dir), "floor-notices.json", append(raw, '\n'), 0o600); err != nil {
 		return fmt.Errorf("floor notification delivery set: %w", err)
 	}
 	return nil

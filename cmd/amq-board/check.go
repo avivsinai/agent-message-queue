@@ -49,53 +49,38 @@ func runCheckContext(ctx context.Context, args []string) int {
 		fmt.Fprintln(os.Stderr, "amq-board check: --notify and --as are required together")
 		return exitUsage
 	}
-	var store board.Store
-	var env board.Env
-	var session string
-	var roster []board.RosterEntry
-	var cfg board.FileConfig
-	var state board.Snapshot
 	var recipients []string
 	if *notify == "" {
-		var err error
-		state, cfg, err = readPublishedSnapshot()
+		state, cfg, err := readPublishedSnapshot()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "amq-board check:", err)
 			return exitGeneral
 		}
-	} else {
-		for handle := range strings.SplitSeq(*notify, ",") {
-			handle = strings.TrimSpace(handle)
-			if fsq.ValidateHandle(handle) != nil {
-				fmt.Fprintf(os.Stderr, "amq-board check: invalid recipient %q\n", handle)
-				return exitUsage
-			}
-			recipients = append(recipients, handle)
-		}
-		var err error
-		store, env, cfg, session, err = checkNotifyContext(ctx)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "amq-board check:", err)
-			return exitGeneral
-		}
-		roster = notifyRoster(ctx, env)
-		state, _ = store.Read()
+		now := time.Now()
+		model := state.Project(cfg.Board, now, version)
+		problems, err := board.Check(model, cfg.Board, now)
+		return writeCheck(*asJSON, now, model, problems, err)
 	}
-	now := time.Now()
-	model := state.Project(cfg.Board, now, version)
-	problems, err := board.Check(model, cfg.Board, now)
-	if err != nil && *notify == "" {
+	for handle := range strings.SplitSeq(*notify, ",") {
+		handle = strings.TrimSpace(handle)
+		if fsq.ValidateHandle(handle) != nil {
+			fmt.Fprintf(os.Stderr, "amq-board check: invalid recipient %q\n", handle)
+			return exitUsage
+		}
+		recipients = append(recipients, handle)
+	}
+	store, env, cfg, session, err := checkNotifyContext(ctx)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "amq-board check:", err)
 		return exitGeneral
 	}
-	code := writeCheck(*asJSON, now, model, problems, err)
-	if *notify != "" {
-		nerr := board.Notify(ctx, board.NotifyPlan{Sender: *as, Recipients: recipients, Roster: roster, Env: env, Session: session, Store: store}, err != nil, problems)
-		if nerr != nil {
-			fmt.Fprintln(os.Stderr, "amq-board check: floor notification:", nerr)
-			return exitGeneral
-		}
+	roster, err := notifyRoster(ctx, env)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "amq-board check: resolve floor handles:", err)
+		return exitGeneral
 	}
+	report := board.Notify(ctx, board.NotifyPlan{Sender: *as, Recipients: recipients, Roster: roster, Env: env, Session: session, Store: store, Config: cfg.Board})
+	code := writeCheck(*asJSON, time.Now(), report.Model, report.Problems, report.Err)
 	return code
 }
 
