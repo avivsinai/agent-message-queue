@@ -524,12 +524,8 @@ func (e *Endpoint) unpersisted(rec *requests.Record, state protocol.State, code 
 // Buzz requests carried a session never runs. A request no session binds
 // passes.
 func (e *Endpoint) handoffLocked(rec *requests.Record, t *target) (protocol.Code, string) {
-	if rec.Origin["carrier"] == CarrierLink && (e.consent == nil || !e.consent(rec.CreatorHost, rec.ConsentCredential)) {
-		if rec.GrantDigest != "" {
-			return protocol.CodeConsentInvalid, "grant_revoked: " + GrantKeysGone
-		}
-		return protocol.CodeConsentInvalid, ""
-	}
+	// A granted request's reason comes from its grant check first: it names
+	// why the grant admits nothing now.
 	if rec.GrantDigest != "" {
 		if e.grant == nil {
 			return protocol.CodeConsentInvalid, "grant_revoked: this machine checks no grants"
@@ -537,6 +533,12 @@ func (e *Endpoint) handoffLocked(rec *requests.Record, t *target) (protocol.Code
 		if reason := e.grant(rec.CreatorHost, rec.TargetID, rec.GrantDigest); reason != "" {
 			return protocol.CodeConsentInvalid, reason
 		}
+	}
+	if rec.Origin["carrier"] == CarrierLink && (e.consent == nil || !e.consent(rec.CreatorHost, rec.ConsentCredential)) {
+		if rec.GrantDigest != "" {
+			return protocol.CodeConsentInvalid, "grant_revoked: " + GrantKeysGone
+		}
+		return protocol.CodeConsentInvalid, ""
 	}
 	if rec.NativeSession == "" && !sessionBound(rec.Origin) {
 		return "", ""

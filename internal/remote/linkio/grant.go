@@ -4,9 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"maps"
 	"regexp"
-	"slices"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
@@ -131,7 +129,7 @@ func VerifySignedGrant(view *ConsentView, m SignedGrant, st GrantState, now time
 	if !now.Before(notAfter) {
 		return StoredGrant{}, refuse(CodeGrantExpired, "the grant expired at %s", d.NotAfter)
 	}
-	keyList := KeyList(slices.Collect(maps.Keys(view.Keys)))
+	keyList, _ := view.keyList() // a view with no keys verified no signature
 	if stored {
 		if st.Stored.KeyList != keyList {
 			return StoredGrant{}, refuse(CodeGrantRevoked, "%s; ask grant_info and sign again", core.GrantKeysGone)

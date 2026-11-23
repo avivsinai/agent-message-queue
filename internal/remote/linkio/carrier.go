@@ -162,6 +162,7 @@ type Carrier struct {
 	revokes    map[string]bool                 // consent keys the server removed, waiting for the revoke worker
 	revokeWake chan struct{}                   // wakes the revoke worker; holds at most one signal
 	liveKeys   atomic.Pointer[keySet]          // the key list as last read
+	keysMu     sync.Mutex                      // orders key list reads, so the snapshot is the latest read
 	revoked    atomic.Pointer[map[string]bool] // consent credential ids the server removed in this process
 	held       held                            // signed tasks waiting for the local confirmation
 	waiters    map[string]waiter               // frame id -> the request waiting for its reply
@@ -178,14 +179,23 @@ type Carrier struct {
 	revokedMu       sync.Mutex
 	revokedBindings atomic.Pointer[map[string]uint64]
 	revokeMark      uint64 // under revokedMu: the last mark handed out
+	// mintLocks holds one lock per binding, taken around a binding's
+	// generation mint and its leaving revokedBindings, so two mints of
+	// one binding never run at once. mintLocksMu guards the map.
+	mintLocksMu sync.Mutex
+	mintLocks   map[string]*sync.Mutex
+	// endedMu serializes writers of ended, which maps the digest of every
+	// grant a check of this run saw end to how it ended. A digest in it
+	// admits nothing for the rest of the run, whatever the files say.
+	endedMu sync.Mutex
+	ended   atomic.Pointer[map[string]grantEndRec]
 	// gmu serializes grant store reads and writes, so a snapshot read before
 	// a write never replaces one read after it. It is never held across a
 	// call into the endpoint.
-	gmu        sync.Mutex
-	grantSeen  map[string]StoredGrant // under gmu: digest -> a grant live at the last read
-	grantEnded map[string]string      // under gmu: digest -> the code its grant ended with
-	grantsErr  string                 // under gmu: the store read error last logged
-	mintErr    map[string]string      // under gmu: binding -> the mint error last logged
+	gmu       sync.Mutex
+	grantSeen map[string]StoredGrant // under gmu: digest -> a grant live at the last read
+	grantsErr string                 // under gmu: the store read error last logged
+	storeErr  map[string]string      // under gmu: a store write -> the error last logged
 	// logged is the link state Run last logged: "online" or an offline
 	// error's class (offlineKey). Only Run's goroutine reads or writes it, so a link that
 	// stays down logs one line, not one per redial.
@@ -250,7 +260,7 @@ func New(cfg Config) (*Carrier, error) {
 	}
 	c.held.tasks = map[string]*HeldTask{}
 	c.held.confirmed = map[string]time.Time{}
-	c.grantSeen, c.grantEnded, c.mintErr = map[string]StoredGrant{}, map[string]string{}, map[string]string{}
+	c.grantSeen, c.storeErr, c.mintLocks = map[string]StoredGrant{}, map[string]string{}, map[string]*sync.Mutex{}
 	c.refreshKeys()   // the consent snapshot exists before the first handoff check
 	c.RefreshGrants() // and so does the grant snapshot
 	return c, nil
@@ -495,9 +505,9 @@ func (c *Carrier) Request(ctx context.Context, body any) (json.RawMessage, error
 // every sweep. With no session there is no one to tell: the handshake of the
 // next session sends the bindings as they are then.
 func (c *Carrier) Tick() {
-	c.writeRevokedGenerations()
-	c.refreshKeys()   // a key list the CLI changed is seen here
-	c.RefreshGrants() // and a grant ended by it, by the owner or by its expiry
+	c.writeRevokedGenerations() // a revoke whose new generation is not yet written
+	c.refreshKeys()             // a key list the CLI changed is seen here
+	c.RefreshGrants()           // and a grant ended by it, by the owner or by its expiry
 	c.mu.Lock()
 	connected := c.sess != nil
 	c.mu.Unlock()
@@ -1047,7 +1057,8 @@ func (c *Carrier) admitSigned(m SignedSubmit) (any, error) {
 // submit, so a removed key or a changed binding takes effect at once.
 func (c *Carrier) view() *ConsentView {
 	v := &ConsentView{ServerID: c.cfg.Pin.ServerID, StoreID: c.cfg.StoreID, Keys: map[string]ConsentKey{}, Bindings: map[string]Binding{}}
-	v.Keys = c.refreshKeys()
+	keys, read := c.refreshKeys()
+	v.Keys, v.KeysUnread = keys, !read
 	for _, b := range c.bindingsNow() {
 		v.Bindings[b.Binding] = b
 	}
@@ -1080,13 +1091,14 @@ func (c *Carrier) ConsentLive(credentialID string) bool {
 	return ks != nil && !ks.unread && ks.read[credentialID]
 }
 
-// keyList is the value of the link's key list now (KeyList): the last list
-// read successfully, without the keys the server revoked in this run. ok is
-// false before the first successful read. It does no I/O.
-func (c *Carrier) keyList() (list string, ok bool) {
+// keyListNow is the link's key list now, from the snapshot: the value
+// (KeyList) of the last list read successfully, without the keys the server
+// revoked in this run, and whether the latest read succeeded. It does no
+// I/O.
+func (c *Carrier) keyListNow() keyListNow {
 	ks := c.liveKeys.Load()
 	if ks == nil || ks.read == nil {
-		return "", false
+		return keyListNow{}
 	}
 	revoked := c.revoked.Load()
 	ids := make([]string, 0, len(ks.read))
@@ -1095,7 +1107,7 @@ func (c *Carrier) keyList() (list string, ok bool) {
 			ids = append(ids, id)
 		}
 	}
-	return KeyList(ids), true
+	return keyListNow{list: KeyList(ids), known: true, current: !ks.unread}
 }
 
 // keySet is the snapshot of the key list: read holds the credential ids of
@@ -1113,11 +1125,15 @@ type keySet struct {
 func (c *Carrier) RefreshConsentKeys() { c.refreshKeys() }
 
 // refreshKeys reads the consent keys this machine trusts, stores the
-// snapshot ConsentLive and keyList read, and returns the keys without those
-// the server revoked. The revoked set is loaded after the disk read, so a
-// revocation that lands while the disk is read still filters the keys this
-// submit verifies against. A read error is logged once per distinct error.
-func (c *Carrier) refreshKeys() map[string]ConsentKey {
+// snapshot ConsentLive and keyListNow read, and returns the keys without those
+// the server revoked, and whether the read succeeded. The revoked set is
+// loaded after the disk read, so a revocation that lands while the disk is
+// read still filters the keys this submit verifies against. Reads run one at
+// a time, so a read never replaces the snapshot of a later one. A read
+// error is logged once per distinct error.
+func (c *Carrier) refreshKeys() (map[string]ConsentKey, bool) {
+	c.keysMu.Lock()
+	defer c.keysMu.Unlock()
 	keys := map[string]ConsentKey{}
 	onDisk, err := c.cfg.ConsentKeys()
 	old := c.liveKeys.Load()
@@ -1130,22 +1146,23 @@ func (c *Carrier) refreshKeys() map[string]ConsentKey {
 			c.cfg.Logf("link %s: read consent keys: %v", c.cfg.Name, err)
 		}
 		c.liveKeys.Store(&next)
-		return keys
+		return keys, false
 	}
 	read := make(map[string]bool, len(onDisk))
 	revoked := c.revoked.Load()
 	for _, k := range onDisk {
 		read[k.CredentialID] = true
+		// A key the server revoked is left out: the disk may not say so yet.
 		if revoked == nil || !(*revoked)[k.CredentialID] {
-			keys[k.CredentialID] = k // a revoked key: the disk may not say so yet
+			keys[k.CredentialID] = k
 		}
 	}
 	c.liveKeys.Store(&keySet{read: read})
-	return keys
+	return keys, true
 }
 
 // markRevoked stops a consent key at once: it joins the revoked set,
-// copy-on-write, with no I/O. ConsentLive and keyList read the set.
+// copy-on-write, with no I/O. ConsentLive and keyListNow read the set.
 func (c *Carrier) markRevoked(id string) {
 	next := map[string]bool{id: true}
 	if old := c.revoked.Load(); old != nil {

@@ -18,14 +18,15 @@ import (
 )
 
 // memGrants is a GrantStore in memory. Generation hands out gen to a
-// binding that has none; Mint writes mint, after minting closes when set.
-// Load fails with loadErr when set.
+// binding that has none; Mint writes mint, after minting closes when set,
+// or fails with mintErr when set. Load fails with loadErr when set.
 type memGrants struct {
 	mu      sync.Mutex
 	g       Grants
 	gen     string
 	mint    string
 	minting chan struct{}
+	mintErr error
 	loadErr error
 }
 
@@ -73,8 +74,21 @@ func (m *memGrants) Mint(binding string) (string, error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.mintErr != nil {
+		return "", m.mintErr
+	}
 	m.g[binding] = GrantRecord{Generation: m.mint}
 	return m.mint, nil
+}
+
+func (m *memGrants) Clear(binding, digest string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if rec := m.g[binding]; rec.Grant != nil && rec.Grant.Digest == digest {
+		rec.Grant = nil
+		m.g[binding] = rec
+	}
+	return nil
 }
 
 // goldenFrame is the frame of testdata/link/frames/<file>.
@@ -268,8 +282,8 @@ func TestGrantedSubmitAfterGrantRevokeIsRefused(t *testing.T) {
 
 // Contract section 4, the key list: a grant signed by one key ends when
 // the server revokes another key of the link, from the next frame on, and
-// stays ended after a restart on the same state directory, with no write
-// besides the key drop (review of the session grant branch: the end hung on
+// stays ended after a restart on the same state directory, where the
+// machine cleared it (review of the session grant branch: the end hung on
 // a generation mint after the drop, which could be lost). The same signed
 // grant presented again is refused too, not answered as the stored grant
 // (review of the key-list change: the stored grant's shortcut kept it).
@@ -319,6 +333,11 @@ func TestRevokedKeyEndsTheGrantOfAnotherKey(t *testing.T) {
 			t.Fatalf("%s after the key revoke: %s; want %s for the key list", file, r.Body, CodeGrantRevoked)
 		}
 	}
+	// The machine cleared the ended grant from its file and kept the
+	// binding's generation (contract section 4: the end is permanent).
+	if g, err := LoadGrants(stateDir, "example"); err != nil || g[b.Binding].Grant != nil || g[b.Binding].Generation != gen {
+		t.Fatalf("grants.json after the key revoke: %+v, %v; want no grant and generation %s", g[b.Binding], err, gen)
+	}
 	select {
 	case err := <-dropped:
 		if err != nil {
@@ -337,8 +356,107 @@ func TestRevokedKeyEndsTheGrantOfAnotherKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, reason := restarted.GrantLive(b.TargetID, goldenGrantDigest(t)); reason != CodeGrantRevoked+": "+core.GrantKeysGone {
-		t.Fatalf("hand-over check after a restart = %q, want the key list's end", reason)
+	if _, reason := restarted.GrantLive(b.TargetID, goldenGrantDigest(t)); !strings.HasPrefix(reason, CodeGrantRevoked+": ") {
+		t.Fatalf("hand-over check after a restart = %q, want %s", reason, CodeGrantRevoked)
+	}
+}
+
+// Contract section 4, the key list: the end is permanent. A grant ended by
+// a key added to the link stays ended when the server then revokes that key
+// and the list is back to the one the grant was accepted under: a granted
+// task on the next frame, the hand-over check and the same signed grant
+// presented again are refused, and the store holds no grant (review of the
+// session grant branch: the grant was live again once the list returned).
+func TestKeyListEndIsPermanent(t *testing.T) {
+	view, key := goldenView(t)
+	b := view.Bindings["pi-demo"]
+	const gen = "g_3jx7k2m4qv5w6y7zab2cd3ef4g" // the golden grant's generation
+	added := ConsentKey{CredentialID: "cred-added"}
+	var withAdded atomic.Bool
+	store := &memGrants{g: Grants{b.Binding: {Generation: gen}}}
+	fs, clk := newFakeServer(t), grantClock()
+	c, _ := startCarrier(t, fs, clk, func(cfg *Config) {
+		cfg.StoreID = view.StoreID
+		cfg.ConsentKeys = func() ([]ConsentKey, error) {
+			if withAdded.Load() {
+				return []ConsentKey{key, added}, nil
+			}
+			return []ConsentKey{key}, nil
+		}
+		cfg.ConsentKeyRevoked = func(string) { withAdded.Store(false) }
+		cfg.Bindings = func() []Binding { return []Binding{b} }
+		cfg.Grants = store
+		cfg.GrantInfoFor = func(Binding) (bool, string, int) { return true, "", protocol.MaxInputBytes }
+		cfg.Handle = func(*protocol.Command, core.Source) (any, error) {
+			t.Error("a granted task ran after the key list ended its grant")
+			return protocol.Reply{Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Evidence: "submitted"}}, nil
+		}
+	})
+	wgen := fs.waitWelcome()
+	waitOnline(t, c)
+	send := func(file string) Frame {
+		f := goldenFrame(t, file)
+		f.Gen = wgen
+		fs.send(f)
+		return fs.next()
+	}
+	sameBody(t, send("44-signed_grant.json"), "m_sg1", "45-grant_reply.json")
+	withAdded.Store(true)
+	c.Tick()
+	body, _ := json.Marshal(keyRevokedBody{Schema: SchemaKeyRevoked, CredentialID: added.CredentialID})
+	fs.send(Frame{Schema: SchemaFrame, ID: "m_k1", Gen: wgen, Body: body})
+	for _, file := range []string{"49-granted_submit.json", "44-signed_grant.json"} {
+		var refused struct{ Error ErrorBody }
+		if r := send(file); json.Unmarshal(r.Body, &refused) != nil || refused.Error.Code != CodeGrantRevoked {
+			t.Fatalf("%s with the key list back to the grant's: %s; want %s", file, r.Body, CodeGrantRevoked)
+		}
+	}
+	if _, reason := c.GrantLive(b.TargetID, goldenGrantDigest(t)); !strings.HasPrefix(reason, CodeGrantRevoked+": ") {
+		t.Fatalf("hand-over check with the key list back to the grant's = %q, want %s", reason, CodeGrantRevoked)
+	}
+	if g, _ := store.Load(); g[b.Binding].Grant != nil {
+		t.Fatalf("the grant the key list ended is still stored: %+v", g[b.Binding].Grant)
+	}
+}
+
+// A grant_revoke whose new generation cannot be written answers
+// storage_full, and the binding stays revoked: a granted task on the next
+// frame is refused grant_revoked and the hand-over check refuses it (review
+// of the session grant branch: no row held a binding revoked after its
+// write failed).
+func TestFailedRevokeWriteKeepsTheBindingRevoked(t *testing.T) {
+	view, key := goldenView(t)
+	b := view.Bindings["pi-demo"]
+	const gen = "g_3jx7k2m4qv5w6y7zab2cd3ef4g"
+	store := &memGrants{mintErr: errors.New("grants.json: no space left on device"), g: Grants{b.Binding: {Generation: gen, Grant: goldenGrant(t, b, key, gen, "2026-10-09T22:10:00Z", key)}}}
+	fs, clk := newFakeServer(t), grantClock()
+	c, _ := startCarrier(t, fs, clk, func(cfg *Config) {
+		cfg.StoreID = view.StoreID
+		cfg.ConsentKeys = func() ([]ConsentKey, error) { return []ConsentKey{key}, nil }
+		cfg.Bindings = func() []Binding { return []Binding{b} }
+		cfg.Grants = store
+		cfg.GrantInfoFor = func(Binding) (bool, string, int) { return true, "", protocol.MaxInputBytes }
+		cfg.Handle = func(*protocol.Command, core.Source) (any, error) {
+			t.Error("a granted task ran after its grant was revoked")
+			return protocol.Reply{Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Evidence: "submitted"}}, nil
+		}
+	})
+	wgen := fs.waitWelcome()
+	waitOnline(t, c)
+	for _, step := range []struct{ file, code string }{
+		{"55-grant_revoke.json", string(protocol.CodeStorageFull)},
+		{"49-granted_submit.json", CodeGrantRevoked},
+	} {
+		f := goldenFrame(t, step.file)
+		f.Gen = wgen
+		fs.send(f)
+		var refused struct{ Error ErrorBody }
+		if r := fs.next(); json.Unmarshal(r.Body, &refused) != nil || refused.Error.Code != step.code {
+			t.Fatalf("%s with the generation write failing: %s; want %s", step.file, r.Body, step.code)
+		}
+	}
+	if _, reason := c.GrantLive(b.TargetID, goldenGrantDigest(t)); !strings.HasPrefix(reason, CodeGrantRevoked+": ") {
+		t.Fatalf("hand-over check after the failed revoke write = %q, want %s", reason, CodeGrantRevoked)
 	}
 }
 
@@ -423,9 +541,8 @@ func TestFailedReadEndsNoGrant(t *testing.T) {
 		t.Fatal(err)
 	}
 	ended := func() string {
-		c.gmu.Lock()
-		defer c.gmu.Unlock()
-		return c.grantEnded[digest]
+		e, _ := c.endedGrant(digest)
+		return e.code
 	}
 	keysFail.Store(true)
 	c.RefreshConsentKeys()

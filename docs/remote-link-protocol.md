@@ -178,9 +178,12 @@ retired.
   out; its `not_after` is after the machine's `now`, at most 3 minutes
   ahead and not after the grant's. A busy session answers the outcome
   `busy`; the same command may be sent again, at least 2 seconds apart,
-  until its `not_after`, and every send passes every check again. A target
-  that is offline answers `busy` and keeps no record. Revisions and cancel
-  are as for a signed request.
+  until its `not_after`, and every send passes every check again. A granted
+  request is never held as a deferred record: a harness that cannot read
+  the session's mode while its attachment is offline answers
+  `grant_needs_signature`, and a target that is offline at the hand-over
+  answers `busy` with no record. Revisions and cancel are as for a signed
+  request.
 - `amq.remote.link.grant_revoke/1` `{schema, binding}` (the binding must be
   this link's). Granted tasks read after this frame are refused; the machine
   writes the new generation and answers `{"revoked": {binding,
@@ -221,9 +224,9 @@ outcome of `request.get`.
 
 - Its `not_after`. Expiry is kept: inside one run the machine measures the
   life a grant has left on a clock that does not go back, and when it first
-  sees a grant expired it ends it in its stored state with a new
-  generation. A system clock set back across a restart, before the grant
-  was seen expired, extends it by that amount.
+  sees a grant expired it clears it from its stored state. A system clock
+  set back across a restart, before the grant was seen expired, extends it
+  by that amount.
 - A new generation: a random value per binding of a link, never a counter
   and never reused. The machine mints one when the share is written (attach,
   attach again, a change of consent or tools), when the share is removed
@@ -233,9 +236,12 @@ outcome of `request.get`.
 - A change of the link's key list. The machine stores with each grant the
   key list it was accepted under; a grant is valid only while the link's
   key list is that list. So a key that is added, dropped or revoked ends
-  every grant of the link at once (`grant_revoked`), with no second write
-  that could be lost. The generation does not change; the owner signs a new
-  grant.
+  every grant of the link at once (`grant_revoked`). The end is permanent:
+  the machine clears the stored grant when it sees the change, and a key
+  list that later returns to its earlier value does not bring the grant
+  back. The generation does not change; the owner signs a new grant. Known
+  limit: when that clear fails and the machine restarts while the key list
+  is back at its earlier value, the grant is live again.
 - A newer grant accepted for the same binding.
 - A new epoch or another native session behind the binding.
 - The session can write the machine's state directory with no dialog: the
@@ -275,11 +281,12 @@ signed submit: no code (admitted), `busy`, `request_conflict` (the request
 id is in use with another input, `not_after`, signature or grant),
 `storage_full`, `attachment_lost`.
 
-The reason a grant ended depends on what the machine saw. After the machine
-cleared an expired grant from its stored state, a later hand-over reason
-reads `grant_revoked: the grant is no longer stored`, not `grant_expired`;
-a grant that expired while the machine was down answers `grant_unknown`.
-The server does the same in each case: it signs again.
+The reason a grant ended depends on what the machine saw. In the run of the
+machine that saw a grant end, every later answer for that grant keeps its
+reason, also after the grant is cleared from the stored state. After a
+restart, a grant cleared before it answers `granted_submit` with
+`grant_unknown`, and a hand-over reason reads `grant_revoked: the grant is
+no longer stored`. The server does the same in each case: it signs again.
 
 ## Link info
 

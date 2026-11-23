@@ -11,6 +11,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/jcs"
@@ -79,6 +81,18 @@ type ConsentView struct {
 	StoreID  string
 	Keys     map[string]ConsentKey // by credential id; a removed key is absent
 	Bindings map[string]Binding    // by binding name, as reported to the server
+	// KeysUnread is true when the key list could not be read: Keys is then
+	// empty, and it is no key list a grant can be compared with.
+	KeysUnread bool
+}
+
+// keyList is the KeyList value of the view's keys, and false when the
+// view's key list could not be read.
+func (v *ConsentView) keyList() (string, bool) {
+	if v.KeysUnread {
+		return "", false
+	}
+	return KeyList(slices.Collect(maps.Keys(v.Keys))), true
 }
 
 // Refusal is a signed submit refused before admission.

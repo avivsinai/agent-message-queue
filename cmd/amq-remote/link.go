@@ -1450,8 +1450,9 @@ func (p *nativeProbe) native(target string) (string, error) {
 }
 
 // linkGrantRows lists the grants stored for a link, by binding. A grant is
-// listed until it is revoked or replaced; one past its not_after, or under
-// another key list than the link's, admits nothing.
+// listed until it is revoked or replaced, or a running endpoint saw it end
+// and cleared it; one past its not_after, or under another key list than
+// the link's, admits nothing.
 func linkGrantRows(stateDir, name string) ([]linkGrantRow, string) {
 	grants, err := linkio.LoadGrants(stateDir, name)
 	if err != nil {

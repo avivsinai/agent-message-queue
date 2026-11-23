@@ -140,6 +140,31 @@ func MintGeneration(stateDir, link string, bindings ...string) error {
 	return err
 }
 
+// ClearGrant removes the binding's stored grant when its digest is digest,
+// and keeps the binding's generation: the grant ended (it expired, or the
+// link's key list is not the one it was accepted under) and stays ended. A
+// clear only lowers authority, so it proceeds without an advisory file
+// lock. A removed link has nothing to clear.
+func ClearGrant(stateDir, link, binding, digest string) error {
+	err := withGrants(stateDir, link, func() error {
+		g, err := LoadGrants(stateDir, link)
+		if err != nil {
+			return err
+		}
+		rec, ok := g[binding]
+		if !ok || rec.Grant == nil || rec.Grant.Digest != digest {
+			return nil
+		}
+		rec.Grant = nil
+		g[binding] = rec
+		return writeJSON(LinkDir(stateDir, link), grantsFile, g)
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
 // StoreGrant stores an accepted grant for its binding, replacing an older
 // one. It refuses with ErrGrantGeneration unless the record's generation is
 // the one the grant was signed for, and with ErrGrantNotNewer unless the
@@ -194,6 +219,9 @@ type GrantStore interface {
 	// Mint gives the binding a new generation, which ends its grant, and
 	// returns the new value (MintGeneration).
 	Mint(binding string) (string, error)
+	// Clear removes the binding's stored grant with that digest and keeps
+	// its generation (ClearGrant).
+	Clear(binding, digest string) error
 }
 
 // FileGrants is the GrantStore of link in stateDir: its grants.json.
@@ -208,6 +236,10 @@ func (f fileGrants) Generation(binding string) (string, error) {
 }
 
 func (f fileGrants) Store(sg StoredGrant) error { return StoreGrant(f.stateDir, f.link, sg) }
+
+func (f fileGrants) Clear(binding, digest string) error {
+	return ClearGrant(f.stateDir, f.link, binding, digest)
+}
 
 func (f fileGrants) Mint(binding string) (string, error) {
 	if err := MintGeneration(f.stateDir, f.link, binding); err != nil {

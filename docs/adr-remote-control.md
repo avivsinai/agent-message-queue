@@ -164,7 +164,8 @@ invariants.
   `passkey`, and the harness reports from its own state that the session
   asks before a tool acts. Every share write, detach and revoke mints a new
   random generation, which ends the grant; a key added, dropped or revoked
-  ends it with no write. Within its time the server writes the
+  ends it for good, also when the key list later returns to its earlier
+  value. Within its time the server writes the
   task text; the session reads with no dialog what it can read with no
   dialog, rules the owner pre-allowed in the harness apply to granted tasks,
   and the mode is a report, not a lock. The machine shows a notice when it

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"sync"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
@@ -17,6 +18,10 @@ const grantedCommandAhead = 3 * time.Minute
 
 // noticeTitle is the title of the owner's desktop notices.
 const noticeTitle = "AMQ Remote"
+
+// grantKeysUnread is why no grant admits a task while the link's key list
+// cannot be read. Such a read ends no grant.
+const grantKeysUnread = "the link's key list cannot be read now"
 
 // handleGrantRequest answers the four grant requests. grant_revoke takes
 // effect here on the reader, before the next frame is read; every disk read
@@ -113,7 +118,6 @@ func (c *Carrier) grantInfo(binding string) (any, error) {
 	}
 	c.gmu.Lock()
 	defer c.gmu.Unlock()
-	c.refreshGrantsLocked() // an expired grant ends, with a new generation, before it is read
 	gen, err := c.cfg.Grants.Generation(binding)
 	c.refreshGrantsLocked()
 	if err != nil {
@@ -152,7 +156,8 @@ func (c *Carrier) grantAvailable(b Binding) (bool, string, int) {
 
 // acceptGrant verifies a signed grant against the binding's state read from
 // the store now, stores it, and tells the owner. The stored grant presented
-// again is answered unchanged, with no write and no notice.
+// again is answered unchanged, with no write and no notice, unless a check
+// of this run saw it end: a grant that ended stays refused.
 func (c *Carrier) acceptGrant(m SignedGrant, binding string) (any, error) {
 	view := c.view()
 	var st GrantState
@@ -170,6 +175,12 @@ func (c *Carrier) acceptGrant(m SignedGrant, binding string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if e, ended := c.endedGrant(sg.Digest); ended && (st.Stored == nil || st.Stored.Digest == sg.Digest) {
+		// A grant this run saw end stays ended, also once the store no
+		// longer holds it. One a newer grant replaced is refused by the
+		// store below, as every older grant is.
+		return nil, refuse(e.code, "%s; ask grant_info and sign again", e.why)
+	}
 	reply := GrantReply{Grant: GrantAccepted{Digest: sg.Digest, GrantID: sg.GrantID, Binding: sg.Binding, NotAfter: sg.NotAfter}}
 	if st.Stored != nil && st.Stored.Digest == sg.Digest {
 		return reply, nil
@@ -186,7 +197,7 @@ func (c *Carrier) acceptGrant(m SignedGrant, binding string) (any, error) {
 	if old := st.Stored; old != nil {
 		// Replaced by the newer grant: it ends with no notice of its own.
 		delete(c.grantSeen, old.Digest)
-		c.grantEnded[old.Digest] = CodeGrantRevoked
+		c.markEnded(old.Digest, CodeGrantRevoked, "a newer grant replaced it")
 	}
 	c.refreshGrantsLocked()
 	until := sg.NotAfter
@@ -205,19 +216,18 @@ func (c *Carrier) admitGranted(digest string, cmd *protocol.Command) (any, error
 	if c.cfg.Handle == nil {
 		return nil, refuse(string(protocol.CodeUnsupported), "this endpoint runs no commands")
 	}
-	view := c.view()
 	now := c.cfg.Now()
 	c.gmu.Lock()
 	rec, sg := findGrant(c.refreshGrantsLocked(), cmd.TargetID, digest)
-	ended := c.grantEnded[digest]
 	c.gmu.Unlock()
+	// The view is read after the grant, so its key list is never older than
+	// the one the grant was accepted under, and the grant is compared with
+	// this request's own read of the key list.
+	view := c.view()
 	if sg == nil {
-		if ended != "" {
-			return nil, refuse(ended, "the grant ended; ask grant_info and sign again")
-		}
-		return nil, refuse(CodeGrantUnknown, "no grant with this digest is stored for target %s", cmd.TargetID)
+		return nil, c.noGrant(view, cmd.TargetID, digest)
 	}
-	if code, why := c.grantEnd(rec, sg, now); code != "" {
+	if code, why := c.grantEnd(rec, sg, now, viewKeyList(view)); code != "" {
 		return nil, refuse(code, "%s; ask grant_info and sign again", why)
 	}
 	until, _ := time.Parse(time.RFC3339, sg.NotAfter) // grantEnd parsed it
@@ -266,10 +276,27 @@ func (c *Carrier) admitGranted(digest string, cmd *protocol.Command) (any, error
 	return outcomeReply{Outcome: reply.Outcome}, nil
 }
 
+// noGrant is the refusal of a granted task whose grant is not stored: how
+// the grant ended when a check of this run saw it end, grant_revoked when
+// the server revoked the binding of its target in this run, else
+// grant_unknown.
+func (c *Carrier) noGrant(view *ConsentView, targetID, digest string) error {
+	if e, ended := c.endedGrant(digest); ended {
+		return refuse(e.code, "%s; ask grant_info and sign again", e.why)
+	}
+	for name, b := range view.Bindings {
+		if _, revoked := c.bindingRevoked(name); revoked && b.TargetID == targetID {
+			return refuse(CodeGrantRevoked, "binding %q has another grant generation now; ask grant_info and sign again", name)
+		}
+	}
+	return refuse(CodeGrantUnknown, "no grant with this digest is stored for target %s", targetID)
+}
+
 // revokeGrant writes the binding's new generation after the reader already
 // stopped its grant, and answers it. The write takes the store's own lock.
 // When it fails the answer is storage_full and the binding stays stopped:
-// the server sends the revoke again, and serve's tick writes it again.
+// the server sends the revoke again, and the carrier's tick writes the
+// generation until a write succeeds.
 func (c *Carrier) revokeGrant(binding string, mark uint64) (any, error) {
 	gen, err := c.mintRevoked(binding, mark)
 	if err != nil {
@@ -306,18 +333,35 @@ func (c *Carrier) bindingRevoked(binding string) (uint64, bool) {
 	return mark, ok
 }
 
-// mintRevoked writes a new generation for a binding revoked under mark,
-// reads the store into the snapshot, and only then lets the binding leave
-// the revoked set, unless a later revoke marked it again.
+// mintRevoked writes a new generation for a binding revoked under mark and
+// answers the generation the store holds after it. It holds the binding's
+// mint lock throughout, so no other mint of the binding runs meanwhile, and
+// mints only while the binding is in the revoked set: a binding left the
+// set only after a mint that came after its revoke. It reads the store into
+// the snapshot, and only then lets the binding leave the set, unless a
+// later revoke marked it again.
 func (c *Carrier) mintRevoked(binding string, mark uint64) (string, error) {
-	gen, err := c.cfg.Grants.Mint(binding)
+	mu := c.mintLock(binding)
+	mu.Lock()
+	defer mu.Unlock()
+	var minted string
+	var err error
+	if _, revoked := c.bindingRevoked(binding); revoked {
+		minted, err = c.cfg.Grants.Mint(binding)
+	}
 	c.gmu.Lock()
 	defer c.gmu.Unlock()
-	c.logMint(binding, "write the new grant generation of", err)
+	c.logStore("write the new grant generation of "+binding, err)
 	if err != nil {
 		return "", err
 	}
-	c.refreshGrantsLocked()
+	gen := c.refreshGrantsLocked()[binding].Generation
+	if gen == "" {
+		gen = minted // written, but the store cannot be read back now
+	}
+	if gen == "" {
+		return "", fmt.Errorf("the grant generation of binding %q cannot be read now", binding)
+	}
 	c.revokedMu.Lock()
 	defer c.revokedMu.Unlock()
 	if old := c.revokedBindings.Load(); old != nil && (*old)[binding] == mark {
@@ -328,9 +372,22 @@ func (c *Carrier) mintRevoked(binding string, mark uint64) (string, error) {
 	return gen, nil
 }
 
-// writeRevokedGenerations writes the new generation of each binding the
-// server revoked in this run whose write failed. It runs on serve's tick
-// until the write succeeds.
+// mintLock is the lock around the generation mints of one binding.
+func (c *Carrier) mintLock(binding string) *sync.Mutex {
+	c.mintLocksMu.Lock()
+	defer c.mintLocksMu.Unlock()
+	mu, ok := c.mintLocks[binding]
+	if !ok {
+		mu = &sync.Mutex{}
+		c.mintLocks[binding] = mu
+	}
+	return mu
+}
+
+// writeRevokedGenerations writes the new generation of each binding still
+// in the revoked set: a revoke whose write failed, or whose job has not run
+// yet. The carrier's tick runs it, so a failed write is tried again at every
+// tick until it succeeds.
 func (c *Carrier) writeRevokedGenerations() {
 	revoked := c.revokedBindings.Load()
 	if c.cfg.Grants == nil || revoked == nil {
@@ -341,16 +398,16 @@ func (c *Carrier) writeRevokedGenerations() {
 	}
 }
 
-// logMint logs a failed mint of binding once per distinct error, and
-// forgets the error once a mint succeeds.
-func (c *Carrier) logMint(binding, what string, err error) {
+// logStore logs a failed store write once per distinct error, by what it
+// wrote, and forgets the error once that write succeeds.
+func (c *Carrier) logStore(what string, err error) {
 	if err == nil {
-		delete(c.mintErr, binding)
+		delete(c.storeErr, what)
 		return
 	}
-	if msg := err.Error(); msg != c.mintErr[binding] {
-		c.mintErr[binding] = msg
-		c.cfg.Logf("link %s: %s %s: %v", c.cfg.Name, what, binding, err)
+	if msg := err.Error(); msg != c.storeErr[what] {
+		c.storeErr[what] = msg
+		c.cfg.Logf("link %s: %s: %v", c.cfg.Name, what, err)
 	}
 }
 
@@ -367,10 +424,14 @@ func (c *Carrier) RefreshGrants() {
 
 // refreshGrantsLocked reads the store, stores the snapshot and returns it.
 // An unreadable store admits no grant and ends none. A grant first read now
-// starts its remaining life on the monotonic clock; a stored grant seen
-// expired is ended in the store, by a new generation. A grant live at the
-// last read that is known to be no longer live has ended: revoked, replaced
-// or expired. A key list that could not be read ends no grant.
+// starts its remaining life on the monotonic clock. A stored grant that has
+// ended (grantEndSeen: it expired, its key list or generation is not the
+// link's, or a check of this run saw it end) is cleared from the store,
+// with the binding's generation kept; a failed clear is logged once per
+// distinct error and tried again at the next read. A grant live at the
+// last read that is no longer live has ended, and the owner is told:
+// revoked, replaced or expired. A key list that could not be read ends no
+// grant.
 func (c *Carrier) refreshGrantsLocked() Grants {
 	g, ok := c.loadGrantsLocked()
 	if !ok {
@@ -395,15 +456,18 @@ func (c *Carrier) refreshGrantsLocked() Grants {
 		}
 	}
 	c.grantLife.Store(&life)
-	minted := false
+	kl := c.keyListNow()
+	cleared := false
 	for binding, r := range g {
-		if r.Grant != nil && c.grantExpired(r.Grant, now) {
-			_, err := c.cfg.Grants.Mint(binding)
-			c.logMint(binding, "end the expired grant of", err)
-			minted = minted || err == nil
+		if sg := r.Grant; sg != nil {
+			if code, _ := c.grantEndSeen(r, sg, now, kl); code != "" {
+				err := c.cfg.Grants.Clear(binding, sg.Digest)
+				c.logStore("clear the ended grant of "+binding, err)
+				cleared = cleared || err == nil
+			}
 		}
 	}
-	if minted {
+	if cleared {
 		if g, ok = c.loadGrantsLocked(); !ok {
 			c.grants.Store(&g)
 			return g
@@ -413,7 +477,7 @@ func (c *Carrier) refreshGrantsLocked() Grants {
 	live := map[string]StoredGrant{}
 	for _, r := range g {
 		if sg := r.Grant; sg != nil {
-			if code, _ := c.grantEndKnown(r, sg, now); code == "" {
+			if code, _ := c.grantEndSeen(r, sg, now, kl); code == "" {
 				live[sg.Digest] = *sg
 			}
 		}
@@ -422,12 +486,21 @@ func (c *Carrier) refreshGrantsLocked() Grants {
 		if _, ok := live[d]; ok {
 			continue
 		}
-		code, why := CodeGrantRevoked, "revoked"
-		if c.grantExpired(&sg, now) {
-			code, why = CodeGrantExpired, "expired"
+		e, ended := c.endedGrant(d)
+		if !ended {
+			// It left the store with no check seeing it end: the owner
+			// revoked it, or it expired.
+			e = grantEndRec{code: CodeGrantRevoked, why: "the grant is no longer stored"}
+			if c.grantExpired(&sg, now) {
+				e = grantEndRec{code: CodeGrantExpired, why: "the grant expired at " + sg.NotAfter}
+			}
+			c.markEnded(d, e.code, e.why)
+		}
+		why := "revoked"
+		if e.code == CodeGrantExpired {
+			why = "expired"
 		}
 		delete(c.grantSeen, d)
-		c.grantEnded[d] = code
 		c.notify(fmt.Sprintf("the grant of link %s for session %s ended (%s)", c.cfg.Name, sg.Labels.Session, why))
 	}
 	for d, sg := range live {
@@ -464,36 +537,95 @@ func findGrant(g Grants, targetID, digest string) (GrantRecord, *StoredGrant) {
 	return GrantRecord{}, nil
 }
 
-// grantEnd is "" while the grant sg stored in record r still admits a task:
-// grantEndKnown finds no end, and the last read of the key list succeeded.
-// Else it is the grant code and why. It reads only snapshots and does no
-// I/O.
-func (c *Carrier) grantEnd(r GrantRecord, sg *StoredGrant, now time.Time) (code, why string) {
-	if code, why = c.grantEndKnown(r, sg, now); code == "" {
-		if ks := c.liveKeys.Load(); ks == nil || ks.unread || ks.read == nil {
-			return CodeGrantRevoked, core.GrantKeysGone
-		}
+// grantEnd is "" while the grant sg stored in record r still admits a task
+// under the key list kl: no end is known (grantEndSeen), and kl is the
+// latest read of the key list. Else it is the grant code and why. It reads
+// only snapshots and does no I/O.
+func (c *Carrier) grantEnd(r GrantRecord, sg *StoredGrant, now time.Time, kl keyListNow) (code, why string) {
+	if code, why = c.grantEndSeen(r, sg, now, kl); code == "" && !kl.current {
+		return CodeGrantRevoked, grantKeysUnread
+	}
+	return code, why
+}
+
+// grantEndSeen is the end of a grant: the end a check of this run already
+// saw, or else the end grantEndKnown finds now, which it records, so the
+// grant stays ended for the rest of the run whatever the files say later.
+// It does no I/O.
+func (c *Carrier) grantEndSeen(r GrantRecord, sg *StoredGrant, now time.Time, kl keyListNow) (code, why string) {
+	if e, ended := c.endedGrant(sg.Digest); ended {
+		return e.code, e.why
+	}
+	if code, why = c.grantEndKnown(r, sg, now, kl); code != "" {
+		c.markEnded(sg.Digest, code, why)
 	}
 	return code, why
 }
 
 // grantEndKnown is the end of a grant known to have ended: its generation is
 // not the record's or the server revoked its binding in this run, it
-// expired, or the link's key list is not the one it was accepted under. A
-// key list that could not be read leaves the grant unadmitted (grantEnd)
-// but not ended.
-func (c *Carrier) grantEndKnown(r GrantRecord, sg *StoredGrant, now time.Time) (code, why string) {
+// expired, or the key list ended it (keyListEnded). A key list that could
+// not be read leaves the grant unadmitted (grantEnd) but not ended.
+func (c *Carrier) grantEndKnown(r GrantRecord, sg *StoredGrant, now time.Time, kl keyListNow) (code, why string) {
 	_, revoked := c.bindingRevoked(sg.Binding)
-	list, read := c.keyList()
 	switch {
 	case r.Generation != sg.Generation || revoked:
 		return CodeGrantRevoked, fmt.Sprintf("binding %q has another grant generation now", sg.Binding)
 	case c.grantExpired(sg, now):
 		return CodeGrantExpired, "the grant expired at " + sg.NotAfter
-	case read && list != sg.KeyList:
+	case keyListEnded(kl, sg):
 		return CodeGrantRevoked, core.GrantKeysGone
 	}
 	return "", ""
+}
+
+// keyListNow is the key list a check compares a grant with: list is the
+// value of the last successful read, known is false before any, and
+// current is false when the latest read failed.
+type keyListNow struct {
+	list           string
+	known, current bool
+}
+
+// keyListEnded reports whether the key list ended sg: the list was read and
+// is not the one sg was accepted under. A list that could not be read ends
+// nothing.
+func keyListEnded(kl keyListNow, sg *StoredGrant) bool { return kl.known && kl.list != sg.KeyList }
+
+// viewKeyList is the key list of a view, read for one request.
+func viewKeyList(v *ConsentView) keyListNow {
+	list, read := v.keyList()
+	return keyListNow{list: list, known: read, current: read}
+}
+
+// grantEndRec is how a grant ended: its grant code and why.
+type grantEndRec struct{ code, why string }
+
+// endedGrant reports how the grant with digest ended, when a check of this
+// run saw it end. It does no I/O.
+func (c *Carrier) endedGrant(digest string) (grantEndRec, bool) {
+	ended := c.ended.Load()
+	if ended == nil {
+		return grantEndRec{}, false
+	}
+	e, ok := (*ended)[digest]
+	return e, ok
+}
+
+// markEnded records how the grant with digest ended, copy-on-write, with no
+// I/O. The first end recorded stays.
+func (c *Carrier) markEnded(digest, code, why string) {
+	c.endedMu.Lock()
+	defer c.endedMu.Unlock()
+	next := map[string]grantEndRec{}
+	if old := c.ended.Load(); old != nil {
+		if _, ok := (*old)[digest]; ok {
+			return
+		}
+		next = maps.Clone(*old)
+	}
+	next[digest] = grantEndRec{code: code, why: why}
+	c.ended.Store(&next)
 }
 
 // grantExpired reports whether sg has expired: the wall clock is at or
@@ -524,17 +656,20 @@ func (c *Carrier) notify(body string) {
 // with that digest for that target still admits it, else the reason, which
 // starts with the grant code. It also names the grant's binding. Core asks
 // it under its own lock, so it reads only snapshots: the grant records, the
-// remaining lives, the revoked bindings and the key list.
+// remaining lives, the revoked bindings, the ended grants and the key list.
 func (c *Carrier) GrantLive(targetID, digest string) (binding, reason string) {
-	g := c.grants.Load()
-	if g == nil {
-		return "", CodeGrantRevoked + ": this link holds no grant"
+	var r GrantRecord
+	var sg *StoredGrant
+	if g := c.grants.Load(); g != nil {
+		r, sg = findGrant(*g, targetID, digest)
 	}
-	r, sg := findGrant(*g, targetID, digest)
 	if sg == nil {
+		if e, ended := c.endedGrant(digest); ended {
+			return "", e.code + ": " + e.why
+		}
 		return "", CodeGrantRevoked + ": the grant is no longer stored"
 	}
-	if code, why := c.grantEnd(r, sg, c.cfg.Now()); code != "" {
+	if code, why := c.grantEnd(r, sg, c.cfg.Now(), c.keyListNow()); code != "" {
 		return sg.Binding, code + ": " + why
 	}
 	return sg.Binding, ""
