@@ -54,8 +54,11 @@ recovery. `unresponsive` means an advertised loop did not return a valid
 answer; restart then requires its owning terminal or supervisor. Older wakes
 without the protocol, and Linux wakes, report `unknown`. An unproven loop
 reports wake status `unverified`, and a failed loop reports `degraded`;
-the live process claim is preserved. This check does not prove that a harness
-received or consumed a doorbell. Use a drained receipt for consumption proof.
+the live process claim is preserved. When the wake state changes while the
+check inspects it, the check reports wake status `unverified` with
+`live_wake` false and tells the caller to run `amq wake check` again. This
+check does not prove that a harness received or consumed a doorbell. Use a
+drained receipt for consumption proof.
 
 `doctor --ops` probes advertised loop health in both JSON schemas and text output. Schema 1 adds
 `health_status` and `health_detail` to the wake row; schema 2 uses `wake_check.health`.
