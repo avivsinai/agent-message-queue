@@ -72,6 +72,13 @@ func TestFramesMatchSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	answerSchema, err := c.Compile(schemaBase + "remote-link-v1.schema.json#/$defs/answer_document")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := answerSchema.Validate(mustUnmarshalAny(t, readFile(t, "answer/document.json"))); err != nil {
+		t.Fatal(err)
+	}
 	frames := readFrames(t)
 	if len(frames) == 0 {
 		t.Fatal("no frames")
@@ -82,7 +89,7 @@ func TestFramesMatchSchema(t *testing.T) {
 	}
 	mustUnmarshal(t, readSchema(t), &schemaDoc)
 	shapes := map[string]bool{"frame_id": true, "b64url": true, "digest": true, "opaque": true, "code": true,
-		"labels": true, "binding": true, "error": true, "outcome": true}
+		"answer_document": true, "labels": true, "binding": true, "error": true, "outcome": true}
 	named := map[string]bool{}
 	for _, ff := range frames {
 		named[ff.BodyDef] = true

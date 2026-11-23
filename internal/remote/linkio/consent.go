@@ -168,29 +168,36 @@ func verifySignedSubmit(view *ConsentView, m SignedSubmit, now time.Time) (*prot
 	if err != nil {
 		return nil, "", Binding{}, nil, err
 	}
-	issued, err := time.Parse(time.RFC3339, d.IssuedAt)
-	if err != nil {
-		return nil, "", Binding{}, nil, refuse(CodeConsentInvalid, "issued_at is not RFC 3339")
-	}
-	notAfter, err := time.Parse(time.RFC3339, d.Command.NotAfter)
-	if err != nil {
-		return nil, "", Binding{}, nil, refuse(CodeConsentInvalid, "not_after is not RFC 3339")
-	}
 	maxLife := passkeyMaxLifetime
 	if b.Consent == "local" {
 		maxLife = localMaxLifetime
 	}
-	life := notAfter.Sub(issued)
-	switch {
-	case issued.After(now.Add(consentClockWindow)) || issued.Before(now.Add(-consentClockWindow)):
-		return nil, "", Binding{}, nil, refuse(CodeClockSkew, "check your clock: the consent was issued at %s, this machine says %s", d.IssuedAt, now.UTC().Format(time.RFC3339))
-	case life <= 0 || life > maxLife:
-		return nil, "", Binding{}, nil, refuse(CodeConsentInvalid, "the consent's lifetime %s is outside (0, %s]", life, maxLife)
-	case !now.Before(notAfter):
-		return nil, "", Binding{}, nil, refuse(string(protocol.CodeExpired), "the consent expired at %s", d.Command.NotAfter)
+	if err := checkConsentTime(d.IssuedAt, d.Command.NotAfter, now, maxLife); err != nil {
+		return nil, "", Binding{}, nil, err
 	}
 	cmd := d.Command
 	return &cmd, d.NativeSessionID, b, doc, nil
+}
+
+func checkConsentTime(issuedAt, expiresAt string, now time.Time, maxLife time.Duration) error {
+	issued, err := time.Parse(time.RFC3339, issuedAt)
+	if err != nil {
+		return refuse(CodeConsentInvalid, "issued_at is not RFC 3339")
+	}
+	notAfter, err := time.Parse(time.RFC3339, expiresAt)
+	if err != nil {
+		return refuse(CodeConsentInvalid, "not_after is not RFC 3339")
+	}
+	life := notAfter.Sub(issued)
+	switch {
+	case issued.After(now.Add(consentClockWindow)) || issued.Before(now.Add(-consentClockWindow)):
+		return refuse(CodeClockSkew, "check your clock: the consent was issued at %s, this machine says %s", issuedAt, now.UTC().Format(time.RFC3339))
+	case life <= 0 || life > maxLife:
+		return refuse(CodeConsentInvalid, "the consent's lifetime %s is outside (0, %s]", life, maxLife)
+	case !now.Before(notAfter):
+		return refuse(string(protocol.CodeExpired), "the consent expired at %s", expiresAt)
+	}
+	return nil
 }
 
 // DecodeConsent decodes the signed bytes strictly (decodeJCS), and the
