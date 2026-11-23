@@ -1017,6 +1017,11 @@ func (c *coopExecRun) execAgent() error {
 		if err := publish(); err != nil {
 			return cleanupAfterError(fmt.Errorf("record the startup prompt hold: %w", err))
 		}
+	} else if settings, _ := coopWaitSettings(c.root, c.agentHandle, wakeSettingsLayers{}); settings.attended {
+		// A launch that owns no wake still prints the attended delivery
+		// line: with --no-wake, or beside another owner's wake, the hooks
+		// treat this seat as attended all the same.
+		_ = writeStderr("delivery: attended (no doorbell is typed; mail shows as a notice)\n")
 	}
 	if !embeddedOnly && !c.managedCodexDaemon {
 		if _, err := recordResumedCodexThread(c.binaryPath, c.agentArgs, recordIdentity); err != nil {

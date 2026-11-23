@@ -812,6 +812,8 @@ Self-upgrade: eligible co-op wakes observe their stable launch symlink and
 EXPERIMENTAL: Uses TIOCSTI ioctl (macOS/Linux). May not work on all systems.
 
 Options:
+  -attended
+        A person works in this terminal: never type the doorbell; show a notice only. Applies to a wake of this release or newer; a live wake reports its applied value as attended in amq wake check --json (false with no live wake; read the setting with amq wake config)
   -baseline-existing
         Ignore messages already waiting when this wake starts
   -bell
@@ -1538,6 +1540,8 @@ image, have a failed status write, or be a resume still storing its command-line
 in the file. Restart the wake or use --reset with the full set.
 
 Options:
+  -attended
+        A person works in this terminal: never type the doorbell; show a notice only. Applies to a wake of this release or newer; a live wake reports its applied value as attended in amq wake check --json (false with no live wake; read the setting with amq wake config)
   -bell
         Ring terminal bell on new messages
   -debounce duration

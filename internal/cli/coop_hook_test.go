@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 )
 
@@ -88,6 +89,40 @@ func TestCoopHookSessionStartPrintsThePreamble(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCoopSessionStartAttendedPreamble(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	dir := t.TempDir()
+	base := filepath.Join(dir, ".agent-mail")
+	root := filepath.Join(base, "collab")
+	if err := runInit([]string{"--root", root, "--agents", "claude,codex"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envMe, "claude")
+	t.Setenv(envRoot, root)
+	setAttendedForTest(t, root, "claude")
+
+	stdout, stderr := captureOutput(t, func() error { return writeCoopSessionStart(os.Stdout, time.Now()) })
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want none", stderr)
+	}
+	var got struct {
+		HookSpecificOutput struct {
+			HookEventName     string `json:"hookEventName"`
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("output %q: %v", stdout, err)
+	}
+	want := "This seat is attended: no doorbell is typed and no hook wakes it."
+	if !strings.Contains(got.HookSpecificOutput.AdditionalContext, want) {
+		t.Fatalf("attended preamble = %q, want it to contain %q", got.HookSpecificOutput.AdditionalContext, want)
+	}
+	if strings.Contains(got.HookSpecificOutput.AdditionalContext, "A wake rings this terminal") {
+		t.Fatalf("attended preamble = %q, want no typed-doorbell case", got.HookSpecificOutput.AdditionalContext)
 	}
 }
 
@@ -335,6 +370,129 @@ func TestCoopStopUnderALiveWakeCountsOnlyBaselineMail(t *testing.T) {
 	next, out := decideCoopStop([]coopStopMessage{before, after}, &baseline, fresh, false, "root=r session=s")
 	if out["decision"] != "block" || !slices.Equal(next.BlockedIDs, []string{"before"}) {
 		t.Fatalf("mail at the baseline: %v blocked %v, want a block for before only", out, next.BlockedIDs)
+	}
+}
+
+// An attended seat has no baseline cut: the attended wake
+// types nothing, so mail created after its baseline would never be
+// reported anywhere else. The decide function takes no baseline, so the
+// unit case is that mail after a live wake's baseline is reported.
+func sendCodexToClaudeForAttendedTest(t *testing.T, root string) {
+	t.Helper()
+	if _, err := captureStdout(t, func() error {
+		return runSend([]string{"--root", root, "--me", "codex", "--to", "claude", "--body", "hi"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// setAttendedForTest writes the agent's settings file with attended on.
+func setAttendedForTest(t *testing.T, root, me string) {
+	t.Helper()
+	path := filepath.Join(fsq.AgentBase(root, me), wakeSettingsFileName)
+	raw, err := json.Marshal(map[string]any{"schema": 1, "settings": map[string]bool{"attended": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An attended seat reports pending mail at a real turn end through
+// writeCoopStop: the notice shows, no block is returned, a repeat for the
+// same mail prints nothing, and a second message gets exactly one more
+// notice. No live wake exists here, so there is no baseline to cut with —
+// and the attended path never cuts by baseline anyway.
+func TestCoopStopAttendedReportsPendingMailWithoutAWake(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	base := filepath.Join(t.TempDir(), ".agent-mail")
+	root := filepath.Join(base, "collab")
+	if err := runInit([]string{"--root", root, "--agents", "claude,codex"}); err != nil {
+		t.Fatal(err)
+	}
+	sendCodexToClaudeForAttendedTest(t, root)
+	t.Setenv(envMe, "claude")
+	t.Setenv(envRoot, root)
+	t.Setenv(envBaseRoot, base)
+	t.Setenv(envSession, "collab")
+	setAttendedForTest(t, root, "claude")
+
+	var out bytes.Buffer
+	stop := func() string {
+		t.Helper()
+		out.Reset()
+		if err := writeCoopStop(strings.NewReader(`{"stop_hook_active":false}`), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	first := stop()
+	if !strings.Contains(first, "unread message(s)") {
+		t.Fatalf("attended stop = %q, want the unread notice", first)
+	}
+	if strings.Contains(first, `"decision":"block"`) {
+		t.Fatalf("attended stop = %q, want no block", first)
+	}
+	// A repeat for the same mail prints nothing: NoticedIDs already covers it.
+	if got := stop(); got != "" {
+		t.Fatalf("repeat attended stop = %q, want no output", got)
+	}
+	// A second message prints one more notice, once.
+	sendCodexToClaudeForAttendedTest(t, root)
+	second := stop()
+	if !strings.Contains(second, "2 unread message(s)") {
+		t.Fatalf("second attended stop = %q, want the notice for both messages", second)
+	}
+	if got := stop(); got != "" {
+		t.Fatalf("repeat after both noticed = %q, want no output", got)
+	}
+}
+
+// A drained message leaves the attended Stop state at the next turn end:
+// the state holds exactly the ids still pending, so it does not grow with
+// every message ever reported. The previous ids are what keeps the notice
+// from repeating, not what the state keeps.
+func TestCoopStopAttendedStateHoldsOnlyPendingIDs(t *testing.T) {
+	old := coopStopState{Schema: 1, NoticedIDs: []string{"already-drained"}}
+	if got := decideCoopStopAttended(nil, old); len(got.NoticedIDs) != 0 {
+		t.Fatalf("empty inbox still records %v, want an empty state", got.NoticedIDs)
+	}
+	kept := coopStopMessage{ID: "kept", Created: "2026-11-22T12:00:00Z"}
+	got := decideCoopStopAttended([]coopStopMessage{kept}, old)
+	if !slices.Equal(got.NoticedIDs, []string{"kept"}) {
+		t.Fatalf("drained mail kept in state: %v, want [kept]", got.NoticedIDs)
+	}
+	if !slices.Equal(got.BlockedIDs, old.BlockedIDs) {
+		t.Fatalf("attended seat changed BlockedIDs: %v, want it untouched", got.BlockedIDs)
+	}
+	// An id an earlier unattended block reported stays reported: an attended
+	// seat that keeps it pending reports it again only as a systemMessage
+	// count, never as a second block. Called with the OLD state, as the hook
+	// does — against the next state every pending id is already noticed.
+	blockedOld := coopStopState{Schema: 1, BlockedIDs: []string{"kept"}}
+	if fresh := freshAttendedIDs([]coopStopMessage{kept}, blockedOld.NoticedIDs, blockedOld.BlockedIDs); len(fresh) != 0 {
+		t.Fatalf("blocked id reported again by freshAttendedIDs: %v, want none", fresh)
+	}
+	// Drained mail leaves the unattended state too: decideCoopStop prunes
+	// NoticedIDs to ids still pending at the same turn end.
+	drained := coopStopState{Schema: 1, NoticedIDs: []string{"gone", "kept"}}
+	next, out := decideCoopStop([]coopStopMessage{kept}, nil, drained, false, "root=r session=s")
+	if !slices.Equal(next.NoticedIDs, []string{"kept"}) {
+		t.Fatalf("unattended state keeps drained mail: %v, want [kept]", next.NoticedIDs)
+	}
+	if out == nil {
+		t.Fatal("unattended stop with fresh mail blocked, want a block decision")
+	}
+	// A noticed id that is pending but after the wake baseline stays in
+	// NoticedIDs: the wake does not ring for it, yet it is unread, so
+	// attended on again must not print a second systemMessage for it.
+	baseline := time.Now().Add(-time.Hour)
+	after := coopStopMessage{ID: "after", Created: baseline.Add(time.Second).Format(time.RFC3339Nano)}
+	noticed := coopStopState{Schema: 1, NoticedIDs: []string{"after"}}
+	keptNext, _ := decideCoopStop([]coopStopMessage{after}, &baseline, noticed, false, "root=r session=s")
+	if !slices.Equal(keptNext.NoticedIDs, []string{"after"}) {
+		t.Fatalf("noticed id after the baseline pruned: %v, want [after]", keptNext.NoticedIDs)
 	}
 }
 

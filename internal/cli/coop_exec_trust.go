@@ -220,7 +220,8 @@ func syncStartupDialogMarker(root, handle, binaryPath string, args []string, rec
 	if err != nil {
 		return err
 	}
-	if facts, _ := harness.ForExecutable(binaryPath); facts.Name == harness.Agy {
+	facts, _ := harness.ForExecutable(binaryPath)
+	if facts.Name == harness.Agy {
 		if err := removeHarnessDialogMarker(root, handle, harness.Agy); err != nil {
 			return err
 		}
@@ -330,7 +331,10 @@ func decideStartupDialogMarker(binaryPath string, args []string, recorded, guard
 // publishStartupDialogMarker publishes a decided Startup marker and says on
 // stderr which doorbell the launch gets: "dialog guard: plain" (text and
 // Enter, never held for a dialog), or "dialog guard: proper (<harness>)"
-// when guard names the harness whose dialog hook or relay holds it.
+// when guard names the harness whose dialog hook or relay holds it. An
+// attended seat adds one delivery line for every harness: no doorbell is
+// typed, mail shows as a notice. The line does not predict what the hooks
+// will deliver — that is the hooks' own state at each prompt.
 func publishStartupDialogMarker(root, handle string, marker wakeDialogMarker, hold bool, guard string) error {
 	if err := syncStartupDialogMarkerState(root, handle, marker, hold); err != nil {
 		return err
@@ -341,6 +345,9 @@ func publishStartupDialogMarker(root, handle string, marker wakeDialogMarker, ho
 		_ = writeStderr("dialog guard: proper (%s)\n", guard)
 	}
 	_ = writeStderr("input guard: %s\n", startupInputGuard(root, handle))
+	if settings, _ := coopWaitSettings(root, handle, wakeSettingsLayers{}); settings.attended {
+		_ = writeStderr("delivery: attended (no doorbell is typed; mail shows as a notice)\n")
+	}
 	return nil
 }
 

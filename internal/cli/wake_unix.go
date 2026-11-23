@@ -2739,6 +2739,7 @@ func (s *wakeStart) loadStartupSettings() error {
 	}
 	s.inputGuard = s.newInputGuard()
 	startupSettings.applied.inputGuard = s.inputGuard.status(startupSettings.settings)
+	startupSettings.applied.attended = startupSettings.settings.attended
 	s.startupSettings = startupSettings
 	s.machineSettingsPath, err = machineWakeSettingsPath()
 	if err != nil {

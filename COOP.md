@@ -502,7 +502,14 @@ deferral decides. Claude Code's and Cursor CLI's submit hooks add proof that the
 emptied. [Input guard](docs/wake-operations.md#input-guard-macos). Urgent
 interrupts bypass input deferral; when input remains active through
 `--input-max-hold`, wake emits an out-of-band notice instead of injecting.
-Unavailable input sampling remains best-effort.
+Unavailable input sampling remains best-effort. On an attended seat
+(`amq wake config --attended=true`; it is off by default) the wake never
+writes to the terminal's input, whatever transport it would otherwise use:
+the person reads the notice, and the model learns of the mail at the
+person's next prompt. The input guard is not needed there, because nothing
+is typed into the terminal anyway. `attended` needs a wake of this release
+or newer: upgrade and restart every wake, then confirm with
+`amq wake check --json`.
 
 agy runs no hooks with Google Cloud sign-in, so by default it gets the plain
 doorbell: a doorbell can answer its permission prompt, and doorbells typed
