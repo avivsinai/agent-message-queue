@@ -96,6 +96,9 @@ type Attachment struct {
 	// codexHome is the daemon's Codex home that the thread's rollout path
 	// proves, or "" when thread/resume did not report one.
 	codexHome string
+	// stateDir is the endpoint's absolute state directory, set at build and
+	// never changed; "" refuses every granted request.
+	stateDir string
 	// confirmTimeout is how long Submit waits for our own userMessage item.
 	// Overridable for tests.
 	confirmTimeout time.Duration
@@ -247,6 +250,17 @@ func WithTarget(targetID string) Option {
 	return func(a *Attachment) {
 		if targetID != "" {
 			a.targetID = targetID
+		}
+	}
+}
+
+// WithStateDir names the endpoint's state directory, which a granted request
+// runs only while the thread cannot write it with no dialog. A directory
+// that cannot be made absolute is left unset.
+func WithStateDir(dir string) Option {
+	return func(a *Attachment) {
+		if abs, err := filepath.Abs(dir); err == nil && dir != "" {
+			a.stateDir = abs
 		}
 	}
 }
@@ -466,6 +480,13 @@ func (a *Attachment) WritesWithoutAsking(dir string) bool {
 	a.mu.Lock()
 	p, offline, runtimeRoots := a.perm, a.offline, a.runtimeRoots
 	a.mu.Unlock()
+	return writesWithoutAsking(p, offline, runtimeRoots, dir)
+}
+
+// writesWithoutAsking is WritesWithoutAsking for the settings p and
+// runtimeRoots read under one hold of the lock. It reads the file system, so
+// it runs off the lock.
+func writesWithoutAsking(p perm, offline bool, runtimeRoots []string, dir string) bool {
 	if offline || !p.known || !filepath.IsAbs(dir) {
 		return true
 	}
@@ -621,11 +642,16 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	busy := a.status == "busy" || a.activeTurn != ""
 	codexHome := a.codexHome
 	sessionAsks, why := a.sessionAsksLocked()
+	p, runtimeRoots := a.perm, a.runtimeRoots
 	a.mu.Unlock()
 	// A granted request runs only while the session asks the user before a
-	// tool acts, as read with busy above. The turn carries no override.
+	// tool acts and cannot write the endpoint's state with no dialog, both
+	// read with busy above. The turn carries no override.
 	if req.Granted && !sessionAsks {
 		return core.Admission{Code: protocol.CodeConsentInvalid, Message: "grant_needs_signature: " + why, NothingSent: true}, nil
+	}
+	if req.Granted && writesWithoutAsking(p, false, runtimeRoots, a.stateDir) {
+		return core.Admission{Code: protocol.CodeConsentInvalid, Message: "grant_unsupported: state_in_workspace: the session can write this machine's state with no dialog", NothingSent: true}, nil
 	}
 	// A turn sent while the seat's TUI still shows a startup screen would
 	// end the hold that keeps the seat's own doorbell out of that screen.

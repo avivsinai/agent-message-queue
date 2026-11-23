@@ -29,9 +29,29 @@ func (s *fakeAppServer) setResumeMode(mode string, hook func()) {
 	s.resumeMode, s.resumeHook = mode, hook
 }
 
-func attachWithMode(t *testing.T, srv *fakeAppServer, sock string) *Attachment {
+// scopedSandbox is the workspace-write sandbox policy that writes roots and
+// neither temporary directory, and the thread's working directory work, as
+// JSON members.
+func scopedSandbox(key, work string, roots ...string) string {
+	cwd, _ := json.Marshal(work)
+	writable, _ := json.Marshal(append([]string{}, roots...))
+	return `"cwd":` + string(cwd) + `,"` + key + `":{"type":"workspaceWrite","writableRoots":` + string(writable) + `,"networkAccess":false,"excludeTmpdirEnvVar":true,"excludeSlashTmp":true}`
+}
+
+// scopedMode is the thread/resume mode of a thread that asks, works in work
+// and writes only there and in roots.
+func scopedMode(work string, roots ...string) string {
+	return `,"approvalPolicy":"on-request",` + scopedSandbox("sandbox", work, roots...)
+}
+
+// scopedSettings is the thread/settings/updated of scopedMode.
+func scopedSettings(work string, roots ...string) string {
+	return `{"threadId":"t1","threadSettings":{"approvalPolicy":"on-request","approvalsReviewer":"user",` + scopedSandbox("sandboxPolicy", work, roots...) + `}}`
+}
+
+func attachWithMode(t *testing.T, srv *fakeAppServer, sock string, opts ...Option) *Attachment {
 	t.Helper()
-	att, err := Attach(sock, "t1")
+	att, err := Attach(sock, "t1", opts...)
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
@@ -59,12 +79,14 @@ func grantedSubmit(t *testing.T, att *Attachment, id string) core.Admission {
 	}
 }
 
-// Contract section 5 (Codex): a granted request runs while the thread asks,
-// as the attachment read it at thread/resume, with no override on turn/start.
+// Contract section 5 (Codex): a granted request runs while the thread asks
+// and cannot write the endpoint's state directory, as the attachment read it
+// at thread/resume, with no override on turn/start.
 func TestGrantedSubmitRunsWhileTheThreadAsks(t *testing.T) {
+	work, state := t.TempDir(), t.TempDir()
 	sock, srv := startFakeAppServer(t)
-	srv.setResumeMode(askingMode, nil)
-	att := attachWithMode(t, srv, sock)
+	srv.setResumeMode(scopedMode(work), nil)
+	att := attachWithMode(t, srv, sock, WithStateDir(state))
 	s := att.Inspect()
 	key := requests.Key{CreatorHost: "link-aaaaaaaaaaaaaaaa", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111601"}
 	done := make(chan core.Admission, 1)
@@ -115,6 +137,43 @@ func TestGrantedSubmitIsRefusedAfterTheThreadStopsAsking(t *testing.T) {
 	adm := grantedSubmit(t, att, "11111111-1111-4111-8111-111111111602")
 	if adm.Admitted || adm.Code != protocol.CodeConsentInvalid || !adm.NothingSent || !strings.HasPrefix(adm.Message, "grant_needs_signature: ") {
 		t.Fatalf("granted submit after the change to never = %+v; want consent_invalid grant_needs_signature, nothing sent", adm)
+	}
+}
+
+// Contract section 4: the last check of a granted request is the adapter's,
+// on the settings of the dispatch itself. A thread/settings/updated after the
+// admission check that adds the state directory to the writable roots, while
+// the policy still asks, refuses the granted request with nothing sent
+// (review of the session grant branch: only grant_info and the admission
+// checked the directory, on settings that could change before the dispatch).
+func TestGrantedSubmitIsRefusedWhenTheThreadCanWriteTheState(t *testing.T) {
+	work, state := t.TempDir(), t.TempDir()
+	sock, srv := startFakeAppServer(t)
+	srv.setResumeMode(scopedMode(work), nil)
+	att := attachWithMode(t, srv, sock, WithStateDir(state))
+	if att.WritesWithoutAsking(state) {
+		t.Fatal("after resume: the thread writes the state directory; want not, as the admission check saw")
+	}
+	srv.notify(t, "thread/settings/updated", scopedSettings(work, state))
+	deadline := time.Now().Add(5 * time.Second)
+	for !att.WritesWithoutAsking(state) {
+		if time.Now().After(deadline) {
+			t.Fatal("the settings update that adds the state directory was not applied")
+		}
+		runtime.Gosched()
+	}
+	if asks, why := att.SessionAsks(); !asks {
+		t.Fatalf("after the update: asks false (%s), want true", why)
+	}
+	adm := grantedSubmit(t, att, "11111111-1111-4111-8111-111111111603")
+	const want = "grant_unsupported: state_in_workspace: the session can write this machine's state with no dialog"
+	if adm.Admitted || adm.Code != protocol.CodeConsentInvalid || !adm.NothingSent || adm.Message != want {
+		t.Fatalf("granted submit after the update = %+v; want consent_invalid %q, nothing sent", adm, want)
+	}
+	select {
+	case call := <-srv.calls:
+		t.Fatalf("the refused granted submit sent %s", call.Method)
+	default:
 	}
 }
 

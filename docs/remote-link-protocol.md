@@ -226,8 +226,8 @@ outcome of `request.get`.
   life a grant has left on a clock that does not go back, and when it first
   sees a grant expired it clears it from its stored state. A system clock
   set back across a restart, before the grant was seen expired, extends it
-  by that amount; a clock set back after that brings nothing back, unless
-  the clear failed (see the key list below).
+  by that amount; a clock set back after that brings nothing back once the
+  end is written (see below).
 - A new generation: a random value per binding of a link, never a counter
   and never reused. The machine mints one when the share is written (attach,
   attach again, a change of consent or tools), when the share is removed
@@ -240,11 +240,7 @@ outcome of `request.get`.
   every grant of the link at once (`grant_revoked`). The end is permanent:
   the machine clears the stored grant when it sees the change, and a key
   list that later returns to its earlier value does not bring the grant
-  back. The generation does not change; the owner signs a new grant. When
-  the clear fails, the stored grant stays: inside the run the machine still
-  refuses it, and after a restart in that state, with the key list back at
-  its earlier value, the grant is live again until the next check of its
-  key list or its expiry ends it.
+  back. The generation does not change; the owner signs a new grant.
 - A newer grant accepted for the same binding.
 - A new epoch or another native session behind the binding.
 - The session can write the machine's state directory with no dialog: the
@@ -263,6 +259,15 @@ the end with the end's own code, and after a restart with `grant_stale`,
 also when the wall clock was set back. A new generation drops the value,
 since a grant names its generation; a grant of an earlier generation is
 refused `grant_revoked`.
+
+The machine writes an end that it saw (a key-list change, an expiry) at its
+next tick after it saw it. When the machine stops before that write, or the
+write fails, the stored grant stays: the run that saw the end refuses it,
+and after a restart in that state the grant is live again only if what
+ended it no longer holds (the key list is back at its earlier value, or the
+clock was set back before its expiry), until the next check ends it again.
+An end by a new generation (a share write, a detach, a revoke) is not in
+this limit: the generation is written before the answer.
 
 The machine shows a desktop notice when it accepts a grant and when a grant
 ends by revoke or expiry; `amq-remote link status` lists the stored grants.

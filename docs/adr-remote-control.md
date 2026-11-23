@@ -167,10 +167,12 @@ invariants.
   ends it for good, also when the key list later returns to its earlier
   value. An end is kept on disk: the machine keeps the `issued_at` of the
   newest grant it accepted for a binding, so after a restart a grant that
-  ended, and every grant signed before it, answers `grant_stale`. A grant
-  whose clear failed stays stored: the run that saw it end refuses it, and
-  after a restart it is live again until the next check of its key list or
-  its expiry ends it. Within its time the server writes the
+  ended, and every grant signed before it, answers `grant_stale`. The
+  machine writes an end it saw at its next tick; when it stops before that
+  write, or the write fails, the grant stays stored: the run that saw the end
+  refuses it, and after a restart it is live again only if what ended it no
+  longer holds, until the next check ends it again. An end by a new
+  generation is written before the answer. Within its time the server writes the
   task text; the session reads with no dialog what it can read with no
   dialog, rules the owner pre-allowed in the harness apply to granted tasks,
   and the mode is a report, not a lock. The machine shows a notice when it

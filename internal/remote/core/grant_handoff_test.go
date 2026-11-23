@@ -1,8 +1,10 @@
 package core_test
 
 import (
+	"sync/atomic"
 	"testing"
 
+	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
@@ -75,5 +77,45 @@ func TestGrantedRequestAtTheHandover(t *testing.T) {
 	}
 	if _, exists, err := store.Get(keyOf(offline)); err != nil || exists {
 		t.Fatalf("granted submit to an offline target left a record (%v, %v)", exists, err)
+	}
+}
+
+// unaskingRuntime is a fake whose session does not ask for permissions: it
+// refuses every granted request as the Codex adapter does, with nothing sent,
+// and counts the native Submit calls.
+type unaskingRuntime struct {
+	*fake.Runtime
+	submits atomic.Int32
+}
+
+func (r *unaskingRuntime) Submit(req core.BoundRequest) (core.Admission, error) {
+	r.submits.Add(1)
+	if req.Granted {
+		return core.Admission{Code: protocol.CodeConsentInvalid, Message: "grant_needs_signature: mode_unreadable", NothingSent: true}, nil
+	}
+	return r.Runtime.Submit(req)
+}
+
+// A granted request that the adapter refused ends rejected consent_invalid;
+// the same granted_submit sent again over the link gets that code and reason
+// again, with no second native Submit (review of the session grant branch:
+// the resend answered an empty code, which the link reads as accepted).
+func TestGrantedRequestRefusedByTheAdapterAnswersTheSameAgain(t *testing.T) {
+	rt := &unaskingRuntime{Runtime: fake.New("fake", "e_1")}
+	ep, _, clk := newLinkEndpoint(t, rt)
+	const digest = "sha256:0000000000000000000000000000000000000000000000000000000000000002"
+	ep.SetGrant(func(string, string, string) string { return "" })
+	granted := linkSource(hostA, "fake")
+	granted.GrantDigest = digest
+	cmd := linkSubmit(clk, "fake", "11111111-1111-4111-8111-1111111111f5")
+	const reason = "grant_needs_signature: mode_unreadable"
+	for i := 1; i <= 2; i++ {
+		r := submitReply(t, ep, cmd, granted)
+		if r.Outcome.Code != protocol.CodeConsentInvalid || r.Outcome.Message != reason || r.Snapshot.State != protocol.StateRejected {
+			t.Fatalf("send %d = %s %q %q; want rejected consent_invalid %q", i, r.Snapshot.State, r.Outcome.Code, r.Outcome.Message, reason)
+		}
+	}
+	if n := rt.submits.Load(); n != 1 {
+		t.Fatalf("native Submit calls = %d, want 1", n)
 	}
 }

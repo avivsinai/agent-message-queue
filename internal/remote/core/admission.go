@@ -45,32 +45,22 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		// normally, not answered from the tombstone (minimal tombstone
 		// semantics; full safety/reset is not handled here). Recognizable as
 		// a tombstoned rejected record with no dispatch behind it and the
-		// same request (sameRequest). A different digest, or another signed
-		// document (another not_after) or another grant for any link record,
-		// is a conflict; any other resubmit is answered from the stored
-		// record.
-		retryable := readmittableBusy(rec) && sameRequest(rec, cmd, digest, src.GrantDigest)
-		if !retryable {
+		// same request (conflictWith finds no conflict). A different digest,
+		// or another signed document (another not_after) or another grant for
+		// any link record, is a conflict; any other resubmit is answered from
+		// the stored record.
+		msg, conflict := conflictWith(rec, cmd, digest, src.GrantDigest)
+		if !readmittableBusy(rec) || conflict {
 			e.mu.Unlock()
 			out := protocol.Outcome{Op: protocol.OpRequestSubmit}
-			if rec.InputDigest != "" && rec.InputDigest != digest {
-				out.Code = protocol.CodeRequestConflict
-			} else if rec.Origin["carrier"] == CarrierLink && rec.NotAfter != cmd.NotAfter {
-				// Another signed document for a link's request id never
-				// runs, whatever the record's state; an empty code would
-				// read as accepted over the link, which carries only the
-				// outcome.
-				out.Code = protocol.CodeRequestConflict
-				out.Message = "another signed document holds this request id"
-			} else if rec.Origin["carrier"] == CarrierLink && rec.GrantDigest != src.GrantDigest {
-				// A link's request id admitted by a signature is never run
-				// by a grant, nor the reverse, nor by another grant.
-				out.Code = protocol.CodeRequestConflict
-				out.Message = "another grant or signature holds this request id"
+			if conflict {
+				out.Code, out.Message = protocol.CodeRequestConflict, msg
 			} else if rec.State == protocol.StateRejected {
-				// Same-digest retry of a rejected submit. status/get already
-				// returns the stored adapter text; the duplicate submit must too.
-				out.Message = rec.RefusalReason
+				// The same request sent again after it ended rejected gets
+				// the answer it got: the stored code and the adapter's text,
+				// as status/get returns them. An empty code would read as
+				// accepted over a link, which carries only the outcome.
+				out.Code, out.Message = rec.Code, rec.RefusalReason
 			}
 			return protocol.Reply{Snapshot: rec.Snapshot, Outcome: out}, nil
 		}
@@ -180,7 +170,7 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		// Persist a TERMINAL rejected+busy tombstone directly (one write, no
 		// received-then-reject window). The tombstone keeps dedup and lets the
 		// same request sent again re-admit it, for every carrier: a link's
-		// only with the same signed document (sameRequest).
+		// only with the same signed document (conflictWith).
 		e.busyTombstoneLocked(rec, nativeEvidence{})
 		rec.Revision = 1
 		rec.ObservedAt = protocol.FormatTime(e.now())
@@ -554,8 +544,8 @@ func (e *Endpoint) handoffLocked(rec *requests.Record, t *target) (protocol.Code
 }
 
 // readmittableBusy reports whether rec is a busy tombstone that the same
-// request sent again (sameRequest) may still run: a busy refusal with no
-// dispatch behind it and no cancel asked. It is the only terminal record a
+// request sent again (conflictWith finds no conflict) may still run: a busy
+// refusal with no dispatch behind it and no cancel asked. It is the only terminal record a
 // later submit can execute, so cancel treats it as open. A request id causes
 // at most one native dispatch: the tombstone needs NativeDispatches == 0, and
 // its admission clears the tombstone.
@@ -567,19 +557,29 @@ func readmittableBusy(rec *requests.Record) bool {
 		rec.Cancel == nil
 }
 
-// sameRequest reports whether cmd, whose input digest is digest, sent under
-// the grant grantDigest ("" for none), is the request rec stores. The digest
-// does not cover not_after, so a link record also needs the same not_after
-// and the same grant: only the same signed document, or the same command
-// under the same grant, re-admits a link's busy tombstone, and another
-// signature or another grant for the same request id is answered from the
-// stored record with request_conflict. Nothing is admitted after not_after,
-// so a link record whose deadline passed never runs.
-func sameRequest(rec *requests.Record, cmd *protocol.Command, digest, grantDigest string) bool {
-	if rec.InputDigest != digest {
-		return false
+// conflictWith reports whether cmd, whose input digest is digest, sent under
+// the grant grantDigest ("" for none), conflicts with the request rec
+// stores, and the message of that request_conflict; with no conflict cmd is
+// the stored request. The digest does not cover not_after, so a link record
+// also needs the same not_after and the same grant: only the same signed
+// document, or the same command under the same grant, is a link's stored
+// request, and another signature or another grant for the same request id
+// never runs, whatever the record's state. A record with no stored digest
+// (a cancel that came first) conflicts by its other values only; a busy
+// tombstone always stores one. Nothing is admitted after not_after, so a
+// link record whose deadline passed never runs.
+func conflictWith(rec *requests.Record, cmd *protocol.Command, digest, grantDigest string) (message string, conflict bool) {
+	switch link := rec.Origin["carrier"] == CarrierLink; {
+	case rec.InputDigest != "" && rec.InputDigest != digest:
+		return "", true
+	case link && rec.NotAfter != cmd.NotAfter:
+		return "another signed document holds this request id", true
+	case link && rec.GrantDigest != grantDigest:
+		// A link's request id admitted by a signature is never run by a
+		// grant, nor the reverse, nor by another grant.
+		return "another grant or signature holds this request id", true
 	}
-	return rec.Origin["carrier"] != CarrierLink || (rec.NotAfter == cmd.NotAfter && rec.GrantDigest == grantDigest)
+	return "", false
 }
 
 // busyTombstoneLocked moves rec to the busy tombstone of a refusal that
