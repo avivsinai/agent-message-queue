@@ -77,7 +77,9 @@ func TestHookDoorbellYieldsOnlyToCurrentDeliveryEvidence(t *testing.T) {
 		// waiter less than one debounce after mail arrived, the older waiter
 		// left without a ring, and the wake scanned while no process held
 		// the lock, so it typed for mail that the new waiter rang 1.1 s
-		// later.
+		// later. The review of 912dcf71 added the bound: the wake held for
+		// its whole retry time (5 s) after a waiter that died before it took
+		// the lock, so the hold ends with the hand-over time.
 		{"14 no lock holder, a waiter declared itself 300 ms ago", wakeChannelHook, false, nil, nil, one, true, 300 * time.Millisecond},
 		{"unpublished", "", true, nil, nil, one, false, 0},
 	} {
@@ -137,6 +139,11 @@ func TestHookDoorbellYieldsOnlyToCurrentDeliveryEvidence(t *testing.T) {
 			}
 			if got := h.rings(); got != want {
 				t.Fatalf("typed doorbells = %d, want %d", got, want)
+			}
+			if tc.owner != 0 {
+				if wait, held := h.cfg.hookYield(h.now, []string{"mail"}); !held || wait > coopWaitHandOver-tc.owner {
+					t.Fatalf("hold for a waiter that takes over = %v (held %t), want at most the rest of the hand-over time", wait, held)
+				}
 			}
 		})
 	}

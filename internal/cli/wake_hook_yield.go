@@ -59,7 +59,8 @@ func (cfg *wakeConfig) applyPublishedChannel(channel wakeChannel) {
 // ids, the header ids of the cohort the wake would announce, and when to
 // look again. A waiter runs when a process holds the waiter lock, or when
 // the newest waiter declared itself less than coopWaitHandOver ago and
-// takes the lock from the older one. A message is covered when a waiter
+// takes the lock from the older one; that second fact covers a message
+// only until the hand-over time ends. A message is covered when a waiter
 // runs and no hook announced it (the waiter rings it); when the record that
 // announced it is younger than hookRingGrace (the agent has the grace to
 // drain); or when no waiter runs, no hook announced it, and the waiter's
@@ -76,7 +77,12 @@ func (cfg *wakeConfig) hookYield(now time.Time, ids []string) (time.Duration, bo
 	if cfg.publishedChannel != wakeChannelHook {
 		return 0, false
 	}
-	waiter := coopWaitRuns(cfg.root, cfg.me) || coopWaitStarting(cfg.root, cfg.me, now)
+	holds := coopWaitRuns(cfg.root, cfg.me)
+	var handOver time.Duration
+	if !holds {
+		handOver = coopWaitHandOverLeft(cfg.root, cfg.me, now)
+	}
+	waiter := holds || handOver > 0
 	// The wake does not know the waiter's session, so a ring of any session
 	// counts.
 	seen := coopAnnounced(fsq.AgentBase(cfg.root, cfg.me), "", true)
@@ -100,7 +106,9 @@ func (cfg *wakeConfig) hookYield(now time.Time, ids []string) (time.Duration, bo
 		}
 		at, announced := seen.ids[id]
 		switch {
+		case !announced && holds:
 		case !announced && waiter:
+			wait, reason = min(wait, handOver), "a waiter takes over the doorbell"
 		case announced && grace(at) > 0:
 			wait = min(wait, grace(at))
 			if !waiter {

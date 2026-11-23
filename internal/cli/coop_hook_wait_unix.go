@@ -43,8 +43,8 @@ const (
 	coopWaitPoll = time.Second
 	// coopWaitHandOver bounds the time from a waiter's owner file to its
 	// hold of the waiter lock: the older waiter leaves within one poll of
-	// the file, the newer one tries the lock again within one poll of that,
-	// and the third poll covers a debounce that the older one finishes.
+	// the file, also inside its debounce, and the newer one tries the lock
+	// again within one poll of that. The third poll is the margin.
 	coopWaitHandOver = 3 * coopWaitPoll
 	// coopWaitIdle is how often a waiter that holds the lock and watches its
 	// files looks again with no file event: for the facts that make none, such
@@ -132,11 +132,11 @@ func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 	events := newCoopWaitEvents(agent, extra...)
 	defer events.close()
 	var (
-		release   func()
-		layers    wakeSettingsLayers
-		debounced bool
-		inbox     coopInbox
-		promoted  time.Time
+		release  func()
+		layers   wakeSettingsLayers
+		debounce time.Time // when the debounce of the due mail ends; zero: none runs
+		inbox    coopInbox
+		promoted time.Time
 	)
 	defer func() {
 		if release != nil {
@@ -162,7 +162,7 @@ func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 		if events.live() && release != nil {
 			wait = coopWaitIdle
 		}
-		quiet := false
+		quiet, debouncing := false, false
 		var due []string
 		// The lock-bound half of the seat read is taken at every look; the
 		// settings files are read only when mail is unread.
@@ -186,11 +186,17 @@ func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 				if wake.ringer(settings.attended) != doorbellHook {
 					due, next = nil, time.Time{}
 				}
+				if len(due) > 0 && debounce.IsZero() {
+					debounce = now.Add(settings.debounce)
+					debouncing = true
+				}
 				switch {
-				case len(due) > 0 && !debounced:
+				case len(due) > 0 && (debouncing || now.Before(debounce)):
 					// The Stop guard of the same turn end may be about to
-					// report this mail; let it, and batch a burst.
-					wait = settings.debounce
+					// report this mail; let it, and batch a burst. A newer
+					// waiter takes the doorbell within one poll, so the
+					// debounce is waited in polls and ends at its own time.
+					wait = boundWait(coopWaitPoll, debounce, now)
 					quiet = true
 				case len(due) > 0:
 					// Ring only after the record is stored: a ring the next
@@ -209,7 +215,9 @@ func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 				}
 			}
 		}
-		debounced = len(due) > 0
+		if len(due) == 0 {
+			debounce = time.Time{}
+		}
 		if quiet {
 			select {
 			case <-ctx.Done():
@@ -327,18 +335,21 @@ func coopWaitRuns(root, me string) bool {
 	return err == nil && !ok
 }
 
-// coopWaitStarting reports whether a waiter of (root, me) declared itself
-// less than coopWaitHandOver before now: it is the newest waiter, and it
-// takes the waiter lock when the older one leaves. Between the two no
-// process holds the lock. The owner file is read without following a link
-// and is never created.
-func coopWaitStarting(root, me string, now time.Time) bool {
+// coopWaitHandOverLeft is how long the newest waiter of (root, me) still
+// has at now to take the waiter lock: coopWaitHandOver from its owner file.
+// It is zero when no waiter declared itself in that time. Between an older
+// waiter that left and the newest one no process holds the lock. The owner
+// file is read without following a link and is never created.
+func coopWaitHandOverLeft(root, me string, now time.Time) time.Duration {
 	info, err := os.Lstat(filepath.Join(fsq.AgentBase(root, me), coopWaitOwnerFile))
 	if err != nil || !info.Mode().IsRegular() {
-		return false
+		return 0
 	}
 	age, ok := hookRecordAge(now, info.ModTime())
-	return ok && age < coopWaitHandOver
+	if !ok {
+		return 0
+	}
+	return max(coopWaitHandOver-age, 0)
 }
 
 // coopWaitRunsInBackground reports whether the Claude Code session this

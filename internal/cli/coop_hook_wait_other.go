@@ -21,8 +21,8 @@ func runCoopPromptCodex(io.Reader, io.Writer) error { return nil }
 // coopWaitRuns reports no waiter where the waiter does not run.
 func coopWaitRuns(root, me string) bool { return false }
 
-// coopWaitStarting reports no waiter where the waiter does not run.
-func coopWaitStarting(root, me string, now time.Time) bool { return false }
+// coopWaitHandOverLeft reports no waiter where the waiter does not run.
+func coopWaitHandOverLeft(root, me string, now time.Time) time.Duration { return 0 }
 
 // coopWaitRunsInBackground reports no session that keeps the waiter in the
 // background where the waiter does not run.

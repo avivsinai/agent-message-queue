@@ -284,6 +284,47 @@ func TestCoopWaitRingsOnceForNewMail(t *testing.T) {
 	}
 }
 
+// Review of 912dcf71: a waiter slept its whole debounce (4 s by setting)
+// before it looked at the owner file, so a newer waiter got the lock only
+// after that, and a wake that scanned in between typed for mail the newer
+// waiter then rang.
+func TestCoopWaitLeavesItsDebounceForANewerWaiter(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	root := filepath.Join(t.TempDir(), "queue")
+	if err := runInit([]string{"--root", root, "--agents", "claude,codex"}); err != nil {
+		t.Fatal(err)
+	}
+	root = canonicalWakeRoot(root)
+	if _, err := captureStdout(t, func() error {
+		return runWakeConfig([]string{"--root", root, "--me", "claude", "--debounce", "4s"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := captureStdout(t, func() error {
+		return runSend([]string{"--root", root, "--me", "codex", "--to", "claude", "--body", "hi"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	older := claudeWaiter("7c29e148-77eb-47c0-8984-10c13b4700b1", os.Getppid(), launch.HolderIdentity{})
+	rang := false
+	older.ring = func() (bool, error) { rang = true; return false, errCoopWaitRing }
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	started := time.Now()
+	go func() { done <- waitCoopMail(ctx, root, "claude", older) }()
+	time.Sleep(300 * time.Millisecond)
+	if err := writeCoopHookState(filepath.Join(fsq.AgentBase(root, "claude"), coopWaitOwnerFile), "newer-waiter"); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil || rang {
+		t.Fatalf("older waiter: %v (rang %t), want it to leave with no ring", err, rang)
+	}
+	if took := time.Since(started); took > 300*time.Millisecond+2*coopWaitPoll {
+		t.Fatalf("older waiter left after %v, want within two polls of the newer waiter", took)
+	}
+}
+
 func TestAnAgentWhoseWaiterRunsIsActive(t *testing.T) {
 	clearSendMailboxTestEnv(t)
 	root := filepath.Join(t.TempDir(), "queue")
