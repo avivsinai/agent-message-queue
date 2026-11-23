@@ -20,6 +20,16 @@ import (
 
 func deliverCommand(t *testing.T, root, from, body string, hdr func(*format.Header)) string {
 	t.Helper()
+	mid, data := commandBytes(t, from, body, hdr)
+	droot := mustOpenDeliveryRoot(t, root)
+	if _, err := fsq.DeliverToInboxes(droot, []string{DefaultHandle}, mid+".md", data); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	return mid
+}
+
+func commandBytes(t *testing.T, from, body string, hdr func(*format.Header)) (string, []byte) {
+	t.Helper()
 	now := time.Now()
 	mid, err := format.NewMessageID(now)
 	if err != nil {
@@ -36,11 +46,7 @@ func deliverCommand(t *testing.T, root, from, body string, hdr func(*format.Head
 	if err != nil {
 		t.Fatal(err)
 	}
-	droot := mustOpenDeliveryRoot(t, root)
-	if _, err := fsq.DeliverToInboxes(droot, []string{DefaultHandle}, mid+".md", data); err != nil {
-		t.Fatalf("deliver: %v", err)
-	}
-	return mid
+	return mid, data
 }
 
 const sessionListBody = `{"schema":"amq.remote.command/1","op":"session.list"}`

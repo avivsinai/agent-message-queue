@@ -452,7 +452,15 @@ func TestImportOnceSeesADeliveryIntoALinkedInboxNew(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	deliverCommand(t, root, "codex", sessionListBody, nil)
+	// An external producer publishes into the backing directory because AMQ delivery refuses a linked mailbox.
+	id, data := commandBytes(t, "codex", sessionListBody, nil)
+	tmp := filepath.Join(fsq.AgentInboxTmp(root, DefaultHandle), id+".md")
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, filepath.Join(target, id+".md")); err != nil {
+		t.Fatal(err)
+	}
 	if n, err := carrier.ImportOnce(); err != nil || n != 1 {
 		t.Fatalf("delivery into the linked inbox/new was not imported: n=%d err=%v", n, err)
 	}
