@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.166.0](https://github.com/avivsinai/agent-message-queue/compare/v0.165.0...v0.166.0) (2026-11-23)
+
+
+### Features
+
+* **remote:** a Claude Code session takes a link session grant through its prompt hook ([#1599](https://github.com/avivsinai/agent-message-queue/issues/1599)) ([fa82e8c](https://github.com/avivsinai/agent-message-queue/commit/fa82e8cbb6f445bf236c43bf1b2a7d6eddc12f01))
+
 ## [0.165.0](https://github.com/avivsinai/agent-message-queue/compare/v0.164.0...v0.165.0) (2026-11-23)
 
 
