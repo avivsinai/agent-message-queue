@@ -458,6 +458,7 @@ func WriteLinkAnswer(dir, id, label, role, interactionDigest, documentDigest, cr
 		return fmt.Errorf("dialog directory %s: %w", dir, ErrLinkDialogGone)
 	}
 	defer closeStore()
+	defer func() { _ = dialogRoot.Close() }()
 	answers, err := dialogRoot.OpenDirectChild("answers")
 	if err != nil {
 		return fmt.Errorf("answers directory missing: %w", ErrLinkDialogGone)
