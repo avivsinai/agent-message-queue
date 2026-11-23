@@ -297,6 +297,7 @@ func (e *Endpoint) resubmitTombstoneLocked(cmd *protocol.Command, src Source, ke
 	rec.NativeDispatches = 1
 	rec.ObservedAt = protocol.FormatTime(e.now())
 	e.transitionLocked(rec, causeDispatching, nativeEvidence{})
+	markGrantAtPrompt(rec, t)
 	if err := e.crashAt(PointBeforeDispatching); err != nil {
 		e.store.ReleaseReservation(key)
 		e.mu.Unlock()
@@ -379,6 +380,7 @@ func (e *Endpoint) dispatchReceivedLocked(cmd *protocol.Command, key requests.Ke
 	rec.NativeDispatches = 1
 	rec.ObservedAt = protocol.FormatTime(e.now())
 	e.transitionLocked(rec, causeDispatching, nativeEvidence{})
+	markGrantAtPrompt(rec, t)
 	if err := e.crashAt(PointBeforeDispatching); err != nil {
 		e.mu.Unlock()
 		return protocol.Reply{}, err
@@ -777,6 +779,7 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 	}
 	rec.NativeDispatches = 1
 	e.transitionLocked(rec, causeDispatching, nativeEvidence{})
+	markGrantAtPrompt(rec, t)
 	if _, err := e.commitLocked(rec, e.targets[rec.TargetID]); err != nil {
 		e.mu.Unlock()
 		return err

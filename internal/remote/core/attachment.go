@@ -1,6 +1,8 @@
 package core
 
 import (
+	"time"
+
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
@@ -94,6 +96,11 @@ type Evidence struct {
 	// refusal (action-required), never a silent dispatch and never evidence
 	// of non-admission. Empty on every other evidence path.
 	RefusalCode protocol.Code
+	// GrantedTextDigest is the sha256 (hex) of the text of the hook context
+	// that the adapter saw in the session for this run, when the run's stub
+	// was the only prompt of its turn; else empty. Only a PromptHandover
+	// adapter sets it.
+	GrantedTextDigest string
 }
 
 // CancelEvidence is the attachment's answer to CancelExact.
@@ -137,6 +144,8 @@ type NativeEvent struct {
 	// that interaction id.
 	Outcome protocol.ResolutionOutcome
 	Option  string
+	// GrantedTextDigest is Evidence.GrantedTextDigest for a run event.
+	GrantedTextDigest string
 }
 
 // Attachment is the native seam contract from the design. Implementations
@@ -207,6 +216,43 @@ type SubmitBlocker interface {
 type PermissionReader interface {
 	SessionAsks() (asks bool, why string)
 	WritesWithoutAsking(dir string) bool
+}
+
+// PromptHandover is an optional Attachment method for an adapter whose
+// harness shows its permission mode only at a prompt. Such an adapter sends
+// a granted request as a stub; the endpoint gives the request's text at the
+// prompt the stub raises (Endpoint.GrantedPrompt) and judges its completion.
+type PromptHandover interface {
+	// PromptInstance names this attachment instance. A prompt report that
+	// names another instance is not for this attachment.
+	PromptInstance() string
+	// GrantedStubID is the id by which the stub of the granted request key
+	// names it. It is a function of key alone.
+	GrantedStubID(key requests.Key) string
+	// PromptAsks reports whether a prompt is one at which a granted
+	// request's text may be given: its session is the one this attachment
+	// is attached to now, its mode asks the user before a tool acts, and
+	// the session cannot write this machine's state with no dialog. why
+	// names the mode, or what failed. It reads no stored report.
+	PromptAsks(p Prompt) (asks bool, why string)
+	// ObservePrompt stores the report of a prompt as the evidence that
+	// SessionAsks reads before a stub is sent. It decides nothing else.
+	ObservePrompt(p Prompt, at time.Time)
+	// ForgetPrompt drops a stored report that was observed before before:
+	// a granted request ended then and the session did not take its text.
+	ForgetPrompt(before time.Time)
+}
+
+// Prompt is what a session's hook reported at one prompt.
+type Prompt struct {
+	NativeSession string
+	Mode          string
+}
+
+// GrantTextLimiter is an optional Attachment method for an adapter whose
+// harness bounds the text of a granted request below protocol.MaxInputBytes.
+type GrantTextLimiter interface {
+	GrantTextLimit() int
 }
 
 type Attachment interface {

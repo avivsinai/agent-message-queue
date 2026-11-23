@@ -59,7 +59,7 @@ func (e *Endpoint) recoverTerminalResult(rec *requests.Record) error {
 	case protocol.StateCancelled:
 		typ = EventRunCancelled
 	}
-	e.onNative(rec.TargetID, NativeEvent{Type: typ, Key: keyOfRecord(rec), RunID: ev.RunID, Result: ev.Result})
+	e.onNative(rec.TargetID, NativeEvent{Type: typ, Key: keyOfRecord(rec), RunID: ev.RunID, Result: ev.Result, GrantedTextDigest: ev.GrantedTextDigest})
 	return nil
 }
 
@@ -113,7 +113,12 @@ func (e *Endpoint) Reconcile() error {
 		var rerr error
 		switch rec.State {
 		case protocol.StateDispatching, protocol.StateRunning, protocol.StateUncertain:
-			rerr = e.reconcileLive(rec)
+			// A stub nobody took by its deadline ends here, before any live
+			// evidence is asked for, with no attachment needed.
+			var handled bool
+			if handled, rerr = e.settleUntaken(keyOfRecord(rec)); !handled {
+				rerr = e.reconcileLive(rec)
+			}
 		case protocol.StateReceived:
 			if rerr = e.admitDeferred(rec); rerr == nil {
 				rerr = e.replayTerminalAck(rec)
@@ -320,8 +325,11 @@ func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
 	// Compare both sides in the NativeRef-stable form, recomputed from the
 	// record's own stored result; the full digest is still what the
 	// attachment is asked to release, because its own compare is full-shape.
+	// A record dispatched as a stub may hold its result with the text
+	// withheld, so the evidence is compared in the form a write stores.
+	stored := storedForm(rec, nativeEvidence{result: ev.Result, grantedDigest: ev.GrantedTextDigest})
 	if ev.Class == EvidenceHistoryTerminated && ev.State.Terminal() && ev.Result != nil {
-		if rec.Result == nil || protocol.EvidenceDigestStable(ev.Result) != protocol.EvidenceDigestStable(rec.Result) {
+		if rec.Result == nil || protocol.EvidenceDigestStable(stored) != protocol.EvidenceDigestStable(rec.Result) {
 			// The history outcome is not the outcome this record acked; a
 			// stale or foreign ack must never release different evidence.
 			return nil
@@ -343,7 +351,7 @@ func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
 	// rec.State would reject exactly that: digest matches, states differ, the
 	// slot stays occupied, later submits are refused busy forever. The digest
 	// already proves it is THIS result; the run id proves it is THIS run.
-	if !ev.State.Terminal() || ev.Result == nil || protocol.EvidenceDigest(ev.Result) != digest {
+	if !ev.State.Terminal() || ev.Result == nil || protocol.EvidenceDigest(stored) != digest {
 		// The retained evidence is not the outcome this record acked (a stale
 		// or foreign ack must never release a different request's result).
 		return nil
@@ -504,6 +512,7 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 			return err
 		}
 	}
+	forget, forgetAt := false, time.Time{}
 	switch {
 	case !ok || lookupErr != nil:
 		if rec.State == protocol.StateUncertain {
@@ -542,15 +551,17 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 		// admission did not and cannot happen. Positive evidence, not a guess.
 		e.transitionLocked(rec, causeRefused, nativeEvidence{})
 	case ev.Admitted && ev.State.Terminal():
-		nev := nativeEvidence{runID: ev.RunID, result: ev.Result, interaction: ev.Interaction}
+		nev := nativeEvidence{runID: ev.RunID, result: ev.Result, interaction: ev.Interaction, grantedDigest: ev.GrantedTextDigest}
+		c := causeCompleted
 		switch ev.State {
 		case protocol.StateFailed:
-			e.transitionLocked(rec, causeFailed, nev)
+			c = causeFailed
 		case protocol.StateCancelled:
-			e.transitionLocked(rec, causeCancelledByRequest, nev)
-		default:
-			e.transitionLocked(rec, causeCompleted, nev)
+			c = causeCancelledByRequest
 		}
+		c, nev, forget = grantedOutcome(rec, c, nev)
+		forgetAt = e.now()
+		e.transitionLocked(rec, c, nev)
 		rec.LocalIntervention = rec.LocalIntervention || ev.LocalIntervention
 	case ev.Admitted:
 		// The same-run early return goes FIRST. A healthy running record
@@ -587,7 +598,14 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 	if ackDigest != "" && ok {
 		ackAtt = t.att
 	}
+	var forgetter PromptHandover
+	if forget {
+		forgetter = e.promptHandoverLocked(rec.TargetID)
+	}
 	e.mu.Unlock()
+	if forgetter != nil {
+		forgetter.ForgetPrompt(forgetAt)
+	}
 	if ackAtt != nil && ackDigest != "" {
 		_ = e.ackNative(ackAtt, ackKey, ackEpoch, ackDigest)
 	}
@@ -640,7 +658,7 @@ func (e *Endpoint) applyCancelOutcomeLocked(rec *requests.Record, t *target, key
 		}
 		// causeNone records the result and confirms a pending cancel (folded
 		// into transitionLocked) — no sprinkled force-confirmed after.
-		e.transitionLocked(rec, causeNone, nativeEvidence{runID: lookupRun, result: lookupEv.Result, runTerminal: true})
+		e.transitionLocked(rec, causeNone, nativeEvidence{runID: lookupRun, result: lookupEv.Result, runTerminal: true, grantedDigest: lookupEv.GrantedTextDigest})
 		return e.commitLocked(rec, t)
 	}
 	// CancelExact confirmed: the run was stopped. But disk may have moved under
