@@ -184,6 +184,10 @@ func runEnv(args []string) error {
 		return nil // Not in a session — empty output, exit 0
 	}
 
+	if pinned, acting, ok := pinnedHandleOtherThan(root, me); ok {
+		_ = writeStderr("amq env: this shell is %s (AM_ME); the context printed here is for %s. Commands that use it read and send mail as %s, and nothing here reads mail for %s\n", pinned, acting, acting, pinned)
+	}
+
 	// JSON output mode
 	if *jsonFlag {
 		baseRoot, sessionName, inSession := classifyEnvRoot(root)

@@ -82,6 +82,12 @@ rejected unless a non-empty `--root` or `--session` explicitly repins it.
 `amq env --session` routes from a valid pinned base before it checks project
 configuration.
 
+When `amq env`, `send`, `reply`, `drain`, `read`, or `monitor` acts as a
+handle other than `AM_ME` in the root that `AM_ROOT` pins, it writes one line
+to stderr that names both handles; stdout and the exit code do not change.
+Nothing reads mail for the pinned handle in that command, so a seat that names
+a remembered handle sees the mismatch at its first command.
+
 Exported and persisted roots are absolute and clean. A root that the
 discovery walk finds is a physical path (for example, macOS `/private/var`). An
 explicit `--root`, `AM_ROOT`, `.amqrc` root, or `AMQ_GLOBAL_ROOT` keeps its

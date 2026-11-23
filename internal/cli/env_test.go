@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 func expectedPosixIdentityLines(t *testing.T, root, baseRoot string) string {
@@ -492,6 +494,54 @@ func TestRunEnvExportSessionEmitsBaseRootAndPinNote(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "one terminal, one session") {
 		t.Fatalf("stderr should mention one terminal, one session, got %q", stderr)
+	}
+}
+
+// A seat that coop exec pinned to codex-lead ran
+// `amq env --session session1 --me codex` from a remembered handle; env
+// printed a codex context with no word, and codex-lead's mail stayed unread
+// (bead agent-message-queue-b6ia, observed 2026-11-22).
+func TestRunEnvNamesPinnedHandleWhenContextIsForAnother(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "session1")
+	for _, handle := range []string{"codex", "codex-lead"} {
+		if err := fsq.EnsureAgentDirs(root, handle); err != nil {
+			t.Fatalf("EnsureAgentDirs %s: %v", handle, err)
+		}
+	}
+	rootID, err := resolveTreeIdentityToken(root)
+	if err != nil {
+		t.Fatalf("root identity: %v", err)
+	}
+	baseID, err := resolveTreeIdentityToken(base)
+	if err != nil {
+		t.Fatalf("base identity: %v", err)
+	}
+	t.Setenv(envRoot, root)
+	t.Setenv(envBaseRoot, base)
+	t.Setenv(envSession, "session1")
+	t.Setenv(envRootID, rootID)
+	t.Setenv(envBaseRootID, baseID)
+	t.Setenv(envMe, "codex-lead")
+
+	stdout, stderr, err := captureEnvOutput(t, func() error {
+		return runEnv([]string{"--session", "session1", "--me", "codex"})
+	})
+	if err != nil {
+		t.Fatalf("runEnv: %v", err)
+	}
+	wantStdout := "export AM_ROOT=" + shellQuotePosix(root) + "\n" +
+		"export AM_BASE_ROOT=" + shellQuotePosix(base) + "\n" +
+		expectedPosixIdentityLines(t, root, base) +
+		"export AM_SESSION=session1\n" +
+		"export AM_ME=codex\n"
+	if stdout != wantStdout {
+		t.Fatalf("stdout = %q, want %q", stdout, wantStdout)
+	}
+	wantStderr := "amq env: this shell is codex-lead (AM_ME); the context printed here is for codex. " +
+		"Commands that use it read and send mail as codex, and nothing here reads mail for codex-lead\n"
+	if stderr != wantStderr {
+		t.Fatalf("stderr = %q, want %q", stderr, wantStderr)
 	}
 }
 
