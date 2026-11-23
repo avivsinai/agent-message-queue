@@ -1,6 +1,6 @@
 {
   "body_def": "answer_reply",
-  "description": "Reserved success body after a durable answer write. A verification-only endpoint cannot emit it.",
+  "description": "The machine durably recorded the signed choice.",
   "direction": "endpoint_to_server",
   "frame": {
     "body": {

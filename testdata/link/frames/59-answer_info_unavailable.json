@@ -1,6 +1,6 @@
 {
   "body_def": "answer_info_reply",
-  "description": "Current endpoints take answers at the terminal.",
+  "description": "The share uses the default terminal approval policy.",
   "direction": "endpoint_to_server",
   "frame": {
     "body": {

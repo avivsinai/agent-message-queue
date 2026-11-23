@@ -231,7 +231,7 @@ func (ls *linkSet) newRun(ctx context.Context, l manifest.Link) (*linkRun, error
 	}
 	run := &linkRun{link: l}
 	name := l.Name
-	c, err := linkio.New(linkio.Config{
+	cfg := linkio.Config{
 		Name: name, Pin: pin, StoreID: storeID, Key: key, Version: ls.version,
 		Connected: func() { go ls.refreshToolProfiles(ctx, name) },
 		Bindings:  func() []linkio.Binding { return ls.bindings(run, pin) },
@@ -255,7 +255,13 @@ func (ls *linkSet) newRun(ctx context.Context, l manifest.Link) (*linkRun, error
 		GrantInfoFor: ls.grantInfoFor,
 		Notify:       ls.notify,
 		Logf:         func(f string, a ...any) { say(ls.stderr, f, a...) },
-	})
+	}
+	ls.mu.Lock()
+	if ls.ep != nil {
+		cfg.Answers = ls.ep
+	}
+	ls.mu.Unlock()
+	c, err := linkio.New(cfg)
 	if err != nil {
 		return nil, err
 	}

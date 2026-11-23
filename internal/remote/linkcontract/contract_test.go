@@ -302,7 +302,7 @@ func TestHelloAndRevisions(t *testing.T) {
 		t.Fatal("the consent document does not match the binding in hello")
 	}
 
-	for _, name := range []string{"revision_interaction", "revision_completed"} {
+	for _, name := range []string{"revision_interaction", "revision_completed", "revision_answer_display", "revision_answer_actionable", "revision_answer_occupied", "revision_answer_reopened", "revision_answer_answered", "revision_answer_elsewhere", "revision_answer_ended", "revision_answer_unknown"} {
 		var r struct {
 			StoreID    string          `json:"store_id"`
 			RequestRef string          `json:"request_ref"`

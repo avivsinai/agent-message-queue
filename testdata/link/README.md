@@ -36,6 +36,14 @@ No private key is committed. The keys are derived from public seed strings:
 - Device key (Ed25519): seed = SHA-256(`"amq.remote.link/1 test device key"`).
 - Challenge nonce: base64url of SHA-256(`"amq.remote.link/1 test nonce"`).
 
+## Signed-answer sequences
+
+`answer/sequences.json` lists the request and expected reply frames for a
+lost success reply, a Buzz answer that wins first, and a choice the adapter
+rejects and reopens. Each sequence starts with the same pending approval.
+The `revision_answer_*` frames show the display-only and actionable forms,
+the card while an answer is pending, and the possible dispositions.
+
 ## Rewriting
 
 The files are golden. `AMQ_LINK_FIXTURES_WRITE=1 go test ./internal/remote/linkcontract -run TestGenerateFixtures`

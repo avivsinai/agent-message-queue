@@ -83,6 +83,8 @@ type Config struct {
 	Revoked func()
 	// Handle runs an admitted command (core.Endpoint.Handle).
 	Handle Handler
+	// Answers admits verified choices and reports per-share capability. A nil endpoint takes no answers.
+	Answers AnswerEndpoint
 	// ConsentKeys returns the consent keys this machine trusts now, or the
 	// error that kept it from reading them.
 	ConsentKeys func() ([]ConsentKey, error)

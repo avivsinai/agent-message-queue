@@ -131,7 +131,7 @@
     },
     "answer_document": {
       "type": "object",
-      "description": "The JCS document inside signed_answer. Every key is signed.",
+      "description": "The exact JCS document inside signed_answer. Each key and its schema string are signed.",
       "required": ["schema", "server_id", "store_id", "binding", "target_id", "epoch", "native_session_id", "labels", "request_ref", "interaction_id", "interaction_digest", "option", "issued_at", "not_after"],
       "additionalProperties": false,
       "properties": {
@@ -179,6 +179,7 @@
       }
     },
     "answer_reply": {
+      "description": "The machine has durably recorded the signed choice. The request revision reports which answer the harness adapter took.",
       "type": "object",
       "additionalProperties": false,
       "required": ["answer"],

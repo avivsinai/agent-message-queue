@@ -1,6 +1,6 @@
 {
   "body_def": "answer_info_reply",
-  "description": "Reserved capability for a binding accepting signed answers.",
+  "description": "The opted-in binding accepts signed one-time choices.",
   "direction": "endpoint_to_server",
   "frame": {
     "body": {
