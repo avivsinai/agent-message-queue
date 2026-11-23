@@ -388,10 +388,15 @@ func (e *Endpoint) applyTransitionLocked(rec *requests.Record, c cause, ev nativ
 		}
 		rec.Interaction = nil
 	case causeFailed:
+		// Empty but for a failure the endpoint decided (grantedOutcome). A
+		// record already failed keeps the reason it holds: evidence that only
+		// confirms the end (a Submit that returns after the run ended) carries
+		// none.
+		if rec.State != protocol.StateFailed || ev.reason != "" {
+			rec.RefusalReason = protocol.BoundReason(ev.reason)
+		}
 		rec.State = protocol.StateFailed
 		rec.Code = protocol.CodeNativeError
-		// Empty but for a failure the endpoint decided (grantedOutcome).
-		rec.RefusalReason = protocol.BoundReason(ev.reason)
 		if ev.runID != "" {
 			run := ev.runID
 			rec.NativeRun = &run

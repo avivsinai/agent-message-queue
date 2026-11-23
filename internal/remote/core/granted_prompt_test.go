@@ -492,6 +492,31 @@ func TestGrantedStubSettlement(t *testing.T) {
 		}
 	})
 
+	// Pre-merge review: the Submit that returns after the run ended failed
+	// again with no reason and cleared the withheld answer's reason.
+	t.Run("a run that ends before its Submit returns keeps the withheld reason", func(t *testing.T) {
+		rt := newPromptRuntime()
+		f := newGrantFixture(t, rt)
+		const id = "11111111-1111-4111-8111-111111111318"
+		rt.HoldAfterAdmit()
+		done := make(chan struct{})
+		go func() { defer close(done); f.submit(t, id, true) }()
+		for deadline := time.Now().Add(2 * time.Second); !rt.Complete(id, "the answer"); {
+			if time.Now().After(deadline) {
+				t.Fatal("the run was never admitted")
+			}
+			time.Sleep(time.Millisecond)
+		}
+		rt.ReleaseAfterAdmit()
+		<-done
+		if rec := f.record(t, id); rec.State != protocol.StateFailed || (rec.Result != nil && rec.Result.Text != "") {
+			t.Fatalf("record = %s result %+v; want failed with no text", rec.State, rec.Result)
+		}
+		if got := f.get(t, id); got.Outcome.Message != "the answer cannot be attributed to this task; the task may have run" {
+			t.Fatalf("request.get message = %q", got.Outcome.Message)
+		}
+	})
+
 	t.Run("a late answer on a request that expired untaken stores no text", func(t *testing.T) {
 		rt := newPromptRuntime()
 		f := newGrantFixture(t, rt)
