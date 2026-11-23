@@ -425,8 +425,17 @@ func (e *Endpoint) recoverOwedOutcomes(rec *requests.Record) error {
 		// the filesystem and must not run under the endpoint mutex, and a
 		// resolution that lands just after the unlocked ask still corrects
 		// the retired outcome (retired ids stay correctable until
-		// compaction). The unlocked ask above was the final one.
+		// compaction). The unlocked ask above was the final one. The
+		// horizon's own present-check runs here under the lock on purpose:
+		// the store's commit below does file I/O under that lock already,
+		// and a second mechanism to avoid one directory read is not worth
+		// it. A dialog whose files still exist stays owed — its resolution
+		// may still arrive; unknown is only for a dialog with no files and
+		// no history entry.
 		if isLinkDialog(cur, id) {
+			if e.linkDialogs != nil && cur.Binding != "" && e.linkDialogs.Present(cur.Binding, id) {
+				continue // the dialog's files exist: the outcome may still arrive
+			}
 			if owes(cur, id) && retireOutcomeLocked(cur, id) {
 				changed = true
 			}

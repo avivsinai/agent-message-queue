@@ -311,6 +311,66 @@ func TestLinkDialogHookToSelectorToRequestGet(t *testing.T) {
 	if snap.Revision <= revPublished {
 		t.Fatalf("revision %d after resolution; want above %d", snap.Revision, revPublished)
 	}
+
+	// The remaining dispositions through the same chain: the next open
+	// dialog publishes after one resolves, and a resolution by the
+	// terminal maps to elsewhere, one by the link to answered.
+	dispositions := []struct {
+		name       string
+		resolve    func(dir, id string)
+		wantKind   protocol.ResolutionOutcome
+		wantOption string
+	}{
+		{name: "terminal", resolve: func(dir, id string) {
+			if _, err := dialog.Resolve(dir, dialog.Resolved{ID: id, Outcome: dialog.OutcomeTerminal, By: dialog.ByTerminal, At: time.Now().UTC()}); err != nil {
+				t.Fatal(err)
+			}
+		}, wantKind: protocol.ResolutionElsewhere, wantOption: ""},
+		{name: "link", resolve: func(dir, id string) {
+			if _, err := dialog.Resolve(dir, dialog.Resolved{ID: id, Outcome: dialog.OutcomeAllowed, Label: "Allow once", By: dialog.ByLink, At: time.Now().UTC()}); err != nil {
+				t.Fatal(err)
+			}
+		}, wantKind: protocol.ResolutionAnswered, wantOption: "Allow once"},
+	}
+	for _, d := range dispositions {
+		req := dialog.Request{ID: dialog.NewID(), Harness: "claude", Session: "pi:chat", Tool: "Bash",
+			Text: "$ echo next", Complete: true, OpenedAt: time.Now().UTC(),
+			Options: []dialog.Option{{N: 1, Label: "Allow once", Scope: dialog.ScopeOnce}, {N: 2, Label: "Deny", Deny: true, Scope: dialog.ScopeOnce}}}
+		openDialog(t, "pi-chat", req)
+		if err := ep.Reconcile(); err != nil {
+			t.Fatal(err)
+		}
+		rep, err := ep.Handle(get, linkSrc)
+		if err != nil {
+			t.Fatalf("get after publication %s: %v", d.name, err)
+		}
+		snap = rep.(protocol.Reply).Snapshot
+		if snap.Interaction == nil || snap.Interaction.InteractionID != req.ID {
+			t.Fatalf("snapshot interaction = %+v; want the %s dialog", snap.Interaction, d.name)
+		}
+		d.resolve(dir, req.ID)
+		if err := ep.Reconcile(); err != nil {
+			t.Fatal(err)
+		}
+		rep, err = ep.Handle(get, linkSrc)
+		if err != nil {
+			t.Fatalf("get after %s resolution: %v", d.name, err)
+		}
+		snap = rep.(protocol.Reply).Snapshot
+		if snap.Interaction != nil {
+			t.Fatalf("snapshot kept the %s-resolved interaction: %+v", d.name, snap.Interaction)
+		}
+		var got2 *protocol.Resolution
+		for j := range snap.Resolved {
+			if snap.Resolved[j].InteractionID == req.ID {
+				got2 = &snap.Resolved[j]
+			}
+		}
+		if got2 == nil || got2.Outcome != d.wantKind || got2.Option != d.wantOption {
+			t.Fatalf("%s resolution = %+v; want %s/%q", d.name, got2, d.wantKind, d.wantOption)
+		}
+
+	}
 }
 
 // Only the exact running link, with the share naming the binding, passkey

@@ -789,4 +789,11 @@ func TestDialogTextBashCompletenessRequiresTheRenderedShape(t *testing.T) {
 	if _, complete = dialogText("Bash", "", []byte(`{"command":"ls"}`)); !complete {
 		t.Fatal("plain command without a cwd not marked complete")
 	}
+	// The working directory line shows on every Bash dialog, not only a
+	// strict one (ruling C4): a shape the complete mark refuses still
+	// carries the cwd in its text.
+	got2, complete2 := dialogText("Bash", "/w", []byte(`{"command":"ls","timeout":5000}`))
+	if complete2 || !strings.Contains(got2, "in /w") {
+		t.Fatalf("non-strict Bash render = %q complete=%v; want the cwd line, machine-answered", got2, complete2)
+	}
 }

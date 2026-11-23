@@ -1,6 +1,7 @@
 package core_test
 
 import (
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -20,6 +21,24 @@ type stubDialogs struct {
 	lastSel func(rec *requests.Record) *protocol.Interaction
 	out     map[string]protocol.Resolution
 	askOut  int
+	gone    map[string]bool // ids whose files are gone: Present reports false
+}
+
+// Present answers for a published dialog at the retirement horizon: files
+// exist and no resolution replaced them, unless the test marked the id gone.
+func (s *stubDialogs) Present(_, id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.gone[id]
+}
+
+func (s *stubDialogs) markGone(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.gone == nil {
+		s.gone = map[string]bool{}
+	}
+	s.gone[id] = true
 }
 
 func (s *stubDialogs) Select(rec *requests.Record) *protocol.Interaction {
@@ -109,81 +128,6 @@ func TestLinkDialogSelectionPublishesAndPins(t *testing.T) {
 	}
 }
 
-// The ratified happy path: a link record's published dialog is visible to
-// the linked server through request.get, and its snapshot revision moves
-// when the dialog resolves, so a server that polls sees the change.
-func TestLinkDialogVisibleThroughRequestGet(t *testing.T) {
-	store, now := openStore(t)
-	rt := fake.New("fake", "e_1")
-	ep := core.New(core.Config{Store: store, Now: now})
-	ep.Register(rt)
-	ep.SetConsent(func(string, string) bool { return true })
-	ep.SetDialogsOpen(func(string) ([]string, error) { return nil, nil })
-	stub := &stubDialogs{out: map[string]protocol.Resolution{}}
-	ep.SetLinkDialogs(stub)
-
-	id := "11111111-1111-4111-8111-1111111111d6"
-	if _, err := ep.Handle(submitCmd(id), linkShare("sess-1")); err != nil {
-		t.Fatal(err)
-	}
-	ref := protocol.EncodeRef("link-x", "fake", id)
-	get := &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestGet, RequestRef: ref}
-
-	// Nothing published yet: the snapshot carries no interaction.
-	rep1, err := ep.Handle(get, linkShare("sess-1"))
-	if err != nil {
-		t.Fatalf("get before publication: %v", err)
-	}
-	r1 := rep1.(protocol.Reply)
-	if r1.Snapshot.Interaction != nil {
-		t.Fatalf("snapshot carried an interaction before publication: %+v", r1.Snapshot.Interaction)
-	}
-	revBefore := r1.Snapshot.Revision
-
-	stub.setSelect(func(*requests.Record) *protocol.Interaction { return linkInteraction("ld_6") })
-	if err := ep.Reconcile(); err != nil {
-		t.Fatal(err)
-	}
-	rep2, err := ep.Handle(get, linkShare("sess-1"))
-	if err != nil {
-		t.Fatalf("get after publication: %v", err)
-	}
-	r2 := rep2.(protocol.Reply)
-	if r2.Snapshot.Interaction == nil || r2.Snapshot.Interaction.InteractionID != "ld_6" {
-		t.Fatalf("snapshot interaction = %+v; want the published dialog", r2.Snapshot.Interaction)
-	}
-	if r2.Snapshot.Revision <= revBefore {
-		t.Fatalf("revision %d after publication; want above %d", r2.Snapshot.Revision, revBefore)
-	}
-
-	// The answer arrives through the seam: the next get resolves it.
-	stub.resolve("ld_6", protocol.Resolution{InteractionID: "ld_6", Outcome: protocol.ResolutionAnswered, Option: "Allow"})
-	stub.setSelect(nil)
-	if err := ep.Reconcile(); err != nil {
-		t.Fatal(err)
-	}
-	rep3, err := ep.Handle(get, linkShare("sess-1"))
-	if err != nil {
-		t.Fatalf("get after resolution: %v", err)
-	}
-	r3 := rep3.(protocol.Reply)
-	if r3.Snapshot.Interaction != nil {
-		t.Fatalf("snapshot kept the resolved interaction: %+v", r3.Snapshot.Interaction)
-	}
-	var answered *protocol.Resolution
-	for i := range r3.Snapshot.Resolved {
-		if r3.Snapshot.Resolved[i].InteractionID == "ld_6" {
-			answered = &r3.Snapshot.Resolved[i]
-		}
-	}
-	if answered == nil || answered.Outcome != protocol.ResolutionAnswered || answered.Option != "Allow" {
-		t.Fatalf("resolved = %+v; want answered/Allow", answered)
-	}
-	if r3.Snapshot.Revision <= r2.Snapshot.Revision {
-		t.Fatalf("revision %d after resolution; want above %d", r3.Snapshot.Revision, r2.Snapshot.Revision)
-	}
-}
-
 // Regression (review of c2236f5e): a pinned dialog whose record went
 // uncertain after attachment loss still settles from its files/history —
 // the disposition lives on the machine, not in the attachment. New
@@ -231,6 +175,69 @@ func TestLinkDialogPinnedSettlesWhileUncertain(t *testing.T) {
 	}
 	if rec.Resolved[0].Outcome != protocol.ResolutionElsewhere || rec.Resolved[0].Option != "Deny" {
 		t.Fatalf("resolution = %+v; want elsewhere/Deny", rec.Resolved[0])
+	}
+}
+
+// Ruling C2 (2026-11-23): at the retirement horizon an open dialog whose
+// files still exist stays owed — the hook can wait far beyond the horizon —
+// and a resolution found later gives the real outcome. Unknown is only for
+// a dialog with no files and no history entry.
+func TestLinkDialogOpenDialogNotRetiredAtHorizon(t *testing.T) {
+	store, now := openStore(t)
+	clk := now()
+	rt := fake.New("fake", "e_1")
+	ep := core.New(core.Config{Store: store, Now: func() time.Time { return clk }})
+	ep.Register(rt)
+	ep.SetConsent(func(string, string) bool { return true })
+	ep.SetDialogsOpen(func(string) ([]string, error) { return nil, nil })
+	stub := &stubDialogs{}
+	ep.SetLinkDialogs(stub)
+
+	id := "11111111-1111-4111-8111-1111111111d5"
+	if _, err := ep.Handle(submitCmd(id), linkShare("sess-1")); err != nil {
+		t.Fatal(err)
+	}
+	stub.setSelect(func(*requests.Record) *protocol.Interaction { return linkInteraction("ld_3") })
+	if err := ep.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	stub.setSelect(nil)
+	rt.Complete(id, "done") // the run ends, the dialog stays open
+	key := requests.Key{CreatorHost: "link-x", TargetID: "fake", RequestID: id}
+
+	// The horizon passes while the dialog's files exist: still owed, no
+	// unknown resolution recorded.
+	clk = clk.Add(protocol.DefaultCompactHorizon + time.Minute)
+	if err := ep.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	rec, _, _ := store.Get(key)
+	if !slices.Contains(rec.OwedOutcomes, "ld_3") {
+		t.Fatalf("owed outcomes = %v; want ld_3 still owed", rec.OwedOutcomes)
+	}
+	for i := range rec.Resolved {
+		if rec.Resolved[i].InteractionID == "ld_3" {
+			t.Fatalf("open dialog retired at the horizon: %+v", rec.Resolved[i])
+		}
+	}
+
+	// The dialog resolves late: the real outcome lands.
+	stub.resolve("ld_3", protocol.Resolution{InteractionID: "ld_3", Outcome: protocol.ResolutionAnswered, Option: "Deny"})
+	if err := ep.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	rec, _, _ = store.Get(key)
+	var got *protocol.Resolution
+	for i := range rec.Resolved {
+		if rec.Resolved[i].InteractionID == "ld_3" {
+			got = &rec.Resolved[i]
+		}
+	}
+	if got == nil || got.Outcome != protocol.ResolutionAnswered || got.Option != "Deny" {
+		t.Fatalf("late resolution = %+v; want answered/Deny", got)
+	}
+	if slices.Contains(rec.OwedOutcomes, "ld_3") {
+		t.Fatalf("owed outcomes = %v; want ld_3 settled", rec.OwedOutcomes)
 	}
 }
 
@@ -340,7 +347,8 @@ func TestLinkDialogRunEndRetiresUnknown(t *testing.T) {
 		t.Fatal(err)
 	}
 	stub.setSelect(nil)
-	rt.Complete(id, "done") // the run ends with the dialog's files already gone
+	stub.markGone("ld_3") // the run ends with the dialog's files already gone
+	rt.Complete(id, "done")
 	key := requests.Key{CreatorHost: "link-x", TargetID: "fake", RequestID: id}
 	rec, _, _ := store.Get(key)
 	if len(rec.OwedOutcomes) != 1 || rec.OwedOutcomes[0] != "ld_3" {

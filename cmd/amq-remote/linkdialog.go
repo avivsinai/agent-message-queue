@@ -214,6 +214,19 @@ func (s *linkDialogSource) render(dir string, rec *requests.Record, id string) (
 	return in, true
 }
 
+// Present reports whether the dialog still exists on the machine: its
+// request file is readable and no resolution replaced it.
+func (s *linkDialogSource) Present(binding, id string) bool {
+	dir, err := dialog.DirRead(binding)
+	if err != nil {
+		return false
+	}
+	phase, _, _, resolved, err := dialog.Lookup(dir, id)
+	// An answered-but-unresolved dialog still exists: its resolution may
+	// land or be rejected, so it stays owed.
+	return err == nil && (phase == dialog.PhaseOpen || phase == dialog.PhaseAnswered) && resolved == nil
+}
+
 // Outcome reads how a published dialog ended, in the ratified order: the
 // resolution file, then the dialog history entry, then not done — the owed
 // horizon later records unknown. A missing file is never read as a winner.
