@@ -23,6 +23,28 @@ type stubDialogs struct {
 	askOut     int
 	gone       map[string]bool                // ids whose files are gone: Present reports not present
 	presentRes map[string]protocol.Resolution // resolutions Present sees in the outcome-read race
+	policy     func(string) (bool, string)    // AnswerPolicy; nil = available
+	write      func() (protocol.Code, string) // WriteAnswer; nil = durable
+	answers    []string                       // WriteAnswer calls, "binding/id/label"
+}
+
+func (s *stubDialogs) AnswerPolicy(binding string) (bool, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.policy != nil {
+		return s.policy(binding)
+	}
+	return true, ""
+}
+
+func (s *stubDialogs) WriteAnswer(binding, id, label, _, _ string) (protocol.Code, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.answers = append(s.answers, binding+"/"+id+"/"+label)
+	if s.write != nil {
+		return s.write()
+	}
+	return "", ""
 }
 
 // Present answers for a published dialog at the retirement horizon: files

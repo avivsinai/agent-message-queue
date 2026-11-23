@@ -36,6 +36,19 @@ type LinkDialogs interface {
 	// caller's outcome ask — resolved carries it, so the caller settles
 	// that outcome instead of retiring it as unknown.
 	Present(binding, id string) (present bool, res protocol.Resolution, resolved bool)
+
+	// AnswerPolicy reports whether the binding's share takes link answers
+	// now and, when it does not, the reason: approvals_terminal,
+	// consent_local or harness_unsupported, in that order when more than
+	// one holds.
+	AnswerPolicy(binding string) (available bool, reason string)
+
+	// WriteAnswer records a verified link answer in the binding's dialog
+	// directory: the answers file created exclusively, the file and its
+	// directory synced. "", "" means durable. Any other return is the
+	// refusal code and its reason; nothing was recorded, except for
+	// internal, where durability could not be confirmed.
+	WriteAnswer(binding, id, label, documentDigest, credential string) (protocol.Code, string)
 }
 
 // SetLinkDialogs installs the link-dialog seam. Until it is set, no link

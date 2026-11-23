@@ -121,8 +121,12 @@ type Answer struct {
 	ID     string    `json:"id"`
 	Option int       `json:"option,omitempty"` // Option.N chosen
 	Text   string    `json:"text,omitempty"`   // free-text answer
-	By     string    `json:"by"`               // "buzz"
+	By     string    `json:"by"`               // "buzz", "link", ...
 	At     time.Time `json:"at"`
+	// DocumentDigest and Credential name the signed answer document a
+	// link's answer took; "" on a Buzz or terminal answer.
+	DocumentDigest string `json:"document_digest,omitempty"`
+	Credential     string `json:"credential,omitempty"`
 	// Event is the signed owner message that typed this answer; "" for a
 	// reaction. One message answers at most one dialog (BindEvent).
 	Event string `json:"event,omitempty"`
@@ -391,6 +395,100 @@ func Requests(dir string) ([]Request, error) {
 // WriteAnswer writes answers/<id>.json; false when an answer exists already.
 func WriteAnswer(dir string, a Answer) (bool, error) {
 	return createExclusive(filepath.Join(dir, "answers"), a.ID, a)
+}
+
+// The refusals WriteLinkAnswer returns. A caller maps them to the link
+// reply codes: gone and answered to already_resolved, no such choice to
+// invalid, anything else to internal.
+var (
+	// ErrLinkDialogGone: the answers directory or the request file is
+	// missing, or a resolution already exists — there is no open dialog
+	// to answer.
+	ErrLinkDialogGone = errors.New("the dialog is not open for an answer")
+	// ErrLinkNoSuchChoice: the label does not name exactly one once-scope
+	// option of the dialog record.
+	ErrLinkNoSuchChoice = errors.New("the label names no single link choice")
+	// ErrLinkAnswered: an answer file exists already; the first answer
+	// wins.
+	ErrLinkAnswered = errors.New("an answer exists already")
+)
+
+// WriteLinkAnswer records a verified link answer: answers/<id>.json created
+// exclusively with the chosen option's number, by "link", the signed
+// document's digest and the credential that signed it, the file and the
+// answers directory synced. It opens the binding's dialog directory and its
+// answers directory as they exist and creates neither: a missing one, a
+// missing request file, or an existing resolution is ErrLinkDialogGone.
+// Unlike the Buzz helper, the directory sync error is returned, not
+// ignored — the caller may only report "recorded" once durability held.
+func WriteLinkAnswer(dir, id, label, documentDigest, credential string) error {
+	if !idRe.MatchString(id) {
+		return fmt.Errorf("dialog id %q is not one NewID mints: %w", id, ErrLinkDialogGone)
+	}
+	answers := filepath.Join(dir, "answers")
+	if fi, err := os.Stat(answers); err != nil || !fi.IsDir() {
+		return fmt.Errorf("answers directory missing: %w", ErrLinkDialogGone)
+	}
+	phase, req, _, resolved, err := Lookup(dir, id)
+	if err != nil || resolved != nil || req.ID != id || phase == PhaseResolved {
+		return fmt.Errorf("dialog %s not open: %w", id, ErrLinkDialogGone)
+	}
+	var chosen *Option
+	for i := range req.Options {
+		o := req.Options[i]
+		if o.Scope != ScopeOnce || o.Label != label {
+			continue
+		}
+		if chosen != nil {
+			return fmt.Errorf("label %q names more than one link choice: %w", label, ErrLinkNoSuchChoice)
+		}
+		chosen = &req.Options[i]
+	}
+	if chosen == nil {
+		return fmt.Errorf("label %q names no link choice of dialog %s: %w", label, id, ErrLinkNoSuchChoice)
+	}
+	a := Answer{
+		ID:             id,
+		Option:         chosen.N,
+		By:             ByLink,
+		At:             time.Now().UTC(),
+		DocumentDigest: documentDigest,
+		Credential:     credential,
+	}
+	raw, err := json.Marshal(a)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(answers, "."+id+".json.tmp-*")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(raw); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Link(tmp.Name(), filepath.Join(answers, id+".json")); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("answer for %s recorded first: %w", id, ErrLinkAnswered)
+		}
+		return err
+	}
+	if err := fsq.SyncDir(answers); err != nil {
+		return err
+	}
+	return nil
 }
 
 // eventRe matches a signed message id: 64 lowercase hex characters.
