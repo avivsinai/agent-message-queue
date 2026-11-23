@@ -118,6 +118,11 @@ func TestCoopStopCodexSilencesNoticeOnInvalidRecordedState(t *testing.T) {
 	joinCodexThread(t, thread)
 	root := absPath(filepath.Join(defaultCoopRoot, defaultSessionName))
 	setAttendedForTest(t, root, "codex")
+	if _, err := captureStdout(t, func() error {
+		return runSend([]string{"--root", root, "--me", "claude", "--to", "codex", "--body", "mail"})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	statePath := filepath.Join(fsq.AgentBase(root, "codex"), coopStopStateFile)
 	raw := []byte("not one JSON object")
 	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
@@ -149,12 +154,27 @@ func TestCoopStopCodexSilencesNoticeWhenItsStateCannotChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	statePath := filepath.Join(fsq.AgentBase(root, "codex"), coopStopStateFile)
-	sentinel := []byte("unwritable state sentinel")
-	if err := os.Mkdir(statePath, 0o700); err != nil {
+	sentinel := []byte("{\"schema\":1,\"blocked_ids\":[],\"noted_ids\":[]}")
+	if err := os.WriteFile(statePath, sentinel, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(statePath, "sentinel"), sentinel, 0o600); err != nil {
+	if info, err := os.Stat(statePath); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("state must start readable and writable: %v, %v", info, err)
+	}
+	mailbox := fsq.AgentBase(root, "codex")
+	if err := os.Chmod(mailbox, 0o500); err != nil {
 		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(mailbox, 0o700); err != nil {
+			t.Logf("restore scratch mailbox permissions: %v", err)
+		}
+	})
+	if f, err := os.CreateTemp(mailbox, "state-write-denied"); err == nil {
+		t.Fatalf("scratch mailbox still allows state writes: %s", f.Name())
+	}
+	if raw, err := os.ReadFile(statePath); err != nil || !bytes.Equal(raw, sentinel) {
+		t.Fatalf("state is not readable before its denied update: %q, %v", raw, err)
 	}
 	for _, key := range append([]string{"CODEX_THREAD_ID"}, identityEnvKeys...) {
 		_ = os.Unsetenv(key)
@@ -172,7 +192,7 @@ func TestCoopStopCodexSilencesNoticeWhenItsStateCannotChange(t *testing.T) {
 	if out.Len() != 0 {
 		t.Fatalf("state write failed but Codex printed %q", out.String())
 	}
-	if raw, err := os.ReadFile(filepath.Join(statePath, "sentinel")); err != nil || !bytes.Equal(raw, sentinel) {
+	if raw, err := os.ReadFile(statePath); err != nil || !bytes.Equal(raw, sentinel) {
 		t.Fatalf("existing state changed: %q, %v", raw, err)
 	}
 }
