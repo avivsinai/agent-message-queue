@@ -18,16 +18,15 @@ import (
 )
 
 // memGrants is a GrantStore in memory. Generation hands out gen to a
-// binding that has none; Mint writes mint, after minting closes when set,
-// and fails while failMints is above 0. Load fails with loadErr when set.
+// binding that has none; Mint writes mint, after minting closes when set.
+// Load fails with loadErr when set.
 type memGrants struct {
-	mu        sync.Mutex
-	g         Grants
-	gen       string
-	mint      string
-	minting   chan struct{}
-	failMints int
-	loadErr   error
+	mu      sync.Mutex
+	g       Grants
+	gen     string
+	mint    string
+	minting chan struct{}
+	loadErr error
 }
 
 func (m *memGrants) Load() (Grants, error) {
@@ -74,10 +73,6 @@ func (m *memGrants) Mint(binding string) (string, error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.failMints > 0 {
-		m.failMints--
-		return "", errors.New("grants.json: no space left on device")
-	}
 	m.g[binding] = GrantRecord{Generation: m.mint}
 	return m.mint, nil
 }
@@ -115,6 +110,22 @@ func grantClock() *clock {
 func goldenGrantDigest(t *testing.T) string {
 	sum := sha256.Sum256(readLinkFixture(t, "grant/document.json"))
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// goldenGrant is the golden grant as stored for binding b under generation
+// gen, ending at notAfter, signed by key and accepted under the key list of
+// keys.
+func goldenGrant(t *testing.T, b Binding, key ConsentKey, gen, notAfter string, keys ...ConsentKey) *StoredGrant {
+	ids := make([]string, 0, len(keys))
+	for _, k := range keys {
+		ids = append(ids, k.CredentialID)
+	}
+	return &StoredGrant{
+		GrantID: "6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7", Digest: goldenGrantDigest(t), CredentialID: key.CredentialID,
+		Binding: b.Binding, TargetID: b.TargetID, Epoch: b.Epoch, NativeSessionID: b.NativeSessionID, Labels: b.Labels,
+		Generation: gen, IssuedAt: "2026-10-09T14:10:00Z", NotAfter: notAfter, MinEvidence: protocol.EvidenceSubmitted,
+		KeyList: KeyList(ids),
+	}
 }
 
 // Over the link: grant_info, the golden signed grant, then a granted task.
@@ -183,11 +194,7 @@ func TestGrantExpiryIsKeptWhenTheWallClockGoesBack(t *testing.T) {
 	b := view.Bindings["pi-demo"]
 	const gen = "g_3jx7k2m4qv5w6y7zab2cd3ef4g"
 	digest := goldenGrantDigest(t)
-	store := &memGrants{mint: "g_5p2r6t3v7x4z2b5d6f3h7j4l2n", g: Grants{b.Binding: {Generation: gen, Grant: &StoredGrant{
-		GrantID: "6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7", Digest: digest, CredentialID: key.CredentialID,
-		Binding: b.Binding, TargetID: b.TargetID, Epoch: b.Epoch, NativeSessionID: b.NativeSessionID, Labels: b.Labels,
-		Generation: gen, IssuedAt: "2026-10-09T14:10:00Z", NotAfter: "2026-10-09T15:10:00Z", MinEvidence: protocol.EvidenceSubmitted,
-	}}}}
+	store := &memGrants{mint: "g_5p2r6t3v7x4z2b5d6f3h7j4l2n", g: Grants{b.Binding: {Generation: gen, Grant: goldenGrant(t, b, key, gen, "2026-10-09T15:10:00Z", key)}}}
 	devKey, err := MintDeviceKey(t.TempDir(), "example")
 	if err != nil {
 		t.Fatal(err)
@@ -219,17 +226,15 @@ func TestGrantExpiryIsKeptWhenTheWallClockGoesBack(t *testing.T) {
 // A granted_submit read right after a grant_revoke is refused grant_revoked,
 // while the new generation is not yet written: the revoke counts from the
 // next frame on (contract attack: a revoke that waited for the disk let the
-// next granted task run).
+// next granted task run), also when the last read of the store failed
+// (review of the session grant branch: a revoke that marked the generation
+// it found in an empty snapshot stopped nothing).
 func TestGrantedSubmitAfterGrantRevokeIsRefused(t *testing.T) {
 	view, key := goldenView(t)
 	b := view.Bindings["pi-demo"]
 	const gen = "g_3jx7k2m4qv5w6y7zab2cd3ef4g"
 	minting := make(chan struct{})
-	store := &memGrants{minting: minting, mint: "g_5p2r6t3v7x4z2b5d6f3h7j4l2n", g: Grants{b.Binding: {Generation: gen, Grant: &StoredGrant{
-		GrantID: "6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7", Digest: goldenGrantDigest(t), CredentialID: key.CredentialID,
-		Binding: b.Binding, TargetID: b.TargetID, Epoch: b.Epoch, NativeSessionID: b.NativeSessionID, Labels: b.Labels,
-		Generation: gen, IssuedAt: "2026-10-09T14:10:00Z", NotAfter: "2026-10-09T22:10:00Z", MinEvidence: protocol.EvidenceSubmitted,
-	}}}}
+	store := &memGrants{minting: minting, mint: "g_5p2r6t3v7x4z2b5d6f3h7j4l2n", g: Grants{b.Binding: {Generation: gen, Grant: goldenGrant(t, b, key, gen, "2026-10-09T22:10:00Z", key)}}}
 	fs, clk := newFakeServer(t), grantClock()
 	c, _ := startCarrier(t, fs, clk, func(cfg *Config) {
 		cfg.StoreID = view.StoreID
@@ -244,6 +249,9 @@ func TestGrantedSubmitAfterGrantRevokeIsRefused(t *testing.T) {
 	})
 	wgen := fs.waitWelcome()
 	waitOnline(t, c)
+	store.setLoadErr(errors.New("grants.json: input/output error"))
+	c.RefreshGrants()
+	store.setLoadErr(nil)
 	for _, file := range []string{"55-grant_revoke.json", "49-granted_submit.json"} {
 		f := goldenFrame(t, file)
 		f.Gen = wgen
@@ -258,60 +266,126 @@ func TestGrantedSubmitAfterGrantRevokeIsRefused(t *testing.T) {
 	sameBody(t, fs.next(), "m_gr1", "56-revoked_reply.json")
 }
 
-// A dropped consent key ends every grant of the link from the moment of the
-// drop, also a grant another key signed, and when the new generation cannot
-// be written after the drop, the next tick writes it (review of the session
-// grant branch: a failed mint after a drop left the other key's grants live).
-func TestDroppedKeyEndsEveryGrantWhenItsMintFails(t *testing.T) {
+// Contract section 4, the key list: a grant signed by one key ends when
+// the server revokes another key of the link, from the next frame on, and
+// stays ended after a restart on the same state directory, with no write
+// besides the key drop (review of the session grant branch: the end hung on
+// a generation mint after the drop, which could be lost). The same signed
+// grant presented again is refused too, not answered as the stored grant
+// (review of the key-list change: the stored grant's shortcut kept it).
+func TestRevokedKeyEndsTheGrantOfAnotherKey(t *testing.T) {
 	view, key := goldenView(t)
 	b := view.Bindings["pi-demo"]
-	const gen = "g_3jx7k2m4qv5w6y7zab2cd3ef4g"
-	other := ConsentKey{CredentialID: "cred-dropped"}
-	store := &memGrants{failMints: 1, mint: "g_5p2r6t3v7x4z2b5d6f3h7j4l2n", g: Grants{b.Binding: {Generation: gen, Grant: &StoredGrant{
-		GrantID: "6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7", Digest: goldenGrantDigest(t), CredentialID: key.CredentialID,
-		Binding: b.Binding, TargetID: b.TargetID, Epoch: b.Epoch, NativeSessionID: b.NativeSessionID, Labels: b.Labels,
-		Generation: gen, IssuedAt: "2026-10-09T14:10:00Z", NotAfter: "2026-10-09T22:10:00Z", MinEvidence: protocol.EvidenceSubmitted,
-	}}}}
-	minted := make(chan error, 1)
+	const gen = "g_3jx7k2m4qv5w6y7zab2cd3ef4g" // the golden grant's generation
+	other := ConsentKey{CredentialID: "cred-revoked"}
+	stateDir := t.TempDir()
+	if err := WriteConsentKeys(stateDir, "example", []ConsentKey{key, other}); err != nil {
+		t.Fatal(err)
+	}
+	stored := Grants{b.Binding: {Generation: gen, Grant: goldenGrant(t, b, key, gen, "2026-10-09T22:10:00Z", key, other)}}
+	if err := writeJSON(LinkDir(stateDir, "example"), grantsFile, stored); err != nil {
+		t.Fatal(err)
+	}
+	files := func(cfg *Config) {
+		cfg.StoreID = view.StoreID
+		cfg.ConsentKeys = func() ([]ConsentKey, error) { return LoadConsentKeys(stateDir, "example") }
+		cfg.Bindings = func() []Binding { return []Binding{b} }
+		cfg.Grants = FileGrants(stateDir, "example")
+		cfg.GrantInfoFor = func(Binding) (bool, string, int) { return true, "", protocol.MaxInputBytes }
+		cfg.Handle = func(*protocol.Command, core.Source) (any, error) {
+			t.Error("a granted task ran after its link's key list changed")
+			return protocol.Reply{Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Evidence: "submitted"}}, nil
+		}
+	}
+	dropped := make(chan error, 1)
 	fs, clk := newFakeServer(t), grantClock()
 	c, _ := startCarrier(t, fs, clk, func(cfg *Config) {
-		cfg.StoreID = view.StoreID
-		cfg.ConsentKeys = func() ([]ConsentKey, error) { return []ConsentKey{key, other}, nil }
-		cfg.Bindings = func() []Binding { return []Binding{b} }
-		cfg.Grants = store
-		cfg.GrantInfoFor = func(Binding) (bool, string, int) { return true, "", protocol.MaxInputBytes }
-		// serve drops the key from the list, then its mint fails.
-		cfg.ConsentKeyRevoked = func(string) {
-			_, err := store.Mint(b.Binding)
-			minted <- err
-		}
-		cfg.Handle = func(*protocol.Command, core.Source) (any, error) {
-			t.Error("a granted task ran after a key of its link was dropped")
-			return protocol.Reply{Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Evidence: "submitted"}}, nil
+		files(cfg)
+		cfg.ConsentKeyRevoked = func(id string) {
+			_, err := DropConsentKey(stateDir, "example", id)
+			dropped <- err
 		}
 	})
 	wgen := fs.waitWelcome()
 	waitOnline(t, c)
 	body, _ := json.Marshal(keyRevokedBody{Schema: SchemaKeyRevoked, CredentialID: other.CredentialID})
 	fs.send(Frame{Schema: SchemaFrame, ID: "m_k1", Gen: wgen, Body: body})
-	f := goldenFrame(t, "49-granted_submit.json")
-	f.Gen = wgen
-	fs.send(f)
-	sameBody(t, fs.next(), "m_gs1", "53-granted_submit_refused_grant_revoked.json")
+	for _, file := range []string{"49-granted_submit.json", "44-signed_grant.json"} {
+		f := goldenFrame(t, file)
+		f.Gen = wgen
+		fs.send(f)
+		var refused struct{ Error ErrorBody }
+		if r := fs.next(); json.Unmarshal(r.Body, &refused) != nil || refused.Error.Code != CodeGrantRevoked || !strings.HasPrefix(refused.Error.Message, core.GrantKeysGone) {
+			t.Fatalf("%s after the key revoke: %s; want %s for the key list", file, r.Body, CodeGrantRevoked)
+		}
+	}
 	select {
-	case err := <-minted:
-		if err == nil {
-			t.Fatal("the mint after the drop did not fail")
+	case err := <-dropped:
+		if err != nil {
+			t.Fatal(err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("the key was never dropped")
+		t.Fatal("the revoked key was never dropped")
 	}
-	if g, _ := store.Load(); g[b.Binding].Generation != gen {
-		t.Fatalf("generation %q before the tick, want the old one still written", g[b.Binding].Generation)
+	devKey, err := MintDeviceKey(t.TempDir(), "example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Name: "example", Pin: Pin{URL: "wss://link.example.invalid/v1", ServerID: testServerID}, Key: devKey, Now: clk.now}
+	files(&cfg)
+	restarted, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, reason := restarted.GrantLive(b.TargetID, goldenGrantDigest(t)); reason != CodeGrantRevoked+": "+core.GrantKeysGone {
+		t.Fatalf("hand-over check after a restart = %q, want the key list's end", reason)
+	}
+}
+
+// Contract section 4, the key list: a key the CLI adds to the link ends its
+// grants at the carrier's next read of the key list, and the owner is told
+// (review of the session grant branch: the end hung on a generation mint
+// beside the add).
+func TestAddedKeyEndsTheGrant(t *testing.T) {
+	view, key := goldenView(t)
+	b := view.Bindings["pi-demo"]
+	const gen = "g_3jx7k2m4qv5w6y7zab2cd3ef4g"
+	stateDir := t.TempDir()
+	if err := WriteConsentKeys(stateDir, "example", []ConsentKey{key}); err != nil {
+		t.Fatal(err)
+	}
+	store := &memGrants{g: Grants{b.Binding: {Generation: gen, Grant: goldenGrant(t, b, key, gen, "2026-10-09T22:10:00Z", key)}}}
+	devKey, err := MintDeviceKey(t.TempDir(), "example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	notices := make(chan string, 4)
+	c, err := New(Config{
+		Name: "example", Pin: Pin{URL: "wss://link.example.invalid/v1", ServerID: testServerID}, StoreID: view.StoreID, Key: devKey, Now: grantClock().now,
+		ConsentKeys: func() ([]ConsentKey, error) { return LoadConsentKeys(stateDir, "example") },
+		Bindings:    func() []Binding { return []Binding{b} }, Grants: store,
+		Notify: func(_, body string) { notices <- body },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, reason := c.GrantLive(b.TargetID, goldenGrantDigest(t)); reason != "" {
+		t.Fatalf("hand-over check before the add = %q, want live", reason)
+	}
+	if _, err := AddConsentKey(stateDir, "example", ConsentKey{CredentialID: "cred-added"}); err != nil {
+		t.Fatal(err)
 	}
 	c.Tick()
-	if g, _ := store.Load(); g[b.Binding].Generation == gen || g[b.Binding].Grant != nil {
-		t.Fatalf("after the tick the record is %+v; want a new generation and no grant", g[b.Binding])
+	if _, reason := c.GrantLive(b.TargetID, goldenGrantDigest(t)); reason != CodeGrantRevoked+": "+core.GrantKeysGone {
+		t.Fatalf("hand-over check after the add = %q, want the key list's end", reason)
+	}
+	select {
+	case n := <-notices:
+		if !strings.HasSuffix(n, "ended (revoked)") {
+			t.Fatalf("notice %q; want the grant's end", n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no notice when the added key ended the grant")
 	}
 }
 
@@ -325,11 +399,7 @@ func TestFailedReadEndsNoGrant(t *testing.T) {
 	b := view.Bindings["pi-demo"]
 	const gen = "g_3jx7k2m4qv5w6y7zab2cd3ef4g"
 	digest := goldenGrantDigest(t)
-	store := &memGrants{mint: "g_5p2r6t3v7x4z2b5d6f3h7j4l2n", g: Grants{b.Binding: {Generation: gen, Grant: &StoredGrant{
-		GrantID: "6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7", Digest: digest, CredentialID: key.CredentialID,
-		Binding: b.Binding, TargetID: b.TargetID, Epoch: b.Epoch, NativeSessionID: b.NativeSessionID, Labels: b.Labels,
-		Generation: gen, IssuedAt: "2026-10-09T14:10:00Z", NotAfter: "2026-10-09T15:10:00Z", MinEvidence: protocol.EvidenceSubmitted,
-	}}}}
+	store := &memGrants{mint: "g_5p2r6t3v7x4z2b5d6f3h7j4l2n", g: Grants{b.Binding: {Generation: gen, Grant: goldenGrant(t, b, key, gen, "2026-10-09T15:10:00Z", key)}}}
 	devKey, err := MintDeviceKey(t.TempDir(), "example")
 	if err != nil {
 		t.Fatal(err)
@@ -402,11 +472,7 @@ func TestSessionThatWritesTheStateTakesNoGrant(t *testing.T) {
 	view, key := goldenView(t)
 	b := view.Bindings["pi-demo"]
 	const gen = "g_3jx7k2m4qv5w6y7zab2cd3ef4g"
-	store := &memGrants{g: Grants{b.Binding: {Generation: gen, Grant: &StoredGrant{
-		GrantID: "6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7", Digest: goldenGrantDigest(t), CredentialID: key.CredentialID,
-		Binding: b.Binding, TargetID: b.TargetID, Epoch: b.Epoch, NativeSessionID: b.NativeSessionID, Labels: b.Labels,
-		Generation: gen, IssuedAt: "2026-10-09T14:10:00Z", NotAfter: "2026-10-09T22:10:00Z", MinEvidence: protocol.EvidenceSubmitted,
-	}}}}
+	store := &memGrants{g: Grants{b.Binding: {Generation: gen, Grant: goldenGrant(t, b, key, gen, "2026-10-09T22:10:00Z", key)}}}
 	fs, clk := newFakeServer(t), grantClock()
 	c, _ := startCarrier(t, fs, clk, func(cfg *Config) {
 		cfg.StoreID = view.StoreID

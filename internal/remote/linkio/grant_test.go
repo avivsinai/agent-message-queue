@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -121,28 +120,5 @@ func TestStoreGrantKeepsTheNewerGrant(t *testing.T) {
 	g, err := LoadGrants(stateDir, "l")
 	if err != nil || g["b"].Grant == nil || g["b"].Grant.Digest != b.Digest {
 		t.Fatalf("stored %+v, %v; want the newer grant %s", g["b"].Grant, err, b.Digest)
-	}
-}
-
-// A server-revoked consent key is dropped even when the mint that ends the
-// link's grants fails (review of the session grant branch: the key stayed on
-// disk and was live again after a restart).
-func TestDropConsentKeyStandsWhenTheMintFails(t *testing.T) {
-	stateDir := t.TempDir()
-	dir := LinkDir(stateDir, "l")
-	// grants.json is a directory, so no new generation can be written.
-	if err := os.MkdirAll(filepath.Join(dir, grantsFile, "x"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := WriteConsentKeys(stateDir, "l", []ConsentKey{{CredentialID: "k1"}}); err != nil {
-		t.Fatal(err)
-	}
-	dropped, err := DropConsentKey(stateDir, "l", "k1")
-	keys, rerr := LoadConsentKeys(stateDir, "l")
-	if rerr != nil || len(keys) != 0 || !dropped {
-		t.Fatalf("after the drop (dropped %v, err %v): keys %+v, %v; want none", dropped, err, keys, rerr)
-	}
-	if err == nil {
-		t.Fatal("the failed mint was not reported")
 	}
 }

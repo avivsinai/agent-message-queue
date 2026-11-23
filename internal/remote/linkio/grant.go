@@ -4,9 +4,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"maps"
 	"regexp"
+	"slices"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
@@ -70,9 +73,11 @@ func DecodeGrant(doc []byte) (*GrantDocument, error) {
 }
 
 // VerifySignedGrant decides whether a signed grant may be stored, and
-// returns the grant to store. Nothing else in the frame is trusted. A
-// presentation of the stored grant's exact bytes skips only the issued_at
-// window and answers the stored grant; every other check still runs.
+// returns the grant to store, with the key list of the view that verified
+// it. Nothing else in the frame is trusted. A presentation of the stored
+// grant's exact bytes skips only the issued_at window and answers the stored
+// grant; every other check still runs, and the view's key list must be the
+// one the stored grant was accepted under.
 func VerifySignedGrant(view *ConsentView, m SignedGrant, st GrantState, now time.Time) (StoredGrant, error) {
 	doc, _, err := verifySigned(view, m.DocumentB64, m.CredentialID, m.AuthenticatorData, m.ClientDataJSON, m.Signature)
 	if err != nil {
@@ -126,12 +131,17 @@ func VerifySignedGrant(view *ConsentView, m SignedGrant, st GrantState, now time
 	if !now.Before(notAfter) {
 		return StoredGrant{}, refuse(CodeGrantExpired, "the grant expired at %s", d.NotAfter)
 	}
+	keyList := KeyList(slices.Collect(maps.Keys(view.Keys)))
 	if stored {
+		if st.Stored.KeyList != keyList {
+			return StoredGrant{}, refuse(CodeGrantRevoked, "%s; ask grant_info and sign again", core.GrantKeysGone)
+		}
 		return *st.Stored, nil
 	}
 	return StoredGrant{
 		GrantID: d.GrantID, Digest: digest, CredentialID: m.CredentialID, Binding: d.Binding,
 		TargetID: d.TargetID, Epoch: d.Epoch, NativeSessionID: d.NativeSessionID, Labels: d.Labels,
 		Generation: d.GrantGeneration, IssuedAt: d.IssuedAt, NotAfter: d.NotAfter, MinEvidence: d.Input.MinEvidence,
+		KeyList: keyList,
 	}, nil
 }

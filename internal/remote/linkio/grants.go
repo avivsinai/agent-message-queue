@@ -2,11 +2,14 @@ package linkio
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base32"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -15,7 +18,8 @@ import (
 
 // link/<name>/grants.json holds, per binding of the link, its grant
 // generation and the one grant accepted for it. A grant is valid only while
-// its generation equals the record's: minting a new generation ends it.
+// its generation equals the record's, so minting a new generation ends it,
+// and while the link's key list is the one it was accepted under.
 const grantsFile = "grants.json"
 
 // StoredGrant is an accepted session grant: what the owner signed, the
@@ -33,6 +37,18 @@ type StoredGrant struct {
 	IssuedAt        string `json:"issued_at"`
 	NotAfter        string `json:"not_after"`
 	MinEvidence     string `json:"min_evidence"`
+	// KeyList is the KeyList value of the link's consent keys that
+	// verified the grant. The grant is live only while the link's keys
+	// have this value, so a key added, dropped or revoked ends it.
+	KeyList string `json:"key_list"`
+}
+
+// KeyList is the value of a link's key list: "sha256:" and the hex of its
+// sorted consent credential ids joined by newlines.
+func KeyList(credentialIDs []string) string {
+	ids := slices.Sorted(slices.Values(credentialIDs))
+	sum := sha256.Sum256([]byte(strings.Join(ids, "\n")))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // GrantRecord is one binding's generation and its stored grant, if any.

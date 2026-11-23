@@ -136,7 +136,7 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 			// A granted request is never held for later: it runs now or the
 			// link sends it again, so it leaves no record.
 			e.mu.Unlock()
-			return protocol.Reply{Snapshot: e.unpersisted(rec, protocol.StateRejected, protocol.CodeBusy), Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeBusy, Message: "the target is offline; nothing was sent"}}, nil
+			return offlineBusy(e.unpersisted(rec, protocol.StateRejected, protocol.CodeBusy)), nil
 		}
 		// Target registered but offline: Create received and let Tick admit
 		// or expire it later.
@@ -225,7 +225,7 @@ func (e *Endpoint) resubmitTombstoneLocked(cmd *protocol.Command, src Source, ke
 		// code would read as accepted, yet nothing will admit a terminal
 		// tombstone later: answer busy so the caller sends it again.
 		e.mu.Unlock()
-		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeBusy, Message: "the target is offline; nothing was sent"}}, nil
+		return offlineBusy(rec.Snapshot), nil
 	}
 	// A resubmit that names a session is bound to the session its source
 	// proves now, which the dispatching write below stores; one that names
@@ -501,6 +501,12 @@ func achievedEvidence(t *target) string {
 	return s.Evidence.Submit
 }
 
+// offlineBusy answers a request whose target is offline and that nothing
+// will admit later: busy, with nothing sent, so the caller sends it again.
+func offlineBusy(s protocol.Snapshot) protocol.Reply {
+	return protocol.Reply{Snapshot: s, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeBusy, Message: "the target is offline; nothing was sent"}}
+}
+
 func (e *Endpoint) unpersisted(rec *requests.Record, state protocol.State, code protocol.Code) protocol.Snapshot {
 	s := rec.Snapshot
 	s.RequestRef = protocol.EncodeRef(rec.CreatorHost, rec.TargetID, rec.RequestID)
@@ -520,7 +526,7 @@ func (e *Endpoint) unpersisted(rec *requests.Record, state protocol.State, code 
 func (e *Endpoint) handoffLocked(rec *requests.Record, t *target) (protocol.Code, string) {
 	if rec.Origin["carrier"] == CarrierLink && (e.consent == nil || !e.consent(rec.CreatorHost, rec.ConsentCredential)) {
 		if rec.GrantDigest != "" {
-			return protocol.CodeConsentInvalid, "grant_revoked: the key that signed the grant is no longer accepted"
+			return protocol.CodeConsentInvalid, "grant_revoked: " + GrantKeysGone
 		}
 		return protocol.CodeConsentInvalid, ""
 	}

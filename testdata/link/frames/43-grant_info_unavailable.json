@@ -1,6 +1,6 @@
 {
   "body_def": "grant_info_reply",
-  "description": "The binding takes no grant now: reason is consent_local, mode_unreadable or harness_unsupported. Send each task as a signed submit.",
+  "description": "The binding takes no grant now: reason is consent_local, mode_unreadable, harness_unsupported or state_in_workspace. Send each task as a signed submit.",
   "direction": "endpoint_to_server",
   "frame": {
     "body": {

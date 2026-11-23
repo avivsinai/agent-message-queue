@@ -2,6 +2,7 @@ package codex
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -169,6 +170,25 @@ func TestSessionThatWritesTheStateDirectory(t *testing.T) {
 		if got := att.WritesWithoutAsking(dir); got != w {
 			t.Errorf("after the update: WritesWithoutAsking(%s) = %v, want %v", dir, got, w)
 		}
+	}
+}
+
+// A working directory spelled in another letter case than the state
+// directory's parent is the same directory on a case-insensitive file
+// system, so it counts as holding the state directory (review of the session
+// grant branch: the string comparison missed it).
+func TestRootInAnotherCaseHoldsTheStateDirectory(t *testing.T) {
+	base := t.TempDir()
+	state := filepath.Join(base, "Home", "state")
+	if err := os.MkdirAll(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(base, "home")
+	if _, err := os.Stat(root); err != nil {
+		t.Skip("the file system distinguishes letter case")
+	}
+	if !pathsOverlap(root, state) {
+		t.Fatalf("pathsOverlap(%s, %s) = false; want true, the same directory", root, state)
 	}
 }
 

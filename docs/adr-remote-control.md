@@ -159,11 +159,12 @@ invariants.
   lets a link send tasks to one shared binding with no signature each. A
   granted task runs only when, at the handoff to the harness, the machine
   holds the grant with the digest the record names, its generation is the
-  binding's generation now, now is before its `not_after`, the key that
-  signed it is still accepted, the share's consent is `passkey`, and the
-  harness reports from its own state that the session asks before a tool
-  acts. Every share write, detach, key change and revoke mints a new random
-  generation, which ends the grant. Within its time the server writes the
+  binding's generation now, now is before its `not_after`, the link's key
+  list is the one the grant was accepted under, the share's consent is
+  `passkey`, and the harness reports from its own state that the session
+  asks before a tool acts. Every share write, detach and revoke mints a new
+  random generation, which ends the grant; a key added, dropped or revoked
+  ends it with no write. Within its time the server writes the
   task text; the session reads with no dialog what it can read with no
   dialog, rules the owner pre-allowed in the harness apply to granted tasks,
   and the mode is a report, not a lock. The machine shows a notice when it

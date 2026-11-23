@@ -53,6 +53,10 @@ type ConsentCheck func(creatorHost, credential string) bool
 // lock, so it reads an immutable snapshot and never waits.
 type GrantCheck func(creatorHost, targetID, grantDigest string) string
 
+// GrantKeysGone is why a grant admits no task once the link's consent keys
+// are not the key list it was accepted under.
+const GrantKeysGone = "the link no longer holds the key list the grant was accepted under"
+
 // CarrierLink is the Origin "carrier" value of a link source: a server the
 // user's machine dialed. Its Host is the link's creator host, link-<id>.
 const CarrierLink = "link"

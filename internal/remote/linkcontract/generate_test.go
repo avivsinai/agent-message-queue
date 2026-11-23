@@ -336,7 +336,7 @@ func TestGenerateFixtures(t *testing.T) {
 				"binding": bindingName, "available": true, "grant_generation": grantGeneration,
 				"max_lifetime_s": 86400, "max_text_bytes": 131072, "now": grantNow,
 			}}, "re", "m_gi1", "gen", gen)},
-		{"grant_info_unavailable", "endpoint_to_server", "grant_info_reply", "The binding takes no grant now: reason is consent_local, mode_unreadable or harness_unsupported. Send each task as a signed submit.",
+		{"grant_info_unavailable", "endpoint_to_server", "grant_info_reply", "The binding takes no grant now: reason is consent_local, mode_unreadable, harness_unsupported or state_in_workspace. Send each task as a signed submit.",
 			env(map[string]any{"grant_info": map[string]any{
 				"binding": bindingName, "available": false, "reason": "harness_unsupported", "now": grantNow,
 			}}, "re", "m_gi1", "gen", gen)},

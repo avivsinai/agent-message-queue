@@ -236,17 +236,12 @@ func (ls *linkSet) newRun(ctx context.Context, l manifest.Link) (*linkRun, error
 		Connected: func() { go ls.refreshToolProfiles(ctx, name) },
 		Bindings:  func() []linkio.Binding { return ls.bindings(run, pin) },
 		ConsentKeyRevoked: func(id string) {
-			// The carrier already ended every grant of the link in memory; its
-			// tick writes the new generation when the drop's own write fails.
-			switch dropped, err := linkio.DropConsentKey(ls.stateDir, name, id); {
-			case err != nil && dropped:
-				say(ls.stderr, "link %s: key dropped; the grant generation is not yet changed: %v", name, err)
-			case err != nil:
+			if _, err := linkio.DropConsentKey(ls.stateDir, name, id); err != nil {
 				say(ls.stderr, "link %s: drop consent key: %v", name, err)
 			}
 			if run.carrier != nil {
 				run.carrier.RefreshConsentKeys()
-				run.carrier.RefreshGrants() // the drop ended every grant of the link
+				run.carrier.RefreshGrants() // the owner is told which grants the key list change ended
 			}
 		},
 		Revoked: func() { ls.retire(name) },
@@ -255,13 +250,7 @@ func (ls *linkSet) newRun(ctx context.Context, l manifest.Link) (*linkRun, error
 			k, err := linkio.LoadLocalKey(ls.stateDir, name)
 			return k, err == nil
 		},
-		ConsentKeys: func() ([]linkio.ConsentKey, error) {
-			keys, err := linkio.LoadConsentKeys(ls.stateDir, name)
-			if err != nil {
-				say(ls.stderr, "link %s: read consent keys: %v", name, err)
-			}
-			return keys, err
-		},
+		ConsentKeys:  func() ([]linkio.ConsentKey, error) { return linkio.LoadConsentKeys(ls.stateDir, name) },
 		Grants:       linkio.FileGrants(ls.stateDir, name),
 		GrantInfoFor: ls.grantInfoFor,
 		Notify:       ls.notify,
@@ -344,7 +333,7 @@ func (ls *linkSet) grantLive(host, target, digest string) string {
 	if reason != "" {
 		return reason
 	}
-	if !slices.ContainsFunc(shares, func(sh manifest.LinkShare) bool { return sh.Binding == b && sh.Consent == "passkey" }) {
+	if !slices.ContainsFunc(shares, func(sh manifest.LinkShare) bool { return sh.Binding == b && linkio.TakesGrant(sh.Consent) }) {
 		return fmt.Sprintf("%s: %s: binding %q is not shared with passkey consent now", linkio.CodeGrantUnsupported, linkio.GrantReasonConsentLocal, b)
 	}
 	return ""
@@ -1461,8 +1450,8 @@ func (p *nativeProbe) native(target string) (string, error) {
 }
 
 // linkGrantRows lists the grants stored for a link, by binding. A grant is
-// listed until it is revoked or replaced; one past its not_after admits
-// nothing.
+// listed until it is revoked or replaced; one past its not_after, or under
+// another key list than the link's, admits nothing.
 func linkGrantRows(stateDir, name string) ([]linkGrantRow, string) {
 	grants, err := linkio.LoadGrants(stateDir, name)
 	if err != nil {

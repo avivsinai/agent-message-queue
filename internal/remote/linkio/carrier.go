@@ -161,7 +161,7 @@ type Carrier struct {
 	oversize   map[string]int64                // request_ref -> a revision already logged as over the frame limit
 	revokes    map[string]bool                 // consent keys the server removed, waiting for the revoke worker
 	revokeWake chan struct{}                   // wakes the revoke worker; holds at most one signal
-	liveKeys   atomic.Pointer[keySet]          // consent credential ids accepted now
+	liveKeys   atomic.Pointer[keySet]          // the key list as last read
 	revoked    atomic.Pointer[map[string]bool] // consent credential ids the server removed in this process
 	held       held                            // signed tasks waiting for the local confirmation
 	waiters    map[string]waiter               // frame id -> the request waiting for its reply
@@ -171,8 +171,13 @@ type Carrier struct {
 	// grantLife maps a stored grant's digest to the Mono reading at which
 	// its life ends, set when this run first read the grant.
 	grantLife atomic.Pointer[map[string]time.Duration]
-	deadMu    sync.Mutex                      // serializes writers of deadGens
-	deadGens  atomic.Pointer[map[string]bool] // generations the server revoked here: never live again
+	// revokedMu serializes writers of revokedBindings, which maps a
+	// binding the server revoked in this run to the mark of that revoke.
+	// A binding in it admits no grant; it leaves only when this process
+	// wrote the binding's new generation after that mark.
+	revokedMu       sync.Mutex
+	revokedBindings atomic.Pointer[map[string]uint64]
+	revokeMark      uint64 // under revokedMu: the last mark handed out
 	// gmu serializes grant store reads and writes, so a snapshot read before
 	// a write never replaces one read after it. It is never held across a
 	// call into the endpoint.
@@ -490,8 +495,9 @@ func (c *Carrier) Request(ctx context.Context, body any) (json.RawMessage, error
 // every sweep. With no session there is no one to tell: the handshake of the
 // next session sends the bindings as they are then.
 func (c *Carrier) Tick() {
-	c.writeDeadGenerations()
-	c.RefreshGrants() // a grant ended by the owner or by its expiry is seen here
+	c.writeRevokedGenerations()
+	c.refreshKeys()   // a key list the CLI changed is seen here
+	c.RefreshGrants() // and a grant ended by it, by the owner or by its expiry
 	c.mu.Lock()
 	connected := c.sess != nil
 	c.mu.Unlock()
@@ -900,15 +906,10 @@ func (c *Carrier) handleRequest(sess *session, f Frame) {
 	case SchemaKeyRevoked:
 		var b keyRevokedBody
 		if err := decodeStrict(f.Body, SchemaKeyRevoked, &b); err == nil && c.cfg.ConsentKeyRevoked != nil {
-			// The key stops counting now, before any later frame is read; the
-			// disk write follows on the revoke worker. A change of the key
-			// list ends every grant of the link, so every generation stops
-			// now too; the tick writes any new generation the drop could not.
-			changes := c.keyMayBeListed(b.CredentialID)
+			// The key stops counting now, before any later frame is read, and
+			// so does every grant accepted under a key list that held it; the
+			// disk write follows on the revoke worker.
 			c.markRevoked(b.CredentialID)
-			if changes {
-				c.endEveryGeneration()
-			}
 			c.mu.Lock()
 			c.revokes[b.CredentialID] = true // the revoke worker does the disk work
 			c.mu.Unlock()
@@ -1068,53 +1069,83 @@ func (c *Carrier) bindingsNow() []Binding {
 // ConsentLive reports whether this link still accepts a consent key. Core
 // asks it right before a handoff, under its own lock, so it does no I/O: it
 // reads the revoked set, which only grows, and then the snapshot the last
-// signed submit or key removal stored. A revoked key is refused even when a
-// snapshot read before its revocation still lists it.
+// read of the key list stored. A revoked key is refused even when a
+// snapshot read before its revocation still lists it, and while the last
+// read failed no key is accepted.
 func (c *Carrier) ConsentLive(credentialID string) bool {
 	if revoked := c.revoked.Load(); revoked != nil && (*revoked)[credentialID] {
 		return false
 	}
-	live := c.liveKeys.Load()
-	return live != nil && live.live[credentialID]
+	ks := c.liveKeys.Load()
+	return ks != nil && !ks.unread && ks.read[credentialID]
 }
 
-// keySet is the snapshot of the consent keys accepted now. unread is true
-// when the last read of the key list failed: then no key is accepted, and
-// no key is known to be gone.
+// keyList is the value of the link's key list now (KeyList): the last list
+// read successfully, without the keys the server revoked in this run. ok is
+// false before the first successful read. It does no I/O.
+func (c *Carrier) keyList() (list string, ok bool) {
+	ks := c.liveKeys.Load()
+	if ks == nil || ks.read == nil {
+		return "", false
+	}
+	revoked := c.revoked.Load()
+	ids := make([]string, 0, len(ks.read))
+	for id := range ks.read {
+		if revoked == nil || !(*revoked)[id] {
+			ids = append(ids, id)
+		}
+	}
+	return KeyList(ids), true
+}
+
+// keySet is the snapshot of the key list: read holds the credential ids of
+// the last list read successfully (nil before the first), unread is true
+// when the last read failed, and err is that read's error. A failed read
+// keeps read, so it changes no key list and ends no grant.
 type keySet struct {
-	live   map[string]bool
+	read   map[string]bool
 	unread bool
+	err    string
 }
 
 // RefreshConsentKeys re-reads the consent keys into the snapshot, after a
 // key was removed.
 func (c *Carrier) RefreshConsentKeys() { c.refreshKeys() }
 
-// refreshKeys reads the consent keys this machine trusts and stores the
-// snapshot ConsentLive reads. The revoked set is loaded after the disk read,
-// so a revocation that lands while the disk is read still filters the keys
-// this submit verifies against.
+// refreshKeys reads the consent keys this machine trusts, stores the
+// snapshot ConsentLive and keyList read, and returns the keys without those
+// the server revoked. The revoked set is loaded after the disk read, so a
+// revocation that lands while the disk is read still filters the keys this
+// submit verifies against. A read error is logged once per distinct error.
 func (c *Carrier) refreshKeys() map[string]ConsentKey {
 	keys := map[string]ConsentKey{}
-	live := map[string]bool{}
 	onDisk, err := c.cfg.ConsentKeys()
+	old := c.liveKeys.Load()
 	if err != nil {
-		onDisk = nil
+		next := keySet{unread: true, err: err.Error()}
+		if old != nil {
+			next.read = old.read
+		}
+		if old == nil || old.err != next.err {
+			c.cfg.Logf("link %s: read consent keys: %v", c.cfg.Name, err)
+		}
+		c.liveKeys.Store(&next)
+		return keys
 	}
+	read := make(map[string]bool, len(onDisk))
 	revoked := c.revoked.Load()
 	for _, k := range onDisk {
-		if revoked != nil && (*revoked)[k.CredentialID] {
-			continue // removed by the server; the disk may not say so yet
+		read[k.CredentialID] = true
+		if revoked == nil || !(*revoked)[k.CredentialID] {
+			keys[k.CredentialID] = k // a revoked key: the disk may not say so yet
 		}
-		keys[k.CredentialID] = k
-		live[k.CredentialID] = true
 	}
-	c.liveKeys.Store(&keySet{live: live, unread: err != nil})
+	c.liveKeys.Store(&keySet{read: read})
 	return keys
 }
 
-// markRevoked stops a consent key at once: it joins the revoked set and
-// leaves the live snapshot, both copy-on-write, with no I/O.
+// markRevoked stops a consent key at once: it joins the revoked set,
+// copy-on-write, with no I/O. ConsentLive and keyList read the set.
 func (c *Carrier) markRevoked(id string) {
 	next := map[string]bool{id: true}
 	if old := c.revoked.Load(); old != nil {
@@ -1123,16 +1154,6 @@ func (c *Carrier) markRevoked(id string) {
 		}
 	}
 	c.revoked.Store(&next)
-	live := keySet{live: map[string]bool{}}
-	if old := c.liveKeys.Load(); old != nil {
-		live.unread = old.unread
-		for k := range old.live {
-			if k != id {
-				live.live[k] = true
-			}
-		}
-	}
-	c.liveKeys.Store(&live)
 }
 
 // OriginName is the Origin key naming the link (its manifest name), so a

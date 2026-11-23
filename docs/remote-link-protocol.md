@@ -161,8 +161,8 @@ retired.
   `state_in_workspace` (the session can write the machine's state
   directory with no dialog: its working directory, a writable root of its
   sandbox, a runtime workspace root of the thread, or `/tmp` or `$TMPDIR`
-  of a `workspaceWrite` sandbox that does not exclude them, holds that
-  directory or lies inside it). A server shows an
+  (this machine's value) of a `workspaceWrite` sandbox that does not
+  exclude them, holds that directory or lies inside it). A server shows an
   unknown reason as not available. `available` true
   carries `grant_generation`, `max_lifetime_s` (86400) and `max_text_bytes`.
   `now` is the machine's clock, for `issued_at` and a command's `not_after`.
@@ -184,14 +184,18 @@ retired.
 - `amq.remote.link.grant_revoke/1` `{schema, binding}` (the binding must be
   this link's). Granted tasks read after this frame are refused; the machine
   writes the new generation and answers `{"revoked": {binding,
-  grant_generation}}`. A task already handed to the harness is not recalled.
+  grant_generation}}`. When that write fails it answers `storage_full`, and
+  the binding's grant stays refused until the server sends the revoke again
+  or the machine writes the generation on its own. A task already handed to
+  the harness is not recalled.
 
 ### What the machine checks at each granted task
 
 1. The body decodes strictly and `command` is a valid `request.submit`.
 2. A grant with this digest is stored for the command's binding.
 3. The grant's generation is the binding's now, `now` is before the grant's
-   `not_after`, and its signing key is still accepted.
+   `not_after`, and the link's key list is the one the grant was accepted
+   under.
 4. The binding is shared with the link; its target, epoch, labels and native
    session equal the grant's and the binding's now.
 5. The share's consent is `passkey`. A granted task is never held for a
@@ -224,8 +228,14 @@ outcome of `request.get`.
   and never reused. The machine mints one when the share is written (attach,
   attach again, a change of consent or tools), when the share is removed
   (detach), when the owner revokes (`amq-remote link grant revoke`), when the
-  server sends `grant_revoke`, when the link's key list changes, and when
-  the stored value is missing or unreadable.
+  server sends `grant_revoke`, and when the stored value is missing or
+  unreadable.
+- A change of the link's key list. The machine stores with each grant the
+  key list it was accepted under; a grant is valid only while the link's
+  key list is that list. So a key that is added, dropped or revoked ends
+  every grant of the link at once (`grant_revoked`), with no second write
+  that could be lost. The generation does not change; the owner signs a new
+  grant.
 - A newer grant accepted for the same binding.
 - A new epoch or another native session behind the binding.
 - The session can write the machine's state directory with no dialog: the

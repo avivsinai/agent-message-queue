@@ -37,6 +37,8 @@ No private key is committed. The keys are derived from public seed strings:
 ## Rewriting
 
 The files are golden. `AMQ_LINK_FIXTURES_WRITE=1 go test ./internal/remote/linkcontract -run TestGenerateFixtures`
-rewrites them; the ES256 signature is randomized, so every rewrite changes
-`consent/assertion.json` and the signed-submit frame, and every mirror must
-copy the files again.
+rewrites them. The ES256 signatures are randomized: a rewrite keeps a
+committed signature while it still verifies over the same signed bytes, and
+otherwise changes `consent/assertion.json`, `grant/assertion.json`, the
+signed-submit frame and the signed-grant frame. Every mirror must copy the
+files again.
