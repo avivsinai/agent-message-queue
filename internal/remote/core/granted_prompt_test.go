@@ -1,8 +1,10 @@
 package core_test
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sync"
@@ -42,9 +44,12 @@ func (r *promptRuntime) PromptInstance() string { return r.instance }
 
 func (r *promptRuntime) GrantedStubID(k requests.Key) string { return "stub-" + k.RequestID }
 
-func (r *promptRuntime) PromptAsks(p core.Prompt) (bool, string) {
+func (r *promptRuntime) PromptRefusal(p core.Prompt) string {
 	asks := p.Mode == "default" || p.Mode == "acceptEdits" || p.Mode == "dontAsk"
-	return asks && p.NativeSession == r.NativeSessionID(), p.Mode
+	if asks && p.NativeSession == r.NativeSessionID() {
+		return ""
+	}
+	return "grant_needs_signature: " + p.Mode
 }
 
 func (r *promptRuntime) ObservePrompt(p core.Prompt, at time.Time) {
@@ -637,6 +642,41 @@ func TestGrantedStubSettlement(t *testing.T) {
 		plain.Complete(granted, "granted answer")
 		if rec := g.record(t, granted); rec.GrantAtPrompt || rec.State != protocol.StateCompleted || rec.Result.Text != "granted answer" {
 			t.Fatalf("granted record of an adapter that sends text = mark %v %s %+v; want completed with its answer", rec.GrantAtPrompt, rec.State, rec.Result)
+		}
+	})
+
+	// request.get now shows the reason of a failed record. A failed run that
+	// was not dispatched as a stub, a signed link request's or a local
+	// request's, answers it as before: the snapshot and the bare op.
+	t.Run("a failed run not dispatched as a stub answers request.get as before", func(t *testing.T) {
+		for _, row := range []struct {
+			id  string
+			src core.Source
+		}{
+			{id: "11111111-1111-4111-8111-111111111326", src: linkSource(hostA, "fake")},
+			{id: "11111111-1111-4111-8111-111111111327", src: core.Source{Host: "local"}},
+		} {
+			rt := newPromptRuntime()
+			f := newGrantFixture(t, rt)
+			submitReply(t, f.ep, linkSubmit(f.clk, "fake", row.id), row.src)
+			key := requests.Key{CreatorHost: row.src.Host, TargetID: "fake", RequestID: row.id}
+			rec, _, err := f.store.Get(key)
+			if err != nil || rec.NativeRun == nil {
+				t.Fatalf("%s: record %+v (%v), want a running record with its run", row.src.Host, rec, err)
+			}
+			rt.emit(core.NativeEvent{Type: core.EventRunFailed, Key: key, RunID: *rec.NativeRun, Result: &protocol.Result{Text: "partial output"}})
+			if rec, _, err = f.store.Get(key); err != nil || rec.State != protocol.StateFailed {
+				t.Fatalf("%s: record %s (%v), want failed", row.src.Host, rec.State, err)
+			}
+			out, err := f.ep.Handle(getCmd(protocol.EncodeRef(row.src.Host, "fake", row.id)), row.src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, _ := json.Marshal(out)
+			want, _ := json.Marshal(protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestGet}})
+			if !bytes.Equal(got, want) {
+				t.Fatalf("%s: request.get = %s\nwant %s", row.src.Host, got, want)
+			}
 		}
 	})
 }

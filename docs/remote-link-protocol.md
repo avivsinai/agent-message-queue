@@ -249,15 +249,17 @@ socket:
   stub's id on the endpoint's local socket, and makes no decision.
 - Under its lock, the endpoint checks the request's `not_after`, epoch and
   native session, checks 3 and 5 again, and checks that the mode of that
-  same prompt asks. It then records durably that it gave the text and
-  answers with it. The hook prints it as the prompt's added context, after
+  same prompt asks and that the session still cannot write the machine's
+  state. It then records durably that it gave the text and answers with
+  it. The hook prints it as the prompt's added context, after
   one line that names the request and the text's SHA-256. The text is given
   at most once per request, also across a restart. The read of the grant
   state at that call is the hand-over: a revoke, a key change or an expiry
   applied before it refuses the text; one applied after it does not recall
   the task. A refusal ends the request `rejected` (for example
-  `consent_invalid`, `grant_needs_signature: plan`), and the model has only
-  the stub.
+  `consent_invalid` with `grant_needs_signature: plan`, or with
+  `grant_unsupported: state_in_workspace: ...` as before the send), and
+  the model has only the stub.
 - The request completes only when the session's transcript shows the
   hook's context with exactly the text the endpoint gave, and the stub was
   the only prompt of its turn. Claude Code can give queued prompts (another

@@ -2,94 +2,61 @@ package main
 
 import (
 	"bytes"
-	"context"
-	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
-	"github.com/avivsinai/agent-message-queue/internal/remote/core"
-	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
-	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
-	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
+	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
-// Session grant, Claude Code: the prompt hook finds the endpoint that serves
-// its session from the attachment's locator, reports the prompt's mode there,
-// and prints the text the endpoint gives for a granted stub as the prompt's
-// added context.
-func TestPromptHookReportsToTheEndpointThatServesTheSession(t *testing.T) {
-	home := t.TempDir()
-	writeClaudeSessionIn(t, home, t.TempDir())
-	// A short state directory: it holds the endpoint's socket.
-	stateDir, err := os.MkdirTemp("", "amqh")
+// install-prompt-hook writes the prompt hook into the settings file of the
+// home and uninstall-prompt-hook takes it out, each with its own line; an
+// extra argument is a usage error that changes nothing.
+func TestClaudePromptHookInstallAndUninstall(t *testing.T) {
+	serviceSandbox(t)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(stateDir) })
-	cfg, err := json.Marshal(map[string]any{"pid": os.Getpid(), "home": home})
+	exe, err := hookExecutable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	att, err := claude.Factory(context.Background(), registry.FactoryConfig{StateDir: stateDir, Target: "cc-1", Config: cfg})
-	if err != nil {
-		t.Fatal(err)
+	settings := claude.SettingsPath(home)
+	if !strings.HasPrefix(settings, home+string(filepath.Separator)) {
+		t.Fatalf("settings file %s is not under the test home %s", settings, home)
 	}
-	store, err := requests.Open(stateDir)
-	if err != nil {
-		t.Fatal(err)
+	rows := []struct {
+		sub, line string
+		state     string
+	}{
+		{sub: "install-prompt-hook", line: "prompt hook installed: a Claude Code session on this machine can take a link session grant while it is in a mode that asks for permissions", state: claude.HookPresent},
+		{sub: "uninstall-prompt-hook", line: "prompt hook removed", state: claude.HookMissing},
 	}
-	ep := core.New(core.Config{Store: store})
-	t.Cleanup(func() { _ = ep.Close() })
-	ep.Register(att)
-	server, err := ipc.Listen(stateDir, ep)
-	if err != nil {
-		t.Fatal(err)
-	}
-	server.SetPromptHandler(promptHandler(ep))
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go func() { _ = server.Serve(ctx) }()
-
-	hook := func(prompt string) string {
-		t.Helper()
-		in, err := json.Marshal(map[string]string{"session_id": "sess-abc", "permission_mode": "default", "prompt": prompt, "hook_event_name": "UserPromptSubmit"})
+	for _, row := range rows {
+		before, _ := claude.PromptHookStateAt(settings)
+		var out bytes.Buffer
+		if code := claudeSubcommand([]string{row.sub, "extra"}, strings.NewReader(""), &out); code != protocol.ExitUsage || out.Len() != 0 {
+			t.Fatalf("%s extra: exit %d, printed %q; want a usage error", row.sub, code, out.String())
+		}
+		if state, _ := claude.PromptHookStateAt(settings); state != before {
+			t.Fatalf("%s extra changed the hook: %q, was %q", row.sub, state, before)
+		}
+		if code := claudeSubcommand([]string{row.sub}, strings.NewReader(""), &out); code != 0 || strings.TrimRight(out.String(), "\n") != row.line {
+			t.Fatalf("%s: exit %d, printed %q; want 0 and %q", row.sub, code, out.String(), row.line)
+		}
+		if state, err := claude.PromptHookStateAt(settings); err != nil || state != row.state {
+			t.Fatalf("after %s the prompt hook is %q (%v), want %q", row.sub, state, err, row.state)
+		}
+		raw, err := os.ReadFile(settings)
 		if err != nil {
 			t.Fatal(err)
 		}
-		var out bytes.Buffer
-		if code := promptHook(home, bytes.NewReader(in), &out); code != 0 {
-			t.Fatalf("promptHook exit = %d, want 0", code)
+		if has := strings.Contains(string(raw), "'"+exe+"' claude prompt-hook"); has != (row.state == claude.HookPresent) {
+			t.Fatalf("after %s the settings file holds the prompt hook command: %v\n%s", row.sub, has, raw)
 		}
-		return out.String()
-	}
-
-	if out := hook("hello"); out != "" {
-		t.Fatalf("a plain prompt printed %q, want nothing", out)
-	}
-	if asks, why := att.(core.PermissionReader).SessionAsks(); !asks {
-		t.Fatalf("SessionAsks after the hook's report = false (%s), want the reported mode", why)
-	}
-
-	const id = "44444444-4444-4444-8444-444444444401"
-	server.SetPromptHandler(func(r ipc.PromptRequest) ipc.PromptReply {
-		if r.StubID != id || r.TargetID != "cc-1" || r.Instance != att.(core.PromptHandover).PromptInstance() || r.Mode != "default" {
-			return ipc.PromptReply{}
-		}
-		return ipc.PromptReply{Text: "the task"}
-	})
-	out := hook("<cross-session-message from=\"amq-cc-1\">\nAMQ granted task " + id + "\n</cross-session-message>")
-	var got struct {
-		HookSpecificOutput struct {
-			HookEventName     string `json:"hookEventName"`
-			AdditionalContext string `json:"additionalContext"`
-		} `json:"hookSpecificOutput"`
-	}
-	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &got); err != nil {
-		t.Fatalf("hook output %q: %v", out, err)
-	}
-	if got.HookSpecificOutput.HookEventName != "UserPromptSubmit" || got.HookSpecificOutput.AdditionalContext != claude.GrantedContext(id, "the task") {
-		t.Fatalf("hook output = %+v, want the granted context of the task", got.HookSpecificOutput)
 	}
 }

@@ -1239,7 +1239,10 @@ The mode of the prompt that the task's stub raises decides again: in
 another mode the task ends `rejected` (`grant_needs_signature: <mode>`).
 A session whose working directory holds, or is inside, the endpoint's state
 directory, the AMQ home or `~/.claude/sessions` takes no grant
-(`state_in_workspace`), and a session in a turn answers `busy`. A granted
+(`state_in_workspace`): a granted task for it, before the send or at the
+prompt its stub raises, is refused with
+`grant_unsupported: state_in_workspace: ...`. A session in a turn answers
+`busy`. A granted
 task's text is at most 8192 bytes. A session in `plan`, `auto` or
 `bypassPermissions`, and every
 session on a machine without the hook, takes no grant: each link task needs

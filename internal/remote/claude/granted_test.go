@@ -203,6 +203,54 @@ func TestGrantedTaskRunsAtThePromptItsStubRaises(t *testing.T) {
 	}
 }
 
+// A session whose working directory came to hold the endpoint's state after
+// the stub was sent gets no text at the prompt the stub raises: the request
+// ends rejected with the same refusal a submit gives before the send.
+func TestGrantedPromptRefusesASessionThatCanWriteTheState(t *testing.T) {
+	ft, pid := grantedTarget(t)
+	stateDir := t.TempDir()
+	att := grantedAttach(t, ft, pid, stateDir)
+	store, err := requests.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep := core.New(core.Config{Store: store, Consent: func(string, string) bool { return true }})
+	ep.SetGrant(func(string, string, string) string { return "" })
+	ep.Register(att)
+	t.Cleanup(func() { _ = ep.Close() })
+
+	ep.GrantedPrompt(core.PromptReport{TargetID: "cc-1", Instance: att.PromptInstance(), Prompt: askingReport})
+	const id = "33333333-3333-4333-8333-333333333321"
+	cmd := &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit, RequestID: id, TargetID: "cc-1",
+		Epoch: SentinelUnpinned, NotAfter: protocol.FormatTime(time.Now().Add(2 * time.Minute)),
+		Input: &protocol.SubmitInput{Text: taskText, Deliver: protocol.DeliverTurn, Busy: protocol.BusyReject}}
+	src := core.Source{Host: grantedHost, Origin: map[string]string{"carrier": core.CarrierLink, core.OriginSink: grantedHost},
+		Shared: []string{"cc-1"}, NativeSession: "sess-abc", Credential: "cred-1",
+		GrantDigest: "sha256:0000000000000000000000000000000000000000000000000000000000000006"}
+	out, err := ep.Handle(cmd, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := out.(protocol.Reply); r.Outcome.Code != "" || r.Snapshot.State != protocol.StateRunning {
+		t.Fatalf("granted submit = %s %q %q, want running", r.Snapshot.State, r.Outcome.Code, r.Outcome.Message)
+	}
+
+	setRegistry(t, ft.home, pid, map[string]any{"cwd": filepath.Dir(stateDir)})
+	if text := ep.GrantedPrompt(core.PromptReport{TargetID: "cc-1", Instance: att.PromptInstance(), Prompt: askingReport,
+		StubID: frameMsgID(grantedKey(id))}); text != "" {
+		t.Fatalf("GrantedPrompt = %q, want no text", text)
+	}
+	got, err := ep.Handle(&protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestGet,
+		RequestRef: protocol.EncodeRef(grantedHost, "cc-1", id)}, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "grant_unsupported: state_in_workspace: the session can write this machine's state with no dialog"
+	if r := got.(protocol.Reply); r.Snapshot.State != protocol.StateRejected || r.Snapshot.Code != protocol.CodeConsentInvalid || r.Outcome.Message != want {
+		t.Fatalf("request.get = %s %s %q, want rejected %s %q", r.Snapshot.State, r.Snapshot.Code, r.Outcome.Message, protocol.CodeConsentInvalid, want)
+	}
+}
+
 // A granted request is refused before anything is sent when the session's
 // latest prompt report does not ask, the session can write the endpoint's
 // state, it is in a turn, or its state cannot be read.

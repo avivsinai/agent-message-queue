@@ -206,27 +206,44 @@ func (a *Attachment) PromptInstance() string {
 // the msg_id of its frame.
 func (a *Attachment) GrantedStubID(key requests.Key) string { return frameMsgID(key) }
 
-// promptVerdict is the one judgment of a prompt report: its session is the
-// live registry session, and its mode asks the user before a tool acts.
-func (a *Attachment) promptVerdict(p core.Prompt) (bool, string) {
-	if sid := a.NativeSessionID(); sid == "" || p.NativeSession != sid {
-		return false, "session_changed"
+// needsSignature starts the refusal of a granted request that this session
+// takes only with a signature now.
+const needsSignature = "grant_needs_signature: "
+
+// stateInWorkspaceRefusal refuses a granted request of a session that can
+// write the endpoint's state with no dialog; signing one task does not help.
+const stateInWorkspaceRefusal = "grant_unsupported: state_in_workspace: the session can write this machine's state with no dialog"
+
+// PromptRefusal implements core.PromptHandover with the values of p alone.
+// It is the one judgment of a prompt report, before a stub is sent and at
+// the hand-over of its text: "" when the report's session is the live
+// registry session, its mode asks the user before a tool acts, and the
+// session cannot write the endpoint's state with no dialog; else the whole
+// message of the refusal.
+func (a *Attachment) PromptRefusal(p core.Prompt) string {
+	switch sid := a.NativeSessionID(); {
+	case sid == "" || p.NativeSession != sid:
+		return needsSignature + "session_changed"
+	case p.Mode == "":
+		return needsSignature + "mode_unreadable"
+	case !modeAsks(p.Mode):
+		return needsSignature + p.Mode
+	case a.WritesWithoutAsking(a.stateDir):
+		return stateInWorkspaceRefusal
 	}
-	if p.Mode == "" {
-		return false, "mode_unreadable"
-	}
-	return modeAsks(p.Mode), p.Mode
+	return ""
 }
 
-// PromptAsks implements core.PromptHandover with the values of p alone.
-func (a *Attachment) PromptAsks(p core.Prompt) (bool, string) {
-	if asks, why := a.promptVerdict(p); !asks {
-		return false, why
+// storedRefusal is PromptRefusal of the session's latest prompt report, with
+// that report's mode. With no report the mode is not known.
+func (a *Attachment) storedRefusal() (msg, mode string) {
+	a.mu.Lock()
+	stored := a.prompt
+	a.mu.Unlock()
+	if stored == nil {
+		return needsSignature + "mode_unreadable", ""
 	}
-	if a.WritesWithoutAsking(a.stateDir) {
-		return false, "state_in_workspace"
-	}
-	return true, p.Mode
+	return a.PromptRefusal(stored.p), stored.p.Mode
 }
 
 // ObservePrompt implements core.PromptHandover: it keeps p as the session's
@@ -253,17 +270,15 @@ func (a *Attachment) ForgetPrompt(before time.Time) {
 	}
 }
 
-// SessionAsks implements core.PermissionReader from the session's latest
-// prompt report, judged as PromptAsks judges a report. With no report the
-// mode is not known.
+// SessionAsks implements core.PermissionReader from storedRefusal. Whether
+// the session can write a directory is WritesWithoutAsking's question, so
+// only a refusal that asks for a signature makes asks false.
 func (a *Attachment) SessionAsks() (bool, string) {
-	a.mu.Lock()
-	stored := a.prompt
-	a.mu.Unlock()
-	if stored == nil {
-		return false, "mode_unreadable"
+	msg, mode := a.storedRefusal()
+	if why, ok := strings.CutPrefix(msg, needsSignature); ok {
+		return false, why
 	}
-	return a.promptVerdict(stored.p)
+	return true, mode
 }
 
 // WritesWithoutAsking implements core.PermissionReader: true when dir is not

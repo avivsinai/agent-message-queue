@@ -208,24 +208,21 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 // it is in a turn, its state cannot be read, or the text is longer than the
 // harness gives a hook's context whole. reg is the registry entry Submit read.
 func (a *Attachment) grantedRefusal(reg *sessionRegistry, text string) (core.Admission, bool) {
-	needsSignature := func(why string) (core.Admission, bool) {
-		return core.Admission{Code: protocol.CodeConsentInvalid, Message: "grant_needs_signature: " + why, NothingSent: true}, true
+	refuse := func(msg string) (core.Admission, bool) {
+		return core.Admission{Code: protocol.CodeConsentInvalid, Message: msg, NothingSent: true}, true
 	}
-	if asks, why := a.SessionAsks(); !asks {
-		return needsSignature(why)
-	}
-	if a.WritesWithoutAsking(a.stateDir) {
-		return core.Admission{Code: protocol.CodeConsentInvalid, Message: "grant_unsupported: state_in_workspace: the session can write this machine's state with no dialog", NothingSent: true}, true
+	if msg, _ := a.storedRefusal(); msg != "" {
+		return refuse(msg)
 	}
 	switch normalizeStatus(reg.Status) {
 	case "idle":
 	case "busy":
 		return core.Admission{Code: protocol.CodeBusy, NothingSent: true}, true
 	default:
-		return needsSignature("the session's state cannot be read")
+		return refuse(needsSignature + "the session's state cannot be read")
 	}
 	if len(text) > GrantedTextLimit {
-		return needsSignature("the text is longer than this session takes under a grant")
+		return refuse(needsSignature + "the text is longer than this session takes under a grant")
 	}
 	return core.Admission{}, false
 }

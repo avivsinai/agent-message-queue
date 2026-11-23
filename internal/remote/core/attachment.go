@@ -229,12 +229,13 @@ type PromptHandover interface {
 	// GrantedStubID is the id by which the stub of the granted request key
 	// names it. It is a function of key alone.
 	GrantedStubID(key requests.Key) string
-	// PromptAsks reports whether a prompt is one at which a granted
-	// request's text may be given: its session is the one this attachment
-	// is attached to now, its mode asks the user before a tool acts, and
-	// the session cannot write this machine's state with no dialog. why
-	// names the mode, or what failed. It reads no stored report.
-	PromptAsks(p Prompt) (asks bool, why string)
+	// PromptRefusal reports whether a prompt is one at which a granted
+	// request's text may be given: "" when its session is the one this
+	// attachment is attached to now, its mode asks the user before a tool
+	// acts, and the session cannot write this machine's state with no
+	// dialog; else the whole message of the outcome that refuses the text.
+	// It reads no stored report.
+	PromptRefusal(p Prompt) string
 	// ObservePrompt stores the report of a prompt as the evidence that
 	// SessionAsks reads before a stub is sent. It decides nothing else.
 	ObservePrompt(p Prompt, at time.Time)

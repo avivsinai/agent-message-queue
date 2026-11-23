@@ -141,8 +141,8 @@ func (e *Endpoint) handGrantedTextLocked(rec *requests.Record, t *target, h Prom
 		// this moment.
 		code, reason = e.handoffLocked(rec, t)
 		if code == "" {
-			if asks, why := h.PromptAsks(p); !asks {
-				code, reason = protocol.CodeConsentInvalid, "grant_needs_signature: "+why
+			if msg := h.PromptRefusal(p); msg != "" {
+				code, reason = protocol.CodeConsentInvalid, msg
 			}
 		}
 	}
