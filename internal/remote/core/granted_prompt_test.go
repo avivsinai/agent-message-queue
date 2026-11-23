@@ -204,8 +204,10 @@ func (f *grantFixture) get(t *testing.T, id string) protocol.Reply {
 	return out.(protocol.Reply)
 }
 
+// report is a hook's report of a prompt that waits a second for its answer;
+// the fixture's clock does not move by itself.
 func report(id, mode string) core.PromptReport {
-	return core.PromptReport{TargetID: "fake", Instance: "inst-1", Prompt: core.Prompt{NativeSession: "fake", Mode: mode}, StubID: "stub-" + id}
+	return core.PromptReport{TargetID: "fake", Instance: "inst-1", Prompt: core.Prompt{NativeSession: "fake", Mode: mode}, StubID: "stub-" + id, Wait: time.Second}
 }
 
 // readOnlyRecords makes the records of hostA unwritable until the returned
@@ -372,6 +374,44 @@ func TestGrantedPromptHandsTheTextOverOnce(t *testing.T) {
 		}
 		rt.ReleaseAdmission()
 		<-done
+	})
+
+	// Review finding: the dispatch is recorded as the hook's wait ends. The
+	// hook has stopped waiting, so the call gives no text and writes nothing,
+	// and the request still ends untaken at its deadline.
+	t.Run("a dispatch recorded as the wait ends gives nothing and the request ends untaken", func(t *testing.T) {
+		rt := newPromptRuntime()
+		f := newGrantFixture(t, rt)
+		const id = "11111111-1111-4111-8111-111111111225"
+		rt.HoldAdmission()
+		ready := rt.NotifySubmitReady()
+		done := make(chan struct{})
+		go func() { defer close(done); f.submit(t, id, true) }()
+		<-ready
+		observed := make(chan struct{})
+		rt.set(func(r *promptRuntime) { r.onObserve = func() { close(observed) } })
+		r := report(id, "default")
+		r.Wait = 2 * time.Second
+		got := make(chan string, 1)
+		go func() { got <- f.ep.GrantedPrompt(r) }()
+		<-observed
+		time.Sleep(20 * time.Millisecond) // let the call reach its wait
+		f.clk.advance(r.Wait)
+		rt.ReleaseAdmission()
+		<-done
+		if text := <-got; text != "" {
+			t.Fatalf("GrantedPrompt after its wait ended = %q, want no text", text)
+		}
+		if rec := f.record(t, id); rec.State != protocol.StateRunning || rec.GrantTextGiven {
+			t.Fatalf("record after the wait = %s mark %v; want running with no mark", rec.State, rec.GrantTextGiven)
+		}
+		f.clk.advance(3 * time.Minute)
+		if err := f.ep.Reconcile(); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		if rec := f.record(t, id); rec.State != protocol.StateRejected || rec.Code != protocol.CodeExpired {
+			t.Fatalf("record at its deadline = %s/%s, want rejected expired", rec.State, rec.Code)
+		}
 	})
 
 	t.Run("a mark that does not commit gives no text", func(t *testing.T) {

@@ -64,38 +64,86 @@ func (g *grantedRun) grantedDigest() string {
 
 // turnState is what the reader knows of the turn its cursor is inside: the
 // prompts read since the turn began, and whether the reader saw where it
-// began.
+// began and every entry since.
 type turnState struct {
 	known   bool
 	prompts int
 	runs    []*runRecord
 }
 
-// isPrompt reports whether e is a prompt the harness gives the model: a
-// user line with text that is not an interrupt line, or a prompt folded into
-// a running turn.
-func isPrompt(e transcriptEntry) bool {
-	return e.Type == "user" && !e.Meta && e.Text != "" && (e.Absorbed || !strings.HasPrefix(e.Text, interruptPrefix))
-}
+// turnEntry is what one transcript line is to the turn reader.
+type turnEntry int
 
-// turnBoundary reports whether e ends the prompts of a turn: an assistant
-// line, or the interrupt line of a turn the user stopped.
-func turnBoundary(e transcriptEntry) bool {
-	return e.Type == "assistant" || (e.Type == "user" && !e.Meta && !e.Absorbed && strings.HasPrefix(e.Text, interruptPrefix))
-}
+const (
+	// entryOther changes nothing the reader knows of the turn.
+	entryOther turnEntry = iota
+	// entryBoundary ends the prompts of a turn: an assistant line, or the
+	// interrupt line of a turn the user stopped.
+	entryBoundary
+	// entryPrompt is input to the model from the user side, whatever its
+	// content (text, an image, a document, an empty text), or a prompt
+	// folded into a running turn. A tool result is not a prompt.
+	entryPrompt
+	// entryContext is the context a UserPromptSubmit hook added.
+	entryContext
+	// entryUnknown is a gap in the evidence: a line that did not parse, a
+	// user line whose content cannot be read, or a line of a type the reader
+	// does not know that carries a message or an attachment.
+	entryUnknown
+)
 
-// trackTurnLocked applies e to what the reader knows of the current turn,
-// before the turn state machine applies it. The prompt lines with no
-// assistant line between them are one turn's prompts: a granted run whose
-// turn holds another one is shared. A prompt folded into a turn while a run
-// owns it joins that turn. The owner's whole hook context, read before any
-// assistant line confirmed the run, gives the run its context digest. Caller
-// holds a.mu.
-func (a *Attachment) trackTurnLocked(e transcriptEntry) {
+// classifyTurnEntry is the one judgment of a transcript line for the turn
+// reader, live and in recovery's read back. parsed is false for a line that
+// did not parse. An attachment that is not a folded prompt or a hook's
+// context is context the harness adds, not input from the user side; an
+// api-request-blob copies a request whose entries the transcript holds.
+func classifyTurnEntry(e transcriptEntry, parsed bool) turnEntry {
 	switch {
-	case turnBoundary(e):
+	case !parsed:
+		return entryUnknown
+	case e.Type == "assistant":
+		return entryBoundary
+	case e.Type == "user" && e.Absorbed:
+		return entryPrompt
+	case e.Type == "user" && e.Meta:
+		return entryOther
+	case e.Type == "user" && strings.HasPrefix(e.Text, interruptPrefix):
+		return entryBoundary
+	case e.Type == "user" && e.Content == contentToolResults:
+		return entryOther
+	case e.Type == "user" && e.Content == contentNone:
+		return entryUnknown
+	case e.Type == "user":
+		return entryPrompt
+	case len(e.HookContext) > 0:
+		return entryContext
+	case e.Type == "attachment" || e.Type == "api-request-blob" || !e.CarriesInput:
+		return entryOther
+	}
+	return entryUnknown
+}
+
+// trackTurnLocked applies e, of kind k, to what the reader knows of the
+// current turn, before the turn state machine applies it. The prompt lines
+// with no assistant line between them are one turn's prompts: a granted run
+// whose turn holds another one is shared. A prompt folded into a turn while
+// a run owns it joins that turn. The owner's whole hook context, read before
+// any assistant line confirmed the run, gives the run its context digest. A
+// gap in the evidence shares every run of the turn and the owner, and leaves
+// the turn not known until the next boundary. Caller holds a.mu.
+func (a *Attachment) trackTurnLocked(e transcriptEntry, k turnEntry) {
+	switch k {
+	case entryBoundary:
 		a.turn = turnState{known: true}
-	case isPrompt(e):
+	case entryUnknown:
+		a.turn.known = false
+		for _, r := range a.turn.runs {
+			r.share()
+		}
+		if a.owner != nil && !a.owner.terminal {
+			a.owner.share()
+		}
+	case entryPrompt:
 		rec := a.runByMsgIDLocked(e.MsgID)
 		if rec != nil && slices.Contains(a.turn.runs, rec) {
 			return // the same stub read again
@@ -121,7 +169,7 @@ func (a *Attachment) trackTurnLocked(e transcriptEntry) {
 				r.share()
 			}
 		}
-	case len(e.HookContext) > 0:
+	case entryContext:
 		rec := a.owner
 		if rec == nil || !rec.granted || rec.admitted || rec.terminal || rec.shared {
 			return
@@ -149,8 +197,9 @@ func (a *Attachment) grantedPendingLocked() bool {
 // turnBefore reads at most one chunk of the transcript at path before byte
 // offset off and returns what it holds of the turn open at off: known when
 // it holds the turn's start (an assistant line, an interrupt line, or the
-// start of the transcript), and the number of that turn's prompts before
-// off. A read that fails, or that starts inside the turn, is not known.
+// start of the transcript) and no gap after it (classifyTurnEntry), and the
+// number of that turn's prompts before off. A read that fails, or that
+// starts inside the turn, is not known.
 func turnBefore(path string, off int64) turnState {
 	if off <= 0 {
 		return turnState{known: true}
@@ -166,11 +215,12 @@ func turnBefore(path string, off int64) turnState {
 			break
 		}
 		e, ok := parseTranscriptLine(line)
-		switch {
-		case !ok:
-		case turnBoundary(e):
+		switch classifyTurnEntry(e, ok) {
+		case entryBoundary:
 			t = turnState{known: true}
-		case isPrompt(e):
+		case entryUnknown:
+			t.known = false
+		case entryPrompt:
 			t.prompts++
 		}
 	}

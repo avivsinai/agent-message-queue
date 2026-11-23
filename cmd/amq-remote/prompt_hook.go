@@ -41,11 +41,21 @@ func promptHook(home string, stdin io.Reader, stdout io.Writer) int {
 	case <-timer.C:
 		return 0
 	}
+	reportPrompt(home, in, stdout, deadline)
+	return 0
+}
+
+// reportPrompt reports the prompt in to every endpoint that serves its
+// session and prints the text the first one gives, all within deadline, the
+// one deadline of the hook's run: the discovery of the endpoints spends it
+// too, and every call gets only what is left, so once it is used up no call
+// is made and nothing is printed.
+func reportPrompt(home string, in claude.PromptHookInput, stdout io.Writer, deadline time.Time) {
 	stub := in.StubID
 	for _, ep := range claude.PromptEndpoints(home, in.SessionID) {
 		left := time.Until(deadline)
 		if left <= 0 {
-			return 0
+			return
 		}
 		reply, err := ipc.Prompt(ep.StateDir, ipc.PromptRequest{
 			TargetID: ep.Target, Instance: ep.Instance, NativeSession: in.SessionID,
@@ -58,5 +68,4 @@ func promptHook(home string, stdin io.Reader, stdout io.Writer) int {
 		// The other endpoints still get the report, with no stub.
 		stub = ""
 	}
-	return 0
 }

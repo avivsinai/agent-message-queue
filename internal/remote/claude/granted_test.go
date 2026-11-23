@@ -117,6 +117,47 @@ func closedTurn(t *testing.T) []string {
 
 func sha(text string) string { return sha256Hex([]byte(text)) }
 
+// imageLine is a prompt of an image alone: a user entry whose content is one
+// image block. No recorded transcript here holds an image entry, so the
+// block follows the documented message content block type (an image with a
+// base64 source).
+func imageLine(t *testing.T) string {
+	t.Helper()
+	b, err := json.Marshal(map[string]any{
+		"type":      "user",
+		"timestamp": time.Now().UTC().Format(time.RFC3339Nano),
+		"message": map[string]any{"role": "user", "content": []any{map[string]any{
+			"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// hugePromptLine is a prompt longer than the reader's chunk, which the
+// reader drops unread.
+func hugePromptLine(t *testing.T) string {
+	return transcriptLine(t, "user", strings.Repeat("x", transcriptChunkBytes+1024))
+}
+
+// brokenLine is a line that does not parse.
+const brokenLine = `{"type":"user","message":{"role":"user","content":"a prompt the reader cannot parse"`
+
+// pollUntilEnd runs the poller until the run of key ends, a few reads at
+// most, and returns its evidence.
+func pollUntilEnd(t *testing.T, att *Attachment, key requests.Key) core.Evidence {
+	t.Helper()
+	var ev core.Evidence
+	for range 6 {
+		att.pollConfirmations()
+		if ev, _ = att.Lookup(key, ""); ev.State.Terminal() {
+			break
+		}
+	}
+	return ev
+}
+
 const taskText = "list the files of this directory"
 
 // Session grant, Claude Code, end to end: a granted submit writes the stub
@@ -174,7 +215,7 @@ func TestGrantedTaskRunsAtThePromptItsStubRaises(t *testing.T) {
 		t.Fatalf("StubMsgID(frame) = %q %v, want the frame's msg_id %s", got, ok, msgID)
 	}
 
-	text := ep.GrantedPrompt(core.PromptReport{TargetID: "cc-1", Instance: loc[0].Instance, Prompt: askingReport, StubID: msgID})
+	text := ep.GrantedPrompt(core.PromptReport{TargetID: "cc-1", Instance: loc[0].Instance, Prompt: askingReport, StubID: msgID, Wait: time.Second})
 	if text != taskText {
 		t.Fatalf("GrantedPrompt = %q, want the task text", text)
 	}
@@ -237,7 +278,7 @@ func TestGrantedPromptRefusesASessionThatCanWriteTheState(t *testing.T) {
 
 	setRegistry(t, ft.home, pid, map[string]any{"cwd": filepath.Dir(stateDir)})
 	if text := ep.GrantedPrompt(core.PromptReport{TargetID: "cc-1", Instance: att.PromptInstance(), Prompt: askingReport,
-		StubID: frameMsgID(grantedKey(id))}); text != "" {
+		StubID: frameMsgID(grantedKey(id)), Wait: time.Second}); text != "" {
 		t.Fatalf("GrantedPrompt = %q, want no text", text)
 	}
 	got, err := ep.Handle(&protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestGet,
@@ -348,6 +389,29 @@ func TestGrantedRunReportsTheContextItsTurnShows(t *testing.T) {
 			return []string{transcriptLine(t, "user", "the person's prompt"), transcriptLine(t, "assistant", "working"),
 				absorbedLine(t, msgID, env), hookContextLine(t, GrantedContext(msgID, taskText)), transcriptLine(t, "assistant", "done")}
 		}},
+		// Review finding: a prompt of an image alone is a prompt, and a line
+		// the reader drops or cannot parse is a gap that may hide one.
+		{name: "an image-only prompt before the stub in its turn", lines: func(t *testing.T, msgID, env string) []string {
+			return []string{imageLine(t), deliveredLine(t, msgID, env), hookContextLine(t, GrantedContext(msgID, taskText)), transcriptLine(t, "assistant", "done")}
+		}},
+		{name: "an image-only prompt after the stub in its turn", lines: func(t *testing.T, msgID, env string) []string {
+			return []string{deliveredLine(t, msgID, env), hookContextLine(t, GrantedContext(msgID, taskText)), imageLine(t), transcriptLine(t, "assistant", "done")}
+		}},
+		{name: "an over-size line in the stub's turn", lines: func(t *testing.T, msgID, env string) []string {
+			return []string{deliveredLine(t, msgID, env), hugePromptLine(t), hookContextLine(t, GrantedContext(msgID, taskText)), transcriptLine(t, "assistant", "done")}
+		}},
+		{name: "an unparseable line in the stub's turn", lines: func(t *testing.T, msgID, env string) []string {
+			return []string{deliveredLine(t, msgID, env), brokenLine, hookContextLine(t, GrantedContext(msgID, taskText)), transcriptLine(t, "assistant", "done")}
+		}},
+		{name: "a gap in an earlier turn", want: sha(taskText), lines: func(t *testing.T, msgID, env string) []string {
+			return []string{brokenLine, transcriptLine(t, "assistant", "an answer after the gap"),
+				deliveredLine(t, msgID, env), hookContextLine(t, GrantedContext(msgID, taskText)), transcriptLine(t, "assistant", "done")}
+		}},
+		// A gap while the run still runs may hide a prompt folded into it.
+		{name: "a gap after the run's first answer line", lines: func(t *testing.T, msgID, env string) []string {
+			return []string{deliveredLine(t, msgID, env), hookContextLine(t, GrantedContext(msgID, taskText)),
+				transcriptLine(t, "assistant", "working"), brokenLine, transcriptLine(t, "assistant", "done")}
+		}},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -362,8 +426,7 @@ func TestGrantedRunReportsTheContextItsTurnShows(t *testing.T) {
 			}
 			appendTranscript(t, ft.home, row.lines(t, adm.RunID, frameEnvelope(t, ft))...)
 			appendStopMarker(t, ft.home, time.Now().UnixMilli()+1)
-			att.pollConfirmations()
-			ev, _ := att.Lookup(grantedKey(id), "")
+			ev := pollUntilEnd(t, att, grantedKey(id))
 			if ev.State != protocol.StateCompleted || ev.GrantedTextDigest != row.want {
 				t.Fatalf("evidence = %s digest %q, want completed with digest %q", ev.State, ev.GrantedTextDigest, row.want)
 			}
@@ -413,7 +476,9 @@ func TestRecoveredGrantedRunReadsBackToItsTurn(t *testing.T) {
 	rows := []struct {
 		name   string
 		before func(t *testing.T) []string
-		want   bool
+		// after are lines between the stub and its context.
+		after []string
+		want  bool
 	}{
 		{name: "the only prompt of its turn", want: true, before: func(t *testing.T) []string { return closedTurn(t) }},
 		{name: "the second of two stubs of one turn", before: func(t *testing.T) []string {
@@ -427,6 +492,18 @@ func TestRecoveredGrantedRunReadsBackToItsTurn(t *testing.T) {
 			}
 			return append(closedTurn(t), string(huge))
 		}},
+		// Review finding: the read back and the replay judge the same gaps
+		// as the live reader.
+		{name: "an image-only prompt before the stub in its turn", before: func(t *testing.T) []string {
+			return append(closedTurn(t), imageLine(t))
+		}},
+		{name: "an unparseable line before the stub in its turn", before: func(t *testing.T) []string {
+			return append(closedTurn(t), brokenLine)
+		}},
+		{name: "an over-size line after the stub", before: closedTurn, after: []string{hugePromptLine(t)}},
+		{name: "a gap in an earlier turn", want: true, before: func(t *testing.T) []string {
+			return append(closedTurn(t), brokenLine, transcriptLine(t, "assistant", "an answer after the gap"))
+		}},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -434,15 +511,18 @@ func TestRecoveredGrantedRunReadsBackToItsTurn(t *testing.T) {
 			const id = "33333333-3333-4333-8333-333333333341"
 			msgID, line := stub(t, id)
 			appendTranscript(t, ft.home, row.before(t)...)
-			appendTranscript(t, ft.home, line, hookContextLine(t, GrantedContext(msgID, taskText)), transcriptLine(t, "assistant", "done"))
+			appendTranscript(t, ft.home, line)
+			if len(row.after) > 0 {
+				appendTranscript(t, ft.home, row.after...)
+			}
+			appendTranscript(t, ft.home, hookContextLine(t, GrantedContext(msgID, taskText)), transcriptLine(t, "assistant", "done"))
 			appendStopMarker(t, ft.home, time.Now().UnixMilli()+1)
 
 			att := grantedAttach(t, ft, pid, t.TempDir())
 			if ev, _ := att.Lookup(grantedKey(id), ""); ev.Class != core.EvidenceTentative {
 				t.Fatalf("recovery = %s, want the run rebuilt", ev.Class)
 			}
-			att.pollConfirmations()
-			ev, _ := att.Lookup(grantedKey(id), "")
+			ev := pollUntilEnd(t, att, grantedKey(id))
 			want := ""
 			if row.want {
 				want = sha(taskText)
@@ -451,6 +531,39 @@ func TestRecoveredGrantedRunReadsBackToItsTurn(t *testing.T) {
 				t.Fatalf("recovered run = %s digest %q, want completed with digest %q", ev.State, ev.GrantedTextDigest, want)
 			}
 		})
+	}
+}
+
+// Review finding: the prompt hook's discovery is bounded, so its deadline
+// covers it. It reads at most 16 sentinels in name order, also when they are
+// empty: a locator that sorts 16th is found, one that sorts 17th is not.
+func TestPromptEndpointsReadsAtMostSixteenSentinels(t *testing.T) {
+	for _, row := range []struct {
+		empties int
+		found   bool
+	}{{empties: 15, found: true}, {empties: 16, found: false}} {
+		home := t.TempDir()
+		dir := stopBoundDir(home, "sess-abc")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for i := range row.empties {
+			if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("a%02d", i)), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		stateDir := t.TempDir()
+		loc, err := json.Marshal(promptLocator{StateDir: stateDir, Target: "cc-1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "b-valid"), loc, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got := PromptEndpoints(home, "sess-abc")
+		if found := len(got) == 1 && got[0] == (PromptEndpoint{StateDir: stateDir, Target: "cc-1", Instance: "b-valid"}); found != row.found || len(got) > 1 {
+			t.Fatalf("%d empty sentinels before the locator: PromptEndpoints = %+v, want found %v", row.empties, got, row.found)
+		}
 	}
 }
 

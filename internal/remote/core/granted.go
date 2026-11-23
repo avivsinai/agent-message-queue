@@ -41,10 +41,13 @@ const unattributedReason = "the answer cannot be attributed to this task; the ta
 // refuses the text; one applied after it does not recall the task.
 //
 // A report from a stale locator (another target, another kind of
-// attachment, another instance) changes nothing. A report whose request is
-// still being dispatched waits for the record's next change, for at most
-// req.Wait, and writes nothing when that time is used up.
+// attachment, another instance) changes nothing. The hook waits for the
+// answer until now + req.Wait, taken at entry: a report whose request is
+// still being dispatched waits for the record's next change until then, and
+// once that deadline is reached the call returns "" with nothing written, so
+// no text is marked given after the hook stopped waiting.
 func (e *Endpoint) GrantedPrompt(req PromptReport) string {
+	deadline := e.now().Add(req.Wait)
 	if !e.beginReconcile() {
 		return ""
 	}
@@ -64,7 +67,6 @@ func (e *Endpoint) GrantedPrompt(req PromptReport) string {
 	if req.StubID == "" {
 		return ""
 	}
-	deadline := time.Now().Add(req.Wait)
 	for {
 		e.mu.Lock()
 		if e.targets[req.TargetID] != t {
@@ -72,7 +74,7 @@ func (e *Endpoint) GrantedPrompt(req PromptReport) string {
 			return ""
 		}
 		rec := e.stubRecordLocked(req.TargetID, h, req.StubID)
-		if rec == nil || rec.GrantTextGiven {
+		if rec == nil || rec.GrantTextGiven || !e.now().Before(deadline) {
 			e.mu.Unlock()
 			return ""
 		}
@@ -81,16 +83,13 @@ func (e *Endpoint) GrantedPrompt(req PromptReport) string {
 			// for the next record change, as Wait does, with no lock held.
 			ch := e.changed
 			e.mu.Unlock()
-			left := time.Until(deadline)
-			if left <= 0 {
-				return ""
-			}
-			timer := time.NewTimer(left)
+			timer := time.NewTimer(deadline.Sub(e.now()))
 			select {
 			case <-ch:
+				timer.Stop()
 			case <-timer.C:
+				return ""
 			}
-			timer.Stop()
 			continue
 		}
 		return e.handGrantedTextLocked(rec, t, h, req.Prompt)

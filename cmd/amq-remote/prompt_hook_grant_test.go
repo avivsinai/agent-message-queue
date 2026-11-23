@@ -259,3 +259,62 @@ func TestPromptHookCarriesAGrantedLinkTaskEndToEnd(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// Review finding: the hook's one deadline covers the discovery of its
+// endpoints. With what is left of it the hook reaches an endpoint that gives
+// text; once it is spent before the first call, the hook calls no endpoint
+// and prints nothing.
+func TestPromptHookWithItsBudgetSpentCallsNoEndpoint(t *testing.T) {
+	home := t.TempDir()
+	// A short state directory: it holds the endpoint's socket.
+	stateDir, err := os.MkdirTemp("", "amqh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(stateDir) })
+	store, err := requests.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep := core.New(core.Config{Store: store})
+	t.Cleanup(func() { _ = ep.Close() })
+	server, err := ipc.Listen(stateDir, ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := make(chan ipc.PromptRequest, 4)
+	server.SetPromptHandler(func(r ipc.PromptRequest) ipc.PromptReply {
+		calls <- r
+		return ipc.PromptReply{Text: "a task"}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = server.Serve(ctx) }()
+
+	// The session's sentinel, as an attachment with this state directory
+	// writes it.
+	dir := filepath.Join(home, ".claude", "sessions", "amq-bound", "sess-abc")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	loc, err := json.Marshal(map[string]string{"state_dir": stateDir, "target": "cc-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "inst-1"), loc, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	in := claude.PromptHookInput{SessionID: "sess-abc", Mode: "default", StubID: "55555555-5555-4555-8555-555555555511"}
+
+	var out bytes.Buffer
+	reportPrompt(home, in, &out, time.Now().Add(promptHookBudget))
+	if len(calls) != 1 || out.Len() == 0 {
+		t.Fatalf("with its budget: %d calls, printed %q; want one call and the context", len(calls), out.String())
+	}
+	<-calls
+	out.Reset()
+	reportPrompt(home, in, &out, time.Now())
+	if len(calls) != 0 || out.Len() != 0 {
+		t.Fatalf("with its budget spent: %d calls, printed %q; want no call and nothing", len(calls), out.String())
+	}
+}

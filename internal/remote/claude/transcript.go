@@ -273,7 +273,27 @@ type transcriptEntry struct {
 	// UserPromptSubmit hook added (attachment type hook_additional_context):
 	// the hook's text, or a preview of it when the harness cut it.
 	HookContext []string
+	// Content is what message.content gives the model, whatever Text holds:
+	// input, tool results only, or nothing readable.
+	Content contentShape
+	// CarriesInput: the line has a message content or an attachment, the
+	// two places where the harness writes input to the model.
+	CarriesInput bool
 }
+
+// contentShape is what a line's message.content gives the model.
+type contentShape int
+
+const (
+	// contentNone: no content, or a content that is neither a string nor a
+	// list of blocks.
+	contentNone contentShape = iota
+	// contentInput: a string, also an empty one, or a list of blocks of
+	// which one at least is not a tool result (text, an image, a document).
+	contentInput
+	// contentToolResults: a list of tool_result blocks only.
+	contentToolResults
+)
 
 // toolUseRef is one tool_use block: its id, tool name and actionHash of
 // its input.
@@ -326,10 +346,11 @@ func parseTranscriptLine(line string) (transcriptEntry, bool) {
 	if err := json.Unmarshal([]byte(line), &raw); err != nil || raw.Type == "" {
 		return transcriptEntry{}, false
 	}
-	text, blocks, uses := decodeContentWalk(raw.Message.Content)
+	text, blocks, uses, shape := decodeContentWalk(raw.Message.Content)
 	e := transcriptEntry{Type: raw.Type, Meta: raw.IsMeta, Text: text, Blocks: blocks, SessionID: raw.SessionID, UUID: raw.UUID, PromptID: raw.PromptID, ToolUses: uses,
 		TurnOrigin: raw.TurnOrigin, Sidechain: raw.IsSidechain, CompactSummary: raw.IsCompact, VisibleOnly: raw.IsVisibleOnly,
-		MessageID: raw.Message.ID, StopReason: raw.Message.StopReason, APIError: raw.IsAPIError, Model: raw.Message.Model}
+		MessageID: raw.Message.ID, StopReason: raw.Message.StopReason, APIError: raw.IsAPIError, Model: raw.Message.Model,
+		Content: shape, CarriesInput: len(raw.Message.Content) > 0 || raw.Attachment != nil}
 	for _, b := range blocks {
 		if b.Type == "tool_result" && b.ID != "" {
 			e.ToolResults = append(e.ToolResults, b.ID)
@@ -411,23 +432,23 @@ type TranscriptBlock struct {
 // tool_use and tool_result are kept beside that text, and tool_use input is
 // not copied: it carries local paths.
 func decodeContentBlocks(raw json.RawMessage) (string, []TranscriptBlock) {
-	text, blocks, _ := decodeContentWalk(raw)
+	text, blocks, _, _ := decodeContentWalk(raw)
 	return text, blocks
 }
 
 // decodeContentWalk is decodeContentBlocks plus each tool_use block's input
-// hash, which matches the call a permission dialog is about. The input is
-// hashed, never kept.
-func decodeContentWalk(raw json.RawMessage) (string, []TranscriptBlock, []toolUseRef) {
+// hash, which matches the call a permission dialog is about, and the shape
+// of the content as input to the model. The input is hashed, never kept.
+func decodeContentWalk(raw json.RawMessage) (string, []TranscriptBlock, []toolUseRef, contentShape) {
 	if len(raw) == 0 {
-		return "", nil, nil
+		return "", nil, nil, contentNone
 	}
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
 		if s == "" {
-			return "", nil, nil
+			return "", nil, nil, contentInput
 		}
-		return s, []TranscriptBlock{{Type: "text", Text: s}}, nil
+		return s, []TranscriptBlock{{Type: "text", Text: s}}, nil, contentInput
 	}
 	var blocks []struct {
 		Type      string          `json:"type"`
@@ -440,12 +461,19 @@ func decodeContentWalk(raw json.RawMessage) (string, []TranscriptBlock, []toolUs
 		Input     json.RawMessage `json:"input"`
 	}
 	if err := json.Unmarshal(raw, &blocks); err != nil {
-		return "", nil, nil
+		return "", nil, nil, contentNone
 	}
 	var parts []string
 	var out []TranscriptBlock
 	var uses []toolUseRef
+	shape := contentInput
+	if len(blocks) > 0 {
+		shape = contentToolResults
+	}
 	for _, b := range blocks {
+		if b.Type != "tool_result" {
+			shape = contentInput
+		}
 		switch b.Type {
 		case "text":
 			if b.Text == "" {
@@ -465,7 +493,7 @@ func decodeContentWalk(raw json.RawMessage) (string, []TranscriptBlock, []toolUs
 			out = append(out, TranscriptBlock{Type: "tool_result", ID: b.ToolUseID, Text: decodeContent(b.Content), Failed: b.IsError})
 		}
 	}
-	return strings.Join(parts, "\n"), out, uses
+	return strings.Join(parts, "\n"), out, uses, shape
 }
 
 // TranscriptLine is the activity and mirror view of one parsed transcript

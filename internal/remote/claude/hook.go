@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -540,18 +541,22 @@ type promptLocator struct {
 	Target   string `json:"target"`
 }
 
-// maxPromptEndpoints bounds how many sentinels of one session the prompt
-// hook reads, and maxLocatorBytes one sentinel's size.
+// The prompt hook's discovery of its endpoints is bounded, so the hook's one
+// deadline covers it: it lists at most maxSentinelNames names of a session's
+// sentinel directory, reads at most maxLocatorReads sentinels of them in name
+// order (a read that fails or holds no locator counts), and at most
+// maxLocatorBytes of each.
 const (
-	maxPromptEndpoints = 16
-	maxLocatorBytes    = 4 << 10
+	maxSentinelNames = 64
+	maxLocatorReads  = 16
+	maxLocatorBytes  = 4 << 10
 )
 
 // PromptEndpoints returns the attachments that serve session sessionID and
-// give a granted request's text at a prompt: every regular sentinel file of
-// the session, read bounded with no link followed, whose content is a
-// locator with an absolute state directory and a target. An empty sentinel
-// (an attachment built with no state directory) names none.
+// give a granted request's text at a prompt: the regular sentinel files of
+// the session, within the bounds above, read with no link followed, whose
+// content is a locator with an absolute state directory and a target. An
+// empty sentinel (an attachment built with no state directory) names none.
 func PromptEndpoints(home, sessionID string) []PromptEndpoint {
 	if !sessionIDRe.MatchString(sessionID) {
 		return nil
@@ -560,18 +565,23 @@ func PromptEndpoints(home, sessionID string) []PromptEndpoint {
 	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() {
 		return nil
 	}
-	entries, err := os.ReadDir(dir)
+	d, err := os.Open(dir)
 	if err != nil {
 		return nil
 	}
+	entries, _ := d.ReadDir(maxSentinelNames)
+	_ = d.Close()
+	slices.SortFunc(entries, func(a, b os.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
 	var out []PromptEndpoint
+	reads := 0
 	for _, e := range entries {
-		if len(out) == maxPromptEndpoints {
+		if reads == maxLocatorReads {
 			break
 		}
 		if !e.Type().IsRegular() {
 			continue
 		}
+		reads++
 		raw, err := readRegularBounded(filepath.Join(dir, e.Name()), maxLocatorBytes)
 		if err != nil {
 			continue

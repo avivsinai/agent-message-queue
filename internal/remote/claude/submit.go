@@ -518,6 +518,10 @@ func (a *Attachment) pollConfirmations() {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return
 	}
+	// A read that starts or ends inside a line it discards (one longer than
+	// a chunk, or the partial first line of a cursor that starts mid-file)
+	// drops that line before any line it returns.
+	dropped := err == nil && (cur.skipping || rd.skipping)
 	caughtUp := err == nil && !rd.skipping && rd.next >= rd.size
 	truncated := false
 	if err == nil && rd.size < cur.off {
@@ -540,10 +544,13 @@ func (a *Attachment) pollConfirmations() {
 		a.activityNext = 0
 		// The next read starts at the top of the new file.
 		a.turn = turnState{known: true}
+	} else if dropped {
+		a.trackTurnLocked(transcriptEntry{}, entryUnknown)
 	}
 	for i, line := range rd.lines {
 		e, ok := parseTranscriptLine(line)
 		if !ok {
+			a.trackTurnLocked(e, classifyTurnEntry(e, false))
 			continue
 		}
 		events = a.applyEntryLocked(e, events)
@@ -596,7 +603,7 @@ func (a *Attachment) pollConfirmations() {
 //
 // Caller holds a.mu.
 func (a *Attachment) applyEntryLocked(e transcriptEntry, events []core.NativeEvent) []core.NativeEvent {
-	a.trackTurnLocked(e)
+	a.trackTurnLocked(e, classifyTurnEntry(e, true))
 	switch {
 	case e.Type == "user" && !e.Meta && e.Text != "":
 		if !e.Absorbed {
