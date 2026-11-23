@@ -39,3 +39,13 @@ func TestLegacyFreeTextDialogHintKeepsYesNo(t *testing.T) {
 		t.Fatalf("legacy hint = %q", text)
 	}
 }
+
+// wb7p review: an unscoped option 1 beside a typed allow is not the legacy
+// first-option branch. A no without Deny still must not appear in the hint.
+func TestMixedScopeDialogHintDoesNotPromiseNo(t *testing.T) {
+	req := dialog.Request{Options: []dialog.Option{{N: 1, Label: "Other"}, {N: 2, Label: "Once", Scope: dialog.ScopeOnce}}}
+	text := dialogText("Codex", req)
+	if !strings.Contains(text, "React ✅ = 2, or reply a number / yes.") || strings.Contains(text, "/ no") {
+		t.Fatalf("mixed hint = %q", text)
+	}
+}

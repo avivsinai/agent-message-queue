@@ -725,12 +725,6 @@ func dialogText(label string, req dialog.Request) string {
 		deny = deny || o.Deny
 	}
 	var how []string
-	legacyNo := false
-	for _, option := range req.Options {
-		if option.Scope == "" && option.N == 1 {
-			legacyNo = true
-		}
-	}
 	approve, canApprove := dialog.ApproveOption(req)
 	if len(req.Options) > 0 {
 		if canApprove {
@@ -743,7 +737,7 @@ func dialogText(label string, req dialog.Request) string {
 		if canApprove {
 			tail += " / yes"
 		}
-		if deny || legacyNo {
+		if deny || canApprove && approve.Scope == "" {
 			tail += " / no"
 		}
 		how = append(how, tail)
