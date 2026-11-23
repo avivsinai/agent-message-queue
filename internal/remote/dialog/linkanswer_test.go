@@ -11,6 +11,25 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 )
 
+// signedDigest computes what the server signed for a dialog's record:
+// the digest of its rendered interaction, the value the write must match.
+func signedDigest(t *testing.T, dir, id string) string {
+	t.Helper()
+	_, req, _, _, err := dialog.Lookup(dir, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, ok := dialog.RenderLinkInteraction(req)
+	if !ok {
+		t.Fatalf("dialog %s renders no link interaction", id)
+	}
+	d, err := dialog.InteractionDigest(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
 // openDialog writes one open dialog record with the two link choices and
 // returns its id and directory.
 func openDialog(t *testing.T, dir string) string {
@@ -39,7 +58,7 @@ func openDialog(t *testing.T, dir string) string {
 func TestWriteLinkAnswerRecordsTheChoice(t *testing.T) {
 	dir := t.TempDir()
 	id := openDialog(t, dir)
-	if err := dialog.WriteLinkAnswer(dir, id, "Allow once", dialog.RoleApprove, "sha256:abc", "cred-1"); err != nil {
+	if err := dialog.WriteLinkAnswer(dir, id, "Allow once", dialog.RoleApprove, signedDigest(t, dir, id), "sha256:abc", "cred-1"); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	phase, req, a, _, err := dialog.Lookup(dir, id)
@@ -66,7 +85,7 @@ func TestWriteLinkAnswerRecordsTheChoice(t *testing.T) {
 func TestWriteLinkAnswerDenyRole(t *testing.T) {
 	dir := t.TempDir()
 	id := openDialog(t, dir)
-	if err := dialog.WriteLinkAnswer(dir, id, "Deny", dialog.RoleDeny, "sha256:d", "cred-1"); err != nil {
+	if err := dialog.WriteLinkAnswer(dir, id, "Deny", dialog.RoleDeny, signedDigest(t, dir, id), "sha256:d", "cred-1"); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	_, _, a, _, err := dialog.Lookup(dir, id)
@@ -83,17 +102,17 @@ func TestWriteLinkAnswerRefusals(t *testing.T) {
 		dir := t.TempDir()
 		id := openDialog(t, dir)
 		// The approve label with the deny role names no deny choice.
-		err := dialog.WriteLinkAnswer(dir, id, "Allow once", dialog.RoleDeny, "sha256:x", "c")
+		err := dialog.WriteLinkAnswer(dir, id, "Allow once", dialog.RoleDeny, signedDigest(t, dir, id), "sha256:x", "c")
 		if !errors.Is(err, dialog.ErrLinkNoSuchChoice) {
 			t.Fatalf("approve label as deny = %v; want no such choice", err)
 		}
 		// The deny label with the approve role, the same way.
-		err = dialog.WriteLinkAnswer(dir, id, "Deny", dialog.RoleApprove, "sha256:x", "c")
+		err = dialog.WriteLinkAnswer(dir, id, "Deny", dialog.RoleApprove, signedDigest(t, dir, id), "sha256:x", "c")
 		if !errors.Is(err, dialog.ErrLinkNoSuchChoice) {
 			t.Fatalf("deny label as approve = %v; want no such choice", err)
 		}
 		// An out-of-scope label is no link choice for any role.
-		if err := dialog.WriteLinkAnswer(dir, id, "Always allow", dialog.RoleApprove, "sha256:x", "c"); !errors.Is(err, dialog.ErrLinkNoSuchChoice) {
+		if err := dialog.WriteLinkAnswer(dir, id, "Always allow", dialog.RoleApprove, signedDigest(t, dir, id), "sha256:x", "c"); !errors.Is(err, dialog.ErrLinkNoSuchChoice) {
 			t.Fatalf("session-scope label = %v; want no such choice", err)
 		}
 		if _, err := os.Stat(filepath.Join(dir, "answers", id+".json")); !os.IsNotExist(err) {
@@ -106,7 +125,7 @@ func TestWriteLinkAnswerRefusals(t *testing.T) {
 		if err := os.RemoveAll(filepath.Join(dir, "answers")); err != nil {
 			t.Fatal(err)
 		}
-		if err := dialog.WriteLinkAnswer(dir, id, "Allow once", dialog.RoleApprove, "sha256:x", "c"); !errors.Is(err, dialog.ErrLinkDialogGone) {
+		if err := dialog.WriteLinkAnswer(dir, id, "Allow once", dialog.RoleApprove, signedDigest(t, dir, id), "sha256:x", "c"); !errors.Is(err, dialog.ErrLinkDialogGone) {
 			t.Fatalf("missing answers dir = %v; want gone", err)
 		}
 		if _, err := os.Stat(filepath.Join(dir, "answers")); !os.IsNotExist(err) {
@@ -115,7 +134,7 @@ func TestWriteLinkAnswerRefusals(t *testing.T) {
 	})
 	t.Run("missing request file", func(t *testing.T) {
 		dir := t.TempDir()
-		if err := dialog.WriteLinkAnswer(dir, dialog.NewID(), "Allow once", dialog.RoleApprove, "sha256:x", "c"); !errors.Is(err, dialog.ErrLinkDialogGone) {
+		if err := dialog.WriteLinkAnswer(dir, dialog.NewID(), "Allow once", dialog.RoleApprove, "sha256:none", "sha256:x", "c"); !errors.Is(err, dialog.ErrLinkDialogGone) {
 			t.Fatalf("no dialog = %v; want gone", err)
 		}
 	})
@@ -125,7 +144,7 @@ func TestWriteLinkAnswerRefusals(t *testing.T) {
 		if ok, err := dialog.Resolve(dir, dialog.Resolved{ID: id, Outcome: dialog.OutcomeAllowed, Label: "Allow once", At: time.Now().UTC()}); err != nil || !ok {
 			t.Fatalf("resolve: %v %v", ok, err)
 		}
-		if err := dialog.WriteLinkAnswer(dir, id, "Allow once", dialog.RoleApprove, "sha256:x", "c"); !errors.Is(err, dialog.ErrLinkDialogGone) {
+		if err := dialog.WriteLinkAnswer(dir, id, "Allow once", dialog.RoleApprove, signedDigest(t, dir, id), "sha256:x", "c"); !errors.Is(err, dialog.ErrLinkDialogGone) {
 			t.Fatalf("resolved dialog = %v; want gone", err)
 		}
 	})
@@ -137,14 +156,14 @@ func TestWriteLinkAnswerRefusals(t *testing.T) {
 func TestWriteLinkAnswerFirstAnswerWins(t *testing.T) {
 	dir := t.TempDir()
 	id := openDialog(t, dir)
-	if err := dialog.WriteLinkAnswer(dir, id, "Allow once", dialog.RoleApprove, "sha256:first", "cred-1"); err != nil {
+	if err := dialog.WriteLinkAnswer(dir, id, "Allow once", dialog.RoleApprove, signedDigest(t, dir, id), "sha256:first", "cred-1"); err != nil {
 		t.Fatalf("first write: %v", err)
 	}
 	raw, err := os.ReadFile(filepath.Join(dir, "answers", id+".json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = dialog.WriteLinkAnswer(dir, id, "Deny", dialog.RoleDeny, "sha256:second", "cred-2")
+	err = dialog.WriteLinkAnswer(dir, id, "Deny", dialog.RoleDeny, signedDigest(t, dir, id), "sha256:second", "cred-2")
 	if !errors.Is(err, dialog.ErrLinkAnswered) {
 		t.Fatalf("second write = %v; want already answered", err)
 	}
@@ -167,7 +186,7 @@ func TestWriteLinkAnswerSyncFaultReturnsInternalError(t *testing.T) {
 		return nil
 	})
 	defer restore()
-	err := dialog.WriteLinkAnswer(dir, id, "Allow once", dialog.RoleApprove, "sha256:x", "cred-1")
+	err := dialog.WriteLinkAnswer(dir, id, "Allow once", dialog.RoleApprove, signedDigest(t, dir, id), "sha256:x", "cred-1")
 	if err == nil || errors.Is(err, dialog.ErrLinkDialogGone) || errors.Is(err, dialog.ErrLinkAnswered) || errors.Is(err, dialog.ErrLinkNoSuchChoice) {
 		t.Fatalf("sync fault = %v; want a durability error", err)
 	}
@@ -187,7 +206,7 @@ func TestWriteLinkAnswerFollowsNoLink(t *testing.T) {
 		if err := os.Symlink(real, dir); err != nil {
 			t.Fatal(err)
 		}
-		if err := dialog.WriteLinkAnswer(dir, dialog.NewID(), "Allow once", dialog.RoleApprove, "sha256:x", "c"); !errors.Is(err, dialog.ErrLinkDialogGone) {
+		if err := dialog.WriteLinkAnswer(dir, dialog.NewID(), "Allow once", dialog.RoleApprove, "sha256:none", "sha256:x", "c"); !errors.Is(err, dialog.ErrLinkDialogGone) {
 			t.Fatalf("linked dialog dir = %v; want gone", err)
 		}
 		if _, err := os.ReadDir(real); err != nil {
@@ -219,7 +238,7 @@ func TestWriteLinkAnswerFollowsNoLink(t *testing.T) {
 			}
 		}
 		id := dialog.NewID()
-		if err := dialog.WriteLinkAnswer(dir, id, "Allow once", dialog.RoleApprove, "sha256:x", "c"); !errors.Is(err, dialog.ErrLinkDialogGone) {
+		if err := dialog.WriteLinkAnswer(dir, id, "Allow once", dialog.RoleApprove, "sha256:none", "sha256:x", "c"); !errors.Is(err, dialog.ErrLinkDialogGone) {
 			t.Fatalf("linked answers dir = %v; want gone", err)
 		}
 		if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {

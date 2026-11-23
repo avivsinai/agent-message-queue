@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
-	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 	"github.com/avivsinai/agent-message-queue/internal/remote/linkio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
@@ -176,7 +175,11 @@ func (s *linkDialogSource) renderDialog(dir string, rec *requests.Record, id str
 	if req.Session == "" || req.Session != rec.NativeSession {
 		return nil, false // identity unavailable or not the signed session: withhold
 	}
-	in, ok := renderLinkInteraction(req)
+	// The render is the one the answer write re-checks the signature
+	// against: dialog.RenderLinkInteraction is shared with the write so a
+	// record whose text or options changed renders a different dialog and
+	// the pinned digest check refuses the answer.
+	in, ok := dialog.RenderLinkInteraction(req)
 	if !ok {
 		return nil, false
 	}
@@ -185,70 +188,6 @@ func (s *linkDialogSource) renderDialog(dir string, rec *requests.Record, id str
 	// answer file — the link's or the owner's from Buzz — or a policy
 	// that moved takes them dark in a new revision of the same card.
 	in.RemoteAnswer = phase == dialog.PhaseOpen && s.takesAnswers(rec)
-	return in, true
-}
-
-// renderLinkInteraction renders one read dialog record as its interaction,
-// without the answer state: the one render publication and the answer
-// write share, so a record whose text or options changed since
-// publication renders a different dialog and the write's digest check
-// refuses it. ok=false when the record offers no legal link shape: the
-// role scan, the label distinctness, and the prompt, option and id bounds.
-func renderLinkInteraction(req dialog.Request) (*protocol.Interaction, bool) {
-	var (
-		allow, deny dialog.Option
-		haveAllow   bool
-		haveDeny    bool
-	)
-	for _, o := range req.Options {
-		if o.Scope != dialog.ScopeOnce {
-			continue
-		}
-		if o.Deny {
-			if haveDeny {
-				return nil, false
-			}
-			deny, haveDeny = o, true
-			continue
-		}
-		if haveAllow {
-			return nil, false
-		}
-		allow, haveAllow = o, true
-	}
-	if !haveAllow && !haveDeny {
-		return nil, false // nothing the link may choose once
-	}
-	if haveAllow && haveDeny && allow.Label == deny.Label {
-		return nil, false // roles must stay distinguishable
-	}
-	prompt := req.Tool + "\n" + req.Text
-	if len(prompt) > maxLinkPromptBytes || len(req.ID) > 128 {
-		return nil, false
-	}
-	in := &protocol.Interaction{
-		InteractionID: req.ID,
-		Kind:          "approval",
-		Prompt:        prompt,
-		Options:       []string{},
-	}
-	for _, o := range req.Options {
-		if (o.Deny && haveDeny && o == deny) || (!o.Deny && haveAllow && o == allow) {
-			if o.Label == "" || len(o.Label) > maxLinkOptionBytes {
-				return nil, false
-			}
-			in.Options = append(in.Options, o.Label)
-		}
-	}
-	if haveAllow {
-		in.ApproveOption = allow.Label
-	}
-	if haveDeny {
-		in.RejectOption = deny.Label
-	}
-	if len(in.Options) == 0 {
-		return nil, false
-	}
 	return in, true
 }
 
@@ -364,9 +303,14 @@ func (s *linkDialogSource) linkSharePolicy(host, bindingName string) (approvals,
 }
 
 // WriteAnswer records the verified answer in the binding's dialog
-// directory: the answers file created exclusively, the file and its
-// directory synced. It creates no directory — a missing one is
-// already_resolved, the same refusal a resolved or answered dialog gets.
+// directory. The policy judgment is the seam's; the write itself holds
+// the pinned handles and judges the record it publishes through: the
+// signature is checked against a re-render of the record read through
+// the held dialog directory (dialog_changed when the dialog moved since
+// publication), the option is mapped from that same pinned request, and
+// the answer file is created exclusively and synced through the pinned
+// fsq sync. It creates no directory — a missing one is already_resolved,
+// the same refusal a resolved or answered dialog gets.
 func (s *linkDialogSource) WriteAnswer(host, bindingName, id, label, role, interactionDigest, documentDigest, credential string) (protocol.Code, string) {
 	if _, _, ok := s.linkSharePolicy(host, bindingName); !ok {
 		return protocol.CodeUnshared, "the binding is not shared with this link now"
@@ -375,38 +319,11 @@ func (s *linkDialogSource) WriteAnswer(host, bindingName, id, label, role, inter
 	if err != nil {
 		return protocol.CodeAlreadyResolved, "the binding's dialog directory is gone"
 	}
-	// The signature covers the dialog as the record file holds it now:
-	// re-render the record with the one render publication used, and
-	// refuse a digest that does not match — a record whose text or
-	// options changed since publication is a changed dialog.
-	_, req, _, resolved, err := dialog.Lookup(dir, id)
-	if err != nil || resolved != nil || req.ID != id {
-		return protocol.CodeAlreadyResolved, "the dialog is not open for an answer"
-	}
-	rendered, ok := renderLinkInteraction(req)
-	if !ok {
-		return protocol.CodeDialogChanged, "the dialog's record no longer renders a legal link dialog"
-	}
-	digest, err := core.InteractionDigest(rendered)
-	if err != nil {
-		return protocol.CodeInternal, err.Error()
-	}
-	if digest != interactionDigest {
-		return protocol.CodeDialogChanged, "the dialog's record no longer matches the signed document"
-	}
-	// The option is found by label and role in the rendered interaction:
-	// approve_option is the allow-once choice, reject_option the deny-once
-	// one.
-	derived := dialog.RoleApprove
-	if label == rendered.RejectOption {
-		derived = dialog.RoleDeny
-	}
-	if label != rendered.ApproveOption && label != rendered.RejectOption || derived != role {
-		return protocol.CodeInvalid, "the label names no such choice of the dialog"
-	}
-	switch err := dialog.WriteLinkAnswer(dir, id, label, derived, documentDigest, credential); {
+	switch err := dialog.WriteLinkAnswer(dir, id, label, role, interactionDigest, documentDigest, credential); {
 	case err == nil:
 		return "", ""
+	case errors.Is(err, dialog.ErrLinkDialogChanged):
+		return protocol.CodeDialogChanged, err.Error()
 	case errors.Is(err, dialog.ErrLinkDialogGone), errors.Is(err, dialog.ErrLinkAnswered):
 		return protocol.CodeAlreadyResolved, err.Error()
 	case errors.Is(err, dialog.ErrLinkNoSuchChoice):
@@ -479,7 +396,4 @@ func mapHistoryEntry(e dialog.HistoryEntry) protocol.Resolution {
 }
 
 // Schema bounds for a published interaction (remote-request-v1).
-const (
-	maxLinkPromptBytes = 16384
-	maxLinkOptionBytes = 256
-)
+const ()

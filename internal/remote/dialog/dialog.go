@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -426,74 +427,87 @@ var (
 	// ErrLinkAnswered: an answer file exists already; the first answer
 	// wins.
 	ErrLinkAnswered = errors.New("an answer exists already")
+	// ErrLinkDialogChanged: the record file no longer renders the dialog
+	// the signed document covers — the digest computed from the pinned
+	// read does not match the signed one, or the record renders nothing.
+	ErrLinkDialogChanged = errors.New("the dialog changed since the document was signed")
 )
 
-// WriteLinkAnswer records a link's answer in the binding's dialog
-// directory: the answers file created exclusively, the file and the
-// directories synced. role is the choice's expected role, "approve" or
-// "deny", as the stored interaction carries it; the label must name a
-// once-scope option of that role.
-//
-// Every step runs against opened directory handles: the binding's dialog
-// directory and its answers child are opened once, no link followed at any
-// component, and the lookup, the exclusive publish and the cleanup all go
-// through those handles — a retirement or replacement of the directory
-// tree under the path can never mix a half state into another
-// generation's files. The directory syncs run through fsq.SyncDir, the
-// queue's own durability primitive, so its fault seam applies.
-// ErrLinkDialogGone when the dialog is not open, ErrLinkAnswered when an
-// answer file already holds the answer — the first answer wins — and
-// ErrLinkNoSuchChoice when the label names no such choice. A returned
-// sync error leaves the record written but unconfirmed.
-func WriteLinkAnswer(dir, id, label, role, documentDigest, credential string) error {
+// WriteLinkAnswer records the link's answer for one open dialog: the
+// whole write holds opened directory handles — the binding's dialog
+// directory opened as a direct, non-symlink child of its parent with its
+// identity confirmed the way fsq's held creation does, the answers
+// directory opened the same way beneath it — so a rename or replacement
+// of any directory on the path after the open can never redirect a step
+// to a different tree, and a link at either level refuses with
+// ErrLinkDialogGone and creates nothing. The record file is read through
+// the handle; the signed interaction digest is computed from those bytes
+// with the render publication uses and must match interactionDigest, or
+// the write refuses ErrLinkDialogChanged: the signature covers the dialog
+// as the record holds it now, not as publication stored it. The option is
+// then mapped from the same pinned request: the label names exactly one
+// once-scope choice whose deny-ness matches role, else
+// ErrLinkNoSuchChoice. The answer file is created exclusively through the
+// answers handle — the first answer wins, ErrLinkAnswered otherwise — and
+// the syncs run through the pinned fsq sync the fault seam covers; a
+// returned sync error leaves the record written but unconfirmed. No step
+// re-reads a pathname after the opens.
+func WriteLinkAnswer(dir, id, label, role, interactionDigest, documentDigest, credential string) error {
 	if !idRe.MatchString(id) {
 		return fmt.Errorf("dialog id %q is not one NewID mints: %w", id, ErrLinkDialogGone)
 	}
 	if role != RoleApprove && role != RoleDeny {
 		return fmt.Errorf("answer role %q is neither approve nor deny: %w", role, ErrLinkNoSuchChoice)
 	}
-	// A dialog directory that is a link to elsewhere is not the binding's
-	// dialog directory: refuse it, create nothing.
-	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("dialog directory %s is not a real directory: %w", dir, ErrLinkDialogGone)
-	}
-	root, err := os.OpenRoot(dir)
+	// The dialog directory is pinned through its parent: opened as a
+	// direct child with no link followed, its identity the same object
+	// before and after the open.
+	dialogRoot, err := openPinnedChild(filepath.Dir(dir), filepath.Base(dir))
 	if err != nil {
 		return fmt.Errorf("dialog directory %s: %w", dir, ErrLinkDialogGone)
 	}
-	defer func() { _ = root.Close() }()
-	// The answers child is its own root: the occupancy read, the exclusive
-	// publish, the cleanup and the link all hold the one handle.
-	answers, err := root.OpenRoot("answers")
+	defer func() { _ = dialogRoot.Close() }()
+	answers, err := dialogRoot.OpenDirectChild("answers")
 	if err != nil {
 		return fmt.Errorf("answers directory missing: %w", ErrLinkDialogGone)
 	}
 	defer func() { _ = answers.Close() }()
 
-	// The dialog must still be open, read through the same handle the
-	// publish will use.
+	// One read of the record, through the handle: the digest, the option
+	// map and the answer all come from these bytes.
 	var res Resolved
-	if resolved, err := rootReadID(root, "resolved", id, &res); err != nil {
+	if resolved, err := readIDFile(dialogRoot, "resolved", id, &res); err != nil {
 		return fmt.Errorf("dialog %s unreadable: %w", id, ErrLinkDialogGone)
 	} else if resolved {
 		return fmt.Errorf("dialog %s is resolved: %w", id, ErrLinkDialogGone)
 	}
 	var taken Answer
-	if answered, err := rootReadID(answers, "", id, &taken); err != nil {
+	if answered, err := readIDFile(answers, ".", id, &taken); err != nil {
 		return fmt.Errorf("dialog %s unreadable: %w", id, ErrLinkDialogGone)
 	} else if answered {
 		return fmt.Errorf("answer for %s recorded first: %w", id, ErrLinkAnswered)
 	}
 	var req Request
-	requested, err := rootReadID(root, "requests", id, &req)
-	if err != nil {
-		return fmt.Errorf("dialog %s unreadable: %w", id, ErrLinkDialogGone)
-	}
-	if !requested {
+	requested, err := readIDFile(dialogRoot, "requests", id, &req)
+	if err != nil || !requested {
 		return fmt.Errorf("dialog %s not open: %w", id, ErrLinkDialogGone)
 	}
 
-	// The label names exactly one once-scope choice of the expected role.
+	// The signature covers the record as it stands now.
+	rendered, ok := RenderLinkInteraction(req)
+	if !ok {
+		return fmt.Errorf("dialog %s no longer renders a link dialog: %w", id, ErrLinkDialogChanged)
+	}
+	digest, err := InteractionDigest(rendered)
+	if err != nil {
+		return fmt.Errorf("dialog %s: %w", id, err)
+	}
+	if digest != interactionDigest {
+		return fmt.Errorf("dialog %s no longer matches the signed document: %w", id, ErrLinkDialogChanged)
+	}
+
+	// The option is mapped from the same pinned request: exactly one
+	// once-scope choice carries the label and the expected role.
 	var chosen *Option
 	for i := range req.Options {
 		o := req.Options[i]
@@ -520,66 +534,51 @@ func WriteLinkAnswer(dir, id, label, role, documentDigest, credential string) er
 	if err != nil {
 		return err
 	}
-
-	// The exclusive publish: one temp file in answers, linked into place
-	// by the answer id. Names below the root are dialog-relative; names on
-	// the answers handle are answers-relative.
-	tmpName := "." + id + ".json.tmp-" + randToken()
-	tmp, err := answers.OpenFile(tmpName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return err
-	}
-	cleanup := func() { _ = answers.Remove(tmpName) }
-	if _, err := tmp.Write(raw); err != nil {
-		_ = tmp.Close()
-		cleanup()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		cleanup()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		cleanup()
-		return err
-	}
-	if err := answers.Link(tmpName, id+".json"); err != nil {
-		cleanup()
+	// The exclusive publish through the answers handle: the name appears
+	// only whole and content-synced, and the pinned sync the fault seam
+	// covers carries it to durability. An existing name is the first
+	// answer's win.
+	if _, err := answers.WriteFileExclusive(".", id+".json", raw, 0o600); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return fmt.Errorf("answer for %s recorded first: %w", id, ErrLinkAnswered)
 		}
 		return err
 	}
-	// The temp name has served; the answer's name is the record.
-	cleanup()
-	// Durability: the answers directory holds the new name, the dialog
-	// directory the generation it lives in. fsq.SyncDir carries the
-	// queue's fault seam.
-	if err := fsq.SyncDir(filepath.Join(dir, "answers")); err != nil {
-		return err
-	}
-	return fsq.SyncDir(dir)
+	return dialogRoot.SyncDir(".")
 }
 
-// rootReadID reads one id file of a dialog directory through an opened
-// root handle: ok=false when it does not exist. sub is the directory
-// inside the handle, empty for the handle's own directory.
-func rootReadID(root *os.Root, sub, id string, v any) (bool, error) {
-	name := id + ".json"
-	if sub != "" {
-		name = sub + "/" + id + ".json"
-	}
-	f, err := root.Open(name)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
+// openPinnedChild opens name as a direct, non-symlink directory child of
+// base with its identity confirmed across the open: the way fsq's held
+// creation opens a child, at the level the dialog store hands out.
+func openPinnedChild(base, name string) (*fsq.DeliveryRoot, error) {
+	identity, err := fsq.SnapshotDeliveryRoot(base)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	defer func() { _ = f.Close() }()
-	raw, err := io.ReadAll(io.LimitReader(f, maxFileBytes))
+	store, err := fsq.OpenDeliveryRoot(base, identity)
 	if err != nil {
+		return nil, err
+	}
+	// OpenDeliveryRoot holds the base; the child root's lifetime ends with
+	// the process, so close the store root when the child closes. The
+	// borrowed child from OpenDirectChild is closed with the store.
+	child, err := store.OpenDirectChild(name)
+	if err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	return child, nil
+}
+
+// readIDFile reads one id file of a dialog directory through an opened
+// root handle: ok=false when it does not exist.
+func readIDFile(root *fsq.DeliveryRoot, sub, id string, v any) (bool, error) {
+	name := filepath.Join(sub, id+".json")
+	raw, err := root.ReadFile(name)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
 		return false, err
 	}
 	if err := json.Unmarshal(raw, v); err != nil {

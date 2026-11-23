@@ -1,11 +1,7 @@
 package core
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
-	"github.com/avivsinai/agent-message-queue/internal/remote/jcs"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
@@ -115,21 +111,15 @@ func (e *Endpoint) AnswerLinkDialog(src Source, a LinkAnswer) (protocol.Code, st
 // remote_answer flag is part of the revision, never of the digest: an
 // answer file appearing must not make signed documents stale.
 func interactionDigest(in *protocol.Interaction) (string, error) {
-	cp := *in
-	cp.RemoteAnswer = false
-	canon, err := jcs.Marshal(cp)
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(canon)
-	return "sha256:" + hex.EncodeToString(sum[:]), nil
+	return dialog.InteractionDigest(in)
 }
 
 // InteractionDigest is the value a server signs for one interaction: the
 // identity keys' JCS hash, the remote_answer flag excluded. The machine's
-// answer seam re-renders the dialog's record file and compares this
-// digest against the signed one before it writes — the one rule for what
-// the signature covers, shared by admission and the write.
+// answer write recomputes it from the record read through the held dialog
+// directory and compares it against the signed one before it writes — the
+// one rule for what the signature covers, shared by admission, the render
+// and the write.
 func InteractionDigest(in *protocol.Interaction) (string, error) {
 	return interactionDigest(in)
 }
