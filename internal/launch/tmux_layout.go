@@ -56,7 +56,7 @@ func (b *TmuxBackend) reclaimOwnedLayout(ctx context.Context, req ReclaimRequest
 			return ReclaimResult{Status: ReclaimUnknown, Evidence: tmuxServerEpochMismatch}, nil
 		}
 	}
-	out, err := b.run(ctx, b.args("list-panes", "-a", "-F", "#{window_id}\t#{pane_id}\t#{@amq_pane_agent}\t#{@amq_launch_nonce}")...)
+	out, err := b.run(ctx, b.args("list-panes", "-a", "-F", tmuxFormat("window_id", "pane_id", "@amq_pane_agent", "@amq_launch_nonce"))...)
 	if err != nil {
 		return ReclaimResult{Status: ReclaimUnknown, Evidence: err.Error()}, nil
 	}
@@ -70,7 +70,7 @@ func (b *TmuxBackend) reclaimOwnedLayout(ctx context.Context, req ReclaimRequest
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		fields := strings.Split(line, "\t")
+		fields := strings.Split(line, tmuxFieldSeparator)
 		if len(fields) != 4 {
 			return ReclaimResult{Status: ReclaimUnknown, Evidence: "invalid tmux pane inventory line " + line}, nil
 		}
@@ -208,12 +208,12 @@ func (b *TmuxBackend) createSessionLayout(req CreateRequest, detect DetectResult
 		return CreateResult{}, fmt.Errorf("tmux session %q already exists; journal recovery must classify it", name)
 	}
 	first := req.Plan.Agents[0]
-	out, err := b.runNewSessionWithTransientRetry(ctx, b.args("new-session", "-d", "-P", "-F", "#{session_id}\t#{window_id}\t#{pane_id}",
+	out, err := b.runNewSessionWithTransientRetry(ctx, b.args("new-session", "-d", "-P", "-F", tmuxFormat("session_id", "window_id", "pane_id"),
 		"-s", name, "-n", first.Handle, "-e", tmuxNonceEnvironment+"="+first.LaunchNonce, agentCommand(req, first))...)
 	if err != nil {
 		return CreateResult{}, fmt.Errorf("create tmux session: %w", err)
 	}
-	fields := strings.Split(strings.TrimSpace(out), "\t")
+	fields := strings.Split(strings.TrimSpace(out), tmuxFieldSeparator)
 	if len(fields) != 3 || fields[0] == "" || fields[1] == "" || fields[2] == "" {
 		return CreateResult{}, fmt.Errorf("tmux create returned invalid resource identities %q", strings.TrimSpace(out))
 	}
@@ -257,12 +257,12 @@ func (b *TmuxBackend) createNewWindowLayout(req CreateRequest, detect DetectResu
 		return CreateResult{}, &DefinitePreCreateError{Err: err}
 	}
 	first := req.Plan.Agents[0]
-	out, err := b.run(ctx, b.args("new-window", "-d", "-P", "-F", "#{window_id}\t#{pane_id}",
+	out, err := b.run(ctx, b.args("new-window", "-d", "-P", "-F", tmuxFormat("window_id", "pane_id"),
 		"-t", sessionID, "-n", first.Handle, agentCommand(req, first))...)
 	if err != nil {
 		return CreateResult{}, fmt.Errorf("create tmux window: %w", err)
 	}
-	fields := strings.Split(strings.TrimSpace(out), "\t")
+	fields := strings.Split(strings.TrimSpace(out), tmuxFieldSeparator)
 	if len(fields) != 2 || fields[0] == "" || !tmuxPaneID(fields[1]) {
 		return CreateResult{}, fmt.Errorf("tmux create returned invalid window identities %q", strings.TrimSpace(out))
 	}

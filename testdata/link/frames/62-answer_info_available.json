@@ -1,0 +1,17 @@
+{
+  "body_def": "answer_info_reply",
+  "description": "Reserved capability for a binding accepting signed answers.",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "answer_info": {
+        "available": true,
+        "binding": "codex-demo",
+        "now": "2026-10-09T14:02:00Z"
+      }
+    },
+    "gen": 12,
+    "re": "m_ai",
+    "schema": "amq.remote.link/1"
+  }
+}

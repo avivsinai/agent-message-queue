@@ -1,0 +1,14 @@
+{
+  "body_def": "answer_info",
+  "description": "Ask whether the shared binding accepts signed answers now.",
+  "direction": "server_to_endpoint",
+  "frame": {
+    "body": {
+      "binding": "codex-demo",
+      "schema": "amq.remote.link.answer_info/1"
+    },
+    "gen": 12,
+    "id": "m_ai",
+    "schema": "amq.remote.link/1"
+  }
+}

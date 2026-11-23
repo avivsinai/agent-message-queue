@@ -16,6 +16,8 @@ byte and runs the same checks as `internal/remote/linkcontract` and
 | `consent/refused/*.json` | Documents a verifier refuses with `consent_invalid`, as `document_b64` |
 | `grant/document.json` | An `amq.remote.grant/1` session grant for the same binding, exactly the signed bytes |
 | `grant/assertion.json` | The ES256 assertion over it by the same consent key, and its `digest` (`"sha256:"` + hex of the document bytes) |
+| `answer/interaction.json` | Canonical signed projection of an example approval, including its option roles and Unicode prompt |
+| `answer/document.json` | Exact JCS answer document. Frame 60 carries its Ed25519 assertion using the public key in `consent/assertion_ed25519.json`. The recorded reply illustrates the durable admission contract. |
 | `device.json` | The endpoint's Ed25519 device key (SPKI) and the creator host derived from it |
 | `frames/NN-name.json` | One golden frame per body: `direction`, `body_def` (a `$defs` name in the schema), `frame` |
 

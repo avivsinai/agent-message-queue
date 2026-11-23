@@ -64,8 +64,8 @@ A binding is one AMQ binding shared with the link, as the machine sees it
 now: `binding`, `target_id`, `epoch`, `native_session_id`, `labels`
 (`device`, `session`, `harness`, `project`), `harness`, `display_name`,
 `attachment`, `consent` (`passkey` or `local`), `tools` (the tool profile)
-and `capabilities`. `approve_tool` and `answer_question` are always false: a
-link never answers the agent's prompts. `hello` carries the bindings and
+and `capabilities`. `approve_tool` and `answer_question` are false for ordinary link commands.
+A server queries signed-answer capability separately with `answer_info`. `hello` carries the bindings and
 `pending_local` (digests of documents waiting for a local confirmation);
 `amq.remote.link.bindings/1` pushes them again when they change, and
 `session.list` and `session.inspect` answer with them. A consent document's
@@ -120,6 +120,63 @@ id; the local passkey signs SHA-256(`"amq.remote.link/1\0confirm\0"` +
 digest). After a confirmation the request has a record and revisions like
 any other. A task whose deadline passes, or that a restart drops, has no
 record and no revision; the next hello omits its digest.
+
+## Signed dialog answers
+
+The endpoint recognizes two frame bodies for permission dialogs. It currently
+verifies signed answers and returns `answer_unsupported`. Every shared
+binding reports terminal-only approvals. A server keeps answer buttons off
+until both the binding reports `available: true` and the request interaction
+has `remote_answer: true`. An absent `remote_answer` means false.
+
+Send `amq.remote.link.answer_info/1` with `binding`. The reply carries
+`answer_info` with the binding, `available` and `now` (the machine’s RFC 3339
+clock). An unavailable binding can give the reason `approvals_terminal`,
+`consent_local` or `harness_unsupported`. An unshared binding returns
+`unshared`. An older endpoint can return `unsupported` for either frame.
+
+A signing server constructs the interaction digest from the request’s
+published approval. Take exactly `interaction_id`, `kind`, `options` in
+their published order, `prompt`, and each of `approve_option` and
+`reject_option` that is present. Hash the JCS bytes of that object with
+SHA-256 and prefix the lowercase hex with `sha256:`. Copy the chosen role’s
+label verbatim into `option`. Availability and other snapshot fields stay
+outside this digest.
+
+The signed document is `amq.remote.answer/1`. It has exactly these keys.
+
+| Signed content | Fields |
+| --- | --- |
+| Schema and link | `schema`, `server_id`, `store_id` |
+| Published binding | `binding`, `target_id`, `epoch`, `native_session_id`, `labels` |
+| Request and choice | `request_ref`, `interaction_id`, `interaction_digest`, `option` |
+| RFC 3339 timestamps | `issued_at`, `not_after` |
+
+Use the same WebAuthn assertion as for a signed submit, with SHA-256 of the
+exact JCS document bytes as the challenge. Send the assertion fields and
+`document_b64` under the frame schema `amq.remote.link.signed_answer/1`.
+The machine checks the signature against its current enrolled keys, decodes
+the document strictly, matches server, store and live binding, then checks
+time. Issuance must be within 60 seconds of the machine’s clock, lifetime
+must be positive and at most 120 seconds, and the machine’s clock must be
+strictly before expiry. Each send undergoes all checks again.
+
+The verification-stage errors in order are `consent_invalid` for malformed
+signed content, signature or link identity, `unshared`, `stale_epoch`,
+`session_changed`, then the time checks (`consent_invalid` for malformed
+timestamps, `clock_skew`, `consent_invalid` for invalid lifetime,
+`expired`). A verified document currently ends at `answer_unsupported`.
+A session grant confers no authority to answer a dialog.
+
+The wire reserves `{"answer":{"request_ref":"…","interaction_id":"…","state":"recorded"}}`
+for the endpoint that durably writes the answer file and its directory entry.
+That admission stage can also return `not_found`, `already_resolved`,
+`dialog_changed`, `invalid` or `internal`. After a lost reply or uncertain
+durability, the server reads request revisions for disposition. It may see a
+resolution directly. A still-admissible document can be checked again after
+the seam rejects the original choice and reopens the dialog. The signing
+projection, document, assertion frame and replies are published as
+[golden fixtures](../testdata/link/README.md).
 
 ## Session grant
 
