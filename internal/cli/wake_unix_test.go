@@ -1215,6 +1215,41 @@ func TestRunWakeLoopProvisionsMissingMailboxAtStart(t *testing.T) {
 		}
 	})
 
+	// zih4: a first-contact sender can publish its inbox after the wake's absence check.
+	t.Run("first send creates inbox during provisioning", func(t *testing.T) {
+		root := secureTempDirForTest(t)
+		agent := fsq.AgentBase(root, "codex")
+		if err := os.MkdirAll(agent, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		held := retainedWakeAgentDirForTest(t, root, "codex")
+		if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+			t.Fatal(err)
+		}
+		inbox := filepath.Join(agent, "inbox")
+		message := filepath.Join(inbox, "new", "first.md")
+		if err := os.WriteFile(message, []byte("first message"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		before, err := os.Lstat(inbox)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := held.withFD(func(fd int) error { return provisionWakeMailbox(fd, agent) }); err != nil {
+			t.Fatal(err)
+		}
+		after, err := os.Lstat(inbox)
+		if err != nil || !os.SameFile(before, after) {
+			t.Fatalf("first sender's inbox changed: %v", err)
+		}
+		if data, err := os.ReadFile(message); err != nil || string(data) != "first message" {
+			t.Fatalf("first message = %q, %v", data, err)
+		}
+		if _, err := os.Lstat(filepath.Join(agent, wakeStagedInbox)); !os.IsNotExist(err) {
+			t.Fatalf("staging directory after first send: %v", err)
+		}
+	})
+
 	t.Run("refuse unusable leaf before creating inbox", func(t *testing.T) {
 		root := secureTempDirForTest(t)
 		agent := fsq.AgentBase(root, "codex")
@@ -1222,7 +1257,8 @@ func TestRunWakeLoopProvisionsMissingMailboxAtStart(t *testing.T) {
 			t.Fatal(err)
 		}
 		path := filepath.Join(agent, "outbox", "sent")
-		if err := os.Symlink("absent", path); err != nil {
+		target := secureTempDirForTest(t)
+		if err := os.Symlink(target, path); err != nil {
 			t.Fatal(err)
 		}
 		loopErr := start(t, root)
@@ -1233,8 +1269,8 @@ func TestRunWakeLoopProvisionsMissingMailboxAtStart(t *testing.T) {
 		if _, err := os.Lstat(filepath.Join(agent, "inbox")); !os.IsNotExist(err) {
 			t.Fatalf("inbox after refusal: %v", err)
 		}
-		if _, err := os.Lstat(filepath.Join(agent, "outbox", "absent")); !os.IsNotExist(err) {
-			t.Fatalf("link target after refusal: %v", err)
+		if entries, err := os.ReadDir(target); err != nil || len(entries) != 0 {
+			t.Fatalf("link target after refusal: %v, %v", entries, err)
 		}
 	})
 

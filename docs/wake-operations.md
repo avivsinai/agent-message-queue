@@ -6,12 +6,6 @@ durable file and crash invariants, see
 [Wake state invariants](wake-state-invariants.md) and the
 [wake lifecycle document](wake-lifecycle.md).
 
-When an agent has no inbox, a wake prepares its mailbox directories and
-publishes the complete inbox last. A new start resumes interrupted preparation.
-If a mailbox path prevents provisioning, fix the named path and start the wake
-again. An established mailbox whose `inbox/new` is temporarily missing keeps
-its existing watcher retry behavior.
-
 ## Inspect before mutation
 
 Run `amq wake check --me <agent> --json` before stopping, repairing, or
@@ -82,6 +76,11 @@ counts when a live wake has no `baseline_at` yet (its baseline is not done) or
 when the lock changes while the hook reads it. A live wake that is demoted
 or parked signals through its own pane attention and `doctor --ops`
 (`doorbell_parked`); the Stop hook does not duplicate that.
+
+At startup, a wake prepares a missing mailbox, resumes interrupted preparation,
+and publishes its complete inbox last unless a sender creates the inbox first.
+For an established mailbox the watcher retries a temporarily missing `inbox/new`,
+and for a preparation error the wake names the path to fix before restarting.
 
 The wake child appends full runtime diagnostics to the private
 `agents/<agent>/.wake.log`; the controlling terminal receives only

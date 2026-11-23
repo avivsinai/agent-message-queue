@@ -136,7 +136,25 @@ func visitWakeMailboxDir(parentFD int, parentPath, name string, children wakeMai
 		return nil
 	}
 	if err := wakeRenameNoReplaceAt(parentFD, name, parentFD, wakeInboxParentDirectoryName); err != nil {
-		return &wakeMailboxPathError{filepath.Join(parentPath, wakeInboxParentDirectoryName), err}
+		inboxPath := filepath.Join(parentPath, wakeInboxParentDirectoryName)
+		if !errors.Is(err, unix.EEXIST) && !errors.Is(err, unix.ENOTEMPTY) {
+			return &wakeMailboxPathError{inboxPath, err}
+		}
+		var inbox unix.Stat_t
+		if statErr := unix.Fstatat(parentFD, wakeInboxParentDirectoryName, &inbox, unix.AT_SYMLINK_NOFOLLOW); statErr != nil {
+			return &wakeMailboxPathError{inboxPath, statErr}
+		}
+		if inbox.Mode&unix.S_IFMT != unix.S_IFDIR {
+			return &wakeMailboxPathError{inboxPath, err}
+		}
+		// A sender published its inbox first. Discard only empty staging
+		// directories, relative to the descriptors we prepared.
+		if verifyWakeMailboxChild(parentFD, name, fd) == nil {
+			for leaf := range children {
+				_ = unix.Unlinkat(fd, leaf, unix.AT_REMOVEDIR)
+			}
+			_ = unix.Unlinkat(parentFD, name, unix.AT_REMOVEDIR)
+		}
 	}
 	if err := unix.Fsync(parentFD); err != nil {
 		return &wakeMailboxPathError{parentPath, err}
