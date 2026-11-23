@@ -2,6 +2,7 @@ package codex
 
 import (
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -87,19 +88,33 @@ func (h *dialogHarness) reply(id string) string {
 	}
 }
 
+// b80x: this native fixture follows CommandExecutionRequestApprovalParams
+// in the Codex 0.171.0 experimental app-server schema.
+const plainCommandApprovalParams = `{"threadId":"t1","turnId":"tui-1","itemId":"i1","startedAtMs":1795464000000,
+	"kind":"command","command":"ls","cwd":"/w","environmentId":null,
+	"commandActions":[{"type":"listFiles","command":"ls","path":null}],
+	"availableDecisions":["acceptForSession","decline","cancel","accept"]}`
+
 // A request of a turn started in the Codex TUI opens a dialog for the
 // binding that serves the thread, with Codex's own decisions; the owner's
 // answer reaches the app-server as Codex's response shape.
 func TestTUIRequestsOpenDialogsAndReplyWithTheAnswer(t *testing.T) {
 	h := newDialogHarness(t, "cx")
-	h.srv.sendServerRequest(t, "7", methodCommandApproval, `{"threadId":"t1","turnId":"tui-1","itemId":"c1","command":"go test ./...","cwd":"/w",
-		"availableDecisions":["accept","acceptForSession","decline"]}`)
+	h.srv.sendServerRequest(t, "7", methodCommandApproval, plainCommandApprovalParams)
 	req := h.opened("")
-	if req.Tool != "exec" || req.Text != "$ go test ./...\nin /w" || len(req.Options) != 3 ||
-		req.Options[1].Value != "acceptForSession" || req.Options[1].Label != "Allow for session" || !req.Options[2].Deny {
-		t.Fatalf("dialog = %+v, want the command with Codex's three decisions", req)
+	if !req.Complete || req.Tool != "exec" || req.Turn != "tui-1" || req.Text != "$ ls\nin /w" {
+		t.Fatalf("published command dialog = %+v", req)
 	}
-	h.answer(dialog.Answer{ID: req.ID, Option: 2})
+	want := []dialog.Option{
+		{N: 1, Value: "acceptForSession", Label: "Allow for session", Scope: dialog.ScopeSession},
+		{N: 2, Value: "decline", Label: "Deny", Scope: dialog.ScopeOnce, Deny: true},
+		{N: 3, Value: "cancel", Label: "Cancel turn"},
+		{N: 4, Value: "accept", Label: "Allow once", Scope: dialog.ScopeOnce},
+	}
+	if !slices.Equal(req.Options, want) {
+		t.Fatalf("native choices = %+v, want %+v", req.Options, want)
+	}
+	h.answer(dialog.Answer{ID: req.ID, Option: 1})
 	if got := h.reply("7"); got != `{"decision":"acceptForSession"}` {
 		t.Fatalf("response = %s, want acceptForSession", got)
 	}
