@@ -524,7 +524,14 @@ func (h *Host) askOwner(turn *turnCollect, req permissionRequest) (chosen int, o
 		if label == "" {
 			label = option.OptionID
 		}
-		options[i] = dialog.Option{N: i + 1, Label: label, Value: option.OptionID, Deny: strings.HasPrefix(option.Kind, "reject")}
+		scope := ""
+		switch option.Kind {
+		case "allow_once":
+			scope = dialog.ScopeOnce
+		case "allow_always":
+			scope = dialog.ScopeAlways
+		}
+		options[i] = dialog.Option{N: i + 1, Label: label, Value: option.OptionID, Deny: strings.HasPrefix(option.Kind, "reject"), Scope: scope}
 	}
 	r := dialog.Request{
 		ID:       dialog.NewID(),

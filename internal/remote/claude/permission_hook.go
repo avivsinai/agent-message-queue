@@ -523,7 +523,7 @@ func dialogOptions(in permissionInput) ([]dialog.Option, []json.RawMessage) {
 	case toolExitPlanMode:
 		return nil, nil
 	}
-	opts := []dialog.Option{{N: 1, Label: "Allow once", Value: valueAllow}}
+	opts := []dialog.Option{{N: 1, Label: "Allow once", Value: valueAllow, Scope: dialog.ScopeOnce}}
 	var rules []json.RawMessage
 	for _, s := range in.Suggestions {
 		if r, ok := sessionScoped(s); ok {
@@ -534,7 +534,7 @@ func dialogOptions(in permissionInput) ([]dialog.Option, []json.RawMessage) {
 		rules = []json.RawMessage{json.RawMessage(`{"type":"setMode","mode":"acceptEdits","destination":"session"}`)}
 	}
 	if len(rules) > 0 {
-		opts = append(opts, dialog.Option{N: 2, Label: sessionScope(rules), Value: valueAllowSession})
+		opts = append(opts, dialog.Option{N: 2, Label: sessionScope(rules), Value: valueAllowSession, Scope: dialog.ScopeSession})
 	}
 	return append(opts, dialog.Option{N: len(opts) + 1, Label: "Deny", Value: valueDeny, Deny: true}), rules
 }

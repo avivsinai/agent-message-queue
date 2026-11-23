@@ -85,10 +85,10 @@ every 10 minutes for the same open dialogs.
 
 | Owner's answer | Picks |
 | --- | --- |
-| ✅ reaction | option 1 |
+| ✅ reaction | the first narrowest allow: once, else turn, else session; option 1 when every option lacks a scope. A typed persistent approval takes no ✅ answer |
 | ❌ reaction | the deny option; ❌ beats ✅ |
 | `1`, `2`, ... | that option |
-| `yes`, `y`, `approve`, `✅` | option 1 |
+| `yes`, `y`, `approve`, `✅` | the same narrowest allow as ✅; legacy option 1 only when every option lacks a scope |
 | `no`, `n`, `reject`, `❌` | the deny option |
 | any other text | the answer, for a dialog that asks for text |
 

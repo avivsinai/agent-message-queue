@@ -111,6 +111,11 @@ func TestPermissionHookAppliesBuzzOption(t *testing.T) {
 	if req.Text != "$ rm -rf node_modules\n(Remove node_modules)" || len(req.Options) != 3 || req.Options[1].Label != "Allow this session: Bash(rm -rf node_modules)" || !req.Options[2].Deny {
 		t.Fatalf("request = %+v", req)
 	}
+	for i, scope := range []string{dialog.ScopeOnce, dialog.ScopeSession, ""} {
+		if req.Options[i].Scope != scope {
+			t.Fatalf("option %d scope = %q; want %q", i+1, req.Options[i].Scope, scope)
+		}
+	}
 	if _, err := dialog.WriteAnswer(dir, dialog.Answer{ID: req.ID, Option: 2, By: dialog.ByBuzz}); err != nil {
 		t.Fatal(err)
 	}
