@@ -158,11 +158,19 @@ func writeCoopStop(stdin io.Reader, w io.Writer) error {
 // baseline: an attended wake types nothing, so mail after its baseline would
 // otherwise never be reported at a turn end. An id already reported by a
 // block is noticed too, so attended off-on-off does not print it a third time.
+// Claude's historical advisory writes stay advisory; Codex writes may fail
+// silently before a notice, without one duplicate per subsequent turn.
 func writeCoopStopAttended(w io.Writer, pending []coopStopMessage, old coopStopState, statePath string) error {
+	return writeCoopStopAttendedState(w, pending, old, statePath, true)
+}
+
+func writeCoopStopAttendedState(w io.Writer, pending []coopStopMessage, old coopStopState, statePath string, advisory bool) error {
 	next := decideCoopStopAttended(pending, old)
 	fresh := freshAttendedIDs(pending, old.NoticedIDs, old.BlockedIDs)
 	if !slices.Equal(next.NoticedIDs, old.NoticedIDs) || !slices.Equal(next.BlockedIDs, old.BlockedIDs) {
-		_ = writeCoopHookState(statePath, next)
+		if err := writeCoopHookState(statePath, next); err != nil && !advisory {
+			return err
+		}
 	}
 	if len(fresh) == 0 {
 		return nil
@@ -335,20 +343,30 @@ func (in *coopInbox) pending(root, me string) ([]coopStopMessage, error) {
 }
 
 func readCoopStopState(path string) coopStopState {
+	state, _ := readCoopStopStateChecked(path)
+	return state
+}
+
+// readCoopStopStateChecked keeps absence distinct from corrupt or unreadable
+// state. Claude uses the historical collapsing wrapper above unchanged.
+func readCoopStopStateChecked(path string) (coopStopState, error) {
 	state := coopStopState{Schema: 1, BlockedIDs: []string{}}
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return state
+		if os.IsNotExist(err) {
+			return state, nil
+		}
+		return state, err
 	}
 	var read coopStopState
-	if json.Unmarshal(raw, &read) != nil {
-		return state
+	if err := json.Unmarshal(raw, &read); err != nil {
+		return state, err
 	}
 	if read.BlockedIDs == nil {
 		read.BlockedIDs = []string{}
 	}
 	read.Schema = 1
-	return read
+	return read, nil
 }
 
 // writeCoopHookState replaces a co-op hook state file by a temp file and a

@@ -85,10 +85,7 @@ func runCoopPromptCodex(stdin io.Reader, w io.Writer) error {
 	}
 	// Input the receiver cannot read whole, a prompt cut by the bound among
 	// it, names no chat and no prompt to speak for.
-	if json.NewDecoder(io.LimitReader(stdin, coopPromptInputLimit)).Decode(&in) != nil || !codexidentity.ValidThread(in.SessionID) {
-		return nil
-	}
-	if adoptCodexHookIdentity(in.SessionID) != nil {
+	if json.NewDecoder(io.LimitReader(stdin, coopPromptInputLimit)).Decode(&in) != nil {
 		return nil
 	}
 	root, me, session, err := coopHookIdentity(in.SessionID)
@@ -117,7 +114,14 @@ func runCoopStopCodex(stdin io.Reader, w io.Writer) error {
 		return nil
 	}
 	statePath := filepath.Join(fsq.AgentBase(root, me), coopStopStateFile)
-	return writeCoopStopAttended(w, pending, readCoopStopState(statePath), statePath)
+	old, err := readCoopStopStateChecked(statePath)
+	if err != nil {
+		return nil
+	}
+	if err := writeCoopStopAttendedState(w, pending, old, statePath, false); err != nil {
+		return nil
+	}
+	return nil
 }
 
 // coopHookIdentity resolves the only seat a Codex hook may speak for: its

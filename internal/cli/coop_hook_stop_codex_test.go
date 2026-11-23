@@ -113,6 +113,70 @@ func TestCoopStopCodexSpeaksOnlyForFreshMailOnItsAttendedThread(t *testing.T) {
 	}
 }
 
+func TestCoopStopCodexSilencesNoticeOnInvalidRecordedState(t *testing.T) {
+	const thread = "019a1166-dd8e-77c0-bc3b-a4b7e24e91f1"
+	joinCodexThread(t, thread)
+	root := absPath(filepath.Join(defaultCoopRoot, defaultSessionName))
+	setAttendedForTest(t, root, "codex")
+	statePath := filepath.Join(fsq.AgentBase(root, "codex"), coopStopStateFile)
+	raw := []byte("not one JSON object")
+	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range append([]string{"CODEX_THREAD_ID"}, identityEnvKeys...) {
+		_ = os.Unsetenv(key)
+	}
+	var out bytes.Buffer
+	if err := runCoopStopCodex(strings.NewReader(fmt.Sprintf(`{"session_id":%q,"hook_event_name":"Stop"}`, thread)), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("receiver counted invalid state as absent and printed %q", out.String())
+	}
+	if got, err := os.ReadFile(statePath); err != nil || !bytes.Equal(got, raw) {
+		t.Fatalf("invalid state changed on a silent failure: %q, %v", got, err)
+	}
+}
+
+func TestCoopStopCodexSilencesNoticeWhenItsStateCannotChange(t *testing.T) {
+	const thread = "019a1166-dd8e-77c0-bc3b-a4b7e24e91f1"
+	joinCodexThread(t, thread)
+	root := absPath(filepath.Join(defaultCoopRoot, defaultSessionName))
+	setAttendedForTest(t, root, "codex")
+	if _, err := captureStdout(t, func() error {
+		return runSend([]string{"--root", root, "--me", "claude", "--to", "codex", "--body", "mail"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(fsq.AgentBase(root, "codex"), coopStopStateFile)
+	sentinel := []byte("unwritable state sentinel")
+	if err := os.Mkdir(statePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(statePath, "sentinel"), sentinel, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range append([]string{"CODEX_THREAD_ID"}, identityEnvKeys...) {
+		_ = os.Unsetenv(key)
+	}
+	var out bytes.Buffer
+	input := strings.NewReader(fmt.Sprintf(`{"session_id":%q,"hook_event_name":"Stop"}`, thread))
+	for i := 0; i < 2; i++ {
+		if _, err := input.Seek(0, 0); err != nil {
+			t.Fatal(err)
+		}
+		if err := runCoopStopCodex(input, &out); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out.Len() != 0 {
+		t.Fatalf("state write failed but Codex printed %q", out.String())
+	}
+	if raw, err := os.ReadFile(filepath.Join(statePath, "sentinel")); err != nil || !bytes.Equal(raw, sentinel) {
+		t.Fatalf("existing state changed: %q, %v", raw, err)
+	}
+}
+
 func TestCodexCoopStopInstallsAlongsideTheWaiter(t *testing.T) {
 	clearJoinTestEnv(t)
 	home := t.TempDir()
