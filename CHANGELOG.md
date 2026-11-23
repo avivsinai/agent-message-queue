@@ -8,6 +8,20 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.167.0](https://github.com/avivsinai/agent-message-queue/compare/v0.166.0...v0.167.0) (2026-11-23)
+
+
+### Features
+
+* **cli:** one command hands a candidate to a reviewer and tells the requester ([b763876](https://github.com/avivsinai/agent-message-queue/commit/b763876e4016c06bf9a2d8ea8a5a637987449ff5))
+* **followup:** one notice when a recipient sends nothing about a request ([2036796](https://github.com/avivsinai/agent-message-queue/commit/20367966889a7e04f288fd30311ede440042af16))
+
+
+### Bug Fixes
+
+* **fsq:** mailbox directories are never created through a link ([200839a](https://github.com/avivsinai/agent-message-queue/commit/200839a6556dcadf6d6d9e04327f5fe332234fc2))
+* **remote:** a queued Claude prompt that holds an image is read ([5960bce](https://github.com/avivsinai/agent-message-queue/commit/5960bceb0329010a5f85a54c1e0b7a80f6f20d43))
+
 ## [0.166.0](https://github.com/avivsinai/agent-message-queue/compare/v0.165.0...v0.166.0) (2026-11-23)
 
 
