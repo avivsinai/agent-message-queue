@@ -19,25 +19,7 @@ import (
 
 const followUpHelp = "Notify me if the recipient has not closed this request, or for another kind of message not replied, after this duration (e.g. 30m); the recipient sees the reply time"
 
-const newsWithinHelp = "One notice if the recipient sends no reply about this request within this time (e.g. 20m); needs --kind review_request, question or todo"
-
-// validateNewsWithin applies the rules of --news-within: a positive duration
-// needs exactly one recipient and a message that opens a request for it.
-func validateNewsWithin(d time.Duration, recipients int, kind string, labels []string) error {
-	if d < 0 {
-		return UsageError("--news-within must be >= 0")
-	}
-	if d == 0 {
-		return nil
-	}
-	if recipients != 1 {
-		return UsageError("--news-within requires exactly one recipient (got %d)", recipients)
-	}
-	if !thread.OpensObligation(kind, labels) {
-		return UsageError("--news-within requires a request: --kind %s, without a closing label", strings.Join(thread.OpenerKinds, ", "))
-	}
-	return nil
-}
+const newsWithinHelp = "One notice if the recipient sends you nothing about this message within this time (e.g. 20m)"
 
 // outgoingMessage is a send or reply whose route, capabilities, and rosters
 // are authorized. deliverOutgoing owns every step from there to the report.
