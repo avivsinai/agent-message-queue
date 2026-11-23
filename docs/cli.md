@@ -1964,8 +1964,8 @@ Usage:
   amq coop install-hooks [--dry-run] [--harness claude|codex]
 
 Install the co-op hooks in $CLAUDE_CONFIG_DIR/settings.json (default
-~/.claude/settings.json), or with --harness codex the wait hook and the
-prompt hook in $CODEX_HOME/hooks.json.
+~/.claude/settings.json), or with --harness codex the wait, attended-stop
+notice and prompt hooks in $CODEX_HOME/hooks.json.
 
 SessionStart (startup, resume, clear, compact) gives the agent its co-op
 preamble: handle, session, peers, unread count, and what announces new mail.
@@ -1989,6 +1989,9 @@ a turn, or when Codex unloads the chat; the next turn starts it again.
 The prompt hook runs on UserPromptSubmit and adds context with the unread
 count to the person's prompt in a joined chat. A seat with an earlier hook
 installation adds this entry at the next install; approve it in Codex.
+The attended-stop hook runs synchronously at a turn end and shows unread
+mail as a warning, without a block or continuation; reinstall and approve
+it to add this entry to an earlier hook installation.
 
 Running again keeps the same entries and replaces entries of another amq
 binary. Other settings and hooks are not changed. It also lists old project
@@ -2008,7 +2011,7 @@ $ amq coop uninstall-hooks --help
 Usage:
   amq coop uninstall-hooks [--harness claude|codex]
 
-Remove the co-op hooks (AMQ_COOP_HOOK entries) from
+Remove the co-op hooks (AMQ_COOP_HOOK and AMQ_COOP_STOP_HOOK entries) from
 $CLAUDE_CONFIG_DIR/settings.json (default ~/.claude/settings.json), or with
 --harness codex from $CODEX_HOME/hooks.json.
 Other settings and hooks are not changed.
@@ -2023,7 +2026,7 @@ Options:
 ```text
 $ amq coop hook --help
 Usage:
-  amq coop hook session-start|stop|prompt|wait|codex-wait|codex-prompt
+  amq coop hook session-start|stop|prompt|wait|codex-wait|codex-prompt|codex-stop
 
 Hook receivers for the co-op hooks; amq coop install-hooks installs them.
 They read AM_ME, AM_ROOT and the session pin from the environment, or the
@@ -2065,6 +2068,10 @@ next waiter.
 
 codex-prompt is prompt for a joined Codex chat: it reads the thread id from
 the hook input's session_id, and always exits 0.
+
+codex-stop reports unread mail at a turn end on an attended joined Codex
+chat, as a systemMessage with no block or continuation; otherwise prints
+nothing and always exits 0.
 ```
 
 ## amq swarm list

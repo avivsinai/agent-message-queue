@@ -387,9 +387,13 @@ func opsWakeLockFromWakeCheckObservation(
 func unstableWakeCheckDecision(root, me string, inspection wakeLockInspection) wakeCheckDecision {
 	// Unstable state cannot authorize an image conclusion, and probing again
 	// would widen the observation window after instability is already known.
+	// Nor can it prove a live wake, so the wake is unverified and not live
+	// whatever the carried lock inspection says.
 	decision := buildWakeCheckDecision(root, me, inspection, nil, false)
 	detail := "wake state changed during inspection"
 	reason := wakeRepairReasonExactEvidenceMissing
+	decision.Wake.Status = string(wakeLockUnverified)
+	decision.Wake.Live = false
 	decision.Repair.InjectViaAvailable = false
 	decision.Repair.ReasonCode = &reason
 	decision.Repair.Detail = &detail
@@ -410,21 +414,6 @@ func unstableWakeCheckDecision(root, me string, inspection wakeLockInspection) w
 	return decision
 }
 
-func wakeCheckObservationFailureDecision(
-	root, me string,
-	inspection wakeLockInspection,
-	err error,
-) wakeCheckDecision {
-	decision := unstableWakeCheckDecision(root, me, inspection)
-	if !isWakeStateBoundInconclusive(err) {
-		return decision
-	}
-	decision.Wake.Status = string(wakeLockUnverified)
-	decision.Wake.Live = false
-	decision.Repair.InjectViaAvailable = false
-	return decision
-}
-
 func wakeCheckObservationFailureSnapshot(
 	root, me string,
 	observation wakeCheckObservation,
@@ -441,7 +430,7 @@ func wakeCheckObservationFailureSnapshot(
 	}
 	return wakeCheckSnapshot{
 		OpsLock:  opsLock,
-		Decision: wakeCheckObservationFailureDecision(root, me, observation.Inspection, err),
+		Decision: unstableWakeCheckDecision(root, me, observation.Inspection),
 	}
 }
 

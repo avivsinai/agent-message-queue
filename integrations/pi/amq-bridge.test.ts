@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import nodeFs from "node:fs";
-import { syncBuiltinESMExports } from "node:module";
+import { registerHooks, syncBuiltinESMExports } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
@@ -46,11 +46,31 @@ function aged(dir: string, ref: string): void {
 	}
 }
 
+type BridgeModule = { default: (pi: never) => void; registerAmqBridge: typeof registerAmqBridge };
+
+// freshBridge imports a new instance of the extension module, as pi does on
+// every load and reload, so its guard state starts empty. pid, when given,
+// is the process id that instance sees at load.
+let instances = 0;
+async function freshBridge(pid?: number): Promise<BridgeModule> {
+	const real = Object.getOwnPropertyDescriptor(process, "pid") as PropertyDescriptor;
+	if (pid !== undefined) Object.defineProperty(process, "pid", { ...real, value: pid });
+	try {
+		return (await import(`./amq-bridge.ts?instance=${++instances}`)) as BridgeModule;
+	} finally {
+		Object.defineProperty(process, "pid", real);
+	}
+}
+
+type Tool = { name: string; sourceInfo?: { source: string; path: string } };
+const builtinTool = (name: string): Tool => ({ name, sourceInfo: { source: "builtin", path: `builtin:${name}` } });
+
 // harness runs the extension against a fake ExtensionAPI and a real bridge
 // directory under a temporary AM_ROOT. host, when given, embeds the bridge
 // as a host application does, with no AM_ROOT or AM_ME set. shared, when
-// given, is another harness's root, which that harness removes.
-function harness(host?: (root: string) => AmqBridgeOptions, shared?: string) {
+// given, is another harness's root, which that harness removes. mod, when
+// given, is the module instance to load instead of the shared one.
+function harness(host?: (root: string) => AmqBridgeOptions, shared?: string, mod?: BridgeModule) {
 	const root = shared ?? fs.mkdtempSync(path.join(os.tmpdir(), "amq-pi-bridge-"));
 	process.env.AM_ROOT = root;
 	process.env.AM_ME = "pi-seat";
@@ -60,23 +80,51 @@ function harness(host?: (root: string) => AmqBridgeOptions, shared?: string) {
 	}
 	const handlers = new Map<string, Handler[]>();
 	const sent: { content: unknown; options: unknown }[] = [];
-	const state = { idle: true, pending: false, idleChecks: 0, aborts: 0 };
+	const state = { idle: true, pending: false, idleChecks: 0, aborts: 0, lookups: 0, throwSend: false };
 	const notices: string[] = [];
+	// armedAtSend records, for each sendUserMessage, whether a guard file of
+	// this process existed at that moment.
+	const armedAtSend: boolean[] = [];
+	const tools: Tool[] = ["read", "bash", "edit", "write", "grep", "find", "ls"].map(builtinTool);
+	const dialogs: { title: string; placeholder: string | undefined }[] = [];
+	const guards = () => {
+		try {
+			return fs.readdirSync(dir).filter((n) => n.startsWith("granted-guard."));
+		} catch {
+			return [];
+		}
+	};
 	const pi = {
 		on(name: string, h: Handler) {
 			handlers.set(name, [...(handlers.get(name) ?? []), h]);
 			return () => {};
 		},
 		sendUserMessage(content: unknown, options: unknown) {
+			armedAtSend.push(guards().length > 0);
+			if (state.throwSend) throw new Error("not delivered");
 			sent.push({ content, options });
 		},
+		getAllTools() {
+			state.lookups++;
+			return tools;
+		},
 	};
+	// answer is what the person types in a dialog, undefined for Escape;
+	// input resolves undefined for an aborted signal, as pi's TUI does. The
+	// fake has no select, so a guard that opens one fails.
+	let answer: (title: string) => string | undefined | Promise<string | undefined> = () => undefined;
 	const ctx = {
 		mode: "tui",
 		hasUI: true,
+		signal: undefined as AbortSignal | undefined,
 		ui: {
 			notify(message: string) {
 				notices.push(message);
+			},
+			async input(title: string, placeholder?: string, opts?: { signal?: AbortSignal }) {
+				dialogs.push({ title, placeholder });
+				if (opts?.signal?.aborted) return undefined;
+				return answer(title);
 			},
 		},
 		isIdle: () => {
@@ -90,8 +138,9 @@ function harness(host?: (root: string) => AmqBridgeOptions, shared?: string) {
 		sessionManager: { getSessionId: () => "pi-session-1" },
 	};
 	const dir = path.join(root, "agents", "pi-seat", "extensions", "pi-bridge");
-	const bridge = host ? registerAmqBridge(pi as never, host(root)) : undefined;
-	if (!host) amqPiBridge(pi as never);
+	const register = mod?.registerAmqBridge ?? registerAmqBridge;
+	const bridge = host ? register(pi as never, host(root)) : undefined;
+	if (!host) (mod?.default ?? amqPiBridge)(pi as never);
 	const emit = async (name: string, event: object = {}) => {
 		for (const h of handlers.get(name) ?? []) await h({ type: name, ...event }, ctx);
 	};
@@ -103,6 +152,23 @@ function harness(host?: (root: string) => AmqBridgeOptions, shared?: string) {
 		state,
 		notices,
 		emit,
+		ctx,
+		tools,
+		dialogs,
+		armedAtSend,
+		guards,
+		set answer(fn: (title: string) => string | undefined | Promise<string | undefined>) {
+			answer = fn;
+		},
+		// tool raises pi's tool_call for one call and returns the first
+		// block, as pi does, or undefined when every handler let it run.
+		async tool(toolName: string, input: unknown, extra: object = {}) {
+			for (const h of handlers.get("tool_call") ?? []) {
+				const r = (await h({ type: "tool_call", toolCallId: "call-1", toolName, input, ...extra }, ctx)) as { block?: boolean } | undefined;
+				if (r?.block) return r;
+			}
+			return undefined;
+		},
 		start: () => emit("session_start", { reason: "startup" }),
 		generation: () => JSON.parse(fs.readFileSync(path.join(dir, "bridge.liveness"), "utf8")).session_generation as string,
 		publish(ref: string, text: string, epochHint: string, fields: Record<string, unknown> = { bridge_revision: 3 }) {
@@ -195,6 +261,25 @@ test("a cancel for the request in flight aborts it and its terminal event is can
 		await h.waitFor(() => h.state.aborts > 0);
 		assert.equal(h.state.aborts, 1);
 		await h.emit("agent_before_settle", { outcome: "aborted" });
+		await h.emit("agent_settled", { aborted: true });
+		assert.deepEqual(
+			h.events(REF).map((e) => e.event),
+			["started", "cancelled"],
+		);
+	} finally {
+		await h.done();
+	}
+});
+
+// agent-message-queue-kj9z: Pi 1.5.2 skipped agent_before_settle on Escape.
+test("a remote request interrupted at the terminal ends cancelled", async () => {
+	const h = harness();
+	await h.start();
+	try {
+		h.publish(REF, "remote task", h.generation());
+		await h.waitFor(() => h.sent.length === 1);
+		await h.emit("message_start", userMessage("remote task"));
+		await h.emit("agent_end", { messages: [] });
 		await h.emit("agent_settled", { aborted: true });
 		assert.deepEqual(
 			h.events(REF).map((e) => e.event),
@@ -997,7 +1082,7 @@ test("a host application's identity and delivery run a request without AM_ROOT o
 	try {
 		const live = JSON.parse(fs.readFileSync(path.join(h.dir, "bridge.liveness"), "utf8"));
 		assert.equal(live.upgrade, "update the host application");
-		assert.equal(live.bridge_revision, 5);
+		assert.equal(live.bridge_revision, 6);
 
 		h.publish(REF, "remote task", h.generation(), { bridge_revision: 3, origin: { carrier: "link", name: "example" } });
 		await h.waitFor(() => handed.length === 1);
@@ -1209,5 +1294,724 @@ test("a relative AM_ROOT is named in the inactive notice", async () => {
 	} finally {
 		fs.rmSync(path.resolve(rel), { recursive: true, force: true });
 		await h.done();
+	}
+});
+
+// --- The guard of granted tasks (bridge revision 6) ---------------------------
+
+const GRANTED = { bridge_revision: 6, granted: true };
+const DENIED = { block: true, reason: "The person at the terminal did not approve this call. It is a call of a task that a linked server sent under a session grant." };
+const NO_TERMINAL = { block: true, reason: "This call needs the person's yes at the terminal, and this pi session has no terminal UI." };
+const TOO_LONG = { block: true, reason: "This call is too long to show whole at the terminal for approval. A task that needs it must be sent with a signature." };
+const EXTENSION_LINE = "This is a tool of an extension. AMQ cannot see what it does or starts; one yes covers the whole call.";
+const typeYes = (tool: string) => `\n\nType yes to run ${tool}. Any other answer does not run it.`;
+const askTitle = (tool: string, input: unknown, extension = false) =>
+	`A task that a linked server sent wants to run \`${tool}\`:\n${JSON.stringify(input, null, 1)}${extension ? `\n${EXTENSION_LINE}` : ""}${typeYes(tool)}`;
+const mayStillTitle = (tool: string, input: unknown) => `A task that a linked server sent may still run in this session. \`${tool}\` wants to run:\n${JSON.stringify(input, null, 1)}${typeYes(tool)}`;
+
+type Harness = ReturnType<typeof harness>;
+
+// typed is the person's next prompt typed at pi's terminal: pi emits input
+// with source interactive before the run that it starts.
+const typed = (h: Harness, fields: object = {}) => h.emit("input", { text: "my own prompt", source: "interactive", ...fields });
+
+// guardOf reads the guard file of process pid in h's bridge directory.
+function guardOf(h: Harness, pid = process.pid): { pid: number; arms: { arm: string; ref: string; armed_at: string }[] } | null {
+	try {
+		return JSON.parse(fs.readFileSync(path.join(h.dir, `granted-guard.${pid}.json`), "utf8"));
+	} catch {
+		return null;
+	}
+}
+
+// granted starts a fresh module instance and hands it one granted request.
+// tag starts the request's own user message, as pi does when it runs it.
+async function granted(tag = true): Promise<Harness> {
+	const h = harness(undefined, undefined, await freshBridge());
+	await h.start();
+	h.publish(REF, "remote task", h.generation(), GRANTED);
+	await h.waitFor(() => h.sent.length === 1);
+	assert.equal(h.sent.length, 1);
+	if (tag) await h.emit("message_start", userMessage(h.sent[0].content as string));
+	return h;
+}
+
+test("a granted task's tool calls ask the person at the terminal until the person types after its run settles", async () => {
+	const h = harness(undefined, undefined, await freshBridge());
+	await h.start();
+	try {
+		h.publish(REF, "remote task", h.generation(), GRANTED);
+		await h.waitFor(() => h.sent.length === 1);
+		assert.deepEqual(h.armedAtSend, [true]);
+		const file = path.join(h.dir, `granted-guard.${process.pid}.json`);
+		assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+		const guard = guardOf(h);
+		assert.equal(guard?.pid, process.pid);
+		assert.equal(guard?.arms.length, 1);
+		const { arm, ref } = guard!.arms[0];
+		assert.match(arm, /^[0-9a-f]{32}$/);
+		assert.equal(ref, REF);
+		assert.deepEqual(h.sent[0], { content: `remote task\n\n[AMQ granted task ${arm}]`, options: { deliverAs: "followUp" } });
+
+		await h.emit("message_start", userMessage(h.sent[0].content as string));
+		await h.emit("message_end", userMessage(h.sent[0].content as string));
+		const activity = fs
+			.readFileSync(path.join(h.dir, "activity", "pi-session-1.jsonl"), "utf8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line));
+		assert.deepEqual(activity.filter((row) => row.kind === "user").map((row) => [row.id, row.text]), [[REF, "remote task"]]);
+		h.answer = () => "yes";
+		const input = { command: "ls -la" };
+		assert.equal(await h.tool("bash", input), undefined);
+		assert.deepEqual(h.dialogs, [{ title: askTitle("bash", input), placeholder: "" }]);
+
+		await h.emit("message_end", assistantMessage("listed"));
+		await h.emit("agent_before_settle", { outcome: "completed" });
+		await h.emit("agent_settled", { aborted: false });
+		await typed(h);
+		assert.equal(fs.existsSync(file), false);
+		const lookups = h.state.lookups;
+		assert.equal(await h.tool("bash", input), undefined);
+		assert.equal(h.dialogs.length, 1);
+		assert.equal(h.state.lookups, lookups);
+		assert.deepEqual(
+			h.events(REF).map((e) => e.event),
+			["started", "completed"],
+		);
+	} finally {
+		await h.done();
+	}
+});
+
+test("liveness publishes gate only for the TUI with the bridge's own hand-off", async () => {
+	const gateOf = (h: Harness) => JSON.parse(fs.readFileSync(path.join(h.dir, "bridge.liveness"), "utf8")).gate;
+	const tui = harness();
+	await tui.start();
+	assert.equal(gateOf(tui), true);
+	await tui.done();
+	for (const mode of ["rpc", "print"]) {
+		const h = harness();
+		h.ctx.mode = mode;
+		await h.start();
+		assert.equal(gateOf(h), undefined, mode);
+		await h.done();
+	}
+	const host = hostHarness({ busy: () => false, send() {} });
+	await host.start();
+	assert.equal(gateOf(host), undefined, "host deliver seam");
+	await host.done();
+});
+
+// Guard table, row "read-only built-ins": pi's own read, grep, find and ls
+// run with no dialog.
+test("guard: pi's own read-only built-ins pass with no dialog", async () => {
+	const h = await granted();
+	try {
+		for (const name of ["read", "grep", "find", "ls"]) assert.equal(await h.tool(name, { path: "." }), undefined, name);
+		assert.equal(h.dialogs.length, 0);
+	} finally {
+		await h.done();
+	}
+});
+
+// Guard table, row "read replaced": an extension can register a tool under a
+// built-in's name; provenance, not the name, exempts a call.
+test("guard: read replaced by an extension asks, as an extension's tool", async () => {
+	const h = await granted();
+	try {
+		h.tools[0] = { name: "read", sourceInfo: { source: "local", path: "/ext/read.ts" } };
+		h.answer = () => "no";
+		assert.deepEqual(await h.tool("read", { path: "." }), DENIED);
+		assert.equal(h.dialogs[0].title, askTitle("read", { path: "." }, true));
+	} finally {
+		await h.done();
+	}
+});
+
+// Guard table, the typed answer: only yes, after trimming spaces and
+// lowering case, runs a call. A short or foreign yes, text typed ahead into
+// the dialog, Enter alone, Escape, a throwing dialog and an aborted run
+// block it.
+test("guard: only a typed yes runs the call", async () => {
+	const h = await granted();
+	try {
+		for (const yes of ["yes", " Yes "]) {
+			h.answer = () => yes;
+			assert.equal(await h.tool("bash", { command: "rm -rf build" }), undefined, JSON.stringify(yes));
+		}
+		const answers: [string, () => string | undefined][] = [
+			["y", () => "y"],
+			["j", () => "j"],
+			["Enter alone", () => ""],
+			["typed ahead", () => "please adjust the build"],
+			["Escape", () => undefined],
+			[
+				"throw",
+				() => {
+					throw new Error("dialog broke");
+				},
+			],
+		];
+		for (const [name, fn] of answers) {
+			h.answer = fn;
+			assert.deepEqual(await h.tool("bash", { command: "rm -rf build" }), DENIED, name);
+		}
+		h.answer = () => "yes";
+		h.ctx.signal = AbortSignal.abort();
+		assert.deepEqual(await h.tool("bash", { command: "rm -rf build" }), DENIED, "aborted");
+		assert.equal(h.dialogs.length, 9);
+	} finally {
+		await h.done();
+	}
+});
+
+// A pi host without the optional title measurer can still serve ordinary requests.
+test("guard: an unavailable TUI package refuses only the call that needs measurement", async (t) => {
+	const hooks = registerHooks({
+		resolve(specifier, context, nextResolve) {
+			if (specifier === "@earendil-works/pi-tui") throw new Error("pi-tui unavailable in this host");
+			return nextResolve(specifier, context);
+		},
+	});
+	t.after(() => hooks.deregister());
+	const h = harness(undefined, undefined, await freshBridge());
+	try {
+		await h.start();
+		h.publish(REF, "ordinary request", h.generation());
+		await h.waitFor(() => h.sent.length === 1);
+		assert.equal(h.sent[0].content, "ordinary request");
+		await h.emit("message_start", userMessage("ordinary request"));
+		await h.emit("message_end", assistantMessage("done"));
+		await h.emit("agent_before_settle", { outcome: "completed" });
+		await h.emit("agent_settled", { aborted: false });
+		assert.equal(h.events(REF).at(-1)?.event, "completed");
+		h.publish(OTHER, "guarded request", h.generation(), GRANTED);
+		await h.waitFor(() => h.sent.length === 2);
+		assert.deepEqual(await h.tool("bash", { command: "pwd" }), {
+			block: true, reason: "This pi cannot measure the approval dialog; a task that needs this call must be sent with a signature.",
+		});
+		assert.equal(h.dialogs.length, 0);
+	} finally {
+		await h.done();
+	}
+});
+
+// Guard table, rows "rpc" and "print": with no terminal there is nobody to
+// ask, so the call is blocked and no dialog opens.
+test("guard: a session that is not tui blocks the call with no dialog", async () => {
+	const h = await granted();
+	try {
+		for (const mode of ["rpc", "print"]) {
+			h.ctx.mode = mode;
+			assert.deepEqual(await h.tool("bash", { command: "make" }), NO_TERMINAL, mode);
+		}
+		assert.equal(h.dialogs.length, 0);
+	} finally {
+		await h.done();
+	}
+});
+
+// Guard table, rows "nested call", "an extension's tool", "the dialog text":
+// every call is shown as the JSON of its whole input, and a tool that is not
+// pi's own carries the extension line, a built-in extension's tool too.
+test("guard: nested calls and extension tools ask, showing the whole input", async () => {
+	const h = await granted();
+	try {
+		h.tools.push({ name: "deploy", sourceInfo: { source: "local", path: "/ext/deploy.ts" } }, { name: "mcp_query", sourceInfo: { source: "builtin", path: "builtin:mcp" } });
+		h.answer = () => "yes";
+		const calls: [string, unknown, boolean, object][] = [
+			["bash", { command: 'echo "a"\nrm x', timeout: 5 }, false, {}],
+			["edit", { path: "a.go", edits: [{ oldText: "x", newText: "y" }] }, false, {}],
+			["write", { path: "b.go", content: "package b\n" }, false, { parentToolCallId: "call-0" }],
+			["deploy", { target: "prod", args: ["--force"] }, true, {}],
+			["mcp_query", { sql: "drop table t" }, true, {}],
+		];
+		for (const [name, input, extension, extra] of calls) {
+			assert.equal(await h.tool(name, input, extra), undefined, name);
+			assert.equal(h.dialogs.at(-1)?.title, askTitle(name, input, extension), name);
+		}
+		assert.equal(h.dialogs.length, calls.length);
+	} finally {
+		await h.done();
+	}
+});
+
+// Guard table, row "over the limit": a call the person cannot see whole is
+// never offered for approval.
+test("guard: a call text over 2000 characters blocks with no dialog", async () => {
+	const h = await granted();
+	try {
+		h.answer = () => "yes";
+		assert.deepEqual(await h.tool("write", { path: "big.txt", content: "x".repeat(2000) }), TOO_LONG);
+		assert.equal(h.dialogs.length, 0);
+	} finally {
+		await h.done();
+	}
+});
+
+// Guard table, row "over one screen": a call under 2000 characters that
+// takes more than 20 rows at 80 columns is never offered for approval; a
+// long one-line command that fits 20 rows is.
+test("guard: a call text over 20 rows at 80 columns blocks with no dialog", async () => {
+	const h = await granted();
+	try {
+		h.answer = () => "yes";
+		const edits = { path: "a.go", edits: Array.from({ length: 12 }, (_, i) => ({ oldText: `a${i}`, newText: `b${i}` })) };
+		assert.ok(JSON.stringify(edits, null, 1).length < 2000);
+		assert.deepEqual(await h.tool("edit", edits), TOO_LONG);
+		assert.equal(h.dialogs.length, 0);
+		// A long ASCII argument still fits the padded title.
+		const command = { command: "x".repeat(1250) };
+		assert.equal(await h.tool("bash", command), undefined);
+		assert.equal(h.dialogs.length, 1);
+	} finally {
+		await h.done();
+	}
+});
+
+// Round-two review: Pi wraps wide glyphs and uses the terminal's current size.
+test("guard: the call must fit the displayed cells and available terminal rows", async (t) => {
+	const h = await granted();
+	try {
+		h.answer = () => "no";
+		for (const [name, columns, rows, value, fits] of [
+			["wide glyphs", 80, 40, "界".repeat(80 * 9), false],
+			["wide terminal", 80, 40, "a".repeat(800), true],
+			["narrow terminal", 40, 40, "a".repeat(800), false],
+			["short terminal", 80, 12, "a".repeat(800), false],
+			// The short bash title occupies six rows at this width.
+			["exactly fits the dock", 80, 18, "pwd", true],
+			["one row beyond the dock", 80, 17, "pwd", false],
+			["wrapped key hints", 39, 40, "pwd", false],
+		] as const) {
+			await t.test(name, async () => {
+				const previousColumns = process.stdout.columns;
+				const previousRows = process.stdout.rows;
+				const dialogs = h.dialogs.length;
+				try {
+					process.stdout.columns = columns;
+					process.stdout.rows = rows;
+					assert.deepEqual(await h.tool("bash", { command: value }), fits ? DENIED : TOO_LONG);
+					assert.equal(h.dialogs.length - dialogs, fits ? 1 : 0);
+				} finally {
+					process.stdout.columns = previousColumns;
+					process.stdout.rows = previousRows;
+				}
+			});
+		}
+	} finally {
+		await h.done();
+	}
+});
+
+// Guard table, row "hidden characters": a bidi override, a zero-width
+// space, a C1 control and a line separator in the input or the tool name
+// are shown as their escapes, never as they are.
+test("guard: characters that hide or reorder text are shown escaped", async () => {
+	const h = await granted();
+	try {
+		h.tools.push({ name: "de\u202eploy\n\u001b\t", sourceInfo: { source: "local", path: "/ext/deploy.ts" } });
+		h.answer = () => "no";
+		await h.tool("bash", { command: "echo a\u202eb\u200bc\u009bd\u2028e" });
+		await h.tool("de\u202eploy\n\u001b\t", {});
+		const titles = h.dialogs.map((d) => d.title);
+		assert.ok(titles[0].includes(String.raw`echo a\u202eb\u200bc\u009bd\u2028e`), titles[0]);
+		assert.ok(titles[1].includes("`de\\u202eploy\\u000a\\u001b\\u0009`"), titles[1]);
+		for (const title of titles) assert.doesNotMatch(title, /[\u007f-\u009f\u2028\u2029]|\p{Cf}/u);
+	} finally {
+		await h.done();
+	}
+});
+
+// Guard table, row "text changed by an input handler": the arm does not
+// depend on a text match, so a granted message whose arm line an input
+// extension removed keeps the guard for the life of the process.
+test("guard: a granted message whose text an input handler changed stays guarded after it settles", async () => {
+	const h = await granted(false);
+	try {
+		await h.emit("message_start", userMessage("remote task, rewritten by an input extension"));
+		h.answer = () => "no";
+		assert.deepEqual(await h.tool("bash", { command: "make" }), DENIED);
+		await h.emit("agent_settled", { aborted: false });
+		await typed(h);
+		assert.deepEqual(await h.tool("bash", { command: "make" }), DENIED);
+		assert.equal(h.dialogs[1].title, mayStillTitle("bash", { command: "make" }));
+		assert.equal(guardOf(h)?.arms.length, 1);
+	} finally {
+		await h.done();
+	}
+});
+
+// Guard table, row "the person's prompt with the request's text": text
+// equality alone cannot tell it from the granted message; the arm line can.
+test("guard: the person's prompt with the request's text and no arm line tags and ends nothing", async () => {
+	const h = await granted(false);
+	try {
+		await h.emit("message_start", userMessage("remote task"));
+		await h.emit("agent_settled", { aborted: false });
+		await typed(h);
+		assert.equal(guardOf(h)?.arms.length, 1);
+		await h.emit("message_start", userMessage(h.sent[0].content as string));
+		await h.emit("agent_settled", { aborted: false });
+		await typed(h);
+		assert.equal(guardOf(h), null);
+	} finally {
+		await h.done();
+	}
+});
+
+// Guard table, row "a second user message": a message the person types into
+// the granted run does not lift the guard.
+test("guard: a second user message in the run does not end the guard", async () => {
+	const h = await granted();
+	try {
+		await h.emit("message_start", userMessage("also fix the tests"));
+		h.answer = () => "no";
+		assert.deepEqual(await h.tool("bash", { command: "make test" }), DENIED);
+		assert.equal(guardOf(h)?.arms.length, 1);
+	} finally {
+		await h.done();
+	}
+});
+
+// Guard table, rows "pending message" and "settle before the start".
+test("guard: a settle with a pending message, or before the granted message started, does not end it", async () => {
+	const early = await granted(false);
+	try {
+		await early.emit("agent_settled", { aborted: false });
+		await typed(early);
+		assert.equal(guardOf(early)?.arms.length, 1);
+	} finally {
+		await early.done();
+	}
+	const h = await granted();
+	try {
+		h.state.pending = true;
+		await h.emit("agent_settled", { aborted: false });
+		await typed(h);
+		assert.equal(guardOf(h)?.arms.length, 1);
+		h.state.pending = false;
+		await h.emit("agent_settled", { aborted: false });
+		await typed(h);
+		assert.equal(guardOf(h), null);
+	} finally {
+		await h.done();
+	}
+});
+
+// Guard table, rows "after the settle": a settled granted run keeps the
+// guard for a run that no person typed, such as one an extension starts or
+// steering typed during the run; the person's next typed prompt ends it.
+test("guard: the guard ends at the person's next typed prompt after the granted run settled", async () => {
+	const h = await granted();
+	try {
+		h.answer = () => "no";
+		await typed(h, { streamingBehavior: "steer" });
+		await h.emit("agent_settled", { aborted: false });
+		assert.deepEqual(await h.tool("bash", { command: "make" }), DENIED, "after the settle, nothing typed");
+		await h.emit("input", { text: "next step", source: "extension" });
+		assert.deepEqual(await h.tool("bash", { command: "make" }), DENIED, "an extension's input");
+		await h.emit("agent_start");
+		for (const streamingBehavior of ["steer", "followUp"]) {
+			await typed(h, { streamingBehavior });
+			assert.deepEqual(await h.tool("bash", { command: "pwd" }), DENIED, streamingBehavior);
+		}
+		assert.equal(guardOf(h)?.arms.length, 1);
+		await h.emit("agent_settled", { aborted: false });
+		await typed(h);
+		assert.equal(await h.tool("bash", { command: "make" }), undefined, "the person's typed prompt");
+		assert.equal(guardOf(h), null);
+	} finally {
+		await h.done();
+	}
+});
+
+// Guard table, row "another session's settle": an arm advances and ends
+// only by events of the session that ran its granted message, not by a
+// settle and a typed prompt of another registration of the same module.
+test("guard: another session of the same module does not end the arm", async () => {
+	const mod = await freshBridge();
+	const parent = harness(undefined, undefined, mod);
+	await parent.start();
+	const child = harness(undefined, parent.root, mod);
+	try {
+		await child.start();
+		parent.publish(REF, "remote task", parent.generation(), GRANTED);
+		await parent.waitFor(() => parent.sent.length === 1);
+		await parent.emit("message_start", userMessage(parent.sent[0].content as string));
+		await child.emit("agent_settled", { aborted: false });
+		await typed(parent, { streamingBehavior: "steer" });
+		parent.answer = () => "no";
+		assert.deepEqual(await parent.tool("bash", { command: "pwd" }), DENIED, "child settled, parent steered");
+		await parent.emit("agent_settled", { aborted: false });
+		await typed(child);
+		assert.deepEqual(await parent.tool("bash", { command: "pwd" }), DENIED, "parent settled, child typed");
+		assert.equal(guardOf(parent)?.arms.length, 1);
+	} finally {
+		await child.emit("session_shutdown", { reason: "quit" });
+		await parent.done();
+	}
+});
+
+// Guard table, row "send throws": a hand-off that fails synchronously proves
+// that nothing was delivered.
+test("guard: a sendUserMessage that throws ends its arm", async () => {
+	const h = harness(undefined, undefined, await freshBridge());
+	await h.start();
+	try {
+		h.state.throwSend = true;
+		h.publish(REF, "remote task", h.generation(), GRANTED);
+		await h.waitFor(() => h.events(REF).length > 0);
+		assert.deepEqual(h.armedAtSend, [true]);
+		assert.deepEqual(h.guards(), []);
+		assert.deepEqual(
+			h.events(REF).map((e) => e.event),
+			["failed"],
+		);
+		assert.equal(await h.tool("bash", { command: "make" }), undefined);
+		assert.equal(h.dialogs.length, 0);
+	} finally {
+		await h.done();
+	}
+});
+
+// Guard table, row "guard write fails": a granted request whose guard file
+// cannot be written is never handed to pi.
+test("guard: a guard file that cannot be written sends nothing and settles the request failed", async () => {
+	const h = harness(undefined, undefined, await freshBridge());
+	await h.start();
+	try {
+		fs.mkdirSync(path.join(h.dir, `granted-guard.${process.pid}.json`, "block"), { recursive: true });
+		h.publish(REF, "remote task", h.generation(), GRANTED);
+		await h.waitFor(() => h.events(REF).length > 0);
+		assert.deepEqual(h.sent, []);
+		assert.deepEqual(
+			h.events(REF).map((e) => e.event),
+			["failed"],
+		);
+		assert.equal(await h.tool("bash", { command: "make" }), undefined);
+	} finally {
+		await h.done();
+	}
+});
+
+// Guard table, row "granted not a boolean": only true grants; any other
+// present value that is not a boolean is refused before the receipt.
+test("guard: a granted value that is not a boolean is refused invalid with nothing sent", async () => {
+	for (const value of [1, "true", null]) {
+		const h = harness(undefined, undefined, await freshBridge());
+		await h.start();
+		try {
+			h.publish(REF, "remote task", h.generation(), { bridge_revision: 6, granted: value });
+			await h.waitFor(() => h.events(REF).length > 0 || h.sent.length > 0);
+			assert.equal(h.hasReceipt(REF), false, JSON.stringify(value));
+			assert.deepEqual(
+				h.events(REF).map((e) => [e.event, e.reason]),
+				[["refused", "invalid"]],
+				JSON.stringify(value),
+			);
+			assert.deepEqual(h.sent, [], JSON.stringify(value));
+		} finally {
+			await h.done();
+		}
+	}
+});
+
+// Guard table, row "reload": pi loads a new module instance on reload; it
+// finds the guard file of its own process and stays guarded, untagged.
+test("guard: a reload in the same process restores the guard, which a settled run then keeps", async (t) => {
+	const before = await granted();
+	await before.emit("session_shutdown", { reason: "reload" });
+	// A wall-clock correction between loads leaves this process running.
+	const wallNow = Date.now.bind(Date);
+	t.mock.method(Date, "now", () => wallNow() + 5000);
+	const after = harness(undefined, before.root, await freshBridge());
+	try {
+		await after.emit("session_start", { reason: "reload" });
+		after.answer = () => "no";
+		assert.deepEqual(await after.tool("bash", { command: "make" }), DENIED);
+		assert.equal(after.dialogs[0].title, mayStillTitle("bash", { command: "make" }));
+		await after.emit("agent_settled", { aborted: false });
+		await typed(after);
+		assert.deepEqual(await after.tool("bash", { command: "make" }), DENIED);
+		assert.equal(guardOf(after)?.arms.length, 1);
+	} finally {
+		await after.done();
+		await before.done();
+	}
+});
+
+// Guard table, row "a reused pid": a guard file named for this pid whose
+// process start is not this process's was left by an earlier process with
+// the same pid. It is removed and arms nothing; with this process's start
+// it restores.
+test("guard: a guard file of an earlier process with this pid is removed and arms nothing", async () => {
+	const started = Math.round(performance.timeOrigin) / 1000;
+	for (const [name, at, armed] of [
+		["earlier process", started - 3600, false],
+		["this process", started, true],
+		["missing origin", undefined, true],
+		["unreadable origin", "unknown", true],
+	] as const) {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "amq-pi-bridge-"));
+		const dir = path.join(root, "agents", "pi-seat", "extensions", "pi-bridge");
+		fs.mkdirSync(dir, { recursive: true });
+		const file = path.join(dir, `granted-guard.${process.pid}.json`);
+		fs.writeFileSync(file, JSON.stringify({ pid: process.pid, started: at, arms: [{ arm: "b".repeat(32), ref: REF, armed_at: "2000-01-01T00:00:00.000Z" }] }), { mode: 0o600 });
+		const h = harness(undefined, root, await freshBridge());
+		await h.start();
+		try {
+			h.answer = () => "no";
+			assert.deepEqual(await h.tool("bash", { command: "ls" }), armed ? DENIED : undefined, name);
+			assert.equal(fs.existsSync(file), armed, name);
+		} finally {
+			await h.done();
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	}
+});
+
+// Guard table, row "another pid's file": it belongs to another pi process.
+test("guard: another process's guard file is not read, changed or obeyed", async () => {
+	const other = process.pid + 1;
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "amq-pi-bridge-"));
+	const dir = path.join(root, "agents", "pi-seat", "extensions", "pi-bridge");
+	fs.mkdirSync(dir, { recursive: true });
+	const file = path.join(dir, `granted-guard.${other}.json`);
+	const body = JSON.stringify({ pid: other, arms: [{ arm: "a".repeat(32), ref: REF, armed_at: "2000-01-01T00:00:00.000Z" }] });
+	fs.writeFileSync(file, body, { mode: 0o600 });
+	const mtime = fs.statSync(file).mtimeMs;
+	const h = harness(undefined, root, await freshBridge());
+	await h.start();
+	try {
+		assert.equal(await h.tool("bash", { command: "make" }), undefined);
+		assert.equal(h.dialogs.length, 0);
+		await h.emit("session_shutdown", { reason: "quit" });
+		assert.equal(fs.readFileSync(file, "utf8"), body);
+		assert.equal(fs.statSync(file).mtimeMs, mtime);
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+// Guard table, row "two pids on one mailbox": the guard is the executing
+// process's, not the mailbox's.
+test("guard: two pi processes on one mailbox each keep their own guard", async () => {
+	const other = process.pid + 1;
+	const served = await granted();
+	const held = harness(undefined, served.root, await freshBridge(other));
+	try {
+		await held.start();
+		assert.equal(held.notices.length, 1); // held off: the first pi serves the mailbox
+		assert.equal(await held.tool("bash", { command: "make" }), undefined);
+		assert.equal(held.dialogs.length, 0);
+		served.answer = () => "no";
+		assert.deepEqual(await served.tool("bash", { command: "make" }), DENIED);
+		await held.emit("session_shutdown", { reason: "quit" });
+		assert.deepEqual(served.guards(), [`granted-guard.${process.pid}.json`]);
+	} finally {
+		await served.done();
+	}
+});
+
+// Guard table, rows "two arms" and "a second send that throws": each
+// granted task ends only its own arm.
+test("guard: a second granted task ends only its own arm", async () => {
+	for (const throws of [false, true]) {
+		const h = await granted(false); // the first task's arm line was removed: no tag
+		try {
+			const first = guardOf(h)?.arms[0].arm;
+			await h.emit("session_start", { reason: "new" });
+			h.state.throwSend = throws;
+			h.publish(OTHER, "second task", h.generation(), GRANTED);
+			await h.waitFor(() => h.sent.length === 2 || h.events(OTHER).length > 0);
+			if (!throws) {
+				assert.equal(guardOf(h)?.arms.length, 2);
+				await h.emit("message_start", userMessage(h.sent[1].content as string));
+				await h.emit("agent_settled", { aborted: false });
+				await typed(h);
+			}
+			assert.deepEqual(
+				guardOf(h)?.arms.map((a) => a.arm),
+				[first],
+				throws ? "send throws" : "settled",
+			);
+			h.answer = () => "no";
+			assert.deepEqual(await h.tool("bash", { command: "make" }), DENIED);
+		} finally {
+			await h.done();
+		}
+	}
+});
+
+// Guard table, row "displacement": a bridge that loses its mailbox keeps the
+// guard of the run it handed off.
+test("guard: displacement of the mailbox during the run keeps the guard", async () => {
+	const h = await granted();
+	try {
+		const other = { protocol: "amq:pi-bridge:v1", live: true, at: new Date().toISOString(), pid: 4242, surface: "tui", session_generation: "other-generation", bridge_revision: 6 };
+		fs.writeFileSync(path.join(h.dir, "bridge.liveness"), JSON.stringify(other));
+		await h.waitFor(() => h.notices.length === 1);
+		assert.match(h.notices[0], /no longer serves Buzz requests/);
+		h.answer = () => "no";
+		assert.deepEqual(await h.tool("bash", { command: "make" }), DENIED);
+	} finally {
+		await h.done();
+	}
+});
+
+// Guard table, row "no granted": a request without the field changes nothing.
+test("guard: a request with an absent or false granted field arms nothing", async () => {
+	for (const fields of [{}, { granted: false }]) {
+		const h = harness(undefined, undefined, await freshBridge());
+		await h.start();
+		try {
+			h.publish(REF, "remote task", h.generation(), { bridge_revision: 6, ...fields });
+			await h.waitFor(() => h.sent.length === 1);
+			assert.equal(h.sent[0].content, "remote task");
+			assert.deepEqual(h.guards(), []);
+			assert.equal(await h.tool("bash", { command: "make" }), undefined);
+			assert.equal(h.state.lookups, 0);
+		} finally {
+			await h.done();
+		}
+	}
+});
+
+// Guard table, rows "rpc", "revision 5", "host deliver seam": a bridge that
+// cannot guard the run refuses the granted request before its receipt.
+test("guard: a granted request that the bridge cannot guard is refused with nothing sent", async () => {
+	const cases: [string, () => Harness, Record<string, unknown>, string][] = [
+		[
+			"rpc",
+			() => {
+				const h = harness();
+				h.ctx.mode = "rpc";
+				return h;
+			},
+			GRANTED,
+			"unsupported",
+		],
+		["revision 5", () => harness(), { bridge_revision: 5, granted: true }, "revision"],
+		["host deliver seam", () => hostHarness({ busy: () => false, send: () => assert.fail("a granted request reached the host") }), GRANTED, "unsupported"],
+	];
+	for (const [name, make, fields, reason] of cases) {
+		const h = make();
+		await h.start();
+		try {
+			h.publish(REF, "remote task", h.generation(), fields);
+			await h.waitFor(() => h.events(REF).length > 0);
+			assert.deepEqual(
+				h.events(REF).map((e) => [e.event, e.reason]),
+				[["refused", reason]],
+				name,
+			);
+			assert.deepEqual(h.sent, [], name);
+			assert.equal(h.hasReceipt(REF), false, name);
+			assert.deepEqual(h.guards(), [], name);
+		} finally {
+			await h.done();
+		}
 	}
 });

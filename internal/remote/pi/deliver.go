@@ -73,6 +73,12 @@ const MinBridgeRevision = 3
 // the adapter advertises no cancel_request.
 const CancelBridgeRevision = 5
 
+// GateBridgeRevision is the lowest bridge_revision that gates a granted run:
+// it reads the request field granted and asks the person at the terminal
+// before the run's tool calls (protocol: bridge revision 6). A granted
+// request carries it as its bridge_revision.
+const GateBridgeRevision = 6
+
 // ErrAlreadyDelivered marks the duplicate guard: requests/<ref>.json
 // already exists, so the ref was already delivered and must never be
 // rewritten or re-sent.
@@ -107,6 +113,10 @@ type deliverRequest struct {
 	// requests). It is a pointer, not proof, and never part of Text. Absent
 	// unless the Buzz carrier named the event.
 	Event string `json:"event,omitempty"`
+	// Granted marks a task that a link's session grant admitted with no
+	// signature of its own (protocol: bridge revision 6). Absent on every
+	// other request, so their bytes do not change.
+	Granted bool `json:"granted,omitempty"`
 }
 
 // deliverOrigin is the request's origin: the record's carrier and the
@@ -239,6 +249,9 @@ type livenessRecord struct {
 	// Activity is the activity record version the extension writes; 0 means
 	// the record carries none (protocol: activity).
 	Activity int `json:"activity,omitempty"`
+	// Gate is true when the extension asks the person at the terminal before
+	// a granted run's tool calls (protocol: bridge revision 6).
+	Gate bool `json:"gate,omitempty"`
 }
 
 // heartbeat / freshness: the extension refreshes the heartbeat every 2s and
@@ -287,6 +300,8 @@ type livenessState struct {
 	sessionID string // the live bridge's pi session id ("" = not published)
 	upgrade   string // the live bridge's own remedy, bounded ("" = not published)
 	activity  int    // the live bridge's activity version (0 = not published)
+	surface   string // the live bridge's pi run mode ("" = not published)
+	gate      bool   // the live bridge gates a granted run's tool calls
 }
 
 // publishRequest publishes one request with create-new semantics: an
@@ -437,7 +452,24 @@ func (b bridgeDir) liveness(now time.Time) livenessState {
 	if !rec.Live || rec.PID <= 0 {
 		return livenessState{age: age, reason: "malformed"}
 	}
-	return livenessState{live: true, age: age, pid: rec.PID, gen: rec.SessionGeneration, revision: rec.BridgeRevision, sessionID: rec.SessionID, upgrade: rec.Upgrade, activity: rec.Activity}
+	return livenessState{live: true, age: age, pid: rec.PID, gen: rec.SessionGeneration, revision: rec.BridgeRevision, sessionID: rec.SessionID, upgrade: rec.Upgrade, activity: rec.Activity, surface: rec.Surface, gate: rec.Gate}
+}
+
+// sessionAsks is whether the live bridge asks the person at the terminal
+// before a granted run's tool calls, and why, from one liveness read. pi has
+// no approval mode of its own, so only the bridge's gate asks: a fresh live
+// record of revision GateBridgeRevision or later that publishes gate true
+// for the tui surface.
+func sessionAsks(live livenessState) (bool, string) {
+	switch {
+	case !live.live:
+		return false, "mode_unreadable"
+	case live.revision < GateBridgeRevision || !live.gate:
+		return false, "the pi bridge does not gate tool calls"
+	case live.surface != "tui":
+		return false, fmt.Sprintf("the pi session runs in %s mode, with no terminal to ask at", live.surface)
+	}
+	return true, "the pi bridge gates tool calls"
 }
 
 // listReceipts returns every parseable receipt, ordered oldest-first by

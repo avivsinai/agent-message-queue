@@ -1108,7 +1108,7 @@ for arg in "$@"; do
   previous="$arg"
 done
 if [ "$1" = "wake" ] && [ "$2" = "check" ]; then
-  printf '%s\n' '{"schema":1,"live_wake":true,"image_status":"current","wake_generation":"0123456789abcdef0123456789abcdef"}'
+  printf '%s\n' '{"schema":2,"wake":{"live":true,"generation":"0123456789abcdef0123456789abcdef"},"image":{"status":"current"}}'
   exit 0
 fi
 if [ "$1" = "wake" ] && [ "$2" = "retire" ]; then
@@ -1530,7 +1530,7 @@ func fakeAMQWakeCheckThen(body string) []byte {
 	body = strings.TrimPrefix(body, "#!/bin/sh\n")
 	return []byte(`#!/bin/sh
 if [ "$1" = "wake" ] && [ "$2" = "check" ]; then
-  printf '%s\n' '{"schema":1,"live_wake":true,"image_status":"current","wake_generation":"0123456789abcdef0123456789abcdef"}'
+  printf '%s\n' '{"schema":2,"wake":{"live":true,"generation":"0123456789abcdef0123456789abcdef"},"image":{"status":"current"}}'
   exit 0
 fi
 ` + body)

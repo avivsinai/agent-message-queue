@@ -232,12 +232,28 @@ func TestCoopInstallHooksWritesTheGatedEntryAndListsOldOnes(t *testing.T) {
 	}
 	wait := coopHookMarker + `[ -n "${AM_ME-}" ] || [ -d '` + filepath.Join(home, ".amq", "codex-threads", "threads") + `' ] || exit 0; ` +
 		amq + "codex-wait || true"
+	stopCount := 0
 	for _, event := range []string{"SessionStart", "Stop"} {
-		groups := codex.Hooks[event]
-		if len(groups) != 1 || groups[0].Matcher != nil || len(groups[0].Hooks) != 1 ||
-			groups[0].Hooks[0].Command != wait || !groups[0].Hooks[0].Async || groups[0].Hooks[0].Timeout != coopWaitTimeout {
-			t.Fatalf("Codex %s = %+v, want one async entry running %q", event, groups, wait)
+		for _, group := range codex.Hooks[event] {
+			if len(group.Hooks) != 1 || group.Matcher != nil {
+				t.Errorf("Codex %s group = %+v, want one handler and no matcher", event, group)
+				continue
+			}
+			hook := group.Hooks[0]
+			switch {
+			case hook.Command == wait:
+				if !hook.Async || hook.Timeout != coopWaitTimeout {
+					t.Errorf("Codex %s wait = %+v, want an async long-running waiter", event, hook)
+				}
+			case strings.HasPrefix(hook.Command, codexStopHookMarker) && event == "Stop" && !hook.Async && hook.Timeout == 2 && strings.Contains(hook.Command, " coop hook codex-stop || true"):
+				stopCount++
+			default:
+				t.Errorf("Codex %s unexpected entry = %+v", event, group)
+			}
 		}
+	}
+	if stopCount != 1 {
+		t.Errorf("Codex Stop entries = %d, want one synchronous attended-stop hook", stopCount)
 	}
 	prompt := strings.Replace(wait, "codex-wait", "codex-prompt", 1)
 	if groups := codex.Hooks["UserPromptSubmit"]; len(codex.Hooks) != 3 || len(groups) != 1 || groups[0].Matcher != nil || len(groups[0].Hooks) != 1 ||

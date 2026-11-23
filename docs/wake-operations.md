@@ -54,8 +54,11 @@ recovery. `unresponsive` means an advertised loop did not return a valid
 answer; restart then requires its owning terminal or supervisor. Older wakes
 without the protocol, and Linux wakes, report `unknown`. An unproven loop
 reports wake status `unverified`, and a failed loop reports `degraded`;
-the live process claim is preserved. This check does not prove that a harness
-received or consumed a doorbell. Use a drained receipt for consumption proof.
+the live process claim is preserved. When the wake state changes while the
+check inspects it, the check reports wake status `unverified` with
+`live_wake` false and tells the caller to run `amq wake check` again. This
+check does not prove that a harness received or consumed a doorbell. Use a
+drained receipt for consumption proof.
 
 `doctor --ops` probes advertised loop health in both JSON schemas and text output. Schema 1 adds
 `health_status` and `health_detail` to the wake row; schema 2 uses `wake_check.health`.
@@ -76,6 +79,11 @@ counts when a live wake has no `baseline_at` yet (its baseline is not done) or
 when the lock changes while the hook reads it. A live wake that is demoted
 or parked signals through its own pane attention and `doctor --ops`
 (`doorbell_parked`); the Stop hook does not duplicate that.
+
+At startup, a wake prepares a missing mailbox, resumes interrupted preparation,
+and publishes its complete inbox last unless a sender creates the inbox first.
+For an established mailbox the watcher retries a temporarily missing `inbox/new`,
+and for a preparation error the wake names the path to fix before restarting.
 
 The wake child appends full runtime diagnostics to the private
 `agents/<agent>/.wake.log`; the controlling terminal receives only
@@ -210,10 +218,12 @@ the owner's input, typed on the owner's order.
 The person sees the mail as a notice (terminal title, bell, desktop notice),
 once per unread cohort, and one more notice when more mail arrives —
 whatever transport the wake would otherwise use, including the external
-injector (`--inject-via`). On Claude Code with the co-op hooks installed,
-the model learns of the mail at the person's next submit through the
+injector (`--inject-via`). On Claude Code or Codex with the co-op hooks
+installed, the model learns of the mail at the person's next submit through the
 `UserPromptSubmit` hook, and the Stop guard reports unread mail at a turn
-end without extending the turn. The input guard is not needed on an
+end without extending the turn. On Codex, this is a warning line in the
+window. Mail that arrives while the seat is idle has the terminal-title
+notice described above. The input guard is not needed on an
 attended seat: nothing is typed into the terminal anyway.
 
 `attended` is read from the settings file at each wake. A running wake

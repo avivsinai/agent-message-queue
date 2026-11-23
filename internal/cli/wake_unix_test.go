@@ -1026,6 +1026,285 @@ func TestRunWakeLoopOwnerlessStartupScanAndQueuedEventEmitOnce(t *testing.T) {
 	}
 }
 
+// A consumer started `amq wake` for a handle whose agents/<h>/ existed with no
+// inbox: the start retried the inbox watcher forever and never answered health.
+func TestRunWakeLoopProvisionsMissingMailboxAtStart(t *testing.T) {
+	start := func(t *testing.T, root string) error {
+		t.Helper()
+		agentDir := retainedWakeAgentDirForTest(t, root, "codex")
+		ready := make(chan struct{})
+		stop := make(chan struct{})
+		exited := make(chan struct{})
+		var loopErr error
+		go func() {
+			defer close(exited)
+			loopErr = runWakeLoop(wakeConfig{
+				root:              root,
+				me:                "codex",
+				session:           "session1",
+				retainedAgent:     agentDir,
+				injectMode:        wakeInjectModeNone,
+				controlStop:       stop,
+				preconditionCheck: func(*wakeConfig) error { return nil },
+				attentionIsTTY:    func() bool { return false },
+				onPrepared: func(wakeAdmissionWatcher) error {
+					close(ready)
+					return nil
+				},
+			})
+		}()
+		t.Cleanup(func() {
+			close(stop)
+			select {
+			case <-exited:
+			case <-time.After(2 * time.Second):
+				t.Error("wake loop did not stop")
+			}
+		})
+		select {
+		case <-ready:
+			return nil
+		case <-exited:
+			if loopErr == nil {
+				t.Fatal("wake exited without reporting readiness or failure")
+			}
+			return loopErr
+		case <-time.After(2 * time.Second):
+			t.Fatal("wake did not report readiness or failure")
+		}
+		return nil
+	}
+
+	t.Run("missing inbox", func(t *testing.T) {
+		root := secureTempDirForTest(t)
+		if err := os.MkdirAll(fsq.AgentBase(root, "codex"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := start(t, root); err != nil {
+			t.Fatal(err)
+		}
+		for _, leaf := range fsq.RequiredMailboxLeaves() {
+			info, err := os.Lstat(fsq.AgentMailboxPath(root, "codex", leaf))
+			if err != nil || !info.IsDir() {
+				t.Fatalf("mailbox %s after start: %v, want a directory", leaf, err)
+			}
+		}
+	})
+
+	// A first start interrupted before inbox publication leaves a private
+	// staging directory. Continue it without discarding the prepared leaves.
+	t.Run("resume staged inbox", func(t *testing.T) {
+		root := secureTempDirForTest(t)
+		agent := fsq.AgentBase(root, "codex")
+		staging := filepath.Join(agent, ".wake-inbox-provisioning")
+		for _, leaf := range fsq.RequiredMailboxLeaves() {
+			if !strings.HasPrefix(string(leaf), "inbox/") {
+				if err := os.MkdirAll(filepath.Join(agent, string(leaf)), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		if err := os.MkdirAll(filepath.Join(staging, "tmp"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		before, err := os.Stat(staging)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := start(t, root); err != nil {
+			t.Fatal(err)
+		}
+		after, err := os.Stat(filepath.Join(agent, "inbox"))
+		if err != nil || !os.SameFile(before, after) {
+			t.Fatal("the staged inbox was not published")
+		}
+		if _, err := os.Lstat(staging); !os.IsNotExist(err) {
+			t.Fatalf("staging name after publication: %v", err)
+		}
+	})
+
+	// An occupied provisioning name is existing data. A first start must
+	// refuse it before publishing an inbox.
+	t.Run("occupied staging name", func(t *testing.T) {
+		for _, location := range []string{".wake-inbox-provisioning", ".wake-inbox-provisioning/new/message"} {
+			t.Run(location, func(t *testing.T) {
+				root := secureTempDirForTest(t)
+				agent := fsq.AgentBase(root, "codex")
+				path := filepath.Join(agent, location)
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("existing"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				loopErr := start(t, root)
+				var problem *wakeMailboxPathError
+				if !errors.As(loopErr, &problem) || !strings.Contains(problem.Error(), path) {
+					t.Fatalf("want error naming %s, got %v", path, loopErr)
+				}
+				if data, err := os.ReadFile(path); err != nil || string(data) != "existing" {
+					t.Fatal("existing data changed")
+				}
+				if _, err := os.Lstat(filepath.Join(agent, "inbox")); !os.IsNotExist(err) {
+					t.Fatalf("inbox after refusal: %v", err)
+				}
+			})
+		}
+	})
+
+	// Failed inspection of an absent mailbox's other components belongs to
+	// provisioning. An uninspectable inbox itself belongs to the watcher.
+	t.Run("inbox inspection is unavailable", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("requires ordinary directory permissions")
+		}
+		root := secureTempDirForTest(t)
+		agent := fsq.AgentBase(root, "codex")
+		if err := os.MkdirAll(agent, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		held := retainedWakeAgentDirForTest(t, root, "codex")
+		if err := os.Chmod(agent, 0o400); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := os.Chmod(agent, 0o700); err != nil {
+				t.Error(err)
+			}
+		})
+		loop := wakeLoop{cfg: wakeConfig{root: root, me: "codex"}, ordinaryRecoverable: true, ordinaryAgentDir: held}
+		if err := loop.provisionAgentDir(); err != nil {
+			t.Fatalf("inbox inspection prevented watcher startup: %v", err)
+		}
+		if err := loop.openMainWatcher(); !errors.Is(err, os.ErrPermission) {
+			t.Fatalf("watcher error = %v, want permission error", err)
+		}
+		entries, err := os.ReadDir(agent)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("uninspectable mailbox changed: %v, %v", entries, err)
+		}
+	})
+
+	// Review found that ignoring an inspection error on another leaf could
+	// leave a visible, incomplete inbox before returning the error.
+	t.Run("uninspectable outbox prevents provisioning", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("requires ordinary directory permissions")
+		}
+		root := secureTempDirForTest(t)
+		agent := fsq.AgentBase(root, "codex")
+		path := filepath.Join(agent, "outbox")
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := os.Chmod(path, 0o700); err != nil {
+				t.Error(err)
+			}
+		})
+		loopErr := start(t, root)
+		var problem *wakeMailboxPathError
+		if !errors.As(loopErr, &problem) || problem.path != path || !errors.Is(loopErr, os.ErrPermission) {
+			t.Fatalf("want permission error at %s, got %v", path, loopErr)
+		}
+		if _, err := os.Lstat(filepath.Join(agent, "inbox")); !os.IsNotExist(err) {
+			t.Fatalf("inbox after refusal: %v", err)
+		}
+	})
+
+	// zih4: a first-contact sender can publish its inbox after the wake's absence check.
+	t.Run("first send creates inbox during provisioning", func(t *testing.T) {
+		root := secureTempDirForTest(t)
+		agent := fsq.AgentBase(root, "codex")
+		if err := os.MkdirAll(agent, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		held := retainedWakeAgentDirForTest(t, root, "codex")
+		if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+			t.Fatal(err)
+		}
+		inbox := filepath.Join(agent, "inbox")
+		message := filepath.Join(inbox, "new", "first.md")
+		if err := os.WriteFile(message, []byte("first message"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		before, err := os.Lstat(inbox)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := held.withFD(func(fd int) error { return provisionWakeMailbox(fd, agent) }); err != nil {
+			t.Fatal(err)
+		}
+		after, err := os.Lstat(inbox)
+		if err != nil || !os.SameFile(before, after) {
+			t.Fatalf("first sender's inbox changed: %v", err)
+		}
+		if data, err := os.ReadFile(message); err != nil || string(data) != "first message" {
+			t.Fatalf("first message = %q, %v", data, err)
+		}
+		if _, err := os.Lstat(filepath.Join(agent, wakeStagedInbox)); !os.IsNotExist(err) {
+			t.Fatalf("staging directory after first send: %v", err)
+		}
+	})
+
+	t.Run("refuse unusable leaf before creating inbox", func(t *testing.T) {
+		root := secureTempDirForTest(t)
+		agent := fsq.AgentBase(root, "codex")
+		if err := os.MkdirAll(filepath.Join(agent, "outbox"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(agent, "outbox", "sent")
+		target := secureTempDirForTest(t)
+		if err := os.Symlink(target, path); err != nil {
+			t.Fatal(err)
+		}
+		loopErr := start(t, root)
+		var problem *wakeMailboxPathError
+		if !errors.As(loopErr, &problem) || problem.path != path || strings.Contains(problem.Error(), "amq init") {
+			t.Fatalf("want offending leaf and wake restart remedy, got %v", loopErr)
+		}
+		if _, err := os.Lstat(filepath.Join(agent, "inbox")); !os.IsNotExist(err) {
+			t.Fatalf("inbox after refusal: %v", err)
+		}
+		if entries, err := os.ReadDir(target); err != nil || len(entries) != 0 {
+			t.Fatalf("link target after refusal: %v, %v", entries, err)
+		}
+	})
+
+	t.Run("inbox is a symlink", func(t *testing.T) {
+		root := secureTempDirForTest(t)
+		elsewhere := filepath.Join(root, "elsewhere")
+		if err := os.MkdirAll(elsewhere, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		agentPath := fsq.AgentBase(root, "codex")
+		if err := os.MkdirAll(agentPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join("..", "..", "elsewhere"), filepath.Join(agentPath, "inbox")); err != nil {
+			t.Fatal(err)
+		}
+		loopErr := start(t, root)
+		var pathErr *wakeMailboxPathError
+		if !errors.As(loopErr, &pathErr) {
+			t.Fatalf("start error = %v, want a wake mailbox path error", loopErr)
+		}
+		if entries, err := os.ReadDir(elsewhere); err != nil || len(entries) != 0 {
+			t.Fatalf("symlink target after start: %v entries, err %v; want untouched", len(entries), err)
+		}
+		entries, err := os.ReadDir(agentPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 || entries[0].Name() != "inbox" {
+			t.Fatalf("agent directory after start = %v, want only the inbox symlink", entries)
+		}
+	})
+}
+
 func TestRunWakeLoopRearmsOrdinaryInboxWatcher(t *testing.T) {
 	originalScanRetryBase := wakeInboxScanRetryBase
 	originalScanRetryMax := wakeInboxScanRetryMax

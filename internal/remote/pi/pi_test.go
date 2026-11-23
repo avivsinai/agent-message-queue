@@ -691,29 +691,36 @@ func TestSubmitKeepsInspectedGeneration(t *testing.T) {
 // Pro review of #920, 2026-09-29, #5: a busy refusal writes no receipt, so a restarted adapter
 // answered unknown for it, and Submit waited out its receipt window and
 // reported uncertainty. Both must return the typed rejection, never
-// admission.
+// admission. A granted request refused busy spends its ref the same way.
 func TestReceiptlessRefusalIsRecovered(t *testing.T) {
-	a, dir := newTestAttachment(t)
-	key := testKey("busy")
-	ref := clientRef(key)
-	busy := fmt.Sprintf(`{"protocol":%q,"ref":%q,"event":"refused","reason":"busy","error":"pi is busy with other work"}`, ProtocolV1, ref)
-	a.dir.publish = func(req deliverRequest) error {
-		if err := (bridgeDir{dir: dir, names: piWire}).publishRequest(req); err != nil {
-			return err
+	for _, granted := range []bool{false, true} {
+		a, dir := newTestAttachment(t)
+		if granted {
+			stampGate(t, dir, fixedNow, GateBridgeRevision, "tui", true)
 		}
-		appendEvents(t, dir, ref, busy)
-		return nil
-	}
-	a.submitWait = 3 * time.Second // the refusal must end the wait at once
-	adm, err := a.Submit(submitReq(key, "hello"))
-	if err != nil || adm.Admitted || adm.Code != protocol.CodeBusy {
-		t.Fatalf("Submit = %+v, %v; want the busy refusal", adm, err)
-	}
+		key := testKey("busy")
+		ref := clientRef(key)
+		busy := fmt.Sprintf(`{"protocol":%q,"ref":%q,"event":"refused","reason":"busy","error":"pi is busy with other work"}`, ProtocolV1, ref)
+		a.dir.publish = func(req deliverRequest) error {
+			if err := (bridgeDir{dir: dir, names: piWire}).publishRequest(req); err != nil {
+				return err
+			}
+			appendEvents(t, dir, ref, busy)
+			return nil
+		}
+		a.submitWait = 3 * time.Second // the refusal must end the wait at once
+		req := submitReq(key, "hello")
+		req.Granted = granted
+		adm, err := a.Submit(req)
+		if err != nil || adm.Admitted || adm.Code != protocol.CodeBusy {
+			t.Fatalf("granted %v: Submit = %+v, %v; want the busy refusal", granted, adm, err)
+		}
 
-	restarted := mustAttach(t, dir) // amq-remote restarts before it records the rejection
-	ev, err := restarted.Lookup(key, addressEpoch("gen-1"))
-	if err != nil || ev.Admitted || ev.State != protocol.StateRejected || ev.RefusalCode != protocol.CodeBusy {
-		t.Fatalf("Lookup after restart = %+v, %v; want rejected busy without admission", ev, err)
+		restarted := mustAttach(t, dir) // amq-remote restarts before it records the rejection
+		ev, err := restarted.Lookup(key, addressEpoch("gen-1"))
+		if err != nil || ev.Admitted || ev.State != protocol.StateRejected || ev.RefusalCode != protocol.CodeBusy {
+			t.Fatalf("granted %v: Lookup after restart = %+v, %v; want rejected busy without admission", granted, ev, err)
+		}
 	}
 }
 
@@ -1197,6 +1204,120 @@ func stampLivenessRevisionAt(t *testing.T, dir string, at time.Time, revision in
 	}
 	if err := os.Chtimes(path, at, at); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// stampGate writes a gen-1 liveness record fresh at at with the given
+// revision, surface and gate field.
+func stampGate(t *testing.T, dir string, at time.Time, revision int, surface string, gate bool) {
+	t.Helper()
+	rec := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":%q,"session_generation":"gen-1","bridge_revision":%d,"gate":%t,"session_id":"sess-1"}`,
+		ProtocolV1, at.UTC().Format(time.RFC3339Nano), os.Getpid(), surface, revision, gate)
+	path := filepath.Join(dir, "bridge.liveness")
+	if err := os.WriteFile(path, []byte(rec), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, at, at); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The pi session asks before a granted run's tool calls only while a fresh
+// bridge of revision 6 or later publishes gate true in the tui surface.
+func TestSessionAsksOnlyWithALiveGate(t *testing.T) {
+	a, dir := newTestAttachment(t)
+	var pr core.PermissionReader = a
+	cases := []struct {
+		name  string
+		stamp func()
+		asks  bool
+		why   string
+	}{
+		{"no liveness", func() { _ = os.Remove(filepath.Join(dir, "bridge.liveness")) }, false, "mode_unreadable"},
+		{"stale liveness", func() { stampGate(t, dir, fixedNow.Add(-time.Minute), 6, "tui", true) }, false, "mode_unreadable"},
+		{"revision 5", func() { stampGate(t, dir, fixedNow, 5, "tui", true) }, false, "the pi bridge does not gate tool calls"},
+		{"revision 6 with no gate", func() { stampGate(t, dir, fixedNow, 6, "tui", false) }, false, "the pi bridge does not gate tool calls"},
+		{"revision 6 gate rpc", func() { stampGate(t, dir, fixedNow, 6, "rpc", true) }, false, "the pi session runs in rpc mode, with no terminal to ask at"},
+		{"revision 6 gate tui", func() { stampGate(t, dir, fixedNow, 6, "tui", true) }, true, "the pi bridge gates tool calls"},
+	}
+	for _, tc := range cases {
+		tc.stamp()
+		if asks, why := pr.SessionAsks(); asks != tc.asks || why != tc.why {
+			t.Errorf("%s: SessionAsks = %v %q, want %v %q", tc.name, asks, why, tc.asks, tc.why)
+		}
+		if writes := pr.WritesWithoutAsking(dir); writes != !tc.asks {
+			t.Errorf("%s: WritesWithoutAsking = %v, want %v", tc.name, writes, !tc.asks)
+		}
+	}
+}
+
+// A granted Submit to a bridge that does not gate is refused with nothing
+// written, as the Codex adapter refuses a session that does not ask.
+func TestGrantedSubmitToABridgeThatDoesNotGate(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		revision   int
+		at         time.Time
+		signedCode protocol.Code
+		why        string
+	}{
+		{"absent", 0, time.Time{}, protocol.CodeAttachmentLost, "mode_unreadable"},
+		{"stale", 6, fixedNow.Add(-time.Minute), protocol.CodeAttachmentLost, "mode_unreadable"},
+		{"revision 2", 2, fixedNow, protocol.CodeUnsupported, "the pi bridge does not gate tool calls"},
+		{"revision 5", 5, fixedNow, "", "the pi bridge does not gate tool calls"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, dir := newTestAttachment(t)
+			if tc.revision == 0 {
+				if err := os.Remove(filepath.Join(dir, "bridge.liveness")); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				stampGate(t, dir, tc.at, tc.revision, "tui", true)
+			}
+			req := submitReq(testKey("granted-old"), "hello")
+			req.Granted = true
+			adm, err := a.Submit(req)
+			want := core.Admission{Code: protocol.CodeConsentInvalid, Message: "grant_needs_signature: " + tc.why, NothingSent: true}
+			if err != nil || adm != want {
+				t.Errorf("granted Submit = %+v, %v; want %+v", adm, err, want)
+			}
+			if tc.signedCode != "" {
+				req.Granted = false
+				adm, err = a.Submit(req)
+				if err != nil || adm.Code != tc.signedCode || adm.NothingSent || adm.Admitted {
+					t.Errorf("signed Submit = %+v, %v; want %v", adm, err, tc.signedCode)
+				}
+			}
+			if entries, err := os.ReadDir(filepath.Join(dir, "requests")); err != nil || len(entries) != 0 {
+				t.Fatalf("requests/ = %v (%v), want empty", entries, err)
+			}
+		})
+	}
+}
+
+// The acp-host wire shares this adapter; its host publishes no gate, so its
+// session takes no grant.
+func TestACPHostTakesNoGrant(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "agents", "agent1", "extensions", "acp-host")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rec := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"acp","session_generation":"gen-1","bridge_revision":5,"session_id":"sess-1","agent":"grok 1.0"}`,
+		ProtocolACPHost, fixedNow.UTC().Format(time.RFC3339Nano), os.Getpid())
+	if err := os.WriteFile(filepath.Join(dir, "bridge.liveness"), []byte(rec), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Join(dir, "bridge.liveness"), fixedNow, fixedNow); err != nil {
+		t.Fatal(err)
+	}
+	a, err := New("acp-1", "agent1", bridgeDir{dir: dir, names: acpWire})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.now = func() time.Time { return fixedNow }
+	if asks, why := a.SessionAsks(); asks || why != "the pi bridge does not gate tool calls" {
+		t.Fatalf("SessionAsks = %v %q, want false: the acp host does not gate", asks, why)
 	}
 }
 

@@ -1,9 +1,11 @@
 package pi
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -43,9 +45,9 @@ func TestGoldenExtensionVector(t *testing.T) {
 	live := bd.liveness(fixedNow)
 	// Bead agent-message-queue-611.60: the reference bridge's session id is
 	// the native session id a relay share pins. The reference bridge is
-	// revision 5 (revision 4 plus exact cancel).
-	if !live.live || live.pid != 4242 || live.gen != "golden-generation" || live.revision != 5 || live.sessionID != "pi-session-1" {
-		t.Fatalf("liveness = %+v, want live pid 4242 generation golden-generation revision 5 session pi-session-1", live)
+	// revision 6 (revision 5 plus the guard of granted tasks).
+	if !live.live || live.pid != 4242 || live.gen != "golden-generation" || live.revision != 6 || live.sessionID != "pi-session-1" {
+		t.Fatalf("liveness = %+v, want live pid 4242 generation golden-generation revision 6 session pi-session-1", live)
 	}
 
 	key := requests.Key{CreatorHost: "host1", TargetID: "pi-1", RequestID: "00000000-0000-4000-8000-000000000001"}
@@ -97,5 +99,58 @@ func TestGoldenExtensionVector(t *testing.T) {
 	// Orphan recovery has no native outcome, so the record stays uncertain.
 	if ev.Class != core.EvidenceUnknown || ev.State != protocol.StateUncertain {
 		t.Fatalf("Lookup(orphan) = %+v, want unknown evidence in state uncertain", ev)
+	}
+}
+
+// A granted Submit to the gating reference bridge publishes granted true at
+// the gate's revision; Submit of the same request with Granted false to the
+// same bridge still writes the golden bytes, which the extension's node:test
+// delivers.
+func TestGrantedSubmitToTheReferenceBridge(t *testing.T) {
+	src := filepath.Join("..", "..", "..", "integrations", "pi", "testdata", "pi-bridge")
+	golden := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	key := requests.Key{CreatorHost: "host1", TargetID: "pi-1", RequestID: "00000000-0000-4000-8000-000000000001"}
+	submit := func(t *testing.T, granted bool) []byte {
+		t.Helper()
+		dir := t.TempDir()
+		live, err := os.ReadFile(filepath.Join(src, "bridge.liveness"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "bridge.liveness"), live, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(filepath.Join(dir, "bridge.liveness"), golden, golden); err != nil {
+			t.Fatal(err)
+		}
+		a, err := New("pi-1", "pi-seat", bridgeDir{dir: dir, names: piWire})
+		if err != nil {
+			t.Fatal(err)
+		}
+		a.now = func() time.Time { return golden }
+		a.submitWait = 0
+		req := core.BoundRequest{Key: key, Epoch: addressEpoch("golden-generation"), Input: protocol.SubmitInput{Text: "summarize the diff"}, NotAfter: "2036-01-01T00:00:00Z", Granted: granted}
+		if adm, err := a.Submit(req); adm.Code != "" {
+			t.Fatalf("Submit(granted %v) = %+v, %v; want published, waiting for its receipt", granted, adm, err)
+		}
+		got, err := os.ReadFile(filepath.Join(dir, "requests", clientRef(key)+".json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	want, err := os.ReadFile(filepath.Join(src, "requests", clientRef(key)+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := submit(t, false); string(got) != string(want) {
+		t.Fatalf("request bytes with Granted false = %s, want golden %s", got, want)
+	}
+	var rec map[string]any
+	if err := json.Unmarshal(submit(t, true), &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec["granted"] != true || rec["bridge_revision"] != float64(GateBridgeRevision) || rec["text"] != "summarize the diff" {
+		t.Fatalf("granted request = %v, want granted true, bridge_revision %d and the text as sent", rec, GateBridgeRevision)
 	}
 }
