@@ -9,3 +9,8 @@ import "time"
 func coopHookWakeBaseline(root, me string) (time.Time, bool) {
 	return time.Time{}, false
 }
+
+// On this platform no wake or wait hook runs.
+func readSeatDoorbell(root, me string) seatDoorbellRead {
+	return seatDoorbellRead{ringer: doorbellHook}
+}

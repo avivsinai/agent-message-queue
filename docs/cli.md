@@ -832,6 +832,8 @@ Options:
         Hold the first doorbell for low-priority mail up to this long (0 = no priority hold)
   -hold-normal duration
         Hold the first doorbell for normal-priority mail up to this long (0 = no priority hold)
+  -hook-doorbell
+        Let the harness's own background hook ring this seat; the wake types only when no hook waits
   -inject-arg value
         Argument for --inject-via before the payload (repeatable)
   -inject-cmd string
@@ -1554,6 +1556,8 @@ Options:
         Hold the first doorbell for low-priority mail up to this long (0 = no priority hold)
   -hold-normal duration
         Hold the first doorbell for normal-priority mail up to this long (0 = no priority hold)
+  -hook-doorbell
+        Let the harness's own background hook ring this seat; the wake types only when no hook waits
   -inject-timeout duration
         Timeout for one --inject-via command (default 5s)
   -input-guard
@@ -2035,20 +2039,22 @@ nothing.
 
 stop blocks the stop once for unread mail it has not reported yet. Under a
 live wake it counts only mail created at or before the wake's startup
-baseline, because the wake rings for later mail. It allows the stop after
-5 blocks in one chain, and prints a systemMessage when the context conflicts
-or the mailbox cannot be read.
+baseline, because the wake or its hook rings for later mail. On an attended
+seat it never blocks: it reports each unread message once. It allows the
+stop after 5 blocks in one chain, and prints a systemMessage when the
+context conflicts or the mailbox cannot be read.
 
 prompt: on UserPromptSubmit, adds a line of context when unread mail waits;
 prints nothing for the wake's own doorbell.
 
-wait is the doorbell of a session that no wake rings, such as a session of
-the Claude Code desktop app. It runs as an asyncRewake hook: it waits for
-unread mail that is due under the wake settings hold_normal, hold_low and
+wait rings a supported Claude Code session when it owns the doorbell.
+Desktop sessions support it by default. Terminal sessions enable it with
+--hook-doorbell=true. The asyncRewake hook waits for unread mail due under
+the wake settings hold_normal, hold_low and
 debounce and that no hook has announced, then prints the doorbell on stderr
 and exits 10, which the installed command turns into the exit code 2 that
-wakes the session. It exits 0 at once when a wake rings the agent, another
-wait runs for the agent, or the session would hold its turn end on the hook.
+wakes the session. It exits quietly when the host cannot run it or the
+terminal has not enabled the hook.
 
 codex-wait is the doorbell of a joined Codex chat. It runs as
 an async Codex hook and reads the thread id from the hook input's session_id.

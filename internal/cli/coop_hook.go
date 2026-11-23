@@ -43,20 +43,22 @@ func runCoopHook(args []string) error {
 		"",
 		"stop blocks the stop once for unread mail it has not reported yet. Under a",
 		"live wake it counts only mail created at or before the wake's startup",
-		"baseline, because the wake rings for later mail. It allows the stop after",
-		"5 blocks in one chain, and prints a systemMessage when the context conflicts",
-		"or the mailbox cannot be read.",
+		"baseline, because the wake or its hook rings for later mail. On an attended",
+		"seat it never blocks: it reports each unread message once. It allows the",
+		"stop after 5 blocks in one chain, and prints a systemMessage when the",
+		"context conflicts or the mailbox cannot be read.",
 		"",
 		"prompt: on UserPromptSubmit, adds a line of context when unread mail waits;",
 		"prints nothing for the wake's own doorbell.",
 		"",
-		"wait is the doorbell of a session that no wake rings, such as a session of",
-		"the Claude Code desktop app. It runs as an asyncRewake hook: it waits for",
-		"unread mail that is due under the wake settings hold_normal, hold_low and",
+		"wait rings a supported Claude Code session when it owns the doorbell.",
+		"Desktop sessions support it by default. Terminal sessions enable it with",
+		"--hook-doorbell=true. The asyncRewake hook waits for unread mail due under",
+		"the wake settings hold_normal, hold_low and",
 		"debounce and that no hook has announced, then prints the doorbell on stderr",
 		"and exits 10, which the installed command turns into the exit code 2 that",
-		"wakes the session. It exits 0 at once when a wake rings the agent, another",
-		"wait runs for the agent, or the session would hold its turn end on the hook.",
+		"wakes the session. It exits quietly when the host cannot run it or the",
+		"terminal has not enabled the hook.",
 		"",
 		"codex-wait is the doorbell of a joined Codex chat. It runs as",
 		"an async Codex hook and reads the thread id from the hook input's session_id.",
@@ -147,20 +149,19 @@ func writeCoopSessionStart(w io.Writer, now time.Time) error {
 	if unread > 0 {
 		fmt.Fprintf(&b, "\nInbox: %d unread. Run amq drain --include-body.", unread)
 	}
-	// The settings are read the way the Stop guard reads them: a seat is
-	// attended when its agent or machine file says so, live wake or not.
-	attended := false
-	if settings, _ := coopWaitSettings(root, me, wakeSettingsLayers{}); settings.attended {
-		attended = true
-	}
+	seat := readSeatDoorbell(root, me)
 	switch {
-	case attended:
+	case seat.ringer == doorbellNone:
 		// An attended seat is never typed into, so no wake mode changes the
 		// wording.
 		b.WriteString("\nThis seat is attended: no doorbell is typed and no hook wakes it. Mail is announced at the person's next prompt and at a turn end; run amq drain --include-body then. Do not run amq watch, amq monitor or a polling loop.")
-	case coopHookWakeRings(root, me):
+	case seat.ringer == doorbellTyped:
 		b.WriteString("\nA wake rings this terminal when mail arrives; do not run amq watch, amq monitor or a polling loop.")
-	case coopWaitRings():
+	case seat.hookPublished:
+		// The live wake types the doorbell whenever no waiter holds it, so
+		// this seat has a ringer whether or not its hook runs.
+		b.WriteString("\nA hook wakes this session when mail arrives; a wake types the doorbell only when no hook waits. Do not run amq watch, amq monitor or a polling loop.")
+	case coopWaitRings(seat.optIn):
 		b.WriteString("\nA hook wakes this session when mail arrives after a turn ends; do not run amq watch, amq monitor or a polling loop.")
 	default:
 		b.WriteString("\nNo wake: run amq drain --include-body between tasks.")
@@ -209,8 +210,8 @@ func coopHookPeers(root, me string, now time.Time) []string {
 
 // coopWaitRings reports whether the waiter is this session's doorbell when
 // no wake rings: amq coop install-hooks installed it, and the session keeps
-// it in the background.
-func coopWaitRings() bool {
+// it in the background. optIn is the seat's opt-in from its one seat read.
+func coopWaitRings(optIn bool) bool {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return false
@@ -219,25 +220,11 @@ func coopWaitRings() bool {
 	if err != nil || !slices.ContainsFunc(commands, ownsCoopHook(true)) {
 		return false
 	}
-	return coopWaitRunsInBackground()
+	return coopWaitRunsInBackground(optIn)
 }
 
 // coopHookUnread counts messages in inbox/new the way amq list --new does.
 func coopHookUnread(root, me string) int {
 	pending, _ := coopStopPending(root, me)
 	return len(pending)
-}
-
-// coopHookWakeRings reports whether a live wake for (root, me) writes a
-// doorbell into the terminal, with amq wake check's liveness rule from one
-// lock observation. A notify-only wake (mode none) does not ring the
-// terminal. Any doubt reads as no wake, so the preamble tells the agent to
-// drain.
-func coopHookWakeRings(root, me string) bool {
-	inspection := inspectWakeLock(root, me)
-	live := inspection.Exists &&
-		inspection.Status == wakeLockValid &&
-		inspection.IdentityConfirmed &&
-		inspection.Process.Running
-	return live && inspection.Lock.WakeMode != wakeInjectModeNone
 }

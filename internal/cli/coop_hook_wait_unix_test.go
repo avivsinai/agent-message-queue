@@ -21,6 +21,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -56,11 +57,12 @@ func TestCoopWaitRingsOnlyForDueMailNoHookAnnounced(t *testing.T) {
 		{ID: "reported", Priority: format.PriorityUrgent, File: arrived},
 	}
 
-	due, next := decideCoopWait(pending, []string{"reported"}, policy, now)
+	announced := map[string]time.Time{"reported": now}
+	due, next := decideCoopWait(pending, announced, policy, now)
 	if !slices.Equal(due, []string{"urgent"}) || !next.Equal(now.Add(4*time.Minute)) {
 		t.Fatalf("due = %v next = %v, want urgent now and normal in 4m", due, next)
 	}
-	due, next = decideCoopWait(pending, []string{"reported"}, wakeHoldPolicy{}, now)
+	due, next = decideCoopWait(pending, announced, wakeHoldPolicy{}, now)
 	if !slices.Equal(due, []string{"low", "normal", "urgent"}) || !next.IsZero() {
 		t.Fatalf("without holds: due = %v next = %v, want all three and nothing held", due, next)
 	}
@@ -91,21 +93,235 @@ func TestCoopWaitRingsOnceForNewMail(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := wait(4 * time.Second)
+	// Under a live wake, only the generation's published channel permits
+	// the waiter to ring for this message.
+	process := inspectWakeProcess(os.Getpid())
+	process.Executable = "/opt/amq"
+	process.Args = []string{"amq", "wake"}
+	stubInspectWakeProcess(t, func(int) wakeProcessInfo { return process })
+	stopWake, err := acquireWakeLockWithOptions(root, "claude", wakeLockAcquireOptions{wakeMode: wakeInjectModeRaw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stopWake()
+	dir, err := openExistingWakeAgentDir(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dir.Close() }()
+	inspection := inspectWakeLock(root, "claude")
+	publish := func(channel wakeChannel) {
+		t.Helper()
+		if err := recordWakeSettingsApplied(dir, inspection, wakeSettingsAppliedStatus{doorbell: channel}, wakeSettingsGuardTimeout); err != nil {
+			t.Fatal(err)
+		}
+	}
+	publish(wakeChannelTyped)
+	if err := wait(quiet); err != nil {
+		t.Fatalf("typed wake: %v, want silence", err)
+	}
+	publish(wakeChannelHook)
+	err = wait(4 * time.Second)
 	if !errors.Is(err, errCoopWaitRing) || GetExitCode(err) != harness.ClaudeRewakeRingExit || err.Error() != harness.Doorbell {
 		t.Fatalf("new mail: %v (exit %d), want the doorbell with the ring code", err, GetExitCode(err))
 	}
-	statePath := filepath.Join(root, "agents", "claude", coopWaitStateFile)
-	if rang := readCoopWaitState(statePath, claudeSession); len(rang.RangIDs) != 1 {
+	agentDir := filepath.Join(root, "agents", "claude")
+	statePath := filepath.Join(agentDir, coopWaitStateFile)
+	rang := coopAnnounced(agentDir, claudeSession, false).rang
+	if len(rang.RangIDs) != 1 {
 		t.Fatalf("rang ids = %v, want the one message", rang.RangIDs)
 	}
 	// A ring is what one session heard: another session that takes the
 	// handle must not inherit it.
-	if rang := readCoopWaitState(statePath, "0c29e148-77eb-47c0-8984-10c13b4700b2"); len(rang.RangIDs) != 0 {
-		t.Fatalf("another session reads rang ids %v, want none", rang.RangIDs)
+	if other := coopAnnounced(agentDir, "0c29e148-77eb-47c0-8984-10c13b4700b2", false).rang; len(other.RangIDs) != 0 {
+		t.Fatalf("another session reads rang ids %v, want none", other.RangIDs)
 	}
 	if err := wait(quiet); err != nil {
 		t.Fatalf("same mail again: %v, want no second ring", err)
+	}
+
+	// Commit 90080c7e: a rang record over 64 KiB read as empty, so the
+	// waiter rang the whole backlog again at each turn end.
+	large := coopWaitState{Schema: 1, ClaudeSession: claudeSession, RangIDs: slices.Clone(rang.RangIDs)}
+	for i := 0; i < 4000; i++ {
+		large.RangIDs = append(large.RangIDs, fmt.Sprintf("2026-11-23T00-00-00.%06dZ_pid1_backlog", i))
+	}
+	if err := writeCoopHookState(statePath, large); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(statePath); err != nil || info.Size() <= 64*1024 {
+		t.Fatalf("rang record = %v, %v; want one over 64 KiB", info, err)
+	}
+	if err := wait(quiet); err != nil {
+		t.Fatalf("a rang record over 64 KiB that names the mail: %v, want no ring", err)
+	}
+
+	// Review finding H7: a ring the waiter undoes (its queue failed) left a
+	// fresh rang record, which the wake read as a recent ring and so held
+	// its typed doorbell for the whole grace.
+	aged := time.Now().Add(-2 * hookRingGrace)
+	if err := os.Chtimes(statePath, aged, aged); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := captureStdout(t, func() error {
+		return runSend([]string{"--root", root, "--me", "codex", "--to", "claude", "--body", "again"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	undone := claudeWaiter(claudeSession, os.Getppid(), launch.HolderIdentity{})
+	undone.ring = func() (bool, error) { return true, nil }
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	if err := waitCoopMail(ctx, root, "claude", undone); err != nil {
+		t.Fatalf("undone ring: %v", err)
+	}
+	pending, err := coopStopPending(root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, msg := range pending {
+		ids = append(ids, msg.ID)
+	}
+	yield := &wakeConfig{root: root, me: "claude", publishedChannel: wakeChannelHook}
+	if wait, held := yield.hookYield(time.Now(), ids); held {
+		t.Fatalf("the wake yields %s after an undone ring, want it to type", wait)
+	}
+
+	// Review finding H12: no test covered the lock mode that H1 passes to
+	// publishedWakeChannel. A notify-only wake with no applied record types
+	// nothing, so its waiter is the seat's ringer and must ring.
+	if err := fsq.EnsureAgentDirs(root, "notifyring"); err != nil {
+		t.Fatal(err)
+	}
+	stopNotify, err := acquireWakeLockWithOptions(root, "notifyring", wakeLockAcquireOptions{wakeMode: wakeInjectModeNone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stopNotify()
+	if _, err := captureStdout(t, func() error {
+		return runSend([]string{"--root", root, "--me", "codex", "--to", "notifyring", "--body", "notify-only"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	notifyCtx, notifyCancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer notifyCancel()
+	if err := waitCoopMail(notifyCtx, root, "notifyring", claudeWaiter(claudeSession, os.Getppid(), launch.HolderIdentity{})); !errors.Is(err, errCoopWaitRing) {
+		t.Fatalf("notify-only wake with no record: %v, want the doorbell", err)
+	}
+
+	// Review finding H10: under a live wake whose record has no doorbell
+	// value (an older wake image), the hooks took attended only from that
+	// record, so a seat whose settings file says attended was rung.
+	if err := fsq.EnsureAgentDirs(root, "olderwake"); err != nil {
+		t.Fatal(err)
+	}
+	stopOlder, err := acquireWakeLockWithOptions(root, "olderwake", wakeLockAcquireOptions{wakeMode: wakeInjectModeRaw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stopOlder()
+	if err := os.WriteFile(filepath.Join(fsq.AgentBase(root, "olderwake"), wakeSettingsFileName), []byte(`{"schema":1,"settings":{"attended":true}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readSeatDoorbell(root, "olderwake").ringer; got != doorbellNone {
+		t.Fatalf("live wake with no record, attended in the settings file: doorbell = %v, want none", got)
+	}
+
+	// Review finding H3: the Stop guard keeps the baseline cut of #1152 under
+	// every live wake that is not attended, whatever channel it published:
+	// mail after the baseline does not block the stop.
+	for _, seat := range []struct {
+		me, mode string
+		channel  wakeChannel
+	}{
+		{"hookseat", wakeInjectModeRaw, wakeChannelHook},
+		{"notifyseat", wakeInjectModeNone, ""},
+	} {
+		if err := fsq.EnsureAgentDirs(root, seat.me); err != nil {
+			t.Fatal(err)
+		}
+		stop, err := acquireWakeLockWithOptions(root, seat.me, wakeLockAcquireOptions{wakeMode: seat.mode})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer stop()
+		live := inspectWakeLock(root, seat.me)
+		if err := writeWakePreparedFile(root, seat.me, live); err != nil {
+			t.Fatal(err)
+		}
+		// A message's created time has whole seconds: the baseline is set a
+		// minute back so the next mail is plainly after it.
+		started := time.Now().Add(-time.Minute)
+		if err := os.Chtimes(wakePreparedPath(root, seat.me), started, started); err != nil {
+			t.Fatal(err)
+		}
+		if seat.channel != "" {
+			seatDir, err := openExistingWakeAgentDir(root, seat.me)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = recordWakeSettingsApplied(seatDir, live, wakeSettingsAppliedStatus{doorbell: seat.channel}, wakeSettingsGuardTimeout)
+			_ = seatDir.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := captureStdout(t, func() error {
+			return runSend([]string{"--root", root, "--me", "codex", "--to", seat.me, "--body", "after the baseline"})
+		}); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(envRoot, root)
+		t.Setenv(envMe, seat.me)
+		var out bytes.Buffer
+		if err := writeCoopStop(strings.NewReader(`{"stop_hook_active":false}`), &out); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out.String(), `"decision"`) {
+			t.Fatalf("%s: stop = %q, want no block for mail after the baseline", seat.me, out.String())
+		}
+	}
+}
+
+// Review of 912dcf71: a waiter slept its whole debounce (4 s by setting)
+// before it looked at the owner file, so a newer waiter got the lock only
+// after that, and a wake that scanned in between typed for mail the newer
+// waiter then rang.
+func TestCoopWaitLeavesItsDebounceForANewerWaiter(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	root := filepath.Join(t.TempDir(), "queue")
+	if err := runInit([]string{"--root", root, "--agents", "claude,codex"}); err != nil {
+		t.Fatal(err)
+	}
+	root = canonicalWakeRoot(root)
+	if _, err := captureStdout(t, func() error {
+		return runWakeConfig([]string{"--root", root, "--me", "claude", "--debounce", "4s"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := captureStdout(t, func() error {
+		return runSend([]string{"--root", root, "--me", "codex", "--to", "claude", "--body", "hi"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	older := claudeWaiter("7c29e148-77eb-47c0-8984-10c13b4700b1", os.Getppid(), launch.HolderIdentity{})
+	rang := false
+	older.ring = func() (bool, error) { rang = true; return false, errCoopWaitRing }
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	started := time.Now()
+	go func() { done <- waitCoopMail(ctx, root, "claude", older) }()
+	time.Sleep(300 * time.Millisecond)
+	if err := writeCoopHookState(filepath.Join(fsq.AgentBase(root, "claude"), coopWaitOwnerFile), "newer-waiter"); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil || rang {
+		t.Fatalf("older waiter: %v (rang %t), want it to leave with no ring", err, rang)
+	}
+	if took := time.Since(started); took > 300*time.Millisecond+2*coopWaitPoll {
+		t.Fatalf("older waiter left after %v, want within two polls of the newer waiter", took)
 	}
 }
 
@@ -511,5 +727,53 @@ func TestCodexWaitQueuesTheDoorbellToItsThread(t *testing.T) {
 	want := []string{"queue", "--thread", thread, "--message", harness.Doorbell}
 	if len(recorder.queued) != 1 || !slices.Equal(recorder.queued[0], want) {
 		t.Fatalf("queued %v, want one call %v", recorder.queued, want)
+	}
+}
+
+func TestTerminalWaitHookRequiresOptIn(t *testing.T) {
+	clearJoinTestEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	const session = "7c29e148-77eb-47c0-8984-10c13b4700b1"
+	t.Setenv(envClaudeSession, session)
+	pid := os.Getppid()
+	path := claudeSessionRecord(t, pid, session)
+	raw, err := json.Marshal(claudeNativeRegistry{PID: pid, SessionID: session, Version: "2.1.330", Entrypoint: "cli"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureAgentDirs(root, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envRoot, root)
+	t.Setenv(envMe, "claude")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := runCoopWait(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(fsq.AgentBase(root, "claude"), coopWaitOwnerFile)); !os.IsNotExist(err) {
+		t.Fatalf("waiter owner with hook doorbell off: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fsq.AgentBase(root, "claude"), wakeSettingsFileName), []byte(`{"schema":1,"settings":{"hook_doorbell":true}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if !coopWaitRunsInBackground(readSeatDoorbell(root, "claude").optIn) {
+		t.Fatal("the same terminal should admit a waiter when the setting is enabled")
+	}
+	// Review finding H2: with the setting on, no live wake and no wait hook
+	// installed, nothing rings, so the preamble must not tell the agent a
+	// hook wakes it.
+	var preamble bytes.Buffer
+	if err := writeCoopSessionStart(&preamble, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(preamble.String(), "No wake: run amq drain --include-body between tasks.") {
+		t.Fatalf("preamble with no wake and no wait hook = %q, want No wake", preamble.String())
 	}
 }

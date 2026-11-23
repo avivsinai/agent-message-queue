@@ -2740,6 +2740,12 @@ func (s *wakeStart) loadStartupSettings() error {
 	s.inputGuard = s.newInputGuard()
 	startupSettings.applied.inputGuard = s.inputGuard.status(startupSettings.settings)
 	startupSettings.applied.attended = startupSettings.settings.attended
+	startupSettings.applied.doorbell = wakeDoorbellChannel(startupSettings.settings, &wakeConfig{
+		me:         s.me,
+		harness:    s.harness,
+		injectMode: s.injectMode,
+		injectVia:  s.injectVia,
+	})
 	s.startupSettings = startupSettings
 	s.machineSettingsPath, err = machineWakeSettingsPath()
 	if err != nil {
@@ -2929,6 +2935,9 @@ func (s *wakeStart) newLoopConfig() wakeConfig {
 			)
 		},
 		onPrepared: s.onPrepared,
+	}
+	if startupSettings.unseeded == nil && s.pendingStartupSettingsApplied == nil {
+		cfg.applyPublishedChannel(startupSettings.applied.doorbell)
 	}
 	if s.attention != nil {
 		attention := s.attention

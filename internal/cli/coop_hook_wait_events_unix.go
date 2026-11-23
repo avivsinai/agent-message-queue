@@ -33,7 +33,9 @@ func newCoopWaitEvents(agentDir string, extra ...string) *coopWaitEvents {
 		inbox: filepath.Join(agentDir, "inbox", "new"),
 		names: map[string]bool{},
 	}
-	for _, name := range []string{coopWaitOwnerFile, wakeSettingsFileName, wakeLockFileName, coopStopStateFile} {
+	// The wake's applied record names the channel it published for its
+	// generation, so its change can turn a silent waiter into a ring.
+	for _, name := range []string{coopWaitOwnerFile, wakeSettingsFileName, wakeSettingsAppliedFileName, wakeLockFileName, coopStopStateFile} {
 		e.names[filepath.Join(agentDir, name)] = true
 	}
 	watcher, err := fsnotify.NewWatcher()

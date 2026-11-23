@@ -120,15 +120,15 @@ func writeCoopStop(stdin io.Reader, w io.Writer) error {
 	}
 	statePath := filepath.Join(fsq.AgentBase(root, me), coopStopStateFile)
 	old := readCoopStopState(statePath)
-	// The settings are read before the wake baseline, and only when mail is
-	// pending or a notice is already recorded: most turn ends have neither,
-	// and the two settings files are the only reads here that touch the
-	// disk.
+	// The seat decision is read before the wake baseline, and only when mail
+	// is pending or a notice is already recorded: most turn ends have
+	// neither, and the decision's reads are the only ones here that touch
+	// the disk. The guard asks it only whether the seat is attended: every
+	// other live wake, whatever its channel, rings or yields to a ringer for
+	// mail after its baseline.
 	attended := false
 	if len(pending) > 0 || len(old.NoticedIDs) > 0 {
-		if settings, _ := coopWaitSettings(root, me, wakeSettingsLayers{}); settings.attended {
-			attended = true
-		}
+		attended = readSeatDoorbell(root, me).ringer == doorbellNone
 	}
 	var baseline *time.Time
 	if len(pending) > 0 && !attended {
