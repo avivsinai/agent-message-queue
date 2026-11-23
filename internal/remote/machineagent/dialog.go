@@ -559,8 +559,8 @@ func (s *Agent) dialogStep(t dialogTarget, dir string, req dialog.Request, now t
 }
 
 // reactionOption is the option the owner's reaction picks: ❌ the deny
-// option, which beats ✅, option 1. A reaction never answers a dialog
-// without that option; 0 means no answer.
+// option, which beats the narrowest ✅ allow. A reaction never answers a
+// dialog without that option; 0 means no answer.
 func reactionOption(req dialog.Request, rs []buzzop.Reaction, owner string) int {
 	if reacted(rs, owner, "❌") {
 		for _, o := range req.Options {
@@ -570,10 +570,8 @@ func reactionOption(req dialog.Request, rs []buzzop.Reaction, owner string) int 
 		}
 	}
 	if reacted(rs, owner, "✅") {
-		for _, o := range req.Options {
-			if o.N == 1 {
-				return 1
-			}
+		if option, ok := dialog.ApproveOption(req); ok {
+			return option.N
 		}
 	}
 	return 0
@@ -728,11 +726,20 @@ func dialogText(label string, req dialog.Request) string {
 	}
 	var how []string
 	if len(req.Options) > 0 {
-		how = append(how, "React ✅ = 1")
+		if approve, ok := dialog.ApproveOption(req); ok {
+			how = append(how, fmt.Sprintf("React ✅ = %d", approve.N))
+		}
 		if deny {
 			how = append(how, "❌ = Deny")
 		}
-		how = append(how, "or reply a number / yes / no")
+		tail := "or reply a number"
+		if _, ok := dialog.ApproveOption(req); ok {
+			tail += " / yes"
+		}
+		if deny {
+			tail += " / no"
+		}
+		how = append(how, tail)
 	}
 	if req.FreeText {
 		how = append(how, "or reply with your answer")

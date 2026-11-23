@@ -1850,14 +1850,24 @@ func decisions(raws []json.RawMessage, fallback ...string) ([]dialog.Option, fun
 			continue
 		}
 		label := decisionLabel(raw)
+		scope := ""
 		var tok string
 		if json.Unmarshal(raw, &tok) == nil {
 			value = tok
+			switch tok {
+			case "accept":
+				scope = dialog.ScopeOnce
+			case "acceptForSession":
+				scope = dialog.ScopeSession
+			}
 			if tok == "decline" || tok == "cancel" && deny < 0 {
 				deny = len(options)
 			}
+		} else {
+			// Object decisions are policy amendments, persistent approvals.
+			scope = dialog.ScopeAlways
 		}
-		options = append(options, dialog.Option{Label: label, Value: value})
+		options = append(options, dialog.Option{Label: label, Value: value, Scope: scope})
 	}
 	if deny >= 0 {
 		options[deny].Deny = true
@@ -1922,8 +1932,8 @@ func decisionLabel(raw json.RawMessage) string {
 // the session, or grant none.
 func permissionChoices(requested json.RawMessage) ([]dialog.Option, func(dialog.Answer) (any, string, string, bool)) {
 	options := number([]dialog.Option{
-		{Label: "Allow for this turn", Value: "turn"},
-		{Label: "Allow for session", Value: "session"},
+		{Label: "Allow for this turn", Value: "turn", Scope: dialog.ScopeTurn},
+		{Label: "Allow for session", Value: "session", Scope: dialog.ScopeSession},
 		{Label: "Deny", Value: "deny", Deny: true},
 	})
 	if len(requested) == 0 || string(requested) == "null" {
@@ -1994,7 +2004,7 @@ func userInputChoices(questions []userQuestion) ([]dialog.Option, bool, func(dia
 // object as it is, or the value of the form's only field.
 func elicitationChoices(mode string, schema json.RawMessage) ([]dialog.Option, bool, func(dialog.Answer) (any, string, string, bool)) {
 	options := number([]dialog.Option{
-		{Label: "Accept", Value: "accept"},
+		{Label: "Accept", Value: "accept", Scope: dialog.ScopeOnce},
 		{Label: "Decline", Value: "decline", Deny: true},
 		{Label: "Cancel", Value: "cancel"},
 	})

@@ -1264,9 +1264,12 @@ Every dialog a connected session raises in its terminal also shows in the
 session's Buzz channel: a command, a file edit, a network or permission
 grant, an MCP call, a question. The message carries the dialog text and its
 options as the harness shows them, so the owner reads what the terminal
-shows. ✅ takes the first option, ❌ the deny option, a reply `1`, `2`, ...
-takes that option, `yes` and `no` work as ✅ and ❌, and a dialog that asks for
-text takes any reply. The first answer wins, in Buzz or in the terminal, and
+shows. ✅ takes the narrowest approval: one action, else this turn, else
+this session. An always choice needs its numbered reply. ❌ takes the deny
+option; a reply `1`, `2`, ... takes that option, `yes` and `no` work as ✅
+and ❌, a dialog with only always and deny accepts only a number as an
+approval, and a dialog that asks for text takes any reply. The first answer
+wins, in Buzz or in the terminal, and
 the message is edited with the outcome. A Claude Code question with one
 single-select question shows its choices; a reply with the number, or with
 other text, is the answer. A question with more than one part, a multi-select

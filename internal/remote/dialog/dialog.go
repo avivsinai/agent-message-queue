@@ -39,10 +39,47 @@ import (
 
 // Option is one choice the dialog offers.
 type Option struct {
-	N     int    `json:"n"`              // 1-based, as shown in Buzz
-	Label string `json:"label"`          // "Allow once", "Allow this session", "Deny", or the harness's own label
-	Value string `json:"value"`          // harness-specific decision token the seam applies
-	Deny  bool   `json:"deny,omitempty"` // the option ❌ selects
+	N     int    `json:"n"`               // 1-based, as shown in Buzz
+	Label string `json:"label"`           // "Allow once", "Allow this session", "Deny", or the harness's own label
+	Value string `json:"value"`           // harness-specific decision token the seam applies
+	Deny  bool   `json:"deny,omitempty"`  // the option ❌ selects
+	Scope string `json:"scope,omitempty"` // once | turn | session | always for an allow; empty for a deny or a question
+}
+
+const (
+	ScopeOnce    = "once"
+	ScopeTurn    = "turn"
+	ScopeSession = "session"
+	ScopeAlways  = "always"
+)
+
+// ApproveOption returns the offer an approving word or ✅ takes. A typed
+// allow picks the narrowest once, turn or session, never an always choice.
+// Untyped dialogs retain the first-option rule for questions, pi and records
+// that an older seam opened.
+var approvalScopes = map[string]int{ScopeOnce: 1, ScopeTurn: 2, ScopeSession: 3}
+
+func ApproveOption(r Request) (Option, bool) {
+	typed := false
+	best := 0
+	for _, o := range r.Options {
+		if o.Scope != "" {
+			typed = true
+		}
+		scope := approvalScopes[o.Scope]
+		if scope != 0 && (best == 0 || scope < best) {
+			best = scope
+		}
+	}
+	for _, o := range r.Options {
+		if !typed && o.N == 1 {
+			return o, true
+		}
+		if approvalScopes[o.Scope] == best && best != 0 {
+			return o, true
+		}
+	}
+	return Option{}, false
 }
 
 // Request is one open dialog.
@@ -434,7 +471,7 @@ func FindBinding(root, handle, session string) (string, error) {
 }
 
 // ParseAnswer maps a Buzz reply to an answer: "N" picks option N;
-// "yes"/"y"/"approve"/"✅" picks option 1; "no"/"n"/"reject"/"❌" picks the
+// "yes"/"y"/"approve"/"✅" picks the narrowest approval scope; "no"/"n"/"reject"/"❌" picks the
 // Deny option; any other non-empty text is a free-text answer when
 // r.FreeText. ok=false when the reply is not an answer.
 func ParseAnswer(r Request, reply string) (Answer, bool) {
@@ -452,10 +489,8 @@ func ParseAnswer(r Request, reply string) (Answer, bool) {
 	}
 	switch word {
 	case "yes", "y", "approve", "✅":
-		for _, o := range r.Options {
-			if o.N == 1 {
-				return pick(1)
-			}
+		if o, ok := ApproveOption(r); ok {
+			return pick(o.N)
 		}
 	case "no", "n", "reject", "❌":
 		for _, o := range r.Options {
