@@ -2,6 +2,7 @@
 // `pi`. The wire contract is docs/pi-bridge-protocol.md; this file is the
 // extension side of it. The adapter writes requests/; this extension writes
 // receipts/, events/, and bridge.liveness.
+import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { randomBytes, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
@@ -233,16 +234,15 @@ const guardRestored = new Set<string>();
 // GUARD_PID is the pi process that loaded this module. It names the only
 // guard file this module reads, writes or removes.
 const GUARD_PID = process.pid;
-// GUARD_START_SLACK_S is how far apart, in seconds, two reads of one
-// process's start may be and still name the same process.
-const GUARD_START_SLACK_S = 2;
+// The on-disk unit is Unix seconds. Keep millisecond precision across reloads.
+const GUARD_STARTED = Math.round(performance.timeOrigin) / 1000;
 const ARM_ID = /^[0-9a-f]{32}$/;
 const READ_ONLY_BUILTINS = new Set(["read", "grep", "find", "ls"]);
 const gateTextLimit = 2000;
-// A call's text must fit one screen: at most gateRowLimit rows of
-// gateColumns columns.
 const gateRowLimit = 20;
-const gateColumns = 80;
+// Pi 1.5.2 ExtensionInputComponent (extension-input.js:30-49) adds two
+// borders, four single-row spacers, the input and its key hints to the title.
+const inputDialogRows = 8;
 const gateAsk = "\n\nType yes to run it. Any other answer does not run it.";
 const gateDenied = "The person at the terminal did not approve this call. It is a call of a task that a linked server sent under a session grant.";
 const gateNoTerminal = "This call needs the person's yes at the terminal, and this pi session has no terminal UI.";
@@ -251,13 +251,6 @@ const gateExtensionLine = "This is a tool of an extension. AMQ cannot see what i
 
 function guardFile(dir: string): string {
 	return path.join(dir, `granted-guard.${GUARD_PID}.json`);
-}
-
-// processStarted is the start of this pi process in Unix seconds. With the
-// pid it tells this process's guard file from one that an earlier process
-// with the same pid left.
-function processStarted(): number {
-	return Math.round((Date.now() - process.uptime() * 1000) / 1000);
 }
 
 // Only the native hand-off and its ownership match use the tagged text.
@@ -275,7 +268,7 @@ function writeGuard(dir: string): boolean {
 			fs.rmSync(guardFile(dir), { force: true });
 			return true;
 		}
-		const tmp = writeTemp(dir, JSON.stringify({ pid: GUARD_PID, started: processStarted(), arms: open }));
+		const tmp = writeTemp(dir, JSON.stringify({ pid: GUARD_PID, started: GUARD_STARTED, arms: open }));
 		try {
 			fs.renameSync(tmp, guardFile(dir));
 		} catch (err) {
@@ -303,7 +296,10 @@ function restoreGuard(dir: string): void {
 	} catch {
 		return;
 	}
-	if (!rec || typeof rec.started !== "number" || Math.abs(rec.started - processStarted()) > GUARD_START_SLACK_S) {
+	if (!rec || rec.pid !== GUARD_PID || !Array.isArray(rec.arms)) return;
+	// An unknown origin leaves the arms open. Only a known different
+	// process start proves that the file is stale.
+	if (typeof rec.started === "number" && Number.isFinite(rec.started) && rec.started > 0 && Math.abs(rec.started - GUARD_STARTED) > 1) {
 		try {
 			fs.rmSync(guardFile(dir), { force: true });
 		} catch {
@@ -311,7 +307,6 @@ function restoreGuard(dir: string): void {
 		}
 		return;
 	}
-	if (rec.pid !== GUARD_PID || !Array.isArray(rec.arms)) return;
 	for (const a of rec.arms as { arm?: unknown; ref?: unknown; armed_at?: unknown }[]) {
 		if (typeof a?.arm !== "string" || !ARM_ID.test(a.arm) || arms.has(a.arm)) continue;
 		arms.set(a.arm, { ref: typeof a.ref === "string" ? a.ref : "", tagged: false, owner: null, settled: false, dir, armedAt: typeof a.armed_at === "string" ? a.armed_at : "" });
@@ -365,11 +360,8 @@ function endTypedArms(owner: ExtensionAPI): void {
 	for (const dir of dirs) writeGuard(dir);
 }
 
-// HIDDEN matches every character that a terminal can use to hide or reorder
-// text and that JSON leaves as it is: C1 controls, format characters (bidi
-// controls, zero-width characters, the soft hyphen, U+FEFF) and the line
-// and paragraph separators.
-const HIDDEN = /[\u007f-\u009f\u2028\u2029]|\p{Cf}/gu;
+// C0, DEL, C1, format controls and Unicode line/paragraph separators.
+const HIDDEN = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]|\p{Cf}/gu;
 
 // visible writes every HIDDEN character of text as its \uXXXX escape, one
 // per UTF-16 code unit.
@@ -391,12 +383,8 @@ function callText(input: unknown): string | undefined {
 	} catch {
 		return undefined;
 	}
-	return text === undefined ? undefined : visible(text);
-}
-
-// screenRows is the number of rows text takes at gateColumns columns.
-function screenRows(text: string): number {
-	return text.split("\n").reduce((n, line) => n + Math.max(1, Math.ceil(line.length / gateColumns)), 0);
+	// JSON has already escaped controls in its strings. Keep its layout newlines.
+	return text === undefined ? undefined : text.split("\n").map(visible).join("\n");
 }
 
 type ToolCall = { toolName?: unknown; input?: unknown };
@@ -421,13 +409,21 @@ async function gate(pi: ExtensionAPI, event: ToolCall, ctx: ExtensionContext): P
 	try {
 		if (ctx.mode !== "tui") return deny(gateNoTerminal);
 		const text = callText(event.input);
-		if (text === undefined || text.length > gateTextLimit || screenRows(text) > gateRowLimit) return deny(gateTooLong);
+		if (text === undefined || text.length > gateTextLimit) return deny(gateTooLong);
 		const shown = visible(name);
 		const head = [...arms.values()].some((a) => a.tagged)
 			? `A task that a linked server sent wants to run \`${shown}\`:`
 			: `A task that a linked server sent may still run in this session. \`${shown}\` wants to run:`;
-		const title = [head, text, ...(builtin ? [] : [gateExtensionLine])].join("\n");
-		const answer = await ctx.ui.input(title + gateAsk, "", { signal: ctx.signal });
+		const title = [head, text, ...(builtin ? [] : [gateExtensionLine])].join("\n") + gateAsk;
+		// The dialog title has one cell of padding on either side. Pi's
+		// wrapper counts glyph cells and uses the same word breaks as its Text.
+		const columns = Math.max(20, process.stdout.columns || 80) - 2;
+		const rows = process.stdout.rows || Infinity;
+		const availableTitleRows = Math.max(1, rows - inputDialogRows);
+		if (wrapTextWithAnsi(text, columns).length > gateRowLimit || wrapTextWithAnsi(title, columns).length > availableTitleRows) {
+			return deny(gateTooLong);
+		}
+		const answer = await ctx.ui.input(title, "", { signal: ctx.signal });
 		return typeof answer === "string" && answer.trim().toLowerCase() === "yes" ? undefined : deny(gateDenied);
 	} catch {
 		return deny(gateDenied);

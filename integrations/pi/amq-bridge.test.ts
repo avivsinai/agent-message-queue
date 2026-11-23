@@ -1530,10 +1530,41 @@ test("guard: a call text over 20 rows at 80 columns blocks with no dialog", asyn
 		assert.ok(JSON.stringify(edits, null, 1).length < 2000);
 		assert.deepEqual(await h.tool("edit", edits), TOO_LONG);
 		assert.equal(h.dialogs.length, 0);
-		// "{", a line of 1440 characters (18 rows) and "}": 20 rows.
-		const command = { command: "x".repeat(1426) };
+		// A long ASCII argument still fits the padded title.
+		const command = { command: "x".repeat(1250) };
 		assert.equal(await h.tool("bash", command), undefined);
 		assert.equal(h.dialogs.length, 1);
+	} finally {
+		await h.done();
+	}
+});
+
+// Round-two review: Pi wraps wide glyphs and uses the terminal's current size.
+test("guard: the call must fit the displayed cells and available terminal rows", async (t) => {
+	const h = await granted();
+	try {
+		h.answer = () => "no";
+		for (const [name, columns, rows, value, fits] of [
+			["wide glyphs", 80, 40, "界".repeat(80 * 9), false],
+			["wide terminal", 80, 40, "a".repeat(800), true],
+			["narrow terminal", 40, 40, "a".repeat(800), false],
+			["short terminal", 80, 12, "a".repeat(800), false],
+		] as const) {
+			await t.test(name, async () => {
+				const previousColumns = process.stdout.columns;
+				const previousRows = process.stdout.rows;
+				const dialogs = h.dialogs.length;
+				try {
+					process.stdout.columns = columns;
+					process.stdout.rows = rows;
+					assert.deepEqual(await h.tool("bash", { command: value }), fits ? DENIED : TOO_LONG);
+					assert.equal(h.dialogs.length - dialogs, fits ? 1 : 0);
+				} finally {
+					process.stdout.columns = previousColumns;
+					process.stdout.rows = previousRows;
+				}
+			});
+		}
 	} finally {
 		await h.done();
 	}
@@ -1545,13 +1576,13 @@ test("guard: a call text over 20 rows at 80 columns blocks with no dialog", asyn
 test("guard: characters that hide or reorder text are shown escaped", async () => {
 	const h = await granted();
 	try {
-		h.tools.push({ name: "de\u202eploy", sourceInfo: { source: "local", path: "/ext/deploy.ts" } });
+		h.tools.push({ name: "de\u202eploy\n\u001b\t", sourceInfo: { source: "local", path: "/ext/deploy.ts" } });
 		h.answer = () => "no";
 		await h.tool("bash", { command: "echo a\u202eb\u200bc\u009bd\u2028e" });
-		await h.tool("de\u202eploy", {});
+		await h.tool("de\u202eploy\n\u001b\t", {});
 		const titles = h.dialogs.map((d) => d.title);
 		assert.ok(titles[0].includes(String.raw`echo a\u202eb\u200bc\u009bd\u2028e`), titles[0]);
-		assert.ok(titles[1].includes("`de\\u202eploy`"), titles[1]);
+		assert.ok(titles[1].includes("`de\\u202eploy\\u000a\\u001b\\u0009`"), titles[1]);
 		for (const title of titles) assert.doesNotMatch(title, /[\u007f-\u009f\u2028\u2029]|\p{Cf}/u);
 	} finally {
 		await h.done();
@@ -1745,9 +1776,12 @@ test("guard: a granted value that is not a boolean is refused invalid with nothi
 
 // Guard table, row "reload": pi loads a new module instance on reload; it
 // finds the guard file of its own process and stays guarded, untagged.
-test("guard: a reload in the same process restores the guard, which a settled run then keeps", async () => {
+test("guard: a reload in the same process restores the guard, which a settled run then keeps", async (t) => {
 	const before = await granted();
 	await before.emit("session_shutdown", { reason: "reload" });
+	// A wall-clock correction between loads leaves this process running.
+	const wallNow = Date.now.bind(Date);
+	t.mock.method(Date, "now", () => wallNow() + 5000);
 	const after = harness(undefined, before.root, await freshBridge());
 	try {
 		await after.emit("session_start", { reason: "reload" });
@@ -1769,10 +1803,12 @@ test("guard: a reload in the same process restores the guard, which a settled ru
 // the same pid. It is removed and arms nothing; with this process's start
 // it restores.
 test("guard: a guard file of an earlier process with this pid is removed and arms nothing", async () => {
-	const started = Math.round((Date.now() - process.uptime() * 1000) / 1000);
+	const started = Math.round(performance.timeOrigin) / 1000;
 	for (const [name, at, armed] of [
 		["earlier process", started - 3600, false],
 		["this process", started, true],
+		["missing origin", undefined, true],
+		["unreadable origin", "unknown", true],
 	] as const) {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "amq-pi-bridge-"));
 		const dir = path.join(root, "agents", "pi-seat", "extensions", "pi-bridge");

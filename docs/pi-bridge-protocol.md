@@ -424,7 +424,7 @@ arms the guard: it makes a random arm id (16 bytes, hex), adds it to the
 guard's state, and writes `granted-guard.<pid>.json` (mode 0600, replaced
 whole), which holds `{"pid": <pid>, "started": <seconds>, "arms": [{"arm",
 "ref", "armed_at"}]}` for every open arm of that pi process; `started` is the
-process's start in Unix seconds. A write that fails sends nothing and
+process's stable time origin in Unix seconds, rounded to the millisecond. A write that fails sends nothing and
 settles the request `failed`. The text handed to pi is the request's text, an
 empty line, and the line `[AMQ granted task <arm>]`, so only that message
 carries the arm. The user activity record carries the original request text.
@@ -436,9 +436,10 @@ and the extension never reads, changes or removes another process's file. A
 reload loads the extension again in the same process; at `session_start`,
 which pi emits before any run, the new instance reads the file of its own
 process id and keeps those arms open. A file of its own process id whose
-`started` is more than 2 seconds from this process's start was left by an
+`started` is more than one second from this process's origin was left by an
 earlier process with the same pid number: the extension removes it and
-restores nothing. So a pi process that ends with an open arm leaves its
+restores nothing. A missing or unreadable origin keeps the recorded arms
+open and untagged. A pi process that ends with an open arm leaves its
 file, and a later process with the same pid number removes it. pi does not
 reload while a run is active.
 
@@ -470,16 +471,16 @@ person's own runs too:
   `builtin:<name>`). A tool that an extension registers under one of these
   names asks.
 - A session that is not in the terminal UI at that moment blocks the call.
-- The call's text is its whole input as indented JSON. In it, and in the
-  tool's name, every character that a terminal can use to hide or reorder
-  text is written as its `\uXXXX` escape: C1 controls (U+007F to U+009F),
-  format characters (Unicode category Cf: bidi overrides and isolates,
-  zero-width characters, the soft hyphen, U+FEFF), U+2028 and U+2029.
-- A call whose text does not fit one screen blocks with no dialog: a text
-  longer than 2000 characters, or one that takes more than 20 rows at 80
-  columns (the sum over its lines of the line's length divided by 80,
-  rounded up, at least 1 per line). A task that needs such a call is sent
-  with a signature.
+- The call's text is its whole input as indented JSON. JSON escapes ASCII
+  controls in argument strings. The title also escapes ASCII controls in
+  tool names. DEL, C1 controls, Unicode format characters and the Unicode
+  line and paragraph separators appear as escapes in both.
+- The input is limited to 2000 characters and 20 wrapped rows. Pi's text
+  wrapper counts displayed cells at the terminal's current width (at least
+  20 columns, or 80 if unknown), allowing one cell of padding on each side.
+  The whole title, including the question and any extension notice, must fit
+  the terminal height after reserving eight rows for the input dialog.
+  A call that exceeds a limit is refused without opening a dialog.
 - Otherwise pi's terminal shows a text input. Its title is "A task that a
   linked server sent wants to run `<tool>`:", or, when no open arm's
   message has started, "A task that a linked server sent may still run in

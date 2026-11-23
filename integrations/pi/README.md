@@ -126,5 +126,6 @@ takes no grant and each task needs its signature
 ## Test
 
 ```bash
+npm ci --legacy-peer-deps --ignore-scripts
 npm test
 ```
