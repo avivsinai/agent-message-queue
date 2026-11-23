@@ -201,6 +201,9 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	// amq-acp in remote-target mode reads a request's native activity from
 	// this stream and shows it to its ACP client while the turn runs.
 	server.SetActivityHandler(activity.MirrorHandler(ep))
+	// A Claude Code session's prompt hook reports each prompt here and takes
+	// the text of the granted request whose stub raised it.
+	server.SetPromptHandler(promptHandler(ep))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	say(stdout, "amq-remote %s serving root=%s handle=%s socket=%s targets=%d", version, c.root, *me, server.Path(), len(ep.Targets()))
@@ -493,6 +496,25 @@ func serveStartupFrom(stateDir, root, handle, manifestFile string, mf manifest.F
 		say(warn, "warning: could not persist adapter refusals: %v", perr)
 	}
 	return store, ep, carrier, refusals, nil
+}
+
+// promptWaitMax bounds how long the endpoint holds one prompt report for a
+// dispatch that is not recorded yet.
+const promptWaitMax = 2 * time.Second
+
+// promptHandler answers a session hook's prompt report with the text of the
+// granted request whose stub raised the prompt, or nothing.
+func promptHandler(ep *core.Endpoint) ipc.PromptHandler {
+	return func(r ipc.PromptRequest) ipc.PromptReply {
+		wait := min(time.Duration(r.WaitMS)*time.Millisecond, promptWaitMax)
+		return ipc.PromptReply{Text: ep.GrantedPrompt(core.PromptReport{
+			TargetID: r.TargetID,
+			Instance: r.Instance,
+			Prompt:   core.Prompt{NativeSession: r.NativeSession, Mode: r.Mode},
+			StubID:   r.StubID,
+			Wait:     wait,
+		})}
+	}
 }
 
 // removeGoneTargets removes from the manifest at path the entry of each
