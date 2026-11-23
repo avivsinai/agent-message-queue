@@ -159,9 +159,11 @@ Use "amq <command> --help" for more information about a command.
 ```text
 $ amq init --help
 Usage:
-  amq init --root <path> --agents a,b,c [--force]
+  amq init --root <path> --agents a,b,c [--force | --add]
 
 Options:
+  -add
+        Register --agents in an already-initialized root, provisioning only new or incomplete mailboxes
   -agents string
         Comma-separated agent handles (required)
   -force

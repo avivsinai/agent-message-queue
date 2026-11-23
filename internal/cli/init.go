@@ -1,9 +1,14 @@
 package cli
 
 import (
+	"errors"
 	"flag"
+	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
@@ -18,12 +23,16 @@ func runInit(args []string) error {
 	registerImplicitRootFlag(fs, rootFlag, "Root directory for the queue")
 	agentsFlag := fs.String("agents", "", "Comma-separated agent handles (required)")
 	forceFlag := fs.Bool("force", false, "Overwrite existing config.json if present")
+	addFlag := fs.Bool("add", false, "Register --agents in an already-initialized root, provisioning only new or incomplete mailboxes")
 
-	usage := usageWithFlags(fs, "amq init --root <path> --agents a,b,c [--force]")
+	usage := usageWithFlags(fs, "amq init --root <path> --agents a,b,c [--force | --add]")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
 		return nil
+	}
+	if *addFlag && *forceFlag {
+		return UsageError("--add cannot be combined with --force")
 	}
 
 	agents, err := parseHandles(*agentsFlag)
@@ -43,6 +52,9 @@ func runInit(args []string) error {
 		resolve = route.ResolveCreateRoot
 	}
 	root := resolve(*rootFlag)
+	if *addFlag {
+		return addAgentsToRoot(root, agents)
+	}
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		return err
 	}
@@ -70,4 +82,40 @@ func runInit(args []string) error {
 		return err
 	}
 	return nil
+}
+
+// addAgentsToRoot registers agents in an existing queue in time proportional
+// to the handles it provisions, not to the roster. fsq.EnsureAgentDirs fsyncs
+// every mailbox ancestor, so re-provisioning a large roster through
+// `init --force` costs thousands of fsyncs to add one handle. A handle the
+// roster already lists had its mailbox made durable before it was listed, so
+// only a new handle, or a listed one whose mailbox is incomplete, is
+// provisioned, and always before the roster write names it.
+func addAgentsToRoot(root string, agents []string) error {
+	cfgPath := filepath.Join(root, "meta", "config.json")
+	// Lstat, not a read: a FIFO at the path must not block, and a missing
+	// root must not be scaffolded.
+	if _, err := os.Lstat(cfgPath); errors.Is(err, fs.ErrNotExist) {
+		return NotFoundError("no AMQ queue at %s (%s is missing); run amq init without --add to create it", root, cfgPath)
+	} else if err != nil {
+		return fmt.Errorf("stat config: %w", err)
+	}
+	if len(inventoryMailboxIssues(root, reservedHumanHandle)) > 0 {
+		if err := fsq.EnsureAgentDirs(root, reservedHumanHandle); err != nil {
+			return err
+		}
+	}
+	added, err := config.AddAgents(root, agents, func(handle string, registered bool) error {
+		if registered && len(inventoryMailboxIssues(root, handle)) == 0 {
+			return nil
+		}
+		return fsq.EnsureAgentDirs(root, handle)
+	})
+	if err != nil {
+		return err
+	}
+	if len(added) == 0 {
+		return writeStdout("Agents already registered in AMQ root at %s\n", root)
+	}
+	return writeStdout("Added %s to AMQ root at %s\n", strings.Join(added, ","), root)
 }

@@ -188,25 +188,87 @@ func ensureAgentLocked(root *fsq.DeliveryRoot, handle string, create bool) (bool
 		}
 		return true, nil
 	}
-	var cfg Config
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return false, fmt.Errorf("parse config: %w", err)
-	}
-	for _, a := range cfg.Agents {
-		if a == handle {
-			// A visible registration can follow a failed post-rename sync.
-			return false, root.SyncDir("meta")
+	added, err := mergeAgentsLocked(root, data, []string{handle}, nil)
+	return len(added) > 0, err
+}
+
+// AddAgents registers handles in the existing config.json of rootDir with one
+// read-merge-write under the config lock, and returns the handles it added in
+// request order. It never creates a config: a root without one returns an
+// error wrapping fs.ErrNotExist, so a mistyped root does not become a queue.
+//
+// Still under the lock and before the write, provision is called once per
+// requested handle with whether the roster already lists it, so the caller
+// can make a mailbox durable before the roster names it. A provision error
+// aborts the call with the roster unchanged.
+func AddAgents(rootDir string, handles []string, provision func(handle string, registered bool) error) ([]string, error) {
+	for _, handle := range handles {
+		if err := fsq.ValidateHandle(handle); err != nil {
+			return nil, fmt.Errorf("invalid handle %q: %w", handle, err)
 		}
 	}
-	cfg.Agents = append(cfg.Agents, handle)
-	out, mErr := marshalConfigPreservingUnknowns(data, cfg)
-	if mErr != nil {
-		return false, mErr
+	identity, err := fsq.SnapshotDeliveryRoot(rootDir)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot root: %w", err)
 	}
-	if _, wErr := root.WriteFileAtomic("meta", "config.json", append(out, '\n'), 0o600); wErr != nil {
-		return false, wErr
+	root, err := fsq.OpenDeliveryRoot(rootDir, identity)
+	if err != nil {
+		return nil, fmt.Errorf("open root: %w", err)
 	}
-	return true, nil
+	defer func() { _ = root.Close() }()
+	var added []string
+	err = root.WithConfigLock(func(r *fsq.DeliveryRoot) error {
+		data, rErr := r.ReadRegularNoFollow("meta/config.json")
+		if rErr != nil {
+			return fmt.Errorf("read config: %w", rErr)
+		}
+		added, rErr = mergeAgentsLocked(r, data, handles, provision)
+		return rErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return added, nil
+}
+
+// mergeAgentsLocked appends every handle the parsed roster lacks and rewrites
+// config.json, preserving Version, CreatedUTC, the existing roster order, and
+// every unmodelled key. The caller holds the config lock and read data under
+// it. With nothing to add it only re-syncs meta: a visible registration can
+// follow a failed post-rename sync.
+func mergeAgentsLocked(root *fsq.DeliveryRoot, data []byte, handles []string, provision func(handle string, registered bool) error) ([]string, error) {
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	listed := make(map[string]bool, len(cfg.Agents)+len(handles))
+	for _, a := range cfg.Agents {
+		listed[a] = true
+	}
+	var added []string
+	for _, handle := range handles {
+		if provision != nil {
+			if err := provision(handle, listed[handle]); err != nil {
+				return nil, err
+			}
+		}
+		if !listed[handle] {
+			listed[handle] = true
+			added = append(added, handle)
+		}
+	}
+	if len(added) == 0 {
+		return nil, root.SyncDir("meta")
+	}
+	cfg.Agents = append(cfg.Agents, added...)
+	out, err := marshalConfigPreservingUnknowns(data, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := root.WriteFileAtomic("meta", "config.json", append(out, '\n'), 0o600); err != nil {
+		return nil, err
+	}
+	return added, nil
 }
 
 // MarshalPreservingUnknowns re-marshals cfg together with every key present
