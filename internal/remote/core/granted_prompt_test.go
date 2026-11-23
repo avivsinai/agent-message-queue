@@ -34,6 +34,7 @@ type promptRuntime struct {
 	acked     []requests.Key
 	sink      func(core.NativeEvent)
 	onObserve func()
+	onRefusal func()
 }
 
 func newPromptRuntime() *promptRuntime {
@@ -45,6 +46,12 @@ func (r *promptRuntime) PromptInstance() string { return r.instance }
 func (r *promptRuntime) GrantedStubID(k requests.Key) string { return "stub-" + k.RequestID }
 
 func (r *promptRuntime) PromptRefusal(p core.Prompt) string {
+	r.mu.Lock()
+	hook := r.onRefusal
+	r.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	asks := p.Mode == "default" || p.Mode == "acceptEdits" || p.Mode == "dontAsk"
 	if asks && p.NativeSession == r.NativeSessionID() {
 		return ""

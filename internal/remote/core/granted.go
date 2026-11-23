@@ -92,7 +92,7 @@ func (e *Endpoint) GrantedPrompt(req PromptReport) string {
 			}
 			continue
 		}
-		return e.handGrantedTextLocked(rec, t, h, req.Prompt)
+		return e.handGrantedTextLocked(rec, t, h, req.Prompt, deadline)
 	}
 }
 
@@ -121,13 +121,22 @@ func (e *Endpoint) stubRecordLocked(targetID string, h PromptHandover, stubID st
 
 // handGrantedTextLocked runs the hand-over checks of a running record
 // dispatched as a stub, in order, against the values of the prompt p. A
-// refusal ends the record rejected; a pass marks it durably and returns its
-// text. The caller holds e.mu; it unlocks exactly once.
-func (e *Endpoint) handGrantedTextLocked(rec *requests.Record, t *target, h PromptHandover, p Prompt) string {
+// cancel that was asked for ends the record cancelled; a refusal ends it
+// rejected; a pass marks it durably and returns its text. A record with no
+// stored text gets no mark. Nothing is written at or after deadline, which
+// is checked after the reads and right before each write. The caller holds
+// e.mu; it unlocks exactly once.
+func (e *Endpoint) handGrantedTextLocked(rec *requests.Record, t *target, h PromptHandover, p Prompt, deadline time.Time) string {
 	var code protocol.Code
 	reason := ""
 	notAfter, err := protocol.ParseTime(rec.NotAfter)
+	cancelled := rec.Cancel != nil
 	switch {
+	case cancelled:
+	case rec.Input == nil:
+		// No text to give: nothing is marked and nothing is refused.
+		e.mu.Unlock()
+		return ""
 	case p.NativeSession != rec.NativeSession:
 		code = protocol.CodeSessionChanged
 	case err != nil || !e.now().Before(notAfter):
@@ -144,6 +153,23 @@ func (e *Endpoint) handGrantedTextLocked(rec *requests.Record, t *target, h Prom
 				code, reason = protocol.CodeConsentInvalid, msg
 			}
 		}
+	}
+	// The decision point: the reads above can outlast the hook's wait, and
+	// past the deadline nothing is written. A write that starts in time
+	// may still finish after the hook disconnected.
+	if !e.now().Before(deadline) {
+		e.mu.Unlock()
+		return ""
+	}
+	if cancelled {
+		// The requester asked to cancel before the text was given: the
+		// task does not start.
+		e.transitionLocked(rec, causeCancelledByRequest, nativeEvidence{})
+		if _, err := e.commitLocked(rec, t); err == nil {
+			e.publishLocked(rec)
+		}
+		e.mu.Unlock()
+		return ""
 	}
 	if code != "" {
 		e.transitionLocked(rec, causeRefused, nativeEvidence{code: code, reason: reason})
@@ -162,10 +188,7 @@ func (e *Endpoint) handGrantedTextLocked(rec *requests.Record, t *target, h Prom
 		e.mu.Unlock()
 		return ""
 	}
-	text := ""
-	if rec.Input != nil {
-		text = rec.Input.Text
-	}
+	text := rec.Input.Text
 	e.publishLocked(rec)
 	e.mu.Unlock()
 	return text
