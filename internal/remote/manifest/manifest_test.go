@@ -134,3 +134,21 @@ func TestWriteIsOwnerOnly(t *testing.T) {
 		t.Fatalf("manifest mode = %v, want 0600", fi.Mode().Perm())
 	}
 }
+
+// The approvals policy is a share field with two values: terminal (the
+// default, also written as empty) and link. Anything else refuses the share.
+func TestValidLinkShareApprovalsPolicy(t *testing.T) {
+	ok := LinkShare{Binding: "session", Consent: "passkey", Tools: "read"}
+	if err := ValidLinkShare(ok); err != nil {
+		t.Fatalf("empty approvals: %v", err)
+	}
+	if err := ValidLinkShare(LinkShare{Binding: "session", Consent: "passkey", Tools: "read", Approvals: "terminal"}); err != nil {
+		t.Fatalf("terminal: %v", err)
+	}
+	if err := ValidLinkShare(LinkShare{Binding: "session", Consent: "passkey", Tools: "read", Approvals: "link"}); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	if err := ValidLinkShare(LinkShare{Binding: "session", Consent: "passkey", Tools: "read", Approvals: "auto"}); err == nil {
+		t.Fatal("an unknown approvals policy was accepted")
+	}
+}

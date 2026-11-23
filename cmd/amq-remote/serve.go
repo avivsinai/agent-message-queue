@@ -19,6 +19,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
+	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -230,6 +231,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	machines.tick(time.Now())
 	ep.SetConsent(links.consentLive)
 	ep.SetGrant(links.grantLive) // before any link frame is read
+	ep.SetDialogsOpen(dialog.OpenRequestIDs) // the run-start dialog baseline (R1)
 	links.start(ctx, ep, mfSnap)
 	go func() {
 		t := time.NewTicker(*poll)

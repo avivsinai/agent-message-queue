@@ -269,6 +269,12 @@ type nativeEvidence struct {
 	// grantedDigest is the evidence's GrantedTextDigest: what ties a run's
 	// result to a record dispatched as a stub (grantedResult).
 	grantedDigest string
+	// liveAdmission marks the transition as an original live admission: the
+	// native Submit answer that binds a run now (a fresh admission, a
+	// deferred admission, or a tombstone the same request re-admits). Only
+	// it takes the run-start dialog baseline; evidence found later on a
+	// recovery path never manufactures one.
+	liveAdmission bool
 }
 
 // transitionLocked applies one state transition to rec, deriving every field
@@ -303,6 +309,17 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 		open = &cp
 	}
 	e.applyTransitionLocked(rec, c, ev)
+	// R1: the baseline of dialogs open when the run began. Written once, in
+	// the same commit that enters running, and only on the original live
+	// admission: a busy retry re-admitted live is a run start, but a
+	// running→uncertain→running recovery never manufactures a baseline for
+	// a run that started before the serve did. An unlistable directory
+	// stores no list; a missing one is the empty list.
+	if ev.liveAdmission && rec.State == protocol.StateRunning && rec.DialogsBefore == nil && rec.Binding != "" && e.dialogsOpen != nil {
+		if ids, err := e.dialogsOpen(rec.Binding); err == nil {
+			rec.DialogsBefore = ids
+		}
+	}
 	// Only a clear resolves an interaction. A replacement by another
 	// interaction says nothing about the first, which may still be open.
 	if open != nil && rec.Interaction == nil {

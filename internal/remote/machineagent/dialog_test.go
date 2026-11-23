@@ -351,11 +351,12 @@ func TestPrunedDialogLeavesHistory(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	at := now.Add(-dialogKeep - time.Minute)
-	req := dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", OpenedAt: at.Add(-10 * time.Minute)}
+	req := dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", OpenedAt: at.Add(-10 * time.Minute),
+		Options: []dialog.Option{{N: 1, Label: "Allow once", Scope: dialog.ScopeOnce}, {N: 2, Label: "Deny", Deny: true, Scope: dialog.ScopeOnce}}}
 	if err := dialog.Open(dir, req); err != nil {
 		t.Fatal(err)
 	}
-	res := dialog.Resolved{ID: req.ID, Outcome: dialog.OutcomeAllowed, By: dialog.ByBuzz, At: at}
+	res := dialog.Resolved{ID: req.ID, Outcome: dialog.OutcomeAllowed, By: dialog.ByBuzz, At: at, Label: "Allow once"}
 	if _, err := dialog.Resolve(dir, res); err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +367,7 @@ func TestPrunedDialogLeavesHistory(t *testing.T) {
 	}
 	entries, err := dialog.History(req.OpenedAt)
 	want := dialog.HistoryEntry{ID: req.ID, Binding: "alpha", Harness: req.Harness, Tool: req.Tool,
-		OpenedAt: req.OpenedAt, At: at, Outcome: res.Outcome, By: res.By}
+		OpenedAt: req.OpenedAt, At: at, Outcome: res.Outcome, By: res.By, Label: res.Label}
 	if err != nil || len(entries) != 1 || entries[0] != want {
 		t.Fatalf("history = %+v, %v; want [%+v]", entries, err, want)
 	}
@@ -460,5 +461,65 @@ func TestDropGoneDialogsKeepsTheDialogOfASessionThatAttachedAgain(t *testing.T) 
 	}
 	if !attached {
 		t.Fatal("the real closing edit was not published")
+	}
+}
+
+// R2: history keeps only the chosen approval option's label, matched against
+// the request's own options. The owner's typed free-text answer to a
+// question, an expiry reason, and the label of a request that cannot be read
+// again are not durable history.
+func TestHistoryKeepsOnlyAChosenOptionLabel(t *testing.T) {
+	t.Setenv(binding.EnvPath, filepath.Join(t.TempDir(), "binding.json"))
+	dir, err := dialog.DirFor("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	at := now.Add(-dialogKeep - time.Minute)
+	open := func(req dialog.Request) dialog.Request {
+		if err := dialog.Open(dir, req); err != nil {
+			t.Fatal(err)
+		}
+		return req
+	}
+	s := &Agent{stateDir: t.TempDir()}
+	resolve := func(id, outcome, label, by string) {
+		if _, err := dialog.Resolve(dir, dialog.Resolved{ID: id, Outcome: outcome, Label: label, By: by, At: at}); err != nil {
+			t.Fatal(err)
+		}
+		if !s.keepHistory("alpha", dir, id) {
+			t.Fatal("keepHistory failed")
+		}
+	}
+
+	// A chosen option label survives.
+	req := open(dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", OpenedAt: at.Add(-10 * time.Minute),
+		Options: []dialog.Option{{N: 1, Label: "Allow once"}}})
+	resolve(req.ID, dialog.OutcomeAllowed, "Allow once", dialog.ByBuzz)
+
+	// The typed free-text answer to a question does not.
+	q := open(dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "", FreeText: true, OpenedAt: at.Add(-9 * time.Minute)})
+	resolve(q.ID, dialog.OutcomeAnswered, "the owner's own words", dialog.ByBuzz)
+
+	// An expiry reason does not.
+	e2 := open(dialog.Request{ID: dialog.NewID(), Harness: "claude", Tool: "Bash", OpenedAt: at.Add(-8 * time.Minute)})
+	resolve(e2.ID, dialog.OutcomeExpired, "the asking agent ended", dialog.ByTimeout)
+
+	entries, err := dialog.History(req.OpenedAt)
+	if err != nil || len(entries) != 3 {
+		t.Fatalf("history = %+v, %v", entries, err)
+	}
+	byID := map[string]dialog.HistoryEntry{}
+	for _, e := range entries {
+		byID[e.ID] = e
+	}
+	if e := byID[req.ID]; e.Label != "Allow once" {
+		t.Fatalf("approval label = %q; want Allow once", e.Label)
+	}
+	if e := byID[q.ID]; e.Label != "" {
+		t.Fatalf("question label leaked into history: %q", e.Label)
+	}
+	if e := byID[e2.ID]; e.Label != "" {
+		t.Fatalf("expiry reason leaked into history: %q", e.Label)
 	}
 }

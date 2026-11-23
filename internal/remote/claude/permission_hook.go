@@ -230,11 +230,16 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 	if in.ToolName == toolAskUserQuestion || in.ToolName == toolExitPlanMode {
 		tool = ""
 	}
+	text, complete := dialogText(in.ToolName, in.ToolInput)
+	if in.ToolName != "Bash" {
+		// R6 starts narrow: only a Bash command's text is proven whole.
+		complete = false
+	}
 	opened := h.now()
 	req := dialog.Request{
 		ID: dialog.NewID(), Harness: harnessClaude, Session: in.SessionID, Tool: tool,
 		FreeText: isQuestion,
-		Text:     dialogText(in.ToolName, in.ToolInput), Options: options,
+		Text:     text, Complete: complete, Options: options,
 		OpenedAt: opened.UTC(), PID: os.Getpid(),
 	}
 	// Claude signals no terminal approve: the transcript that records the
@@ -536,7 +541,7 @@ func dialogOptions(in permissionInput) ([]dialog.Option, []json.RawMessage) {
 	if len(rules) > 0 {
 		opts = append(opts, dialog.Option{N: 2, Label: sessionScope(rules), Value: valueAllowSession, Scope: dialog.ScopeSession})
 	}
-	return append(opts, dialog.Option{N: len(opts) + 1, Label: "Deny", Value: valueDeny, Deny: true}), rules
+	return append(opts, dialog.Option{N: len(opts) + 1, Label: "Deny", Value: valueDeny, Deny: true, Scope: dialog.ScopeOnce}), rules
 }
 
 // sessionScope is the label of "Allow this session" with what it allows,
@@ -661,8 +666,11 @@ func chosen(options []dialog.Option, n int) (dialog.Option, bool) {
 }
 
 // dialogText renders the call as the terminal dialog shows it: the command,
-// the edit as a diff, the file, the URL, or the input as JSON.
-func dialogText(tool string, input json.RawMessage) string {
+// the edit as a diff, the file, the URL, or the input as JSON. Complete is
+// true only where the rendered text is everything the terminal shows for the
+// decision and can never be cut: a Bash command (the stdin the hook reads is
+// bounded, and input that did not parse whole opens no dialog).
+func dialogText(tool string, input json.RawMessage) (text string, complete bool) {
 	var in struct {
 		Command      string `json:"command"`
 		Description  string `json:"description"`
@@ -684,7 +692,7 @@ func dialogText(tool string, input json.RawMessage) string {
 			ReplaceAll bool   `json:"replace_all"`
 		} `json:"edits"`
 	}
-	_ = json.Unmarshal(input, &in)
+	decodeErr := json.Unmarshal(input, &in)
 	var b strings.Builder
 	switch {
 	case tool == "Bash" && in.Command != "":
@@ -692,6 +700,11 @@ func dialogText(tool string, input json.RawMessage) string {
 		if in.Description != "" {
 			b.WriteString("\n(" + in.Description + ")")
 		}
+		// The command is the whole decision text only when the input decoded
+		// fully and nothing of the command was lost in rendering (R6): a
+		// decoder error or a stripped trailing newline means the text shown
+		// is not the whole command, and the dialog stays machine-answered.
+		complete = decodeErr == nil && in.Command == strings.TrimRight(in.Command, "\n")
 	case tool == "Edit" && in.FilePath != "":
 		b.WriteString(in.FilePath + "\n")
 		writeDiff(&b, in.OldString, in.NewString, in.ReplaceAll)
@@ -748,11 +761,12 @@ func dialogText(tool string, input json.RawMessage) string {
 			b.Write(input)
 		}
 	}
-	text := strings.TrimRight(b.String(), "\n")
+	text = strings.TrimRight(b.String(), "\n")
 	if t, cut := protocol.TruncateText(text, maxDialogText); cut {
 		text = t + "\n… full text in the terminal"
+		complete = false
 	}
-	return text
+	return text, complete
 }
 
 // writeDiff writes old and new as removed and added lines.

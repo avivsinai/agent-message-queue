@@ -1707,7 +1707,8 @@ func (a *Attachment) dialogFor(req ServerRequest) *openDialog {
 		return nil
 	}
 	d := &openDialog{reqID: req.ID, turnID: p.TurnID, done: make(chan struct{}),
-		req: dialog.Request{ID: dialog.NewID(), Harness: "codex", Session: a.threadID, PID: os.Getpid()}}
+		req: dialog.Request{ID: dialog.NewID(), Harness: "codex", Session: a.threadID, Turn: p.TurnID, PID: os.Getpid()}}
+	wholeCommand := false // a positively recognized, fully rendered command
 	var b strings.Builder
 	line := func(format string, args ...any) {
 		if b.Len() > 0 {
@@ -1728,11 +1729,15 @@ func (a *Attachment) dialogFor(req ServerRequest) *openDialog {
 		d.req.Tool = "exec"
 		switch c := p.Command.(type) {
 		case string:
-			line("$ %s", c)
+			if strings.TrimSpace(c) != "" {
+				line("$ %s", c)
+				wholeCommand = true
+			}
 		case nil:
 		default:
 			if raw, err := json.Marshal(c); err == nil {
 				line("$ %s", raw)
+				wholeCommand = true
 			}
 		}
 		where()
@@ -1808,6 +1813,11 @@ func (a *Attachment) dialogFor(req ServerRequest) *openDialog {
 	text := b.String()
 	if t, cut := protocol.TruncateText(text, maxDialogText); cut {
 		text = t + "\n… full text in the terminal"
+	} else if wholeCommand {
+		// A command approval whose positively rendered command was not cut
+		// holds its full command (R6): a native request with no command, an
+		// unreadable shape, or a cut text stays machine-answered.
+		d.req.Complete = true
 	}
 	d.req.Text = text
 	return d
@@ -1859,6 +1869,9 @@ func decisions(raws []json.RawMessage, fallback ...string) ([]dialog.Option, fun
 				scope = dialog.ScopeOnce
 			case "acceptForSession":
 				scope = dialog.ScopeSession
+			case "decline":
+				// A decline refuses this one action (R3).
+				scope = dialog.ScopeOnce
 			}
 			if tok == "decline" || tok == "cancel" && deny < 0 {
 				deny = len(options)
@@ -1934,7 +1947,8 @@ func permissionChoices(requested json.RawMessage) ([]dialog.Option, func(dialog.
 	options := number([]dialog.Option{
 		{Label: "Allow for this turn", Value: "turn", Scope: dialog.ScopeTurn},
 		{Label: "Allow for session", Value: "session", Scope: dialog.ScopeSession},
-		{Label: "Deny", Value: "deny", Deny: true},
+		// The deny refuses this one permissions request (R3).
+		{Label: "Deny", Value: "deny", Deny: true, Scope: dialog.ScopeOnce},
 	})
 	if len(requested) == 0 || string(requested) == "null" {
 		requested = json.RawMessage(`{}`)
@@ -2005,7 +2019,7 @@ func userInputChoices(questions []userQuestion) ([]dialog.Option, bool, func(dia
 func elicitationChoices(mode string, schema json.RawMessage) ([]dialog.Option, bool, func(dialog.Answer) (any, string, string, bool)) {
 	options := number([]dialog.Option{
 		{Label: "Accept", Value: "accept", Scope: dialog.ScopeOnce},
-		{Label: "Decline", Value: "decline", Deny: true},
+		{Label: "Decline", Value: "decline", Deny: true, Scope: dialog.ScopeOnce},
 		{Label: "Cancel", Value: "cancel"},
 	})
 	form := mode != "url" && mode != "openai/userVerification"

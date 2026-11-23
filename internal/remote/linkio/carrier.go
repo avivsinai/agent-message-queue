@@ -999,7 +999,7 @@ func (c *Carrier) runCommand(cmd *protocol.Command) (any, error) {
 		return nil, refuse(string(protocol.CodeUnsupported), "this endpoint runs no commands")
 	}
 	view := c.view()
-	out, err := c.cfg.Handle(cmd, c.source(view, "", ""))
+	out, err := c.cfg.Handle(cmd, c.source(view, "", "", ""))
 	if err != nil {
 		return nil, err
 	}
@@ -1042,7 +1042,7 @@ func (c *Carrier) admitSigned(m SignedSubmit) (any, error) {
 	if v.Binding.Consent == "local" {
 		return c.hold(v, m.CredentialID)
 	}
-	out, err := c.cfg.Handle(v.Cmd, c.source(view, v.Native, m.CredentialID))
+	out, err := c.cfg.Handle(v.Cmd, c.source(view, v.Native, m.CredentialID, v.Binding.Binding))
 	if err != nil {
 		return nil, err
 	}
@@ -1178,9 +1178,10 @@ func (c *Carrier) markRevoked(id string) {
 const OriginName = "name"
 
 // source is the authenticated source of a signed submit: this link's sink,
-// the native session and consent key it was signed with, and the targets
+// the native session and consent key it was signed with, the binding it was
+// signed for (empty on a call that names no binding), and the targets
 // shared with the link. The origin routes its revisions back to this sink.
-func (c *Carrier) source(view *ConsentView, native, credential string) core.Source {
+func (c *Carrier) source(view *ConsentView, native, credential, bindingName string) core.Source {
 	shared := make([]string, 0, len(view.Bindings))
 	for _, b := range view.Bindings {
 		shared = append(shared, b.TargetID)
@@ -1191,6 +1192,7 @@ func (c *Carrier) source(view *ConsentView, native, credential string) core.Sour
 		Shared:        shared,
 		NativeSession: native,
 		Credential:    credential,
+		Binding:       bindingName,
 	}
 }
 
@@ -1280,7 +1282,7 @@ func (c *Carrier) hold(v *Verified, credential string) (any, error) {
 	case errors.Is(err, errConfirmed):
 		// Already confirmed and handed to core: a resend is answered by core,
 		// which deduplicates by request id and runs nothing twice.
-		out, err := c.cfg.Handle(v.Cmd, c.source(c.view(), v.Native, credential))
+		out, err := c.cfg.Handle(v.Cmd, c.source(c.view(), v.Native, credential, v.Binding.Binding))
 		if err != nil {
 			return nil, err
 		}
@@ -1329,7 +1331,7 @@ func (c *Carrier) ConfirmLocal(id, digest, authenticatorData, clientDataJSON, si
 	if err != nil {
 		return nil, err
 	}
-	out, err := c.cfg.Handle(t.verified.Cmd, c.source(c.view(), t.verified.Native, t.credential))
+	out, err := c.cfg.Handle(t.verified.Cmd, c.source(c.view(), t.verified.Native, t.credential, t.verified.Binding.Binding))
 	if reply, ok := out.(protocol.Reply); err != nil || (ok && reply.Outcome.Code != "") {
 		// Refused, busy included: the confirmation is forgotten, so a later
 		// resend is held and confirmed again, also where core keeps a busy

@@ -96,3 +96,53 @@ func TestLookupResolutionWinsOverAnUnreadableAnswer(t *testing.T) {
 		t.Fatalf("Lookup = %q, %+v, %v; want the terminal resolution", phase, r, err)
 	}
 }
+
+// R1: the baseline is a plain listing of the requests directory — ids of the
+// files on disk, an answered-but-unresolved dialog included, no record read
+// and none filtered. A missing directory is the empty list; another read
+// error is returned so the caller can store no list.
+func TestOpenRequestIDsListsTheDirectoryPlainly(t *testing.T) {
+	t.Setenv(binding.EnvPath, filepath.Join(t.TempDir(), "binding.json"))
+	dir, err := DirFor("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids, err := OpenRequestIDs("alpha")
+	if err != nil || len(ids) != 0 {
+		t.Fatalf("missing directory = %v, %v; want empty, nil", ids, err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "requests"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	req := Request{ID: NewID(), Harness: "claude", OpenedAt: time.Now().UTC()}
+	if err := Open(dir, req); err != nil {
+		t.Fatal(err)
+	}
+	// An answered dialog with no resolution is still on disk.
+	if _, err := WriteAnswer(dir, Answer{ID: req.ID, Option: 1, By: ByBuzz}); err != nil {
+		t.Fatal(err)
+	}
+	ids, err = OpenRequestIDs("alpha")
+	if err != nil || len(ids) != 1 || ids[0] != req.ID {
+		t.Fatalf("listing = %v, %v; want [%s]", ids, err, req.ID)
+	}
+	// A stray non-request file and a subdirectory are not ids.
+	if err := os.WriteFile(filepath.Join(dir, "requests", "notes.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "requests", "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ids, err = OpenRequestIDs("alpha")
+	if err != nil || len(ids) != 1 || ids[0] != req.ID {
+		t.Fatalf("listing after strays = %v, %v; want [%s]", ids, err, req.ID)
+	}
+	// An unlistable directory returns the error.
+	if err := os.Chmod(filepath.Join(dir, "requests"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(dir, "requests"), 0o700) })
+	if _, err := OpenRequestIDs("alpha"); err == nil {
+		t.Fatal("an unreadable directory returned no error")
+	}
+}

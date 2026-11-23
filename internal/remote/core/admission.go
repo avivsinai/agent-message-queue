@@ -49,7 +49,7 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		// or another signed document (another not_after) or another grant for
 		// any link record, is a conflict; any other resubmit is answered from
 		// the stored record.
-		msg, conflict := conflictWith(rec, cmd, digest, src.GrantDigest)
+		msg, conflict := conflictWith(rec, cmd, digest, src.GrantDigest, src.Binding)
 		if !readmittableBusy(rec) || conflict {
 			e.mu.Unlock()
 			out := protocol.Outcome{Op: protocol.OpRequestSubmit}
@@ -94,6 +94,7 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		NativeSession:     src.NativeSession,
 		ConsentCredential: src.Credential,
 		GrantDigest:       src.GrantDigest,
+		Binding:           src.Binding,
 	}
 	// Decide admissibility + reservation BEFORE Create: a request we are
 	// about to refuse is never written (no durable placeholder to leak on a
@@ -574,17 +575,19 @@ func readmittableBusy(rec *requests.Record) bool {
 }
 
 // conflictWith reports whether cmd, whose input digest is digest, sent under
-// the grant grantDigest ("" for none), conflicts with the request rec
-// stores, and the message of that request_conflict; with no conflict cmd is
-// the stored request. The digest does not cover not_after, so a link record
-// also needs the same not_after and the same grant: only the same signed
-// document, or the same command under the same grant, is a link's stored
-// request, and another signature or another grant for the same request id
-// never runs, whatever the record's state. A record with no stored digest
-// (a cancel that came first) conflicts by its other values only, and is
-// never re-admitted (readmittableBusy). Nothing is admitted after not_after, so a
-// link record whose deadline passed never runs.
-func conflictWith(rec *requests.Record, cmd *protocol.Command, digest, grantDigest string) (message string, conflict bool) {
+// the grant grantDigest and signed for the binding bindingName ("" for a
+// source that names none), conflicts with the request rec stores, and the
+// message of that request_conflict; with no conflict cmd is the stored
+// request. The digest does not cover not_after, so a link record also needs
+// the same not_after and the same grant: only the same signed document, or
+// the same command under the same grant, is a link's stored request, and
+// another signature or another grant for the same request id never runs,
+// whatever the record's state. A retry signed for a different share never
+// runs under the stored record's binding either. A record with no stored
+// digest (a cancel that came first) conflicts by its other values only, and
+// is never re-admitted (readmittableBusy). Nothing is admitted after
+// not_after, so a link record whose deadline passed never runs.
+func conflictWith(rec *requests.Record, cmd *protocol.Command, digest, grantDigest, bindingName string) (message string, conflict bool) {
 	switch link := rec.Origin["carrier"] == CarrierLink; {
 	case rec.InputDigest != "" && rec.InputDigest != digest:
 		return "", true
@@ -594,6 +597,10 @@ func conflictWith(rec *requests.Record, cmd *protocol.Command, digest, grantDige
 		// A link's request id admitted by a signature is never run by a
 		// grant, nor the reverse, nor by another grant.
 		return "another grant or signature holds this request id", true
+	case link && rec.Binding != "" && bindingName != rec.Binding:
+		// A retry signed for another share is not this request: it would run
+		// the stored task's dialogs into the wrong dialog directory.
+		return "another share is signed for this request id", true
 	}
 	return "", false
 }
@@ -850,6 +857,9 @@ func (e *Endpoint) applyAdmissionLocked(rec *requests.Record, adm Admission, ner
 	if c == causeBusyTombstone {
 		e.busyTombstoneLocked(rec, nev)
 		return
+	}
+	if c == causeAdmitted {
+		nev.liveAdmission = true
 	}
 	e.transitionLocked(rec, c, nev)
 }

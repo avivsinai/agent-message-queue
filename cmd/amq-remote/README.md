@@ -995,8 +995,10 @@ tools with the most time held. Use `--days N` to change the window or
 `--json` to see every tool and the durations in seconds.
 
 Each history line holds the dialog ID, binding, harness, tool name, opening
-and resolution times, outcome and answer source. Dialog text, tool inputs
-and option labels are never recorded in history. A dialog appears about an
+and resolution times, outcome and answer source, and the chosen option's
+label when the answer was one of the request's own choices. Dialog text,
+tool inputs, the owner's typed answers and expiry reasons are never recorded
+in history. A dialog appears about an
 hour after resolution, or when the machine agent removes a departed session's
 dialogs. With the request already gone, the resolution counts toward the
 session's dialog count only. The dialogs directory retains up to two files of

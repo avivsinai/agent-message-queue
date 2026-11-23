@@ -111,10 +111,13 @@ func TestPermissionHookAppliesBuzzOption(t *testing.T) {
 	if req.Text != "$ rm -rf node_modules\n(Remove node_modules)" || len(req.Options) != 3 || req.Options[1].Label != "Allow this session: Bash(rm -rf node_modules)" || !req.Options[2].Deny {
 		t.Fatalf("request = %+v", req)
 	}
-	for i, scope := range []string{dialog.ScopeOnce, dialog.ScopeSession, ""} {
+	for i, scope := range []string{dialog.ScopeOnce, dialog.ScopeSession, dialog.ScopeOnce} {
 		if req.Options[i].Scope != scope {
 			t.Fatalf("option %d scope = %q; want %q", i+1, req.Options[i].Scope, scope)
 		}
+	}
+	if !req.Complete {
+		t.Fatal("an uncut Bash dialog is not marked complete")
 	}
 	if _, err := dialog.WriteAnswer(dir, dialog.Answer{ID: req.ID, Option: 2, By: dialog.ByBuzz}); err != nil {
 		t.Fatal(err)
@@ -260,7 +263,10 @@ func TestClaudeAncestorChooser(t *testing.T) {
 // doc says (audit 2026-11-10).
 func TestDialogTextCutsAtByteCap(t *testing.T) {
 	input, _ := json.Marshal(map[string]string{"command": strings.Repeat("é", maxDialogText)})
-	got := dialogText("Bash", input)
+	got, complete := dialogText("Bash", input)
+	if complete {
+		t.Fatal("a cut Bash dialog is marked complete")
+	}
 	body, cut := strings.CutSuffix(got, "\n… full text in the terminal")
 	if !cut || len(body) > maxDialogText || !utf8.ValidString(body) {
 		t.Fatalf("body %d bytes, cut %v, valid UTF-8 %v; want a cut body of at most %d valid bytes", len(body), cut, utf8.ValidString(body), maxDialogText)
@@ -726,5 +732,26 @@ func TestPermissionHookSendsAnUnanswerableQuestionToTheTerminal(t *testing.T) {
 				t.Fatalf("a terminal-only question printed %q", out)
 			}
 		})
+	}
+}
+
+// R6 starts narrow: only a Bash command's text is proven whole. Another
+// tool's dialog is answered on the machine; a link publishes nothing for it.
+func TestPermissionHookMarksOnlyBashComplete(t *testing.T) {
+	dir := boundHookEnv(t)
+	stdin, _ := json.Marshal(map[string]any{
+		"session_id": "s-1", "hook_event_name": "PermissionRequest",
+		"tool_name": "Edit", "tool_input": map[string]any{"file_path": "/w/main.go", "old_string": "a", "new_string": "b"},
+	})
+	wait := runHook(t, string(stdin))
+	req := openRequest(t, dir)
+	if req.Complete {
+		t.Fatalf("a %s dialog is marked complete: %+v", req.Tool, req)
+	}
+	if _, err := dialog.WriteAnswer(dir, dialog.Answer{ID: req.ID, Option: 1, By: dialog.ByBuzz}); err != nil {
+		t.Fatal(err)
+	}
+	if d := decisionOf(t, wait()); d["behavior"] != "allow" {
+		t.Fatalf("decision = %v, want the owner's allow", d)
 	}
 }

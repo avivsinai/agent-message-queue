@@ -530,6 +530,11 @@ func (h *Host) askOwner(turn *turnCollect, req permissionRequest) (chosen int, o
 			scope = dialog.ScopeOnce
 		case "allow_always":
 			scope = dialog.ScopeAlways
+		case "reject_once":
+			// A one-time rejection refuses this one action (R3).
+			scope = dialog.ScopeOnce
+		case "reject_always":
+			scope = dialog.ScopeAlways
 		}
 		options[i] = dialog.Option{N: i + 1, Label: label, Value: option.OptionID, Deny: strings.HasPrefix(option.Kind, "reject"), Scope: scope}
 	}

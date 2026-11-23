@@ -25,6 +25,9 @@ type HistoryEntry struct {
 	At       time.Time `json:"resolved_at"`
 	Outcome  string    `json:"outcome"`
 	By       string    `json:"by"`
+	// Label is the chosen option's label, or why an expired dialog
+	// expired; it is what a link reads when the dialog's files are gone.
+	Label string `json:"label,omitempty"`
 }
 
 // historyMaxBytes bounds one history file; the log is at most two files.
