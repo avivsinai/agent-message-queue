@@ -1654,7 +1654,7 @@ func (a *Attachment) awaitDialog(key string, d *openDialog) {
 		elsewhere := d.resolvedWhileSending
 		d.sending = false
 		a.mu.Unlock()
-		r := dialog.Resolved{ID: d.req.ID, Outcome: outcome, Label: label, By: dialog.ByBuzz, At: a.now().UTC()}
+		r := dialog.Resolved{ID: d.req.ID, Outcome: outcome, Label: label, By: answerBy(ans), At: a.now().UTC()}
 		switch {
 		case sendErr != nil && elsewhere:
 			// Another client answered while our send failed.
@@ -1665,6 +1665,16 @@ func (a *Attachment) awaitDialog(key string, d *openDialog) {
 		_, _ = dialog.Resolve(dir, r)
 		return
 	}
+}
+
+// answerBy carries the answer's own by into the resolution it becomes:
+// a link's answer resolves as by "link", an owner's from Buzz as
+// "buzz". A file with no by reads as Buzz.
+func answerBy(a *dialog.Answer) string {
+	if a != nil && a.By != "" {
+		return a.By
+	}
+	return dialog.ByBuzz
 }
 
 // maxDialogText bounds the text of one dialog; the terminal shows the rest.

@@ -36,6 +36,38 @@ type LinkDialogs interface {
 	// caller's outcome ask — resolved carries it, so the caller settles
 	// that outcome instead of retiring it as unknown.
 	Present(binding, id string) (present bool, res protocol.Resolution, resolved bool)
+
+	// AnswerPolicy reports whether the binding's share takes link answers
+	// for the authenticated host now, and the reason when it does not:
+	// approvals_terminal, consent_local or harness_unsupported, in that
+	// order when more than one holds. Two links may share one binding with
+	// different policies, so the host is part of the question.
+	AnswerPolicy(host, binding string) (available bool, reason string)
+
+	// RequestLive reports whether a running record still runs on the
+	// binding's live native session, in the generation it was admitted
+	// in — the identity judgment publication made, repeated at answer
+	// time.
+	RequestLive(rec *requests.Record) bool
+
+	// HasAnswer reports whether the binding's dialog already holds a
+	// recorded answer or a resolution for the id: an already-occupied
+	// answer wins ahead of any digest or option judgment, so a stale
+	// published button cannot turn a recorded answer into a refusal.
+	HasAnswer(binding, id string) bool
+
+	// WriteAnswer records a verified link answer in the binding's dialog
+	// directory. Before it writes anything it re-renders the dialog's
+	// record file with the same render publication used and refuses
+	// dialog_changed unless interactionDigest matches that render — the
+	// signature covers the dialog as the record holds it now, not as
+	// publication stored it. role is the choice's expected role as the
+	// stored interaction names it; the write finds the option by label
+	// and role in the rendered interaction. "", "" means durable. Any
+	// other return is the refusal code and its reason; nothing was
+	// recorded, except for internal, where durability could not be
+	// confirmed.
+	WriteAnswer(host, binding, id, label, role, interactionDigest, documentDigest, credential string) (protocol.Code, string)
 }
 
 // SetLinkDialogs installs the link-dialog seam. Until it is set, no link

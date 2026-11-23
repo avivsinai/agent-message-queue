@@ -266,6 +266,16 @@ const (
 	// CodePendingLocal (an Outcome code, never a record code): a signed task
 	// on a local binding waits for the user's confirmation on the machine.
 	CodePendingLocal Code = "pending_local"
+	// CodeAnswerUnsupported: the share a signed answer names takes no link
+	// answers — its approvals policy is not link, its consent is not
+	// passkey, or its harness cannot apply one.
+	CodeAnswerUnsupported Code = "answer_unsupported"
+	// CodeDialogChanged: the dialog a signed answer names no longer matches
+	// what was signed — its text or choices moved after the touch.
+	CodeDialogChanged Code = "dialog_changed"
+	// CodeInternal: the machine could not confirm that a write it made is
+	// durably recorded; the caller reads the revisions for the disposition.
+	CodeInternal Code = "internal"
 )
 
 // CancelDisposition is the recorded outcome of a cancel command.

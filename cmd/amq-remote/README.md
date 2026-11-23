@@ -605,7 +605,8 @@ Protocol: [`amq.remote.link/1`](../../docs/remote-link-protocol.md).
      send data to any address.
    - The server can keep the session busy and spend your usage until the
      grant ends or you revoke it.
-   - Every permission dialog stays yours; a link never answers one. A dialog
+   - A session grant covers task submission. Answering a linked approval
+     requires its own passkey touch. A dialog
      you answer "yes, and do not ask again" during a granted task leaves a
      rule that later granted tasks use.
    - The mode is a report, not a lock: a change you make in the middle of a
@@ -663,10 +664,17 @@ files are listed in [the protocol's endpoint state](../../docs/remote-link-proto
 When the server revokes the device, the endpoint retires the sink and
 deletes the device key.
 
-A session shared with a link never gains answering authority: the server sees
-the agent's prompts and cannot answer them. A tool permission prompt is
-answered in the session's terminal, and a task that needs one waits there;
-`attach --self --link` says so (JSON `"approvals": "terminal"`).
+By default, tool approvals stay on the machine. To show eligible dialogs on
+the task’s card, attach the binding with `--approvals link --consent passkey`.
+The card shows the tool, full decision text, and the available allow-once or
+deny-once choices. Each choice needs its own passkey touch. The terminal
+or Buzz can answer first, and the task reports where the answer came from.
+A session-wide permission change stays on the machine.
+
+A share can show a qualifying dialog opened by local typing in the same
+Claude or ACP session during a linked task. Codex also requires the dialog’s
+turn to match the task. Only a dialog the adapter can render in full
+qualifies. [Signed dialog answers](../../docs/remote-link-protocol.md#signed-dialog-answers)
 
 ## Flags
 

@@ -7,6 +7,8 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"maps"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -44,13 +46,13 @@ func answerFrames(t *testing.T, host string, gen int) []goldenFrame {
 	rep := "endpoint_to_server"
 	frames := []goldenFrame{
 		{"answer_info", req, "answer_info", "Ask whether the shared binding accepts signed answers now.", env(map[string]any{"schema": "amq.remote.link.answer_info/1", "binding": binding}, "id", "m_ai", "gen", gen)},
-		{"answer_info_unavailable", rep, "answer_info_reply", "Current endpoints take answers at the terminal.", env(map[string]any{"answer_info": map[string]any{"binding": binding, "available": false, "reason": "approvals_terminal", "now": issuedAt}}, "re", "m_ai", "gen", gen)},
+		{"answer_info_unavailable", rep, "answer_info_reply", "The share uses the default terminal approval policy.", env(map[string]any{"answer_info": map[string]any{"binding": binding, "available": false, "reason": "approvals_terminal", "now": issuedAt}}, "re", "m_ai", "gen", gen)},
 		{"signed_answer", req, "signed_answer", "The enrolled Ed25519 test key signs answer/document.json.", env(map[string]any{
 			"schema": "amq.remote.link.signed_answer/1", "document_b64": b64.EncodeToString(doc), "credential_id": credentialIDEd25519(),
 			"authenticator_data": b64.EncodeToString(auth), "client_data_json": b64.EncodeToString(client), "signature": b64.EncodeToString(signature),
 		}, "id", "m_sa", "gen", gen)},
-		{"answer_recorded", rep, "answer_reply", "Reserved success body after a durable answer write. A verification-only endpoint cannot emit it.", env(map[string]any{"answer": map[string]any{"request_ref": ref, "interaction_id": id, "state": "recorded"}}, "re", "m_sa", "gen", gen)},
-		{"answer_info_available", rep, "answer_info_reply", "Reserved capability for a binding accepting signed answers.", env(map[string]any{"answer_info": map[string]any{"binding": binding, "available": true, "now": issuedAt}}, "re", "m_ai", "gen", gen)},
+		{"answer_recorded", rep, "answer_reply", "The machine durably recorded the signed choice.", env(map[string]any{"answer": map[string]any{"request_ref": ref, "interaction_id": id, "state": "recorded"}}, "re", "m_sa", "gen", gen)},
+		{"answer_info_available", rep, "answer_info_reply", "The opted-in binding accepts signed one-time choices.", env(map[string]any{"answer_info": map[string]any{"binding": binding, "available": true, "now": issuedAt}}, "re", "m_ai", "gen", gen)},
 	}
 	for _, row := range []struct{ code, message string }{
 		{"consent_invalid", "the answer is for another server or store"},
@@ -67,6 +69,39 @@ func answerFrames(t *testing.T, host string, gen int) []goldenFrame {
 		{"internal", "the machine could not confirm that the answer was durably recorded"},
 	} {
 		frames = append(frames, goldenFrame{"answer_refused_" + row.code, rep, "error_reply", "The typed refusal for signed_answer. The message is illustrative.", env(map[string]any{"error": map[string]string{"code": row.code, "message": row.message}}, "re", "m_sa", "gen", gen)})
+	}
+	// A snapshot is immutable. Clone the signed projection before adding the
+	// transient button state; every golden retains its own snapshot bytes.
+	for _, r := range []struct {
+		name       string
+		revision   int
+		actionable bool
+		outcome    string
+	}{
+		{"display", 4, false, ""}, {"actionable", 5, true, ""}, {"occupied", 6, false, ""}, {"reopened", 7, true, ""},
+		{"answered", 8, false, "answered"}, {"elsewhere", 8, false, "answered_elsewhere"}, {"ended", 8, false, "run_ended"}, {"unknown", 8, false, "unknown"},
+	} {
+		snap := map[string]any{"schema": protocol.SchemaRequest, "request_ref": ref, "creator_host": host, "target_id": target, "request_id": requestID, "epoch": epoch, "revision": r.revision, "state": "running", "native_run": "codex-turn-demo", "observed_at": issuedAt}
+		if r.outcome == "" {
+			card := maps.Clone(interaction)
+			if r.actionable {
+				card["remote_answer"] = true
+			}
+			snap["interaction"] = card
+		} else {
+			result := map[string]string{"interaction_id": id, "outcome": r.outcome}
+			switch r.outcome {
+			case "answered", "answered_elsewhere":
+				result["option"] = choice
+			case "unknown":
+				snap["state"] = "completed"
+				snap["result"] = map[string]any{"text": "Task completed.", "truncated": false}
+			}
+			snap["resolved"] = []map[string]string{result}
+		}
+		sum := sha256.Sum256(mustJCS(t, snap))
+		body := map[string]any{"schema": "amq.remote.link.revision/1", "store_id": storeID, "request_ref": ref, "revision": r.revision, "digest": "sha256:" + hex.EncodeToString(sum[:]), "snapshot": snap}
+		frames = append(frames, goldenFrame{"revision_answer_" + r.name, rep, "revision", "The linked permission dialog is " + r.name + ".", env(body, "id", fmt.Sprintf("m_dialog_%s", r.name), "gen", gen)})
 	}
 	return frames
 }

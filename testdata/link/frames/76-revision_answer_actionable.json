@@ -1,0 +1,41 @@
+{
+  "body_def": "revision",
+  "description": "The linked permission dialog is actionable.",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "digest": "sha256:27509076595a9d8cdc90fc6f874799546d2a71d2a0ece7003ce320c85488619f",
+      "request_ref": "amqr1_nruw42znmvtgknbzmmytmyzyha4tmobtguagg33emv4duzdfnvxqan3ggnqteyzrmuwtkyrzmqwtizjymewtsyzsgewtozbumu2wmntbhbrdsma",
+      "revision": 5,
+      "schema": "amq.remote.link.revision/1",
+      "snapshot": {
+        "creator_host": "link-efe49c16c8896835",
+        "epoch": "e_4c0e1a",
+        "interaction": {
+          "approve_option": "Allow once",
+          "interaction_id": "d-5644edd335ce43efb10d5c640672479d",
+          "kind": "approval",
+          "options": [
+            "Decline",
+            "Allow once"
+          ],
+          "prompt": "Command\nprintf '<café> & 世界\u2028'",
+          "reject_option": "Decline",
+          "remote_answer": true
+        },
+        "native_run": "codex-turn-demo",
+        "observed_at": "2026-10-09T14:02:00Z",
+        "request_id": "7f3a2c1e-5b9d-4e8a-9c21-7d4e5f6a8b90",
+        "request_ref": "amqr1_nruw42znmvtgknbzmmytmyzyha4tmobtguagg33emv4duzdfnvxqan3ggnqteyzrmuwtkyrzmqwtizjymewtsyzsgewtozbumu2wmntbhbrdsma",
+        "revision": 5,
+        "schema": "amq.remote.request/1",
+        "state": "running",
+        "target_id": "codex:demo"
+      },
+      "store_id": "st_5d1e0c2a"
+    },
+    "gen": 12,
+    "id": "m_dialog_actionable",
+    "schema": "amq.remote.link/1"
+  }
+}

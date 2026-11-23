@@ -1,0 +1,40 @@
+[
+  {
+    "name": "lost reply",
+    "steps": [
+      {
+        "request": "60-signed_answer.json",
+        "reply": "61-answer_recorded.json",
+        "action": "lose_reply"
+      },
+      {
+        "request": "60-signed_answer.json",
+        "reply": "71-answer_refused_already_resolved.json"
+      }
+    ]
+  },
+  {
+    "name": "Buzz answers first",
+    "steps": [
+      {
+        "request": "60-signed_answer.json",
+        "reply": "71-answer_refused_already_resolved.json",
+        "action": "buzz_answers"
+      }
+    ]
+  },
+  {
+    "name": "seam reopens the dialog",
+    "steps": [
+      {
+        "request": "60-signed_answer.json",
+        "reply": "61-answer_recorded.json"
+      },
+      {
+        "request": "60-signed_answer.json",
+        "reply": "61-answer_recorded.json",
+        "action": "seam_rejects"
+      }
+    ]
+  }
+]

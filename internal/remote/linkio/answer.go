@@ -1,11 +1,14 @@
 package linkio
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"regexp"
 	"time"
 	"unicode/utf8"
 
+	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
@@ -41,6 +44,12 @@ type answerDocument struct {
 	NotAfter          string `json:"not_after"`
 }
 
+// AnswerEndpoint owns the current share policy and the durable answer write.
+type AnswerEndpoint interface {
+	LinkAnswerInfo(core.Source, string) (bool, string)
+	AnswerLinkDialog(core.Source, core.LinkAnswer) (protocol.Code, string)
+}
+
 type answerInfo struct {
 	Binding   string `json:"binding"`
 	Available bool   `json:"available"`
@@ -49,7 +58,8 @@ type answerInfo struct {
 }
 
 // The signed assertion has the same fields as a signed submit. The frame
-// decoder checks its schema and the verifier checks the signed document schema.
+// decoder checks its schema. A signed document's type is its exact key set
+// together with its schema string; verification requires both.
 func verifyAnswer(view *ConsentView, m SignedSubmit, now time.Time) (*answerDocument, error) {
 	// The base64 decoder tolerates line breaks, but the link schema admits
 	// only the unpadded base64url alphabet in every assertion field.
@@ -105,10 +115,16 @@ func (c *Carrier) handleAnswerRequest(sess *session, f Frame) {
 			return
 		}
 		c.enqueue(sess, f, "answer_info:"+m.Binding, func() (any, error) {
-			if _, ok := c.view().Bindings[m.Binding]; !ok {
+			view := c.view()
+			b, ok := view.Bindings[m.Binding]
+			if !ok {
 				return nil, refuse(string(protocol.CodeUnshared), "binding %q is not shared with this link", m.Binding)
 			}
 			info := answerInfo{Binding: m.Binding, Reason: "approvals_terminal", Now: c.cfg.Now().UTC().Format(time.RFC3339)}
+			if c.cfg.Answers != nil {
+				src := c.source(view, b.NativeSessionID, "", m.Binding)
+				info.Available, info.Reason = c.cfg.Answers.LinkAnswerInfo(src, m.Binding)
+			}
 			return struct {
 				Info answerInfo `json:"answer_info"`
 			}{info}, nil
@@ -136,10 +152,29 @@ func (c *Carrier) handleAnswerRequest(sess *session, f Frame) {
 		return
 	}
 	c.enqueue(sess, f, id, func() (any, error) {
-		d, err := verifyAnswer(c.view(), m, c.cfg.Now())
+		view := c.view()
+		d, err := verifyAnswer(view, m, c.cfg.Now())
 		if err != nil {
 			return nil, err
 		}
-		return nil, refuse(CodeAnswerUnsupported, "binding %q takes answers at the terminal", d.Binding)
+		if c.cfg.Answers == nil {
+			return nil, refuse(CodeAnswerUnsupported, "binding %q takes answers at the terminal", d.Binding)
+		}
+		sum := sha256.Sum256(doc)
+		answer := core.LinkAnswer{
+			RequestRef:        d.RequestRef,
+			InteractionID:     d.InteractionID,
+			InteractionDigest: d.InteractionDigest,
+			Option:            d.Option,
+			DocumentDigest:    "sha256:" + hex.EncodeToString(sum[:]),
+			Credential:        m.CredentialID,
+		}
+		// Core trusts this source. The carrier owns the authenticated host, and
+		// verifyAnswer matched the signed binding and native session to this view.
+		src := c.source(view, d.NativeSessionID, m.CredentialID, d.Binding)
+		if code, message := c.cfg.Answers.AnswerLinkDialog(src, answer); code != "" {
+			return nil, refuse(string(code), "%s", message)
+		}
+		return map[string]any{"answer": map[string]string{"request_ref": d.RequestRef, "interaction_id": d.InteractionID, "state": "recorded"}}, nil
 	})
 }

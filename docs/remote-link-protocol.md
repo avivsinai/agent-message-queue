@@ -123,11 +123,13 @@ record and no revision; the next hello omits its digest.
 
 ## Signed dialog answers
 
-The endpoint recognizes two frame bodies for permission dialogs. It currently
-verifies signed answers and returns `answer_unsupported`. Every shared
-binding reports terminal-only approvals. A server keeps answer buttons off
-until both the binding reports `available: true` and the request interaction
-has `remote_answer: true`. An absent `remote_answer` means false.
+An owner can attach a passkey share with `--approvals link` to make eligible
+permission dialogs visible on the running task’s card. The card contains the
+tool, its complete decision text and its one-time choices in native order.
+A server enables those choices when the binding reports `available: true`
+and the interaction carries `remote_answer: true`. An absent flag means
+false. Each distinct approval requires a passkey assertion for the selected
+dialog and exact choice. The terminal and Buzz can still answer first.
 
 Send `amq.remote.link.answer_info/1` with `binding`. The reply carries
 `answer_info` with the binding, `available` and `now` (the machine’s RFC 3339
@@ -165,16 +167,21 @@ The verification-stage errors in order are `consent_invalid` for malformed
 signed content, signature or link identity, `unshared`, `stale_epoch`,
 `session_changed`, then the time checks (`consent_invalid` for malformed
 timestamps, `clock_skew`, `consent_invalid` for invalid lifetime,
-`expired`). A verified document currently ends at `answer_unsupported`.
-A session grant confers no authority to answer a dialog.
+`expired`). The endpoint then checks whether the share accepts answers
+(`answer_unsupported`), the submitting link owns the running request on this
+binding (`not_found`), the dialog awaits an answer (`already_resolved`),
+the interaction digest still matches (`dialog_changed`) and the label names
+an eligible one-time choice (`invalid`).
 
-The wire reserves `{"answer":{"request_ref":"…","interaction_id":"…","state":"recorded"}}`
-for the endpoint that durably writes the answer file and its directory entry.
-That admission stage can also return `not_found`, `already_resolved`,
-`dialog_changed`, `invalid` or `internal`. After a lost reply or uncertain
-durability, the server reads request revisions for disposition. It may see a
-resolution directly. A still-admissible document can be checked again after
-the seam rejects the original choice and reopens the dialog. The signing
+The success reply is `{"answer":{"request_ref":"…","interaction_id":"…","state":"recorded"}}`.
+It confirms that the machine durably wrote the choice. After a lost reply
+or an `internal` error during the write, read the task revisions for the
+outcome. A repeated send while the answer file exists gets `already_resolved`.
+If the harness adapter rejects the choice and removes that file, the card
+can become actionable again and the same still-valid document can be sent
+again. The final revision reports `answered` when the adapter takes the
+link’s answer or `answered_elsewhere` when the terminal or Buzz wins.
+A session grant still requires a separate signature for each approval. The signing
 projection, document, assertion frame and replies are published as
 [golden fixtures](../testdata/link/README.md).
 
