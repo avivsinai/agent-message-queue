@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,7 +71,7 @@ func TestMintGenerationEndsTheGrantForGood(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	old := StoredGrant{GrantID: "6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7", Binding: "b", Generation: g1}
+	old := StoredGrant{GrantID: "6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7", Binding: "b", Generation: g1, IssuedAt: "2026-11-22T10:00:00Z"}
 	if err := StoreGrant(stateDir, "l", old); err != nil {
 		t.Fatal(err)
 	}
@@ -84,8 +85,8 @@ func TestMintGenerationEndsTheGrantForGood(t *testing.T) {
 			t.Fatal(err)
 		}
 		rec := g["b"]
-		if seen[rec.Generation] || rec.Generation == "" || rec.Grant != nil {
-			t.Fatalf("after %s: record %+v, want a new generation and no grant (seen %v)", event, rec, seen)
+		if seen[rec.Generation] || rec.Generation == "" || rec.Grant != nil || rec.IssuedFloor != "" {
+			t.Fatalf("after %s: record %+v, want a new generation, no grant and no floor (seen %v)", event, rec, seen)
 		}
 		seen[rec.Generation] = true
 	}
@@ -120,5 +121,14 @@ func TestStoreGrantKeepsTheNewerGrant(t *testing.T) {
 	g, err := LoadGrants(stateDir, "l")
 	if err != nil || g["b"].Grant == nil || g["b"].Grant.Digest != b.Digest {
 		t.Fatalf("stored %+v, %v; want the newer grant %s", g["b"].Grant, err, b.Digest)
+	}
+	// The floor is the newest grant's time and outlives its clear: a grant
+	// issued between the two is refused after the newer one ended.
+	if err := ClearGrant(stateDir, "l", "b", b.Digest); err != nil {
+		t.Fatal(err)
+	}
+	c := StoredGrant{Digest: "sha256:cc", Binding: "b", Generation: gen, IssuedAt: "2026-11-22T10:00:10Z", NotAfter: "2026-11-22T11:00:10Z"}
+	if err := StoreGrant(stateDir, "l", c); !errors.Is(err, ErrGrantNotNewer) || !strings.Contains(err.Error(), b.IssuedAt) {
+		t.Fatalf("a grant issued before the cleared one: %v; want a refusal that names the floor %s", err, b.IssuedAt)
 	}
 }

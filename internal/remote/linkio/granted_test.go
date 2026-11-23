@@ -639,10 +639,26 @@ func TestEndedGrantIsStaleAfterARestart(t *testing.T) {
 // of the session grant branch: no row held a binding revoked after its
 // write failed).
 func TestFailedRevokeWriteKeepsTheBindingRevoked(t *testing.T) {
+	for _, stored := range []bool{true, false} {
+		name := "a grant is stored"
+		if !stored {
+			name = "no grant is stored"
+		}
+		t.Run(name, func(t *testing.T) { failedRevokeWriteKeepsTheBindingRevoked(t, stored) })
+	}
+}
+
+// With no grant stored the answer is still grant_revoked, not grant_unknown:
+// the binding is in the revoked set.
+func failedRevokeWriteKeepsTheBindingRevoked(t *testing.T, stored bool) {
 	view, key := goldenView(t)
 	b := view.Bindings["pi-demo"]
 	const gen = "g_3jx7k2m4qv5w6y7zab2cd3ef4g"
-	store := &memGrants{mintErr: errors.New("grants.json: no space left on device"), g: Grants{b.Binding: {Generation: gen, Grant: goldenGrant(t, b, key, gen, "2026-10-09T22:10:00Z", key)}}}
+	rec := GrantRecord{Generation: gen}
+	if stored {
+		rec.Grant = goldenGrant(t, b, key, gen, "2026-10-09T22:10:00Z", key)
+	}
+	store := &memGrants{mintErr: errors.New("grants.json: no space left on device"), g: Grants{b.Binding: rec}}
 	fs, clk := newFakeServer(t), grantClock()
 	c, _ := startCarrier(t, fs, clk, func(cfg *Config) {
 		cfg.StoreID = view.StoreID

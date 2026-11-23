@@ -194,7 +194,7 @@ func (c *Carrier) acceptGrant(m SignedGrant, binding string) (any, error) {
 		case errors.Is(err, ErrGrantGeneration):
 			return nil, refuse(CodeGrantRevoked, "binding %q has another grant generation now; ask grant_info and sign again", sg.Binding)
 		case errors.Is(err, ErrGrantNotNewer):
-			return nil, refuse(CodeGrantStale, "binding %q took a grant issued at or after %s; sign again", sg.Binding, sg.IssuedAt)
+			return nil, refuse(CodeGrantStale, "binding %q: %v; sign a grant issued later, or revoke the binding's grant", sg.Binding, err)
 		}
 		return nil, err
 	}

@@ -17,7 +17,8 @@ import (
 )
 
 // link/<name>/grants.json holds, per binding of the link, its grant
-// generation and the one grant accepted for it. A grant is valid only while
+// generation, the one grant accepted for it, and the issued_at of the newest
+// grant accepted in that generation (its floor). A grant is valid only while
 // its generation equals the record's, so minting a new generation ends it,
 // and while the link's key list is the one it was accepted under.
 const grantsFile = "grants.json"
@@ -71,7 +72,8 @@ var ErrGrantGeneration = errors.New("the binding's grant generation changed sinc
 
 // ErrGrantNotNewer is returned by StoreGrant for a grant that was not issued
 // after the binding's issued floor: a replaced or ended grant stays retired.
-var ErrGrantNotNewer = errors.New("the binding took a grant issued at the same time or later")
+// StoreGrant wraps it with the floor.
+var ErrGrantNotNewer = errors.New("the binding took a grant issued at")
 
 // LoadGrants reads a link's grant records. No file is an empty map; an
 // unreadable file is an error, so a caller deciding on a grant fails closed.
@@ -205,7 +207,7 @@ func StoreGrant(stateDir, link string, sg StoredGrant) error {
 			return nil
 		}
 		if (rec.Grant != nil || rec.IssuedFloor != "") && !issuedAfter(sg.IssuedAt, rec.IssuedFloor) {
-			return ErrGrantNotNewer
+			return fmt.Errorf("%w %s", ErrGrantNotNewer, rec.IssuedFloor)
 		}
 		rec.Grant, rec.IssuedFloor = &sg, sg.IssuedAt
 		g[sg.Binding] = rec

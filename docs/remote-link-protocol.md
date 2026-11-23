@@ -226,7 +226,8 @@ outcome of `request.get`.
   life a grant has left on a clock that does not go back, and when it first
   sees a grant expired it clears it from its stored state. A system clock
   set back across a restart, before the grant was seen expired, extends it
-  by that amount; a clock set back after that brings nothing back.
+  by that amount; a clock set back after that brings nothing back, unless
+  the clear failed (see the key list below).
 - A new generation: a random value per binding of a link, never a counter
   and never reused. The machine mints one when the share is written (attach,
   attach again, a change of consent or tools), when the share is removed
@@ -257,9 +258,11 @@ outcome of `request.get`.
 An end is kept on disk: the machine keeps, per binding, the `issued_at` of
 the newest grant it accepted in the binding's generation, and a cleared
 grant leaves that value in place. A grant that ended, and every grant
-signed before it, is refused `grant_stale` when it is presented again, also
-after a restart and also when the wall clock was set back. A new generation
-drops the value, since a grant names its generation.
+signed before it, is refused when it is presented again: in the run that saw
+the end with the end's own code, and after a restart with `grant_stale`,
+also when the wall clock was set back. A new generation drops the value,
+since a grant names its generation; a grant of an earlier generation is
+refused `grant_revoked`.
 
 The machine shows a desktop notice when it accepts a grant and when a grant
 ends by revoke or expiry; `amq-remote link status` lists the stored grants.
@@ -275,7 +278,7 @@ Error replies, before admission (nothing was sent):
 | `unsupported` | any grant request | An older machine | Signatures per task |
 | `consent_invalid` | `signed_grant`, `granted_submit` | Signature, passkey, WebAuthn profile, strict decoding, server or store id, an input class a grant may not hold, a command out of its bounds | Fix it; for a grant, sign again |
 | `clock_skew` | `signed_grant` | `issued_at` is more than 60 s ahead of the machine's clock | Read `now` from `grant_info`; sign again |
-| `grant_stale` | `signed_grant` | `issued_at` is more than 60 s behind the machine's clock, or not later than that of the newest grant accepted for the binding, and the digest is not the stored grant's | Sign again |
+| `grant_stale` | `signed_grant` | `issued_at` is more than 60 s behind the machine's clock, or not later than that of the newest grant accepted for the binding (the message names that time), and the digest is not the stored grant's | Sign again. When the named time is ahead of the machine's clock, a new grant is accepted after the clock passes it, or after a revoke of the binding's grant |
 | `grant_too_long` | `signed_grant` | The lifetime is not in (0, `max_lifetime_s`] | Sign a shorter grant |
 | `grant_unsupported` | `signed_grant`, `granted_submit` | The binding takes no grant now; the message starts with the reason | End the grant; signatures per task |
 | `grant_unknown` | `granted_submit` | No grant with this digest is stored for the binding | End the grant; sign again |
