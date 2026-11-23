@@ -212,8 +212,8 @@ func Notice(t Timer, me string) format.Message {
 // message. For a request its kind or labels must also close the obligation.
 // For other kinds, any referenced reply suffices. Thread is never used,
 // because the default thread is shared by every message between the two
-// agents. A message in me's outbox/sent whose refs name the request and whose
-// labels close it for the requester (withdrawn, done, closed) also settles it.
+// agents. A requester closure in the outbox that references the request
+// settles both the completion and news timers.
 //
 // Both timers skip message files stamped before the earliest due request.
 // A news timer settles when the recipient sends news about the request to
@@ -313,6 +313,11 @@ type mailbox struct {
 }
 
 func (m mailbox) settles(t Timer) bool {
+	for _, h := range m.sent {
+		if h.ID != t.RequestID && slices.Contains(h.Refs, t.RequestID) && thread.RequesterCloses(t.RequestKind, h.Labels) {
+			return true
+		}
+	}
 	if t.news() {
 		request := thread.Entry{ID: t.RequestID, Thread: t.Thread, RawTime: t.Sent}
 		for _, h := range m.inbox {
@@ -332,11 +337,6 @@ func (m mailbox) settles(t Timer) bool {
 			continue
 		}
 		if !request || thread.OwnerCloses(t.RequestKind, h.Kind, h.Labels) {
-			return true
-		}
-	}
-	for _, h := range m.sent {
-		if h.ID != t.RequestID && slices.Contains(h.Refs, t.RequestID) && thread.RequesterCloses(t.RequestKind, h.Labels) {
 			return true
 		}
 	}
@@ -374,11 +374,7 @@ func readMailbox(root *fsq.DeliveryRoot, me string, due []Timer) (mailbox, error
 		notices[t.NoticeID+".md"] = true
 	}
 	box := mailbox{noticeIDs: map[string]bool{}}
-	leaves := []fsq.MailboxLeaf{fsq.MailboxInboxNew, fsq.MailboxInboxCur}
-	if slices.ContainsFunc(due, func(t Timer) bool { return !t.news() }) {
-		leaves = append(leaves, fsq.MailboxOutboxSent)
-	}
-	for _, leaf := range leaves {
+	for _, leaf := range []fsq.MailboxLeaf{fsq.MailboxInboxNew, fsq.MailboxInboxCur, fsq.MailboxOutboxSent} {
 		d := fsq.MailboxRootRelativePath(me, leaf)
 		entries, err := root.ReadDir(d)
 		if err != nil {
