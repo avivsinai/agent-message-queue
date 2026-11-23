@@ -525,7 +525,7 @@ func (h *handoff) print(asJSON bool) error {
 		// review it does not find, the notice goes out by hand.
 		next := "run the same command again to complete the hand-off\n"
 		if !recorded(review) {
-			next = fmt.Sprintf("do not run the command again; tell the requester yourself: amq reply --id %s --kind status --labels %s --body %q\n", h.request, handedOffLabel, h.noticeLine())
+			next = fmt.Sprintf("do not run the command again; tell the requester yourself with a reply to the request, kind status, label %s, and this text:\n  %s\n", handedOffLabel, h.noticeLine())
 		}
 		if err := writeStdout("%s", next); err != nil {
 			return err
