@@ -1,0 +1,28 @@
+{
+  "body_def": "granted_submit",
+  "description": "A task under the stored grant: a plain request.submit with the grant's input class written out, not_after after the machine's now, at most 3 minutes ahead and within the grant.",
+  "direction": "server_to_endpoint",
+  "frame": {
+    "body": {
+      "command": {
+        "epoch": "e_4c0e1a",
+        "input": {
+          "busy": "reject",
+          "deliver": "turn",
+          "min_evidence": "submitted",
+          "text": "Run the unit tests again and report the result."
+        },
+        "not_after": "2026-10-09T14:12:00Z",
+        "op": "request.submit",
+        "request_id": "9b2d4f6a-1c3e-4a5b-8d7f-0e1a2b3c4d5e",
+        "schema": "amq.remote.command/1",
+        "target_id": "pi:demo-5b9d0c1e"
+      },
+      "grant_digest": "sha256:3facc1dcb7764712e7e7ba8ae18f0a18e4504e1e81ef58ae189680e6a41da2ac",
+      "schema": "amq.remote.link.granted_submit/1"
+    },
+    "gen": 12,
+    "id": "m_gs1",
+    "schema": "amq.remote.link/1"
+  }
+}

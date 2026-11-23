@@ -37,9 +37,12 @@ const linkUsage = `  link add NAME URL --code CODE
                            Accept one more consent passkey (type its fingerprint)
   link local-key NAME      Create the local passkey that confirms consent-local tasks
   link confirm ID          Show a held task's exact text and confirm it (Touch ID)
+  link grant revoke NAME [BINDING]
+                           End link NAME's session grant for BINDING, or for
+                           every binding; the server must ask for a new grant
   link remove NAME         Retire link NAME's sink and delete its device key
-  link status              Links on this machine, their sockets and owed
-                           revisions, retired sinks
+  link status              Links on this machine, their sockets, owed
+                           revisions and stored grants, retired sinks
   link tools               The tools a linked server offers this machine
   link call TOOL --args J  Call a linked server's tool (--wait for the final state,
                            --idempotency-key K; resume K after a lost answer)

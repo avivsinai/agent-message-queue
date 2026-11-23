@@ -11,6 +11,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/jcs"
@@ -25,6 +27,18 @@ const (
 	CodeConsentInvalid = "consent_invalid"
 	CodeSessionChanged = "session_changed"
 	CodeClockSkew      = "clock_skew"
+)
+
+// Refusal codes of a session grant. They are link reply codes only, never
+// the code of a request record or a revision.
+const (
+	CodeGrantStale          = "grant_stale"
+	CodeGrantTooLong        = "grant_too_long"
+	CodeGrantUnsupported    = "grant_unsupported"
+	CodeGrantUnknown        = "grant_unknown"
+	CodeGrantRevoked        = "grant_revoked"
+	CodeGrantExpired        = "grant_expired"
+	CodeGrantNeedsSignature = "grant_needs_signature"
 )
 
 // Time bounds of a consent.
@@ -67,6 +81,18 @@ type ConsentView struct {
 	StoreID  string
 	Keys     map[string]ConsentKey // by credential id; a removed key is absent
 	Bindings map[string]Binding    // by binding name, as reported to the server
+	// KeysUnread is true when the key list could not be read: Keys is then
+	// empty, and it is no key list a grant can be compared with.
+	KeysUnread bool
+}
+
+// keyList is the KeyList value of the view's keys, and false when the
+// view's key list could not be read.
+func (v *ConsentView) keyList() (string, bool) {
+	if v.KeysUnread {
+		return "", false
+	}
+	return KeyList(slices.Collect(maps.Keys(v.Keys))), true
 }
 
 // Refusal is a signed submit refused before admission.
@@ -110,34 +136,37 @@ func VerifySignedSubmit(view *ConsentView, m SignedSubmit, now time.Time) (*Veri
 	return &Verified{Cmd: cmd, Native: native, Binding: b, Digest: "sha256:" + hex.EncodeToString(sum[:]), Text: cmd.Input.Text, NotAfter: notAfter}, nil
 }
 
+// matchBinding returns the binding a signed document names when it is
+// shared with the link and still has the target, epoch, labels and native
+// session that were signed.
+func matchBinding(view *ConsentView, binding, targetID, epoch string, labels Labels, native string) (Binding, error) {
+	b, shared := view.Bindings[binding]
+	switch {
+	case !shared:
+		return Binding{}, refuse(string(protocol.CodeUnshared), "binding %q is not shared with this link", binding)
+	case targetID != b.TargetID || epoch != b.Epoch || labels != b.Labels:
+		return Binding{}, refuse(string(protocol.CodeStaleEpoch), "the binding changed since you signed; read it again and sign again")
+	case native == "" || native != b.NativeSessionID:
+		return Binding{}, refuse(CodeSessionChanged, "the session behind %s changed since you signed", binding)
+	}
+	return b, nil
+}
+
 func verifySignedSubmit(view *ConsentView, m SignedSubmit, now time.Time) (*protocol.Command, string, Binding, []byte, error) {
-	doc, err := b64.DecodeString(m.DocumentB64)
+	doc, _, err := verifySigned(view, m.DocumentB64, m.CredentialID, m.AuthenticatorData, m.ClientDataJSON, m.Signature)
 	if err != nil {
-		return nil, "", Binding{}, nil, refuse(CodeConsentInvalid, "the document is not base64url")
-	}
-	key, ok := view.Keys[m.CredentialID]
-	if !ok {
-		return nil, "", Binding{}, nil, refuse(CodeConsentInvalid, "the passkey is not one this machine accepts")
-	}
-	docSum := sha256.Sum256(doc)
-	originOK := func(o string) bool { return key.Origin != "" && o == key.Origin }
-	if err := verifyWebAuthnGet(key, docSum[:], originOK, m.AuthenticatorData, m.ClientDataJSON, m.Signature); err != nil {
-		return nil, "", Binding{}, nil, refuse(CodeConsentInvalid, "%v", err)
+		return nil, "", Binding{}, nil, err
 	}
 	d, err := DecodeConsent(doc)
 	if err != nil {
 		return nil, "", Binding{}, nil, refuse(CodeConsentInvalid, "%v", err)
 	}
-	b, shared := view.Bindings[d.Binding]
-	switch {
-	case d.ServerID != view.ServerID || d.StoreID != view.StoreID:
+	if d.ServerID != view.ServerID || d.StoreID != view.StoreID {
 		return nil, "", Binding{}, nil, refuse(CodeConsentInvalid, "the consent is for another server or store")
-	case !shared:
-		return nil, "", Binding{}, nil, refuse(string(protocol.CodeUnshared), "binding %q is not shared with this link", d.Binding)
-	case d.Command.TargetID != b.TargetID || d.Command.Epoch != b.Epoch || d.Labels != b.Labels:
-		return nil, "", Binding{}, nil, refuse(string(protocol.CodeStaleEpoch), "the binding changed since you signed; read it again and sign again")
-	case d.NativeSessionID == "" || d.NativeSessionID != b.NativeSessionID:
-		return nil, "", Binding{}, nil, refuse(CodeSessionChanged, "the session behind %s changed since you signed", d.Binding)
+	}
+	b, err := matchBinding(view, d.Binding, d.Command.TargetID, d.Command.Epoch, d.Labels, d.NativeSessionID)
+	if err != nil {
+		return nil, "", Binding{}, nil, err
 	}
 	issued, err := time.Parse(time.RFC3339, d.IssuedAt)
 	if err != nil {
@@ -164,27 +193,12 @@ func verifySignedSubmit(view *ConsentView, m SignedSubmit, now time.Time) (*prot
 	return &cmd, d.NativeSessionID, b, doc, nil
 }
 
-// DecodeConsent decodes the signed bytes strictly. The bytes must be their
-// own JCS form (no duplicate key, no lone surrogate), the command must be a
-// valid submit with its defaults written out, and the decoded document must
-// encode back to exactly these bytes. The last rule refuses every key that
-// is unknown or differs only by case: encoding/json matches "TEXT" to the
-// field "text", so two spellings could otherwise carry two texts.
+// DecodeConsent decodes the signed bytes strictly (decodeJCS), and the
+// command must be a valid submit with its defaults written out.
 func DecodeConsent(doc []byte) (*ConsentDocument, error) {
-	canon, err := jcs.Canonicalize(doc)
-	if err != nil {
-		return nil, fmt.Errorf("the document is not canonical JSON: %w", err)
-	}
-	if !bytes.Equal(canon, doc) {
-		return nil, errors.New("the document is not in its canonical (JCS) form")
-	}
 	var d ConsentDocument
-	if err := json.Unmarshal(doc, &d); err != nil {
-		return nil, fmt.Errorf("the document does not decode: %w", err)
-	}
-	again, err := jcs.Marshal(d)
-	if err != nil || !bytes.Equal(again, doc) {
-		return nil, errors.New("the document has a key this machine does not read exactly (unknown, or differing only by case)")
+	if err := decodeJCS(doc, &d); err != nil {
+		return nil, err
 	}
 	if d.Schema != SchemaConsent {
 		return nil, fmt.Errorf("schema %q, want %s", d.Schema, SchemaConsent)
@@ -201,6 +215,51 @@ func DecodeConsent(doc []byte) (*ConsentDocument, error) {
 		return nil, fmt.Errorf("the command is invalid: %w", err)
 	}
 	return &d, nil
+}
+
+// verifySigned checks the signature over a signed document and returns its
+// bytes and the consent key that signed them: the document must be
+// base64url, the key one this machine accepts, and the WebAuthn assertion
+// one over SHA-256 of the document bytes, made on the key's origin.
+func verifySigned(view *ConsentView, documentB64, credentialID, authData, clientData, sig string) ([]byte, ConsentKey, error) {
+	doc, err := b64.DecodeString(documentB64)
+	if err != nil {
+		return nil, ConsentKey{}, refuse(CodeConsentInvalid, "the document is not base64url")
+	}
+	key, ok := view.Keys[credentialID]
+	if !ok {
+		return nil, ConsentKey{}, refuse(CodeConsentInvalid, "the passkey is not one this machine accepts")
+	}
+	docSum := sha256.Sum256(doc)
+	originOK := func(o string) bool { return key.Origin != "" && o == key.Origin }
+	if err := verifyWebAuthnGet(key, docSum[:], originOK, authData, clientData, sig); err != nil {
+		return nil, ConsentKey{}, refuse(CodeConsentInvalid, "%v", err)
+	}
+	return doc, key, nil
+}
+
+// decodeJCS decodes signed bytes into v strictly. The bytes must be their
+// own JCS form (no duplicate key, no lone surrogate), and v must encode back
+// to exactly these bytes. The last rule refuses every key that is unknown or
+// differs only by case: encoding/json matches "TEXT" to the field "text", so
+// two spellings could otherwise carry two values. v's type names every key
+// with no omitempty, or a signed key would be lost on the way back.
+func decodeJCS(doc []byte, v any) error {
+	canon, err := jcs.Canonicalize(doc)
+	if err != nil {
+		return fmt.Errorf("the document is not canonical JSON: %w", err)
+	}
+	if !bytes.Equal(canon, doc) {
+		return errors.New("the document is not in its canonical (JCS) form")
+	}
+	if err := json.Unmarshal(doc, v); err != nil {
+		return fmt.Errorf("the document does not decode: %w", err)
+	}
+	again, err := jcs.Marshal(v)
+	if err != nil || !bytes.Equal(again, doc) {
+		return errors.New("the document has a key this machine does not read exactly (unknown, or differing only by case)")
+	}
+	return nil
 }
 
 // verifyWebAuthnGet checks a WebAuthn assertion (WebAuthn Level 3 §7.2)

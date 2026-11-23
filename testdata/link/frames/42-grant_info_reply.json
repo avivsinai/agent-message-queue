@@ -1,0 +1,20 @@
+{
+  "body_def": "grant_info_reply",
+  "description": "The binding takes a grant now. The grant must carry this grant_generation, last at most max_lifetime_s, and be issued at this machine's now (within 60 s). The binding is the fixture's sample binding, and the values are those of a harness that takes grants (Codex in this release: max_text_bytes 131072); a pi binding answers as in frame 43. The wire is the same for every harness; which harness reports a mode that asks is the machine's decision.",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "grant_info": {
+        "available": true,
+        "binding": "pi-demo",
+        "grant_generation": "g_3jx7k2m4qv5w6y7zab2cd3ef4g",
+        "max_lifetime_s": 86400,
+        "max_text_bytes": 131072,
+        "now": "2026-10-09T14:10:00Z"
+      }
+    },
+    "gen": 12,
+    "re": "m_gi1",
+    "schema": "amq.remote.link/1"
+  }
+}

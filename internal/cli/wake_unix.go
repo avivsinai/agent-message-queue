@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/desktopnotice"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/fsnotify/fsnotify"
 	"golang.org/x/sys/unix"
@@ -2916,7 +2917,7 @@ func (s *wakeStart) newLoopConfig() wakeConfig {
 		dialogHoldReason:        wakeDialogHoldReasonInDir(activeAgentDir),
 		commands:                &wakeCommands{dir: activeAgentDir},
 		dialogHoldDetail:        wakeDialogHoldDetailInDir(activeAgentDir),
-		desktopNotify:           wakeDesktopNotifier(),
+		desktopNotify:           desktopnotice.Notifier(),
 		startupTrustRelease:     wakeStartupTrustReleaseInDir(activeAgentDir),
 		settingsObserved:        startupSettings.observed,
 		machineSettingsSource:   machineWakeSettingsSource(),

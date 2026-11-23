@@ -1,0 +1,16 @@
+{
+  "body_def": "error_reply",
+  "description": "No grant with this digest is stored for the command's target. End the grant; sign again.",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "error": {
+        "code": "grant_unknown",
+        "message": "no grant with this digest is stored for target pi:demo-5b9d0c1e"
+      }
+    },
+    "gen": 12,
+    "re": "m_gs1",
+    "schema": "amq.remote.link/1"
+  }
+}

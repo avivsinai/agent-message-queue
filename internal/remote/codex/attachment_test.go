@@ -34,6 +34,11 @@ type fakeAppServer struct {
 	// resumePath, when set, is the rollout path thread/resume reports for
 	// the thread; resumeReviewerMu guards it.
 	resumePath string
+	// resumeMode, when set, is the JSON members (each with a leading comma)
+	// thread/resume adds for the permission mode; resumeHook, when set, runs
+	// before the answer is written. resumeReviewerMu guards both.
+	resumeMode string
+	resumeHook func()
 	// resumeError, when set, is the JSON-RPC error object thread/resume
 	// answers with.
 	resumeError   string
@@ -131,7 +136,7 @@ func startFakeAppServerAt(t *testing.T, sock string) (string, *fakeAppServer) {
 					continue
 				}
 				srv.resumeReviewerMu.Lock()
-				reviewer, path := srv.resumeReviewer, ""
+				reviewer, path, mode, hook := srv.resumeReviewer, "", srv.resumeMode, srv.resumeHook
 				if srv.resumePath != "" {
 					raw, _ := json.Marshal(srv.resumePath)
 					path = `,"path":` + string(raw)
@@ -140,7 +145,10 @@ func startFakeAppServerAt(t *testing.T, sock string) (string, *fakeAppServer) {
 				if reviewer == "" {
 					reviewer = "user"
 				}
-				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":{"thread":{"id":"t1","cwd":"/work","status":{"type":"idle"}` + path + `},"approvalsReviewer":"` + reviewer + `"}}`))
+				if hook != nil {
+					hook()
+				}
+				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":{"thread":{"id":"t1","cwd":"/work","status":{"type":"idle"}` + path + `},"approvalsReviewer":"` + reviewer + `"` + mode + `}}`))
 			case "turn/start":
 				srv.turnStartDelayMu.Lock()
 				hook := srv.turnStartDelayHook

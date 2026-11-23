@@ -62,7 +62,12 @@ func TestRefusalReasonRoundTripsToSnapshot(t *testing.T) {
 	}
 
 	// A same-digest resubmit of the rejected record returns
-	// the stored refusal on Outcome.Message, the same as status/get.
+	// the stored refusal on Outcome.Message, the same as status/get, with no
+	// second dispatch. For a local caller the outcome has no code: the
+	// snapshot beside it holds the record's code, and an outcome code speaks
+	// of this call (review of the session grant branch: a change that
+	// answered the stored code to every caller made a turn resend a busy
+	// refusal until its timeout).
 	again, err := ep.Handle(submitCmd(id), core.Source{Host: "local"})
 	if err != nil {
 		t.Fatalf("resubmit: %v", err)
@@ -70,5 +75,8 @@ func TestRefusalReasonRoundTripsToSnapshot(t *testing.T) {
 	retry, ok := again.(protocol.Reply)
 	if !ok || retry.Outcome.Message != want || retry.Snapshot.State != protocol.StateRejected {
 		t.Fatalf("resubmit outcome = %#v", again)
+	}
+	if reply.Outcome.Code != protocol.CodeNativeError || retry.Outcome.Code != "" || retry.Snapshot.Code != protocol.CodeNativeError || rt.Snapshot().Dispatches != 1 {
+		t.Fatalf("outcome codes %q then %q (snapshot %q), native Submit calls %d; want native_error, then no outcome code beside a native_error snapshot, one call", reply.Outcome.Code, retry.Outcome.Code, retry.Snapshot.Code, rt.Snapshot().Dispatches)
 	}
 }

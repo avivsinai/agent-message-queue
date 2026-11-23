@@ -154,6 +154,30 @@ invariants.
   lists its digest.
   A re-attach or a new native session changes what the binding reports, and
   every older signature stops matching.
+- **A session grant stands in for a signature per task, only while the
+  session asks.** The owner may sign one grant, for at most 24 hours, that
+  lets a link send tasks to one shared binding with no signature each. A
+  granted task runs only when, at the handoff to the harness, the machine
+  holds the grant with the digest the record names, its generation is the
+  binding's generation now, now is before its `not_after`, the link's key
+  list is the one the grant was accepted under, the share's consent is
+  `passkey`, and the harness reports from its own state that the session
+  asks before a tool acts. Every share write, detach and revoke mints a new
+  random generation, which ends the grant; a key added, dropped or revoked
+  ends it for good, also when the key list later returns to its earlier
+  value. An end is kept on disk: the machine keeps the `issued_at` of the
+  newest grant it accepted for a binding, so after a restart a grant that
+  ended, and every grant signed before it, answers `grant_stale`. The
+  machine writes an end it saw at its next tick; when it stops before that
+  write, or the write fails, the grant stays stored: the run that saw the end
+  refuses it, and after a restart it is live again only if what ended it no
+  longer holds, until the next check ends it again. An end by a new
+  generation is written before the answer. Within its time the server writes the
+  task text; the session reads with no dialog what it can read with no
+  dialog, rules the owner pre-allowed in the harness apply to granted tasks,
+  and the mode is a report, not a lock. The machine shows a notice when it
+  accepts a grant and when a grant ends. A signed submit stays valid on every
+  binding at all times.
 - **A revision is published when its sink acknowledged it.** A carrier counts
   a revision as published only after the sink confirms that it committed that
   revision or a newer one. Until then the revision stays owed and the

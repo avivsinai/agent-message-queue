@@ -107,7 +107,7 @@ func TestLocalBindingHoldsUntilConfirmed(t *testing.T) {
 			t.Fatal(err)
 		}
 		c, err := New(Config{Name: "example", Pin: Pin{URL: "wss://link.example.test/link", ServerID: testServerID}, StoreID: view.StoreID, Key: dk,
-			Now: clk.now, ConsentKeys: func() []ConsentKey { return []ConsentKey{key} }, Bindings: func() []Binding { return []Binding{b} },
+			Now: clk.now, ConsentKeys: func() ([]ConsentKey, error) { return []ConsentKey{key}, nil }, Bindings: func() []Binding { return []Binding{b} },
 			LocalKey: func() (ConsentKey, bool) { return local, true },
 			Handle: func(cmd *protocol.Command, _ core.Source) (any, error) {
 				if code := refuseNext; code != "" {

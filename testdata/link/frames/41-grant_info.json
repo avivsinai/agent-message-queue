@@ -1,0 +1,14 @@
+{
+  "body_def": "grant_info",
+  "description": "Ask whether a binding takes a session grant now, and its grant_generation. An older machine answers unsupported.",
+  "direction": "server_to_endpoint",
+  "frame": {
+    "body": {
+      "binding": "pi-demo",
+      "schema": "amq.remote.link.grant_info/1"
+    },
+    "gen": 12,
+    "id": "m_gi1",
+    "schema": "amq.remote.link/1"
+  }
+}

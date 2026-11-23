@@ -101,7 +101,7 @@ signed submit is refused before admission with one of:
 | `clock_skew` | `issued_at` is more than 60 s from the machine's clock |
 | `expired` | The consent's `not_after` has passed |
 | `unshared` | The binding is not shared with this link |
-| `busy` | The harness is busy and `input.busy` is `reject`. The reply is `{"outcome": {"op": "request.submit", "code": "busy"}}`. The server may send the same signed document again; wait at least 2 seconds between sends. It is admitted when the session is free, while the document's `issued_at` is within 60 s of the machine's clock and before its `not_after`. A document for the same request id with another input or `not_after` does not run and is answered `request_conflict` |
+| `busy` | The harness is busy and `input.busy` is `reject`. The reply is `{"outcome": {"op": "request.submit", "code": "busy"}}`. The server may send the same signed document again; wait at least 2 seconds between sends. When nothing was sent to the harness for it, it is admitted when the session is free, while the document's `issued_at` is within 60 s of the machine's clock and before its `not_after`. A request sent again after it ended rejected gets the code and reason it ended with. A document for the same request id with another input or `not_after` does not run and is answered `request_conflict` |
 
 `busy` and `request_conflict` arrive as an outcome reply, not as an error
 reply, and `busy` leaves a busy record.
@@ -120,6 +120,196 @@ id; the local passkey signs SHA-256(`"amq.remote.link/1\0confirm\0"` +
 digest). After a confirmation the request has a record and revisions like
 any other. A task whose deadline passes, or that a restart drops, has no
 record and no revision; the next hello omits its digest.
+
+## Session grant
+
+The owner can sign one grant for one shared binding. Until the grant ends,
+the server sends tasks to that session with no signature per task, while
+the harness reports that the session asks before a tool acts. A signed
+submit stays valid on every binding at all times. Nothing changes in
+`hello`, `bindings/1` or a binding's `capabilities`: each grant request is a
+new body, which an older machine answers `unsupported`.
+
+### The grant document
+
+Schema `amq.remote.grant/1`, signed as a consent document is: its JCS
+bytes, the link's passkey, WebAuthn get, challenge = SHA-256 of the bytes,
+user presence and verification. Every key is required and no other is read:
+
+| Key | Meaning |
+| --- | --- |
+| `schema` | `amq.remote.grant/1` |
+| `server_id`, `store_id` | As in a consent |
+| `grant_id` | A lowercase UUID the server chooses |
+| `binding`, `target_id`, `epoch`, `native_session_id`, `labels` | The binding as the machine published it |
+| `grant_generation` | The value `grant_info` gave for this binding |
+| `issued_at`, `not_after` | RFC 3339; `not_after - issued_at` is above 0 and at most `max_lifetime_s` |
+| `input` | The one input class the grant covers: `{"busy": "reject", "deliver": "turn", "min_evidence": "submitted" or "admitted"}` |
+
+The machine keeps at most one grant per binding of a link. A grant replaces
+the stored one only when its `issued_at` is later; any other digest than
+the stored grant's is refused `grant_stale`, so a replaced grant stays
+retired.
+
+### Requests
+
+- `amq.remote.link.grant_info/1` `{schema, binding}` answers
+  `{"grant_info": {binding, available, reason?, grant_generation?,
+  max_lifetime_s?, max_text_bytes?, now}}`. `available` false carries
+  `reason`: `consent_local`, `mode_unreadable` (the harness has not
+  reported a mode that asks), `harness_unsupported` or
+  `state_in_workspace` (the session can write the machine's state
+  directory with no dialog: its working directory, a writable root of its
+  sandbox, a runtime workspace root of the thread, or `/tmp` or `$TMPDIR`
+  (this machine's value) of a `workspaceWrite` sandbox that does not
+  exclude them, holds that directory or lies inside it). A server shows an
+  unknown reason as not available. `available` true
+  carries `grant_generation`, `max_lifetime_s` (86400) and `max_text_bytes`.
+  `now` is the machine's clock, for `issued_at` and a command's `not_after`.
+- `amq.remote.link.signed_grant/1` has the keys of a signed submit over a
+  grant document. The machine verifies it, stores it, shows the owner a
+  desktop notice and answers `{"grant": {digest, grant_id, binding,
+  not_after}}`, `digest` being `"sha256:"` + hex of the document bytes.
+  `issued_at` must be within 60 s of the machine's clock. The stored grant
+  presented again gets the same reply and changes nothing. The server sends
+  tasks under a grant only after this reply.
+- `amq.remote.link.granted_submit/1` `{schema, grant_digest, command}`.
+  `command` is a plain `request.submit` with the grant's input class written
+  out; its `not_after` is after the machine's `now`, at most 3 minutes
+  ahead and not after the grant's. A busy session answers the outcome
+  `busy`; the same command may be sent again, at least 2 seconds apart,
+  until its `not_after`, and every send passes every check again. A granted
+  request is never held as a deferred record: a harness that cannot read
+  the session's mode while its attachment is offline answers
+  `grant_needs_signature`, and a target that is offline at the hand-over
+  answers `busy` with no record. Revisions and cancel are as for a signed
+  request.
+- `amq.remote.link.grant_revoke/1` `{schema, binding}` (the binding must be
+  this link's). Granted tasks read after this frame are refused; the machine
+  writes the new generation and answers `{"revoked": {binding,
+  grant_generation}}`. When that write fails it answers `storage_full`, and
+  the binding's grant stays refused until the server sends the revoke again
+  or the machine writes the generation on its own. A task already handed to
+  the harness is not recalled.
+
+### What the machine checks at each granted task
+
+1. The body decodes strictly and `command` is a valid `request.submit`.
+2. A grant with this digest is stored for the command's binding.
+3. The grant's generation is the binding's now, `now` is before the grant's
+   `not_after`, and the link's key list is the one the grant was accepted
+   under.
+4. The binding is shared with the link; its target, epoch, labels and native
+   session equal the grant's and the binding's now.
+5. The share's consent is `passkey`. A granted task is never held for a
+   local confirmation.
+6. The command has the grant's input class and its `not_after` bounds; the
+   text is at most `max_text_bytes`.
+7. The harness reports now that the session asks before a tool acts. On
+   Codex this is the thread's own settings as the app-server reported them
+   on the attachment's connection: `approvalPolicy` `untrusted` or
+   `on-request`, `approvalsReviewer` `user`, sandbox `readOnly` or
+   `workspaceWrite`. A granted `turn/start` carries no override.
+8. The request is admitted as a link request, with the grant's native
+   session and signing key; its record keeps the grant's digest.
+
+Right before the hand-over to the harness (also for a busy request sent
+again) the machine checks 3 and 5 again, and the adapter checks 7 and, on
+the settings of that dispatch, that the session cannot write the machine's
+state directory with no dialog. A granted request stopped there ends
+`rejected` with code `consent_invalid`. A snapshot has no message: the
+reason (`grant_revoked: ...`, `grant_expired: ...`,
+`grant_needs_signature: ...`, `grant_unsupported: state_in_workspace: ...`)
+is the message of the outcome of `request.get`.
+
+### How a grant ends
+
+- Its `not_after`. Expiry is kept: inside one run the machine measures the
+  life a grant has left on a clock that does not go back, and when it first
+  sees a grant expired it clears it from its stored state. A system clock
+  set back across a restart, before the grant was seen expired, extends it
+  by that amount; a clock set back after that brings nothing back once the
+  end is written (see below).
+- A new generation: a random value per binding of a link, never a counter
+  and never reused. The machine mints one when the share is written (attach,
+  attach again, a change of consent or tools), when the share is removed
+  (detach), when the owner revokes (`amq-remote link grant revoke`), when the
+  server sends `grant_revoke`, and when the stored value is missing or
+  unreadable.
+- A change of the link's key list. The machine stores with each grant the
+  key list it was accepted under; a grant is valid only while the link's
+  key list is that list. So a key that is added, dropped or revoked ends
+  every grant of the link at once (`grant_revoked`). The end is permanent:
+  the machine clears the stored grant when it sees the change, and a key
+  list that later returns to its earlier value does not bring the grant
+  back. The generation does not change; the owner signs a new grant.
+- A newer grant accepted for the same binding.
+- A new epoch or another native session behind the binding.
+- The session can write the machine's state directory with no dialog: the
+  binding then takes no grant (`state_in_workspace`). A link in the machine
+  root (the default) can grant; a link kept inside a project cannot grant to
+  that project's sessions. A link's state is never moved: to grant there,
+  remove the link (`amq-remote link remove NAME`) and add it again in the
+  machine root (`amq-remote link add` without `--root`), or keep a signature
+  per task.
+
+An end is kept on disk: the machine keeps, per binding, the `issued_at` of
+the newest grant it accepted in the binding's generation, and a cleared
+grant leaves that value in place. A grant that ended, and every grant
+signed before it, is refused when it is presented again: in the run that saw
+the end with the end's own code, and after a restart with `grant_stale`,
+also when the wall clock was set back. A new generation drops the value,
+since a grant names its generation; a grant of an earlier generation is
+refused `grant_revoked`.
+
+The machine writes an end that it saw (a key-list change, an expiry) at its
+next tick after it saw it. When the machine stops before that write, or the
+write fails, the stored grant stays: the run that saw the end refuses it,
+and after a restart in that state the grant is live again only if what
+ended it no longer holds (the key list is back at its earlier value, or the
+clock was set back before its expiry), until the next check ends it again.
+An end by a new generation (a share write, a detach, a revoke) is not in
+this limit: the generation is written before the answer.
+
+The machine shows a desktop notice when it accepts a grant and when a grant
+ends by revoke or expiry; `amq-remote link status` lists the stored grants.
+A restore of the machine's state from a backup can bring back a grant that
+has not expired.
+
+### Codes
+
+Error replies, before admission (nothing was sent):
+
+| Code | From | Meaning | What the server does |
+| --- | --- | --- | --- |
+| `unsupported` | any grant request | An older machine | Signatures per task |
+| `consent_invalid` | `signed_grant`, `granted_submit` | Signature, passkey, WebAuthn profile, strict decoding, server or store id, an input class a grant may not hold, a command out of its bounds | Fix it; for a grant, sign again |
+| `clock_skew` | `signed_grant` | `issued_at` is more than 60 s ahead of the machine's clock | Read `now` from `grant_info`; sign again |
+| `grant_stale` | `signed_grant` | `issued_at` is more than 60 s behind the machine's clock, or not later than that of the newest grant accepted for the binding (the message names that time), and the digest is not the stored grant's | Sign again. When the named time is ahead of the machine's clock, a new grant is accepted after the clock passes it, or after a revoke of the binding's grant |
+| `grant_too_long` | `signed_grant` | The lifetime is not in (0, `max_lifetime_s`] | Sign a shorter grant |
+| `grant_unsupported` | `signed_grant`, `granted_submit` | The binding takes no grant now; the message starts with the reason | End the grant; signatures per task |
+| `grant_unknown` | `granted_submit` | No grant with this digest is stored for the binding | End the grant; sign again |
+| `grant_revoked`, `grant_expired` | both | The grant ended (above) | End the grant; ask `grant_info`; sign again when the owner wants |
+| `grant_needs_signature` | `granted_submit` | The session does not ask now, its mode cannot be read, or the text is longer than `max_text_bytes` | Send this task as a signed submit with a new `request_id`; the grant stays |
+| `unshared`, `stale_epoch`, `session_changed`, `expired` | all | As for a consent | Read the binding again |
+| `busy` with `retry_after_ms` | all | The connection's queue is full; nothing was read | Send the same frame again |
+
+`grant_*` codes are link reply codes only, never the code of a request
+record or a revision. Outcome replies to `granted_submit` are as for a
+signed submit: no code (admitted), `busy`, `request_conflict` (the request
+id is in use with another input, `not_after`, signature or grant),
+`storage_full`, `attachment_lost`. A request sent again after it ended
+rejected gets the code and reason it ended with, for example
+`consent_invalid` with a reason that starts with `grant_needs_signature` or
+`grant_unsupported`.
+
+The reason a grant ended depends on what the machine saw. In the run of the
+machine that saw a grant end, every later answer for that grant keeps its
+reason, also after the grant is cleared from the stored state. After a
+restart, a grant cleared before it answers `granted_submit` with
+`grant_unknown` and `signed_grant` with `grant_stale`, and a hand-over
+reason reads `grant_revoked: the grant is
+no longer stored`. The server does the same in each case: it signs again.
 
 ## Link info
 
@@ -162,5 +352,6 @@ in two roots is refused. Per link root, under `<root>/extensions/remote/link/`:
 | `<name>/device.key` | The Ed25519 device key, mode 0600, never overwritten. |
 | `<name>/link.json` | The pinned server id, URL, signing origin, and the tool profiles the server grants. |
 | `<name>/consent_keys.json` | Consent public keys only. |
+| `<name>/grants.json` | Per shared binding, its grant generation, the one grant accepted for it and the `issued_at` of the newest grant accepted in that generation, mode 0600; changed under `grants.json.lock`. |
 | `<name>/status.json` | The link's last recorded status, which `link status` shows. |
 | `retired/<sink>` | Sinks of removed or revoked links. |
