@@ -5,6 +5,7 @@ package cli
 import (
 	"context"
 	"io"
+	"time"
 )
 
 // runCoopWait does nothing where amq wake does not run: the waiter reads
@@ -20,9 +21,12 @@ func runCoopPromptCodex(io.Reader, io.Writer) error { return nil }
 // coopWaitRuns reports no waiter where the waiter does not run.
 func coopWaitRuns(root, me string) bool { return false }
 
+// coopWaitHandOverLeft reports no waiter where the waiter does not run.
+func coopWaitHandOverLeft(root, me string, now time.Time) time.Duration { return 0 }
+
 // coopWaitRunsInBackground reports no session that keeps the waiter in the
 // background where the waiter does not run.
-func coopWaitRunsInBackground() bool { return false }
+func coopWaitRunsInBackground(optIn bool) bool { return false }
 
 // coopWaitSettings is the settings read of a seat where amq wake does not
 // run. No settings file is written on these platforms, so the defaults are

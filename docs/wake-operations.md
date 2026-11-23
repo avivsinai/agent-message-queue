@@ -232,6 +232,51 @@ In `amq wake check --json`, `attended` is the live wake's applied value: a
 seat with no wake reads `false` even when the settings file says otherwise.
 A seat with no wake reads the setting with `amq wake config`.
 
+## Hook doorbell
+
+On a Claude Code terminal with the co-op hooks installed, run
+`amq wake config --hook-doorbell=true` to let the hook wake the session
+when mail arrives. A fresh session can receive mail before its first prompt,
+and a draft stays in the editor. The setting defaults to false. Add
+`--machine` to set the machine default, or use `--hook-doorbell=false`
+to switch a running seat back to its typed doorbell.
+
+A built-in typing wake yields only when the hook covers every unread
+message. A message is covered when a waiter holds its lock and no hook
+announced the message yet, or when a hook announced it less than 2 minutes
+ago: the waiter rang for it, or the turn-end hook reported it. When no
+waiter runs, mail that arrives during a turn that a ring started waits for
+that turn's end, at most 2 minutes after the ring: the waiter that starts
+at the turn's end rings it. In every other case the wake types the
+doorbell when the usual delivery guards allow it. This also covers a
+missing or stopped hook, and an unread file whose header cannot be read
+(only a drain resolves it, by moving it to the dead-letter queue).
+
+With no wake (`--no-wake`), nothing rings a message a second time: the
+waiter rings it one time, and the turn-end hook reports it at most one
+time. Under a notify-only wake the terminal waiter does not run, as on a
+seat with no setting, and the turn-end hook reports only mail that arrived
+before the wake started.
+
+The grace runs from the announcement. After a ring that no drain followed
+within 2 minutes, the wake starts its typed doorbell one time (the doorbell,
+then its usual reminders), also while a waiter holds its lock. The same
+applies to mail that the turn-end hook reported and nobody drained. So when
+the turn that follows a ring or a report lasts longer than 2 minutes, the
+wake can type during that turn. A wake from an older release
+refuses a settings file that holds `hook_doorbell` and keeps its last
+settings until it upgrades; it keeps typing.
+
+In `amq wake check --json`, `doorbell` shows the channel the live wake
+published (`typed`, `hook` or `none`) and `waiter_live` reports the lock.
+With no live wake, `doorbell` is absent (schema 1) or null (schema 2). A
+drain receipt records consumption.
+
+The terminal hook has been observed on macOS with Claude Code 2.1.330.
+The desktop app uses its existing wait hook on 2.1.321 and later.
+`claude -p` never runs the waiter. The terminal behavior is unverified on
+Linux, earlier terminal versions, and Codex.
+
 ## Input guard (macOS)
 
 The input guard is off by default: the wake then uses the quiet window of
@@ -861,6 +906,7 @@ A running wake has two kinds of input.
   `input_quiet_for`, `input_guard`, `input_stale_for`, `input_poll_interval`, `input_max_hold`, `interrupt`,
   `interrupt_label`, `interrupt_priority`, `interrupt_notice`,
   `interrupt_cooldown`, `inject_timeout`, `self_upgrade`, and `held_notice`.
+  The `hook_doorbell` key enables the [hook doorbell](#hook-doorbell).
   Each has a flag of the same name with `-` in place of `_`.
 - `held_notice` (default `true`) shows the desktop notification of a
   dialog-held doorbell (see [Held-doorbell notice](#dialog-guard-claude-code)).

@@ -368,7 +368,8 @@ func seedWakeSettingsFile(
 
 // wakeSettingsAppliedFile is .wake.settings.applied: what the wake of one
 // lock generation did with one observed agent settings digest and one
-// observed machine settings digest. It is a diagnostic, not a receipt, and
+// observed machine settings digest. The hooks use its generation-bound
+// doorbell and attended fields to select the ringer. The file
 // is removed with the self-upgrade diagnostic. The machine fields were added
 // within schema 1: an older reader decodes without them, and a sidecar
 // without them comes from an image that never reads the machine file.
@@ -385,6 +386,8 @@ type wakeSettingsAppliedFile struct {
 	MachineStatus string `json:"machine_status,omitempty"`
 	MachineDigest string `json:"machine_digest,omitempty"`
 	MachineError  string `json:"machine_error,omitempty"`
+
+	Doorbell wakeChannel `json:"doorbell,omitempty"`
 }
 
 func readWakeSettingsAppliedAt(
@@ -423,6 +426,9 @@ func recordWakeSettingsApplied(
 	guardTimeout time.Duration,
 ) error {
 	if agentDir == nil || !inspection.Exists || inspection.Lock.Generation == "" {
+		if status.doorbell == wakeChannelHook {
+			return fmt.Errorf("no wake generation to publish the hook doorbell")
+		}
 		return nil
 	}
 	return withWakeLifecycleGuardInDir(agentDir, wakeGuardOptions{noWait: true, retryTimeout: guardTimeout}, func(dirfd int) error {
@@ -433,6 +439,7 @@ func recordWakeSettingsApplied(
 			return fmt.Errorf("wake changed before settings status publication")
 		}
 		applied := wakeSettingsAppliedFile{
+			Doorbell:      status.doorbell,
 			InputGuard:    status.inputGuard,
 			Attended:      status.attended,
 			Schema:        wakeSettingsSchemaV1,

@@ -57,6 +57,49 @@ func TestPublishStartupDialogMarkerAttendedDeliveryLine(t *testing.T) {
 	}
 }
 
+// Review finding H16: coop exec --no-wake printed no delivery line for a
+// seat with hook_doorbell on, although its waiter is then the only ringer.
+func TestCoopExecNoWakePrintsHookDoorbellDeliveryLine(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	root := secureTempDirForTest(t)
+	if err := runInit([]string{"--root", root, "--agents", "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	settings := []byte(`{"schema":1,"settings":{"hook_doorbell":true}}`)
+	if err := os.WriteFile(filepath.Join(fsq.AgentBase(root, "codex"), wakeSettingsFileName), settings, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err := captureCoopExecStderr(t, []string{"--root", root, "--me", "codex", "--no-wake", "sh"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr, "delivery: hook doorbell (the harness's hook rings; the wake types only when no hook waits)\n") {
+		t.Fatalf("stderr = %q, want the hook doorbell delivery line", stderr)
+	}
+
+	// A live notify-only wake publishes no hook channel, so the terminal
+	// waiter does not run; the line said the hook rings all the same.
+	process := inspectWakeProcess(os.Getpid())
+	process.Executable = "/opt/amq"
+	process.Args = []string{"amq", "wake"}
+	stubInspectWakeProcess(t, func(int) wakeProcessInfo { return process })
+	stopWake, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{wakeMode: wakeInjectModeNone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stopWake()
+	_, stderr, err = captureEnvOutput(t, func() error {
+		writeSeatDeliveryLine(root, "codex")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(stderr, "delivery: hook doorbell") {
+		t.Fatalf("notify-only wake: stderr = %q, want no hook doorbell line", stderr)
+	}
+}
+
 // A waiter on an attended seat stays quiet for its whole window and
 // records no rang ids, as it does on a quiet inbox: the gate in
 // waitCoopMail suppresses the ring, so a removed gate fails this test.
@@ -88,7 +131,7 @@ func TestCoopWaitOnAttendedSeatDoesNotRing(t *testing.T) {
 	if elapsed := time.Since(start); elapsed < quiet/2 {
 		t.Fatalf("attended waiter ended after %s, want it to run its whole %s window", elapsed, quiet)
 	}
-	if rang := readCoopWaitState(filepath.Join(root, "agents", "claude", coopWaitStateFile), claudeSession); len(rang.RangIDs) != 0 {
+	if rang := coopAnnounced(filepath.Join(root, "agents", "claude"), claudeSession, false).rang; len(rang.RangIDs) != 0 {
 		t.Fatalf("attended waiter rang %v, want no rang ids", rang.RangIDs)
 	}
 }

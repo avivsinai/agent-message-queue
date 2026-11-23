@@ -146,7 +146,7 @@ func TestCoopWaitDebounceBatchesABurst(t *testing.T) {
 	if took := time.Since(start); took < time.Second {
 		t.Fatalf("rang %s after the first message, before the debounce passed", took)
 	}
-	rang := readCoopWaitState(filepath.Join(fsq.AgentBase(root, "claude"), coopWaitStateFile), "7c29e148-77eb-47c0-8984-10c13b4700b1")
+	rang := coopAnnounced(fsq.AgentBase(root, "claude"), "7c29e148-77eb-47c0-8984-10c13b4700b1", false).rang
 	if len(rang.RangIDs) != 2 {
 		t.Fatalf("rang ids = %v, want both messages of the burst", rang.RangIDs)
 	}

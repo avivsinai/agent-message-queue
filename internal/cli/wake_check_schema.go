@@ -109,6 +109,10 @@ type wakeCheckStartDecision struct {
 }
 
 type wakeCheckWakeDecision struct {
+	// Doorbell is the channel the live wake published; empty with no live
+	// wake.
+	Doorbell     wakeChannel
+	WaiterLive   bool
 	InputGuard   string
 	Attended     bool
 	Status       string
@@ -226,6 +230,9 @@ type wakeCheckWakeV2 struct {
 	TargetDigest *string `json:"target_digest"`
 	StartedAt    *string `json:"started_at"`
 	BaselineAt   *string `json:"baseline_at"`
+
+	Doorbell   *wakeChannel `json:"doorbell"`
+	WaiterLive bool         `json:"waiter_live"`
 }
 
 type wakeCheckImageV2 struct {
@@ -304,6 +311,8 @@ func renderWakeCheckV2(decision wakeCheckDecision) wakeCheckResultV2 {
 		Wake: wakeCheckWakeV2{
 			InputGuard:   wakeInputGuardValue(decision.Wake.InputGuard),
 			Attended:     decision.Wake.Attended,
+			Doorbell:     wakeCheckOptionalChannel(decision.Wake.Doorbell),
+			WaiterLive:   decision.Wake.WaiterLive,
 			Status:       decision.Wake.Status,
 			Live:         decision.Wake.Live,
 			PID:          decision.Wake.PID,
@@ -428,6 +437,13 @@ func wakeCheckActionRequiresExecutable(action wakeCheckActionDecision) bool {
 	default:
 		return false
 	}
+}
+
+func wakeCheckOptionalChannel(value wakeChannel) *wakeChannel {
+	if value == "" {
+		return nil
+	}
+	return &value
 }
 
 func wakeCheckOptionalString(value string) *string {

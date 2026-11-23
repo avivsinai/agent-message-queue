@@ -47,6 +47,10 @@ type wakeCheckResult struct {
 	NextAction               string `json:"next_action"`
 	// StartupHold is an open trust-dialog hold coop exec placed.
 	StartupHold *wakeStartupHoldStatus `json:"startup_hold,omitempty"`
+
+	// Doorbell is absent with no live wake.
+	Doorbell   wakeChannel `json:"doorbell,omitempty"`
+	WaiterLive bool        `json:"waiter_live"`
 }
 
 type wakeStartCapability struct {
@@ -83,6 +87,7 @@ type wakeCheckObservation struct {
 	BaselineAt string
 	InputGuard string
 	Attended   bool
+	Doorbell   wakeChannel
 }
 
 type wakeCheckSnapshot struct {
@@ -165,10 +170,12 @@ func inspectWakeCheckSnapshot(root, me string) wakeCheckSnapshot {
 		Decision: buildWakeCheckDecision(root, me, second.Inspection, opsLock, true),
 	}
 	snapshot.Decision.SelfUpgrade = wakeCheckSelfUpgradeDecisionFromObservation(second.SelfUpgrade)
+	snapshot.Decision.Wake.WaiterLive = coopWaitRuns(root, me)
 	snapshot.Decision.Wake.BaselineAt = wakeCheckOptionalString(second.BaselineAt)
 	if snapshot.Decision.Wake.Live {
 		snapshot.Decision.Wake.InputGuard = second.InputGuard
 		snapshot.Decision.Wake.Attended = second.Attended
+		snapshot.Decision.Wake.Doorbell = second.Doorbell
 		applyWakeCheckHealth(&snapshot.Decision, probeWakeHealthPlatform(root, me, second.Inspection))
 	}
 	// Image and loop probing can take time. Re-observe afterwards so a PID
@@ -204,10 +211,10 @@ func observeWakeCheck(root, me string) (wakeCheckObservation, error) {
 			agentDir,
 			observation.Inspection,
 		)
-		if applied, ok := readWakeSettingsAppliedAt(dirfd, agentDir, observation.Inspection); ok {
-			observation.InputGuard = applied.InputGuard
-			observation.Attended = applied.Attended
-		}
+		applied, _ := readWakeSettingsAppliedAt(dirfd, agentDir, observation.Inspection)
+		observation.InputGuard = applied.InputGuard
+		observation.Attended = applied.Attended
+		observation.Doorbell = publishedWakeChannel(applied.Doorbell, observation.Inspection.Lock.WakeMode)
 		observation.BaselineAt = observeWakeCheckBaselineAt(dirfd, agentDir, observation.Inspection)
 		var boundSelectionErr error
 		observation.Repair = assessWakeRepair(
@@ -598,6 +605,8 @@ func renderWakeCheckV1(decision wakeCheckDecision) wakeCheckResult {
 		BaselineAt:               wakeCheckStringValue(decision.Wake.BaselineAt, ""),
 		InputGuard:               wakeInputGuardValue(decision.Wake.InputGuard),
 		Attended:                 decision.Wake.Attended,
+		Doorbell:                 decision.Wake.Doorbell,
+		WaiterLive:               decision.Wake.WaiterLive,
 		WakeStatus:               decision.Wake.Status,
 		HealthStatus:             decision.Health.Status,
 		HealthDetail:             decision.Health.Detail,
