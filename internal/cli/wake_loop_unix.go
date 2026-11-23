@@ -188,6 +188,9 @@ func (l *wakeLoop) provisionAgentDir() error {
 		if err := validateCanonicalWakeAgentDir(l.ordinaryAgentDir); err != nil {
 			return fmt.Errorf("validate acquired wake agent authority: %w", err)
 		}
+		if err := ensureWakeMailbox(l.ordinaryAgentDir, l.cfg.root, l.cfg.me); err != nil {
+			return err
+		}
 		if l.cfg.touchPresence == nil {
 			l.cfg.touchPresence = func() error {
 				return touchWakePresenceInDir(l.ordinaryAgentDir, l.cfg.me)

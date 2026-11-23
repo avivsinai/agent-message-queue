@@ -1026,6 +1026,101 @@ func TestRunWakeLoopOwnerlessStartupScanAndQueuedEventEmitOnce(t *testing.T) {
 	}
 }
 
+// A consumer started `amq wake` for a handle whose agents/<h>/ existed with no
+// inbox: the start retried the inbox watcher forever and never answered health.
+func TestRunWakeLoopProvisionsMissingMailboxAtStart(t *testing.T) {
+	start := func(t *testing.T, root string) (<-chan struct{}, <-chan struct{}, *error) {
+		t.Helper()
+		agentDir := retainedWakeAgentDirForTest(t, root, "codex")
+		ready := make(chan struct{})
+		stop := make(chan struct{})
+		exited := make(chan struct{})
+		var loopErr error
+		go func() {
+			defer close(exited)
+			loopErr = runWakeLoop(wakeConfig{
+				root:              root,
+				me:                "codex",
+				session:           "session1",
+				retainedAgent:     agentDir,
+				injectMode:        wakeInjectModeNone,
+				controlStop:       stop,
+				preconditionCheck: func(*wakeConfig) error { return nil },
+				attentionIsTTY:    func() bool { return false },
+				onPrepared: func(wakeAdmissionWatcher) error {
+					close(ready)
+					return nil
+				},
+			})
+		}()
+		t.Cleanup(func() {
+			close(stop)
+			select {
+			case <-exited:
+			case <-time.After(2 * time.Second):
+				t.Error("wake loop did not stop")
+			}
+		})
+		return ready, exited, &loopErr
+	}
+
+	t.Run("missing inbox", func(t *testing.T) {
+		root := secureTempDirForTest(t)
+		if err := os.MkdirAll(fsq.AgentBase(root, "codex"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		ready, exited, loopErr := start(t, root)
+		select {
+		case <-ready:
+		case <-exited:
+			t.Fatalf("wake loop exited before ready: %v", *loopErr)
+		case <-time.After(2 * time.Second):
+			t.Fatal("wake with no mailbox never reached ready")
+		}
+		for _, leaf := range fsq.RequiredMailboxLeaves() {
+			info, err := os.Lstat(fsq.AgentMailboxPath(root, "codex", leaf))
+			if err != nil || !info.IsDir() {
+				t.Fatalf("mailbox %s after start: %v, want a directory", leaf, err)
+			}
+		}
+	})
+
+	t.Run("inbox is a symlink", func(t *testing.T) {
+		root := secureTempDirForTest(t)
+		elsewhere := filepath.Join(root, "elsewhere")
+		if err := os.MkdirAll(elsewhere, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		agentPath := fsq.AgentBase(root, "codex")
+		if err := os.MkdirAll(agentPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join("..", "..", "elsewhere"), filepath.Join(agentPath, "inbox")); err != nil {
+			t.Fatal(err)
+		}
+		_, exited, loopErr := start(t, root)
+		select {
+		case <-exited:
+		case <-time.After(2 * time.Second):
+			t.Fatal("wake with a symlinked inbox did not fail at start")
+		}
+		var pathErr *wakeMailboxPathError
+		if !errors.As(*loopErr, &pathErr) {
+			t.Fatalf("start error = %v, want a wake mailbox path error", *loopErr)
+		}
+		if entries, err := os.ReadDir(elsewhere); err != nil || len(entries) != 0 {
+			t.Fatalf("symlink target after start: %v entries, err %v; want untouched", len(entries), err)
+		}
+		entries, err := os.ReadDir(agentPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 || entries[0].Name() != "inbox" {
+			t.Fatalf("agent directory after start = %v, want only the inbox symlink", entries)
+		}
+	})
+}
+
 func TestRunWakeLoopRearmsOrdinaryInboxWatcher(t *testing.T) {
 	originalScanRetryBase := wakeInboxScanRetryBase
 	originalScanRetryMax := wakeInboxScanRetryMax

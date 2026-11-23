@@ -6,6 +6,11 @@ durable file and crash invariants, see
 [Wake state invariants](wake-state-invariants.md) and the
 [wake lifecycle document](wake-lifecycle.md).
 
+A wake that starts for an agent with no `inbox` directory creates the agent's
+mailbox directories, as `amq coop exec` does, and a mailbox path that is a
+symlink, is not a directory, or cannot be created ends the start with that
+path and the `amq init --root <root> --agents <agent>` remedy.
+
 ## Inspect before mutation
 
 Run `amq wake check --me <agent> --json` before stopping, repairing, or
