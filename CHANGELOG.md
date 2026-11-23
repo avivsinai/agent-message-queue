@@ -8,6 +8,28 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.166.0](https://github.com/avivsinai/agent-message-queue/compare/v0.165.0...v0.166.0) (2026-11-23)
+
+
+### Features
+
+* **remote:** a Claude Code session takes a link session grant through its prompt hook ([#1599](https://github.com/avivsinai/agent-message-queue/issues/1599)) ([fa82e8c](https://github.com/avivsinai/agent-message-queue/commit/fa82e8cbb6f445bf236c43bf1b2a7d6eddc12f01))
+
+## [0.165.0](https://github.com/avivsinai/agent-message-queue/compare/v0.164.0...v0.165.0) (2026-11-23)
+
+
+### Features
+
+* **coop:** an attended Codex seat sees waiting mail at a turn end ([fb0cfda](https://github.com/avivsinai/agent-message-queue/commit/fb0cfdacc99763eaef3bb5374109d23d4b1bbd4a))
+* **pi:** a pi terminal session takes a link session grant behind a typed yes ([0fb2b22](https://github.com/avivsinai/agent-message-queue/commit/0fb2b220ed18737767f0987834b99124e6fa1d9e))
+
+
+### Bug Fixes
+
+* **pi:** a remote request that the person aborts ends cancelled ([dd7dab2](https://github.com/avivsinai/agent-message-queue/commit/dd7dab2eb86df0f9314e586eef0b997c2e7e8037))
+* **wake:** a wake creates its agent mailbox directories at start ([6f21152](https://github.com/avivsinai/agent-message-queue/commit/6f211526643317df08248872f8d0d1f1991912f5))
+* **wake:** an unstable wake check never reports a valid live wake ([23d2dad](https://github.com/avivsinai/agent-message-queue/commit/23d2dadda304a24bb4adbedba3cc0473a5a4e1a8))
+
 ## [0.164.0](https://github.com/avivsinai/agent-message-queue/compare/v0.163.0...v0.164.0) (2026-11-23)
 
 

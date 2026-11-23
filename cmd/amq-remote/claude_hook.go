@@ -22,7 +22,7 @@ import (
 // operator, never from inside Claude Code.
 func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 	if len(args) == 0 {
-		say(os.Stderr, "claude subcommand required (stop-hook | install-stop-hook | uninstall-stop-hook | permission-hook | install-approval-hook | uninstall-approval-hook)\n")
+		say(os.Stderr, "claude subcommand required (stop-hook | install-stop-hook | uninstall-stop-hook | permission-hook | install-approval-hook | uninstall-approval-hook | prompt-hook | install-prompt-hook | uninstall-prompt-hook)\n")
 		return protocol.ExitUsage
 	}
 	home, err := os.UserHomeDir()
@@ -30,7 +30,8 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 		return 0 // fail-open even on home resolution failure
 	}
 	switch args[0] {
-	case "install-stop-hook", "uninstall-stop-hook", "install-approval-hook", "uninstall-approval-hook":
+	case "install-stop-hook", "uninstall-stop-hook", "install-approval-hook", "uninstall-approval-hook",
+		"install-prompt-hook", "uninstall-prompt-hook":
 		// They take no options: --help or a stray argument changes nothing.
 		// Only the bare command acts; a lone -- parses clean.
 		if len(args) > 1 {
@@ -87,6 +88,26 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 			return 1
 		}
 		say(stdout, "approval hook removed\n")
+		return 0
+	case "prompt-hook":
+		return promptHook(home, stdin, stdout)
+	case "install-prompt-hook":
+		bin, err := hookExecutable()
+		if err == nil {
+			_, err = claude.OptInPromptHook(home, claude.SettingsPath(home), bin)
+		}
+		if err != nil {
+			say(os.Stderr, "install-prompt-hook: %v\n", err)
+			return 1
+		}
+		say(stdout, "prompt hook installed: a Claude Code session on this machine can take a link session grant while it is in a mode that asks for permissions\n")
+		return 0
+	case "uninstall-prompt-hook":
+		if err := claude.OptOutHook(claude.SettingsPath(home), claude.HookPrompt); err != nil {
+			say(os.Stderr, "uninstall-prompt-hook: %v\n", err)
+			return 1
+		}
+		say(stdout, "prompt hook removed\n")
 		return 0
 	default:
 		say(os.Stderr, "unknown claude subcommand %q\n", args[0])

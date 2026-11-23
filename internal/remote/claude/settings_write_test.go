@@ -109,6 +109,44 @@ func TestRestoreHookLeavesADeletedSettingsFileDeleted(t *testing.T) {
 	}
 }
 
+// The opt-in record gained the prompt hook's fields; a record an earlier
+// release wrote, with none of them, reads the same for its own hooks, and
+// the prompt install keeps them.
+func TestEarlierOptInRecordReadsTheSame(t *testing.T) {
+	home := t.TempDir()
+	path := SettingsPath(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	file, err := optInPath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	earlier := `{"settings":"` + hookfile.Canonical(path) + `","approval":{"bin":"/opt/amq-remote"},"stop_removed":true}` + "\n"
+	if err := os.WriteFile(file, []byte(earlier), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	check := func(when string) {
+		t.Helper()
+		in, err := ReadHookOptIn(path)
+		if err != nil || !in.Has(HookApproval) || in.Approval.Bin != "/opt/amq-remote" || in.Removed(HookApproval) ||
+			in.Has(HookStop) || !in.Removed(HookStop) {
+			t.Fatalf("%s: opt-in = %+v, %v; want the approval opt-in and the Stop removal", when, in, err)
+		}
+	}
+	check("earlier record")
+	if in, _ := ReadHookOptIn(path); in.Has(HookPrompt) || in.Removed(HookPrompt) {
+		t.Fatalf("earlier record has a prompt opt-in: %+v", in)
+	}
+	if _, err := OptInPromptHook(home, path, filepath.Join(home, "amq-remote")); err != nil {
+		t.Fatal(err)
+	}
+	check("after the prompt install")
+}
+
 // Review of the hook installers: an edit made a 0644 settings file 0600.
 func TestHookInstallKeepsTheSettingsFileMode(t *testing.T) {
 	home := t.TempDir()

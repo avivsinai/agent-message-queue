@@ -13,15 +13,16 @@ import (
 
 // doctor --fix repairs what the check pass flags and doctor can repair
 // without the owner, each step idempotent, and returns one line per change:
-// the approval hook, the Stop hook (where native mode needs it) and the
-// wake dialog guard in each Claude settings file doctor checks, and, for
-// the machine root only, the login service for `up` while doctor advises one
-// and none is installed. It never creates a settings file in a Claude
-// config dir that does not exist, never installs a hook the owner removed
-// with its uninstall command (doctor notes it), never restarts amq-acp or a
-// wake, and never deletes a request record. An approval or Stop hook it
-// installs records the owner's opt-in, so the machine agent restores it
-// when another writer removes it.
+// the approval hook, the Stop hook (where native mode needs it), the prompt
+// hook (only where the owner's opt-in of it exists) and the wake dialog
+// guard in each Claude settings file doctor checks, and, for the machine
+// root only, the login service for `up` while doctor advises one and none
+// is installed. It never creates a settings file in a Claude config dir
+// that does not exist, never installs a hook the owner removed with its
+// uninstall command (doctor notes it), never restarts amq-acp or a wake,
+// and never deletes a request record. An approval or Stop hook it installs
+// records the owner's opt-in, so the machine agent restores it when another
+// writer removes it.
 func doctorFix(root, stateDir string, all []binding.Binding, fail reportFunc) []string {
 	fixed := []string{}
 	changed := func(link, subject, what string) {
@@ -53,7 +54,7 @@ func fixHooks(home, stateDir string, all []binding.Binding, changed func(link, s
 	native := nativeConfigured(stateDir, all)
 	ensure := func(path, what string, install func() (bool, error)) {
 		switch wrote, err := install(); {
-		case errors.Is(err, claude.ErrHookRemoved):
+		case errors.Is(err, claude.ErrHookRemoved), errors.Is(err, claude.ErrNoOptIn):
 		case err != nil:
 			fail("hooks", path, "cannot install the "+what+": "+err.Error(), "repair "+path)
 		case wrote:
@@ -69,6 +70,11 @@ func fixHooks(home, stateDir string, all []binding.Binding, changed func(link, s
 		if state, err := claude.StopHookStateAt(path); err == nil {
 			if form, _ := claude.StopHookForm(home, path); native && state == claude.HookMissing || state != claude.HookMissing && claude.FormFlagged(form) {
 				ensure(path, "Stop hook", func() (bool, error) { return claude.EnsureStopHook(home, path, bin) })
+			}
+		}
+		if state, err := claude.PromptHookStateAt(path); err == nil {
+			if form, _ := claude.PromptHookForm(home, path); state == claude.HookMissing || claude.FormFlagged(form) {
+				ensure(path, "prompt hook (UserPromptSubmit)", func() (bool, error) { return claude.EnsurePromptHook(home, path, bin) })
 			}
 		}
 		switch state, _ := dialogguard.ClaudeAt(path); state {

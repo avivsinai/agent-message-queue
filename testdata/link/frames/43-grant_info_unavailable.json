@@ -8,7 +8,7 @@
         "available": false,
         "binding": "pi-demo",
         "now": "2026-10-09T14:10:00Z",
-        "reason": "harness_unsupported"
+        "reason": "mode_unreadable"
       }
     },
     "gen": 12,

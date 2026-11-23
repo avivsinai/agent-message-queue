@@ -92,7 +92,9 @@ jobs:
         with:
           node-version: '24'
       - name: pi extension test
-        run: npm test
+        run: |
+          npm ci --legacy-peer-deps --ignore-scripts
+          npm test
       - name: Smoke test
         run: make smoke
       - name: Module, contract, and hook checks
