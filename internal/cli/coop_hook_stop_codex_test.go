@@ -171,7 +171,9 @@ func TestCoopStopCodexSilencesNoticeWhenItsStateCannotChange(t *testing.T) {
 		}
 	})
 	if f, err := os.CreateTemp(mailbox, "state-write-denied"); err == nil {
-		t.Fatalf("scratch mailbox still allows state writes: %s", f.Name())
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		t.Skip("privileged runner bypasses Unix directory write permissions")
 	}
 	if raw, err := os.ReadFile(statePath); err != nil || !bytes.Equal(raw, sentinel) {
 		t.Fatalf("state is not readable before its denied update: %q, %v", raw, err)
