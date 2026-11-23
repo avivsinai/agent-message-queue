@@ -76,6 +76,28 @@ func TestCoopExecNoWakePrintsHookDoorbellDeliveryLine(t *testing.T) {
 	if !strings.Contains(stderr, "delivery: hook doorbell (the harness's hook rings; the wake types only when no hook waits)\n") {
 		t.Fatalf("stderr = %q, want the hook doorbell delivery line", stderr)
 	}
+
+	// A live notify-only wake publishes no hook channel, so the terminal
+	// waiter does not run; the line said the hook rings all the same.
+	process := inspectWakeProcess(os.Getpid())
+	process.Executable = "/opt/amq"
+	process.Args = []string{"amq", "wake"}
+	stubInspectWakeProcess(t, func(int) wakeProcessInfo { return process })
+	stopWake, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{wakeMode: wakeInjectModeNone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stopWake()
+	_, stderr, err = captureEnvOutput(t, func() error {
+		writeSeatDeliveryLine(root, "codex")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(stderr, "delivery: hook doorbell") {
+		t.Fatalf("notify-only wake: stderr = %q, want no hook doorbell line", stderr)
+	}
 }
 
 // A waiter on an attended seat stays quiet for its whole window and

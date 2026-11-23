@@ -347,16 +347,18 @@ func publishStartupDialogMarker(root, handle string, marker wakeDialogMarker, ho
 	return nil
 }
 
-// writeSeatDeliveryLine prints the delivery line of a seat from its
-// settings files, with or without a wake of this launch. An attended seat
-// gets one line for every harness: no doorbell is typed, mail shows as a
-// notice. A seat that is not attended and has hook_doorbell on gets the
-// hook doorbell line instead. Neither line predicts what the hooks will
-// deliver — that is the hooks' own state at each prompt.
+// writeSeatDeliveryLine prints the delivery line of a seat, with or without
+// a wake of this launch. An attended seat (its settings files) gets one
+// line for every harness: no doorbell is typed, mail shows as a notice. A
+// seat that is not attended gets the hook doorbell line only where the
+// seat's doorbell read admits the hook: no live wake and hook_doorbell on,
+// or a live wake that published the hook channel. Neither line predicts
+// what the hooks will deliver — that is the hooks' own state at each
+// prompt.
 func writeSeatDeliveryLine(root, handle string) {
 	if settings, _ := coopWaitSettings(root, handle, wakeSettingsLayers{}); settings.attended {
 		_ = writeStderr("delivery: attended (no doorbell is typed; mail shows as a notice)\n")
-	} else if settings.hookDoorbell {
+	} else if readSeatDoorbell(root, handle).optIn {
 		_ = writeStderr("delivery: hook doorbell (the harness's hook rings; the wake types only when no hook waits)\n")
 	}
 }

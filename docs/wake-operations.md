@@ -252,10 +252,11 @@ doorbell when the usual delivery guards allow it. This also covers a
 missing or stopped hook, and an unread file whose header cannot be read
 (only a drain resolves it, by moving it to the dead-letter queue).
 
-With no typing wake (`--no-wake`, or a notify-only wake), nothing rings a
-message a second time: the waiter rings it one time, and the turn-end hook
-reports it at most one time. Under a notify-only wake, the turn-end hook
-reports only mail that arrived before the wake started.
+With no wake (`--no-wake`), nothing rings a message a second time: the
+waiter rings it one time, and the turn-end hook reports it at most one
+time. Under a notify-only wake the terminal waiter does not run, as on a
+seat with no setting, and the turn-end hook reports only mail that arrived
+before the wake started.
 
 The grace runs from the announcement. After a ring that no drain followed
 within 2 minutes, the wake starts its typed doorbell one time (the doorbell,

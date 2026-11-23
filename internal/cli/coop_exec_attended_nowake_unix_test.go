@@ -20,10 +20,6 @@ func TestCoopExecNoWakeNamesAttendedDelivery(t *testing.T) {
 	clearCoopSessionPinForTest(t)
 	// exec provisions and reads the default session root, not the base.
 	setAttendedForTest(t, base+"/collab", "alice")
-	// The dialog hook goes to a private home: one installed in the package's
-	// shared test home made the plain-doorbell test see a dialog guard and
-	// hold its doorbell (full-suite run after the attended-seat merge).
-	t.Setenv("HOME", t.TempDir())
 	fakeClaudeOnPath(t, "2.1.310")
 	if _, err := captureStdout(t, func() error {
 		return runWake([]string{"install-dialog-hook"})
