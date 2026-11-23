@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -65,6 +66,27 @@ func absorbedLine(t *testing.T, msgID, envelope string) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// Field, 2026-10-27: a prompt the person queued during a turn with a pasted
+// image is a list of content blocks, and the whole line did not decode. It
+// reads as the same blocks on an idle user line read.
+func TestQueuedPromptWithAnImageDecodes(t *testing.T) {
+	content := []any{
+		map[string]any{"type": "text", "text": "[Image #20]"},
+		map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}},
+	}
+	queued, _ := json.Marshal(map[string]any{"type": "attachment", "timestamp": "2026-10-27T18:02:19.427Z",
+		"attachment": map[string]any{"type": "queued_command", "prompt": content, "imagePasteIds": []int{20},
+			"commandMode": "prompt", "origin": map[string]any{"kind": "human"}, "humanTurn": true}})
+	idle, _ := json.Marshal(map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": content}})
+	e, ok := parseTranscriptLine(string(queued))
+	u, _ := parseTranscriptLine(string(idle))
+	want := []TranscriptBlock{{Type: "text", Text: "[Image #20]"}}
+	if !ok || e.Type != "user" || !e.Absorbed || e.OriginKind != "human" || e.Text != "[Image #20]" ||
+		!slices.Equal(e.Blocks, want) || !slices.Equal(u.Blocks, want) {
+		t.Fatalf("queued = %+v, %v; idle blocks %+v", e, ok, u.Blocks)
+	}
 }
 
 // appendTranscript appends complete JSONL lines, as the harness does.
