@@ -45,24 +45,33 @@ func isLinkDialog(rec *requests.Record, id string) bool {
 }
 
 // reconcileLinkDialog selects, refreshes and resolves the link dialog of one
-// running link request. It reads the dialog directory without the lock and
-// commits under it, and it never changes the record's state: the disposition
-// of a cleared link interaction travels the existing owed-outcome mechanism,
-// across run end and restart.
+// link request. It reads the dialog directory without the lock and commits
+// under it, and it never changes the record's state: the disposition of a
+// cleared link interaction travels the existing owed-outcome mechanism,
+// across run end and restart. New selections and re-renders are a running
+// record's business; an already-published dialog also settles from its
+// files while the record is uncertain — native liveness is unknown, but the
+// disposition lives on the machine, not in the attachment.
 func (e *Endpoint) reconcileLinkDialog(rec *requests.Record) error {
-	if e.linkDialogs == nil || rec.Binding == "" || rec.State != protocol.StateRunning {
+	if e.linkDialogs == nil || rec.Binding == "" {
+		return nil
+	}
+	publish := rec.State == protocol.StateRunning
+	if !publish && rec.State != protocol.StateUncertain {
 		return nil
 	}
 	key := keyOfRecord(rec)
 
 	// Unlocked file reads, against the record as it was fetched. Both are
 	// re-checked against the fresh record under the lock.
-	sel := e.linkDialogs.Select(rec)
+	sel := (*protocol.Interaction)(nil)
+	if publish {
+		sel = e.linkDialogs.Select(rec)
+	}
 	out := (*protocol.Resolution)(nil)
 	if rec.Interaction != nil && isLinkDialog(rec, rec.Interaction.InteractionID) {
 		if r, done := e.linkDialogs.Outcome(rec.Binding, rec.Interaction.InteractionID); done {
 			out = &r
-			sel = nil
 		}
 	}
 	if sel == nil && out == nil {
@@ -75,20 +84,22 @@ func (e *Endpoint) reconcileLinkDialog(rec *requests.Record) error {
 	if err != nil || !exists {
 		return err
 	}
-	if cur.Binding == "" || cur.State != protocol.StateRunning {
+	if cur.Binding == "" {
 		return nil
 	}
 	changed := false
 	if out != nil && cur.Interaction != nil && cur.Interaction.InteractionID == out.InteractionID {
-		e.transitionLocked(cur, causeNone, nativeEvidence{
-			clearInteraction: true,
-			resolvedRemotely: out.Outcome == protocol.ResolutionAnswered,
-			outcome:          out.Outcome,
-			option:           out.Option,
-		})
-		changed = true
+		if cur.State == protocol.StateRunning || cur.State == protocol.StateUncertain {
+			e.transitionLocked(cur, causeNone, nativeEvidence{
+				clearInteraction: true,
+				resolvedRemotely: out.Outcome == protocol.ResolutionAnswered,
+				outcome:          out.Outcome,
+				option:           out.Option,
+			})
+			changed = true
+		}
 	}
-	if sel != nil && !resolvedIn(cur.Resolved, sel.InteractionID) {
+	if sel != nil && cur.State == protocol.StateRunning && !resolvedIn(cur.Resolved, sel.InteractionID) {
 		switch {
 		case cur.Interaction == nil:
 			// A new selection, never one another running link request

@@ -184,6 +184,56 @@ func TestLinkDialogVisibleThroughRequestGet(t *testing.T) {
 	}
 }
 
+// Regression (review of c2236f5e): a pinned dialog whose record went
+// uncertain after attachment loss still settles from its files/history —
+// the disposition lives on the machine, not in the attachment. New
+// selections stay a running record's business.
+func TestLinkDialogPinnedSettlesWhileUncertain(t *testing.T) {
+	store, now := openStore(t)
+	ep := core.New(core.Config{Store: store, Now: now})
+	ep.Register(fake.New("fake", "e_1"))
+	ep.SetConsent(func(string, string) bool { return true })
+	ep.SetDialogsOpen(func(string) ([]string, error) { return []string{}, nil })
+	stub := &stubDialogs{out: map[string]protocol.Resolution{}}
+	ep.SetLinkDialogs(stub)
+	id := "11111111-1111-4111-8111-1111111111d6"
+	if _, err := ep.Handle(submitCmd(id), linkShare("sess-1")); err != nil {
+		t.Fatal(err)
+	}
+	key := requests.Key{CreatorHost: "link-x", TargetID: "fake", RequestID: id}
+	stub.setSelect(func(*requests.Record) *protocol.Interaction { return linkInteraction("ld_6") })
+	if err := ep.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	rec, _, _ := store.Get(key)
+	if rec.Interaction == nil {
+		t.Fatal("fixture never published")
+	}
+	// Restore the endpoint with its durable record while the native target
+	// is absent: the next reconcile finds the record uncertain.
+	ep2 := core.New(core.Config{Store: store, Now: now})
+	ep2.SetLinkDialogs(stub)
+	stub.setSelect(nil)
+	if err := ep2.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	rec, _, _ = store.Get(key)
+	if rec.State != protocol.StateUncertain {
+		t.Fatalf("state %v", rec.State)
+	}
+	stub.resolve("ld_6", protocol.Resolution{InteractionID: "ld_6", Outcome: protocol.ResolutionElsewhere, Option: "Deny"})
+	if err := ep2.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	rec, _, _ = store.Get(key)
+	if rec.Interaction != nil || len(rec.Resolved) != 1 {
+		t.Fatalf("state=%s stillPinned=%t resolved=%v; want cleared pin and answered_elsewhere/Deny", rec.State, rec.Interaction != nil, rec.Resolved)
+	}
+	if rec.Resolved[0].Outcome != protocol.ResolutionElsewhere || rec.Resolved[0].Option != "Deny" {
+		t.Fatalf("resolution = %+v; want elsewhere/Deny", rec.Resolved[0])
+	}
+}
+
 // R3: two running link requests of one binding never publish one dialog;
 // the first pin wins and the second record publishes nothing.
 func TestLinkDialogPinnedByOtherIsNotRepublished(t *testing.T) {
