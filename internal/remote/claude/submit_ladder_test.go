@@ -87,6 +87,28 @@ func TestQueuedPromptWithAnImageDecodes(t *testing.T) {
 		!slices.Equal(e.Blocks, want) || !slices.Equal(u.Blocks, want) {
 		t.Fatalf("queued = %+v, %v; idle blocks %+v", e, ok, u.Blocks)
 	}
+
+	// Independent check of this fix: a tool_result block in a queued prompt
+	// reached the activity view as a tool call update, and a list prompt on
+	// an attachment of another type became readable.
+	line := func(kind string, prompt any) string {
+		raw, _ := json.Marshal(map[string]any{"type": "attachment", "attachment": map[string]any{"type": kind, "prompt": prompt}})
+		return string(raw)
+	}
+	mixed := []any{
+		map[string]any{"type": "tool_result", "tool_use_id": "t1", "content": "tool output"},
+		map[string]any{"type": "text", "text": "and this"},
+	}
+	e, ok = parseTranscriptLine(line("queued_command", mixed))
+	if !ok || !slices.Equal(e.Blocks, []TranscriptBlock{{Type: "text", Text: "and this"}}) || len(e.ToolResults) != 0 {
+		t.Fatalf("queued prompt with a tool result = %+v, %v; want its text block only", e, ok)
+	}
+	if _, ok := parseTranscriptLine(line("other_kind", content)); ok {
+		t.Fatal("a list prompt on an attachment that is not a queued prompt was read")
+	}
+	if e, ok := parseTranscriptLine(line("other_kind", "text")); !ok || e.Absorbed {
+		t.Fatalf("a string prompt on another attachment = %+v, %v; want it read as before", e, ok)
+	}
 }
 
 // appendTranscript appends complete JSONL lines, as the harness does.

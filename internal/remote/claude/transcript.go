@@ -348,13 +348,23 @@ func parseTranscriptLine(line string) (transcriptEntry, bool) {
 	}
 	var prompt string
 	var promptBlocks []TranscriptBlock
-	if raw.Attachment != nil {
-		// A prompt is a string or a list of content blocks, decoded as
-		// message.content is; any other value makes the line unreadable.
+	if a := raw.Attachment; a != nil && len(a.Prompt) > 0 {
+		// A prompt is a string. A queued prompt may also be a list of
+		// content blocks, decoded as message.content is, and it shows its
+		// text blocks only, as a string prompt does. Any other value makes
+		// the line unreadable.
+		queued := raw.Type == "attachment" && a.Type == "queued_command"
+		isString := json.Unmarshal(a.Prompt, new(string)) == nil
+		var blocks []TranscriptBlock
 		var promptShape contentShape
-		prompt, promptBlocks, _, promptShape = decodeContentWalk(raw.Attachment.Prompt)
-		if len(raw.Attachment.Prompt) > 0 && promptShape == contentNone {
+		prompt, blocks, _, promptShape = decodeContentWalk(a.Prompt)
+		if !isString && (!queued || promptShape == contentNone) {
 			return transcriptEntry{}, false
+		}
+		for _, b := range blocks {
+			if b.Type == "text" {
+				promptBlocks = append(promptBlocks, b)
+			}
 		}
 	}
 	text, blocks, uses, shape := decodeContentWalk(raw.Message.Content)
