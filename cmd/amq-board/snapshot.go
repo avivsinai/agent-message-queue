@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/board"
 	"github.com/avivsinai/agent-message-queue/internal/board/decision"
 	"github.com/avivsinai/agent-message-queue/internal/board/source"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 func readPublishedSnapshot() (board.Snapshot, board.FileConfig, error) {
@@ -32,6 +34,66 @@ func readPublishedSnapshot() (board.Snapshot, board.FileConfig, error) {
 	}
 	state, err := store.Read()
 	return state, cfg, err
+}
+
+// checkNotifyContext resolves and pins the live project route independently
+// of a published snapshot, which is allowed to be stale.
+func checkNotifyContext(ctx context.Context) (board.Store, board.Env, board.FileConfig, string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return board.Store{}, board.Env{}, board.FileConfig{}, "", err
+	}
+	cfg, warnings := loadConfig(dir)
+	for _, w := range warnings {
+		fmt.Fprintln(os.Stderr, "amq-board: config:", w)
+	}
+	store, env, err := resolveBoardContext(ctx, newEnv(dir, execRunner{}))
+	if err != nil {
+		return board.Store{}, board.Env{}, cfg, "", err
+	}
+	if err := env.Run.(execRunner).amqValidate(ctx); err != nil {
+		return board.Store{}, board.Env{}, cfg, "", err
+	}
+	bc, err := readBoardContext(ctx, env)
+	return store, env, cfg, bc.Session, err
+}
+
+// notifyRoster asks the live AMQ root directly, under the same command
+// binding as delivery. Name is the session name, empty for the base queue.
+func notifyRoster(ctx context.Context, env board.Env) ([]board.RosterEntry, error) {
+	bc, err := readBoardContext(ctx, env)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := env.Run.Run(ctx, env.Dir, []string{"amq", "who", "--json"})
+	if err != nil {
+		return nil, err
+	}
+	var scopes []struct {
+		Name, Scope, Root string
+		Agents            []struct {
+			Handle string `json:"handle"`
+		} `json:"agents"`
+	}
+	if err := json.Unmarshal(raw, &scopes); err != nil {
+		return nil, err
+	}
+	root, err := filepath.EvalSymlinks(bc.Root)
+	if err != nil {
+		return nil, err
+	}
+	var roster []board.RosterEntry
+	for _, scope := range scopes {
+		if scope.Root != root && scope.Root != bc.Root {
+			continue
+		}
+		for _, agent := range scope.Agents {
+			if fsq.ValidateHandle(agent.Handle) == nil {
+				roster = append(roster, board.RosterEntry{Session: bc.Session, Handle: agent.Handle, ValidHandle: true})
+			}
+		}
+	}
+	return roster, nil
 }
 
 func runSync(args []string) int {

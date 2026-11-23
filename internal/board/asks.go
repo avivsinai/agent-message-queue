@@ -11,15 +11,17 @@ import (
 // Ask is one open obligation of the snapshot: who owes a reply to whom,
 // and by when if the request names a time.
 type Ask struct {
-	Key     string      `json:"key"`
-	Kind    string      `json:"kind"`
-	Ruling  bool        `json:"ruling,omitempty"`
-	Subject string      `json:"subject"`
-	From    Participant `json:"from"`
-	Owner   Participant `json:"owner"`
-	Human   bool        `json:"human,omitempty"`
-	Opened  time.Time   `json:"opened,omitzero"`
-	ReplyBy time.Time   `json:"reply_by,omitzero"`
+	Key          string      `json:"key"`
+	Kind         string      `json:"kind"`
+	Ruling       bool        `json:"ruling,omitempty"`
+	Subject      string      `json:"subject"`
+	From         Participant `json:"from"`
+	Owner        Participant `json:"owner"`
+	Human        bool        `json:"human,omitempty"`
+	OwnerReplied bool        `json:"owner_replied,omitempty"`
+	Opened       time.Time   `json:"opened,omitzero"`
+	ReplyBy      time.Time   `json:"reply_by,omitzero"`
+	NewsBy       time.Time   `json:"news_by,omitzero"`
 }
 
 func (cfg Config) obligationCutoff(now time.Time) time.Time {
@@ -44,14 +46,14 @@ func (s Snapshot) projectAsks(cutoff time.Time) (map[string]bool, []Ask) {
 		open[key] = true
 		m := s.Messages[key]
 		human := ob.Owner.Handle == reservedHuman
-		due := replyTime(m)
-		if !human && due.IsZero() {
+		due, news := replyTime(m), deadlineTime(m.NewsBy)
+		if !human && due.IsZero() && news.IsZero() {
 			continue
 		}
 		asks = append(asks, Ask{
 			Key: key, Kind: m.Kind, Ruling: slices.Contains(m.Labels, "ruling"), Subject: m.Subject,
 			From: Participant(ob.Requester), Owner: Participant(ob.Owner), Human: human,
-			Opened: ob.Opener.RawTime.UTC(), ReplyBy: due,
+			Opened: ob.Opener.RawTime.UTC(), ReplyBy: due, NewsBy: news, OwnerReplied: ob.OwnerReplied,
 		})
 	}
 	slices.SortFunc(asks, func(a, b Ask) int {
@@ -80,6 +82,10 @@ func (s Snapshot) projectAsks(cutoff time.Time) (map[string]bool, []Ask) {
 }
 
 func replyTime(m Message) time.Time {
-	at, _ := time.Parse(time.RFC3339, m.ReplyBy)
+	return deadlineTime(m.ReplyBy)
+}
+
+func deadlineTime(value string) time.Time {
+	at, _ := time.Parse(time.RFC3339, value)
 	return at.UTC()
 }

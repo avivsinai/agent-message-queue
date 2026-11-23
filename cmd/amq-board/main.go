@@ -11,6 +11,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -362,7 +363,8 @@ const maxToolOutput = 64 << 20
 // last line.
 const stderrTail = 4 << 10
 
-// execRunner runs argv directly (no shell) with no stdin and returns stdout.
+// execRunner runs argv directly (no shell) with nil stdin by default and
+// returns stdout. WithInput shares the pinned environment for a real send.
 // A failed command's error carries its stderr. A non-empty ghToken is passed
 // as GH_TOKEN to gh commands only, never to another tool or a provider. Git
 // runs in the C locale, so its error text is English whatever the user's
@@ -371,6 +373,14 @@ type execRunner struct {
 	ghToken     string
 	amqEnv      []string
 	amqValidate func(context.Context) error
+	stdin       io.Reader
+}
+
+// WithInput retains the pinned command identity and bounds while supplying
+// a fresh reader to one actual send. Ordinary reads leave stdin nil (EOF).
+func (r execRunner) WithInput(in io.Reader) board.Runner {
+	r.stdin = in
+	return r
 }
 
 func (r execRunner) Run(ctx context.Context, dir string, argv []string) ([]byte, error) {
@@ -390,6 +400,7 @@ func (r execRunner) RunLimited(ctx context.Context, dir string, argv []string, m
 	defer cancel()
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = dir
+	cmd.Stdin = r.stdin
 	if argv[0] == "amq" && r.amqEnv != nil {
 		cmd.Env = append([]string(nil), r.amqEnv...)
 	}

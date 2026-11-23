@@ -1,6 +1,7 @@
 package board
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -15,7 +16,31 @@ const (
 	ProblemReadyNotBegun ProblemKind = "ready_not_started"
 	ProblemNotWorked     ProblemKind = "in_progress_not_worked"
 	ProblemReplyOverdue  ProblemKind = "reply_overdue"
+	ProblemNewsOverdue   ProblemKind = "news_overdue"
+	ProblemBoardStale    ProblemKind = "board_stale"
 )
+
+// Incident identifies one delivered observation. Changing rendered prose,
+// an age, or a limit's example card does not create another incident.
+func (p Problem) Incident() string {
+	parts := []string{string(p.Kind)}
+	switch p.Kind {
+	case ProblemSeatStalled, ProblemSeatAtLimit:
+		parts = append(parts, p.Session, p.Handle)
+	case ProblemReadyNotBegun, ProblemNotWorked:
+		parts = append(parts, p.Session, p.Handle, p.CardID)
+	case ProblemReplyOverdue, ProblemNewsOverdue:
+		parts = append(parts, p.Request)
+	case ProblemBoardStale:
+	default:
+		return ""
+	}
+	raw, err := json.Marshal(parts)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
 
 // Problem is one floor problem: a seat or a card that does not move.
 type Problem struct {
@@ -126,6 +151,17 @@ func Check(m Model, cfg Config, now time.Time) ([]Problem, error) {
 			problem.Text = fmt.Sprintf("a question to the owner passed its default time %s ago; %s reads the thread, then takes the default: %s", wait, from, subject)
 		default:
 			continue
+		}
+		problems = append(problems, problem)
+	}
+	for _, ask := range m.Asks {
+		if ask.NewsBy.IsZero() || !ask.NewsBy.Before(now) || ask.OwnerReplied {
+			continue
+		}
+		problem := Problem{Kind: ProblemNewsOverdue, Request: ask.Key,
+			Text: fmt.Sprintf("no reply seen from %s about %s: %s", participantLabel(ask.Owner), cleanTitle(ask.Subject), age(now.Sub(ask.NewsBy)))}
+		if !ask.Human {
+			problem.Handle, problem.Session = ask.Owner.Handle, ask.Owner.Session
 		}
 		problems = append(problems, problem)
 	}

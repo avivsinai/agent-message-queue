@@ -12,6 +12,7 @@ amq-board --pane-json             # bounded native pane, amq/board-pane/v1
 amq-board --html --out board.html  # one self-contained page
 amq-board serve                   # live view on 127.0.0.1
 amq-board check                    # one line per floor problem (exit 6 when any)
+amq-board check --notify lead,alt --as floor  # send new incidents once per recipient
 amq-board retro [--since DUR] [--json]  # request history per seat
 amq-board classify --classifier NAME --next 8 --json  # export requests to label
 amq-board classify --file labels.json                 # import labels
@@ -33,11 +34,27 @@ scan mailboxes itself or fall back to a different source.
 
 An unclosed request older than `obligation_max_age` (14 days by default) expires, as in `amq thread open`. It leaves Needs you and the overdue check. Set `obligation_max_age` to `0` to disable expiry.
 
+`news_overdue` means a request's first-news clock passed without news from its owner. A news-only obligation stays in the projection even without a completion deadline. A message with references is news about only those requests; a message without references can be news for each open request in its thread.
+
+### Notify floor problems
+
+`amq-board check --notify lead,alt --as floor` sends one ordinary status message with label `floor` for each new incident to each listed recipient. Create `floor` as a mailbox in the board's session. If the board uses the base queue directly rather than a session, name a complete declared base-root mailbox and complete declared base-root recipients instead. The sender is this dedicated observer, never a working seat or interactive agent. Every sender and recipient resolves in the live route at the board's session root or base root before the first send. A sender equal to a recipient is an error. This is an explicit broadcast to all listed recipients, not one alternate receiving only after another fails. Each send has the observed problem as its text, so both recipients see what the observer saw. The sender receives no notice copy.
+
+The delivered set is under the board directory, scoped by incident, recipient and that recipient root's session name (empty for the base queue). One lock covers reading, evaluation, sends and pruning. Each incident/recipient/session pair is recorded after its send succeeds. The operator's supervisor schedules the two commands; AMQ starts nothing:
+
+```sh
+
+# the OS supervisor's schedule definition runs this pair, e.g. every minute
+amq-board sync && amq-board check --notify lead,alt --as floor
+```
+
+A stale or unusable existing board snapshot sends `board_stale` once for each recipient and retains all current incident records; any read or decode error exits 1, even if a partially decoded value looks fresh. With no board store, the command sends nothing, creates no file under the board store and returns the same no-board error. This leaves the next `amq-board sync --init` able to initialize that store. Incidents in another session are independent. It does not deduplicate a stale record against seat/request incidents. An incident's identity ignores prose, age and the limit's example card. A fresh snapshot with no such incident clears its record; a later recurrence sends again. An unread floor notice remains unread mail and can make a seat that reads nothing look stalled once; it does not create new card or request incidents. A crash between a send and its durable record can send that one notice twice immediately after retry. A failed send returns 1 after every other notice was tried; the next run retries the missing pairs. Without `--notify`, exits are 0 for a clean floor, 6 for floor problems, 1 for an unusable board and 2 for a bad invocation. A notification failure returns 1; `--json` keeps the documented successful report schema and no stdout report is emitted for an unusable snapshot.
+
 The in-progress inactivity rule requires an observed activity time. Other rules
 use their own evidence, including unread mail, ready assignments and observed
 account limits.
 
-Exit `0` when no floor problem exists, `6` when at least one exists, and `1` when the snapshot cannot decide (including stale or missing data). `--json` emits the same rows in `amq/board-check/v1`.
+Exit `0` when no floor problem exists, `6` when at least one exists, and `1` when the snapshot cannot decide (including stale or missing data). `--json` emits the same rows in `amq/board-check/v1`. With `--notify --as`, exit 1 also means an identity, snapshot or delivery error; the report keeps a valid snapshot's existing output before the final exit code is selected.
 
 ```sh
 amq-board check
