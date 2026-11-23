@@ -15,6 +15,12 @@ import (
 )
 
 func TestPlacementOmittedMatchesV061TmuxWindows(t *testing.T) {
+	// Regression b78a: a C-locale client outside tmux must read exact pane identities.
+	t.Setenv("LC_ALL", "C")
+	t.Setenv("TMUX", "") // Restore the caller's environment after unsetting TMUX.
+	if err := os.Unsetenv("TMUX"); err != nil {
+		t.Fatal(err)
+	}
 	backend, project, root, plan := newTmuxPlacementFixture(t, "claude", "codex")
 	created, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeTmuxSleepAMQ(t), Root: root})
 	if err != nil {

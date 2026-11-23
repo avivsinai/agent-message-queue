@@ -222,6 +222,7 @@ type Endpoint struct {
 	consent     ConsentCheck
 	grant       GrantCheck
 	dialogsOpen DialogsOpen
+	linkDialogs LinkDialogs
 }
 
 // Config configures New.

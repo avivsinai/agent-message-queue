@@ -323,6 +323,20 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 	// Only a clear resolves an interaction. A replacement by another
 	// interaction says nothing about the first, which may still be open.
 	if open != nil && rec.Interaction == nil {
+		// A link-published dialog owes its disposition to the machine's own
+		// dialog directory, never to the native attachment: the seam may
+		// implement no InteractionResolver (Claude and Codex do not), the
+		// target may be retired, and the disposition can still arrive
+		// through the resolution file or the history entry.
+		if isLinkDialog(rec, open.InteractionID) {
+			if ev.clearInteraction && ev.outcome != "" {
+				// The exact resolution is in hand: record it, nothing owed.
+				recordResolution(rec, open.InteractionID, ev)
+				return
+			}
+			oweOutcome(rec, open.InteractionID)
+			return
+		}
 		if t := e.targets[rec.TargetID]; t != nil && !ev.clearInteraction {
 			// An adapter that records how each interaction ended reports
 			// the end itself; the run's end never stands in for it. The

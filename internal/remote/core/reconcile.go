@@ -451,6 +451,11 @@ func (e *Endpoint) reconcileCancelRetry(rec *requests.Record) error {
 // without the endpoint lock, then applies the result under the lock.
 func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 	key := keyOfRecord(rec)
+	// The link dialog of a running link request: select, refresh or resolve
+	// it before the native evidence pass, which owns the state transitions.
+	if err := e.reconcileLinkDialog(rec); err != nil {
+		return err
+	}
 	e.mu.Lock()
 	t, ok := e.targets[rec.TargetID]
 	e.mu.Unlock()

@@ -1,0 +1,16 @@
+{
+  "body_def": "error_reply",
+  "description": "The typed refusal for signed_answer. The message is illustrative.",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "error": {
+        "code": "internal",
+        "message": "the machine could not confirm that the answer was durably recorded"
+      }
+    },
+    "gen": 12,
+    "re": "m_sa",
+    "schema": "amq.remote.link/1"
+  }
+}

@@ -139,6 +139,10 @@ const (
 	ByBuzz     = "buzz"
 	ByTerminal = "terminal"
 	ByTimeout  = "timeout"
+	// ByLink is the closer of a link's answer applied by the answer seam
+	// (the passkey-signed answer record). Set on resolutions, not answers:
+	// an answer the owner typed still says by.
+	ByLink = "link"
 )
 
 // Resolved records how a dialog ended.
@@ -192,6 +196,24 @@ func DirFor(bindingName string) (string, error) {
 		}
 	}
 	return dir, nil
+}
+
+// DirRead is DirFor without creating anything: the read-side path of a
+// binding's dialogs directory. A retired binding's deleted directory is
+// never recreated by an outcome lookup — a missing directory simply reads
+// as no files (wrap with os.IsNotExist to tell that apart from a real
+// error).
+func DirRead(bindingName string) (string, error) {
+	if bindingName != binding.LegacyName {
+		if err := binding.ValidName(bindingName); err != nil {
+			return "", err
+		}
+	}
+	root, err := Root()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, bindingName), nil
 }
 
 // Owner is whose Buzz messages act on a binding's session: the owner's key,

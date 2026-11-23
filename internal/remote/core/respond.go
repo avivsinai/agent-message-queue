@@ -298,9 +298,15 @@ func retireOutcomeLocked(rec *requests.Record, id string) bool {
 // the same id in place (it is provisional, not final); a native resolution
 // never routes through here.
 func recordRetainedResolution(rec *requests.Record, id string) {
-	r := protocol.Resolution{InteractionID: id, Outcome: protocol.ResolutionDeliveryUnknown}
+	// A link-published dialog whose files are gone or unreadable keeps the
+	// explicit unknown outcome, never a delivery claim (R2).
+	outcome := protocol.ResolutionDeliveryUnknown
+	if isLinkDialog(rec, id) {
+		outcome = protocol.ResolutionUnknown
+	}
+	r := protocol.Resolution{InteractionID: id, Outcome: outcome}
 	for i, cur := range rec.Resolved {
-		if cur.InteractionID == id && cur.Outcome == protocol.ResolutionDeliveryUnknown {
+		if cur.InteractionID == id && cur.Outcome == outcome {
 			rec.Resolved[i] = r
 			return
 		}
@@ -321,7 +327,7 @@ func settleOwedNative(rec *requests.Record, r protocol.Resolution) bool {
 		return false
 	}
 	for _, cur := range rec.Resolved {
-		if cur.InteractionID == r.InteractionID && cur.Outcome != protocol.ResolutionDeliveryUnknown {
+		if cur.InteractionID == r.InteractionID && !provisionalOutcome(cur.Outcome) {
 			// A native resolution already recorded for this id (e.g. a
 			// duplicate event): nothing to correct.
 			return false
@@ -329,7 +335,7 @@ func settleOwedNative(rec *requests.Record, r protocol.Resolution) bool {
 	}
 	// Drop the provisional retention resolution, then record the exact one.
 	rec.Resolved = slices.DeleteFunc(rec.Resolved, func(cur protocol.Resolution) bool {
-		return cur.InteractionID == r.InteractionID && cur.Outcome == protocol.ResolutionDeliveryUnknown
+		return cur.InteractionID == r.InteractionID && provisionalOutcome(cur.Outcome)
 	})
 	rec.OwedOutcomes = slices.DeleteFunc(rec.OwedOutcomes, func(id string) bool { return id == r.InteractionID })
 	rec.RetiredOutcomes = slices.DeleteFunc(rec.RetiredOutcomes, func(id string) bool { return id == r.InteractionID })
@@ -369,11 +375,19 @@ func (e *Endpoint) recoverOwedOutcomes(rec *requests.Record) error {
 	// retires what the horizon has outrun, re-checking the resolver inside
 	// the lock for each id it is about to retire.
 	resolutions := make(map[string]protocol.Resolution, len(rec.OwedOutcomes)+len(rec.RetiredOutcomes))
-	if resolver != nil {
-		for _, id := range append(slices.Clone(rec.OwedOutcomes), rec.RetiredOutcomes...) {
-			if res, done := resolver.ResolvedInteraction(key, rec.Epoch, id); done && res.InteractionID == id {
-				resolutions[id] = res
-			}
+	for _, id := range append(slices.Clone(rec.OwedOutcomes), rec.RetiredOutcomes...) {
+		// A link-published dialog resolves ONLY through the link-dialog
+		// seam (its resolution file or history entry); the native
+		// attachment never answers for it.
+		if r, done := e.askLinkOutcome(rec, id); done {
+			resolutions[id] = r
+			continue
+		}
+		if isLinkDialog(rec, id) || resolver == nil {
+			continue
+		}
+		if res, done := resolver.ResolvedInteraction(key, rec.Epoch, id); done && res.InteractionID == id {
+			resolutions[id] = res
 		}
 	}
 
@@ -407,6 +421,37 @@ func (e *Endpoint) recoverOwedOutcomes(rec *requests.Record) error {
 				curResolver = r
 			}
 		}
+		// A link-published dialog gets no final ask here: its reads touch
+		// the filesystem and must not run under the endpoint mutex, and a
+		// resolution that lands just after the unlocked ask still corrects
+		// the retired outcome (retired ids stay correctable until
+		// compaction). The unlocked ask above was the final one. The
+		// horizon's own present-check runs here under the lock on purpose:
+		// the store's commit below does file I/O under that lock already,
+		// and a second mechanism to avoid one directory read is not worth
+		// it. A dialog whose files still exist stays owed — its resolution
+		// may still arrive; unknown is only for a dialog with no files and
+		// no history entry.
+		if isLinkDialog(cur, id) {
+			present, r, resolved := false, protocol.Resolution{}, false
+			if e.linkDialogs != nil && cur.Binding != "" {
+				present, r, resolved = e.linkDialogs.Present(cur.Binding, id)
+			}
+			switch {
+			case resolved:
+				// A resolution landed after the unlocked ask: settle it now.
+				if settleOwedNative(cur, r) {
+					changed = true
+				}
+			case present:
+				// The dialog's files exist: the outcome may still arrive.
+			default:
+				if owes(cur, id) && retireOutcomeLocked(cur, id) {
+					changed = true
+				}
+			}
+			continue
+		}
 		if curResolver != nil {
 			// Final ask inside the locked update: the resolver may have
 			// gained the outcome between the unlocked lookup and now.
@@ -432,6 +477,27 @@ func (e *Endpoint) recoverOwedOutcomes(rec *requests.Record) error {
 		return err
 	}
 	return nil
+}
+
+// provisionalOutcome reports whether an outcome is the retention horizon's
+// placeholder for its id's kind: delivery_unknown for a native interaction,
+// unknown for a link-published dialog whose files are gone. An exact
+// resolution replaces either one.
+func provisionalOutcome(o protocol.ResolutionOutcome) bool {
+	return o == protocol.ResolutionDeliveryUnknown || o == protocol.ResolutionUnknown
+}
+
+// askLinkOutcome resolves a link-published dialog id through the link-dialog
+// seam. It runs OUTSIDE the endpoint lock, like every other dialog read.
+func (e *Endpoint) askLinkOutcome(rec *requests.Record, id string) (protocol.Resolution, bool) {
+	if e.linkDialogs == nil || rec.Binding == "" || !isLinkDialog(rec, id) {
+		return protocol.Resolution{}, false
+	}
+	r, done := e.linkDialogs.Outcome(rec.Binding, id)
+	if done && r.InteractionID == id {
+		return r, true
+	}
+	return protocol.Resolution{}, false
 }
 
 // resolvedIn reports whether id has a recorded resolution.
@@ -475,7 +541,8 @@ func (e *Endpoint) reconcileInteractionLocked(rec *requests.Record, ev Evidence,
 // sameInteraction reports whether two views of an interaction are equal.
 func sameInteraction(a, b protocol.Interaction) bool {
 	return a.InteractionID == b.InteractionID && a.Kind == b.Kind && a.Prompt == b.Prompt &&
-		slices.Equal(a.Options, b.Options) && a.RemoteAnswer == b.RemoteAnswer
+		slices.Equal(a.Options, b.Options) && a.RemoteAnswer == b.RemoteAnswer &&
+		a.ApproveOption == b.ApproveOption && a.RejectOption == b.RejectOption
 }
 
 // recordResolution appends how the interaction id stopped being pending,

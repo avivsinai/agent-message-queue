@@ -1,0 +1,16 @@
+{
+  "body_def": "error_reply",
+  "description": "The typed refusal for signed_answer. The message is illustrative.",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "error": {
+        "code": "already_resolved",
+        "message": "the interaction is no longer pending"
+      }
+    },
+    "gen": 12,
+    "re": "m_sa",
+    "schema": "amq.remote.link/1"
+  }
+}

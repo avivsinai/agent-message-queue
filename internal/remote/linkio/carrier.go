@@ -974,6 +974,9 @@ func (c *Carrier) handleRequest(sess *session, f Frame) {
 		}
 		c.enqueue(sess, f, key, func() (any, error) { return c.runCommand(cmd) })
 		return
+	case SchemaAnswerInfo, SchemaSignedAnswer:
+		c.handleAnswerRequest(sess, f)
+		return
 	case SchemaGrantInfo, SchemaSignedGrant, SchemaGrantedSubmit, SchemaGrantRevoke:
 		if c.cfg.Grants != nil {
 			c.handleGrantRequest(sess, f)

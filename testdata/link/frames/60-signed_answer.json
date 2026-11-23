@@ -1,0 +1,18 @@
+{
+  "body_def": "signed_answer",
+  "description": "The enrolled Ed25519 test key signs answer/document.json.",
+  "direction": "server_to_endpoint",
+  "frame": {
+    "body": {
+      "authenticator_data": "9kvuDAdMLimGnBA2F-3ZzHNmFtGJ7LtJlp44oV4tZHIFAAAAAA",
+      "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiQkYyT3pvaG9tM1Y5enJKUVY5RUlJVVVtN1BWeTZKam1MNjRkRWpVQVNoWSIsIm9yaWdpbiI6Imh0dHBzOi8vc2lnbi5leGFtcGxlLnRlc3QiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+      "credential_id": "GPumfrZCQfsR4RkwkzQGhg",
+      "document_b64": "eyJiaW5kaW5nIjoiY29kZXgtZGVtbyIsImVwb2NoIjoiZV80YzBlMWEiLCJpbnRlcmFjdGlvbl9kaWdlc3QiOiJzaGEyNTY6NThiYzcwNzZmYjNiNzM5ZmNlZTU1MTFiMmZmZjQ1MWYzZjYzZWY0NjBjNmFmYTRiMGEyM2RlMjI0ZGUzNzA4YSIsImludGVyYWN0aW9uX2lkIjoiZC01NjQ0ZWRkMzM1Y2U0M2VmYjEwZDVjNjQwNjcyNDc5ZCIsImlzc3VlZF9hdCI6IjIwMjYtMTAtMDlUMTQ6MDI6MDBaIiwibGFiZWxzIjp7ImRldmljZSI6IkV4YW1wbGUgTWFjQm9vayIsImhhcm5lc3MiOiJjb2RleCIsInByb2plY3QiOiJkZW1vIiwic2Vzc2lvbiI6IkNvZGV4IGRlbW8ifSwibmF0aXZlX3Nlc3Npb25faWQiOiJjb2RleC1kZW1vLXNlc3Npb24iLCJub3RfYWZ0ZXIiOiIyMDI2LTEwLTA5VDE0OjA0OjAwWiIsIm9wdGlvbiI6IkFsbG93IG9uY2UiLCJyZXF1ZXN0X3JlZiI6ImFtcXIxX25ydXc0MnpubXZ0Z2tuYnptbXl0bXl6eWhhNHRtb2J0Z3VhZ2czM2VtdjRkdXpkZm52eHFhbjNnZ25xdGV5enJtdXd0a3lyem1xd3Rpemp5bWV3dHN5enNnZXd0b3pidW11MndtbnRiaGJyZHNtYSIsInNjaGVtYSI6ImFtcS5yZW1vdGUuYW5zd2VyLzEiLCJzZXJ2ZXJfaWQiOiJzcnZfZXhhbXBsZSIsInN0b3JlX2lkIjoic3RfNWQxZTBjMmEiLCJ0YXJnZXRfaWQiOiJjb2RleDpkZW1vIn0",
+      "schema": "amq.remote.link.signed_answer/1",
+      "signature": "GdSaqykr-8LWx4YXRto919nwNUJga2hs9i65Al2gP2jpDK3XD_EPWdsgb9vtb1H6hgLtVMjbbIVhJyCEFxRFBA"
+    },
+    "gen": 12,
+    "id": "m_sa",
+    "schema": "amq.remote.link/1"
+  }
+}

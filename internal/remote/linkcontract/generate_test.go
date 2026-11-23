@@ -212,17 +212,7 @@ func TestGenerateFixtures(t *testing.T) {
 		"not_after": grantedNotAfter, "native_run": nil, "observed_at": "2026-10-09T14:10:20Z",
 	}
 	const gen = 12
-	env := func(body any, kv ...any) map[string]any {
-		f := map[string]any{"schema": "amq.remote.link/1", "body": body}
-		for i := 0; i < len(kv); i += 2 {
-			f[kv[i].(string)] = kv[i+1]
-		}
-		return f
-	}
-	frames := []struct {
-		name, direction, def, description string
-		frame                             map[string]any
-	}{
+	frames := []goldenFrame{
 		{"challenge", "server_to_endpoint", "challenge", "First frame after the socket opens. No gen yet.",
 			env(map[string]any{"schema": "amq.remote.link.challenge/1", "server_id": serverID, "nonce": nonce}, "id", "m_c1")},
 		{"hello", "endpoint_to_server", "hello", "Reply to the challenge; it carries its own id because welcome answers it. signature is Ed25519 over helloMessage (README).",
@@ -378,6 +368,7 @@ func TestGenerateFixtures(t *testing.T) {
 				"revision": 2, "digest": digest(snapGrantEnded), "snapshot": snapGrantEnded,
 			}, "id", "m_e12", "gen", gen)},
 	}
+	frames = append(frames, answerFrames(t, host, gen)...)
 	// Write the frames beside the old ones, then swap, so an aborted rewrite
 	// never leaves an empty folder.
 	_ = os.RemoveAll(filepath.Join(linkDir, "frames.new"))
@@ -467,4 +458,17 @@ func writeJSON(t *testing.T, rel string, v any) {
 		t.Fatal(err)
 	}
 	writeRaw(t, rel, buf.Bytes())
+}
+
+type goldenFrame struct {
+	name, direction, def, description string
+	frame                             map[string]any
+}
+
+func env(body any, kv ...any) map[string]any {
+	f := map[string]any{"schema": "amq.remote.link/1", "body": body}
+	for i := 0; i < len(kv); i += 2 {
+		f[kv[i].(string)] = kv[i+1]
+	}
+	return f
 }

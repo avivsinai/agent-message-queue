@@ -230,8 +230,9 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	machines := newMachineSet(ctx, stderr)
 	machines.tick(time.Now())
 	ep.SetConsent(links.consentLive)
-	ep.SetGrant(links.grantLive)             // before any link frame is read
-	ep.SetDialogsOpen(dialog.OpenRequestIDs) // the run-start dialog baseline (R1)
+	ep.SetGrant(links.grantLive)                       // before any link frame is read
+	ep.SetDialogsOpen(dialog.OpenRequestIDs)           // the run-start dialog baseline (R1)
+	ep.SetLinkDialogs(&linkDialogSource{links: links}) // link-published dialogs (R3–R5)
 	links.start(ctx, ep, mfSnap)
 	go func() {
 		t := time.NewTicker(*poll)
