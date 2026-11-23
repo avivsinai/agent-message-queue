@@ -29,15 +29,13 @@ func sendRequest(t *testing.T, root *fsq.DeliveryRoot, sent time.Time, replyTo s
 	return msg.Header
 }
 
-// armNews arms the news timer of request; a routed send records the session
-// it delivered to.
-func armNews(t *testing.T, root *fsq.DeliveryRoot, request format.Header, sent time.Time, after time.Duration, targetSession string) Timer {
+// armNews arms the news timer for the request.
+func armNews(t *testing.T, root *fsq.DeliveryRoot, request format.Header, sent time.Time, after time.Duration) Timer {
 	t.Helper()
 	timer, err := NewNews(request.ID, "bob", request.Thread, request.Subject, request.Kind, sent, after)
 	if err != nil {
 		t.Fatal(err)
 	}
-	timer.TargetSession = targetSession
 	if err := Write(root, "alice", timer); err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +84,7 @@ func TestPromoteNewsTimerNoticesASilentRecipientOnce(t *testing.T) {
 	base, root := openTestRoot(t)
 	sent := time.Date(2026, 11, 23, 9, 0, 0, 0, time.UTC)
 	request := sendRequest(t, root, sent, "", nil)
-	timer := armNews(t, root, request, sent, 20*time.Minute, "")
+	timer := armNews(t, root, request, sent, 20*time.Minute)
 
 	if err := Promote(root, "alice", sent.Add(21*time.Minute)); err != nil {
 		t.Fatal(err)
@@ -128,13 +126,7 @@ func TestPromoteNewsAndCompletionTimers(t *testing.T) {
 		completion time.Duration
 		legacy     bool
 		arrange    func(t *testing.T, root *fsq.DeliveryRoot, request format.Header)
-		replyTo    string
-		// targetSession is the session a routed send delivered to.
-		targetSession string
-		// foreignGrandparent makes the request answer a message whose own
-		// parent is not in alice's mailbox.
-		foreignGrandparent bool
-		steps              []step
+		steps      []step
 	}{
 		{name: "progress from the recipient ends the news clock", news: 20 * time.Minute,
 			arrange: func(t *testing.T, root *fsq.DeliveryRoot, r format.Header) {
@@ -152,15 +144,14 @@ func TestPromoteNewsAndCompletionTimers(t *testing.T) {
 			arrange: func(t *testing.T, root *fsq.DeliveryRoot, r format.Header) {
 				deliverToAlice(t, root, r, "carol", format.KindStatus, nil, "")
 			}, steps: []step{{21 * time.Minute, []string{NewsLabel}, 0}}},
-		{name: "a routed request settles by a reply from its recorded session", news: 20 * time.Minute, replyTo: "alice@lead", targetSession: "build",
+		// The mixed-timer review found a news notice after the sender withdrew the work.
+		{name: "requester withdrawal ends the news clock", news: 20 * time.Minute,
 			arrange: func(t *testing.T, root *fsq.DeliveryRoot, r format.Header) {
-				deliverToAlice(t, root, r, "bob", format.KindStatus, nil, "bob@build")
-			}, steps: []step{{21 * time.Minute, nil, 0}}},
-		// Pre-merge probe: a delegated request whose parent's parent sat in
-		// another mailbox opened no obligation, so a reply still gave the notice.
-		{name: "a request below a parent from another mailbox settles by a reply", news: 20 * time.Minute, foreignGrandparent: true,
-			arrange: func(t *testing.T, root *fsq.DeliveryRoot, r format.Header) {
-				deliverToAlice(t, root, r, "bob", format.KindStatus, nil, "")
+				timer := Timer{RequestID: r.ID, Thread: r.Thread, Sent: mustCreated(t, r)}
+				msg := testMessage(t, timer, "alice", "bob", format.KindDecision, []string{"withdrawn"})
+				if _, err := root.WriteFileAtomic(fsq.MailboxRootRelativePath("alice", fsq.MailboxOutboxSent), msg.Header.ID+".md", marshal(t, msg), 0o600); err != nil {
+					t.Fatal(err)
+				}
 			}, steps: []step{{21 * time.Minute, nil, 0}}},
 		{name: "news at 10m comes first and the completion timer stays", news: 10 * time.Minute, completion: time.Hour,
 			steps: []step{{10 * time.Minute, []string{NewsLabel}, 1}}},
@@ -177,23 +168,7 @@ func TestPromoteNewsAndCompletionTimers(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			base, root := openTestRoot(t)
-			var refs []string
-			if tc.foreignGrandparent {
-				// carol's status to alice answers a message alice never held.
-				gone, err := format.NewMessageID(sent.Add(-2 * time.Minute))
-				if err != nil {
-					t.Fatal(err)
-				}
-				parent := format.Message{Header: format.Header{
-					Schema: 1, ID: gone + "-parent", From: "carol", To: []string{"alice"}, Thread: "p2p/alice__bob",
-					Created: sent.Add(-time.Minute).Format(time.RFC3339Nano), Refs: []string{gone}, Kind: format.KindStatus,
-				}, Body: "fyi"}
-				if _, err := fsq.DeliverToInbox(root, "alice", parent.Header.ID+".md", marshal(t, parent)); err != nil {
-					t.Fatal(err)
-				}
-				refs = []string{gone, parent.Header.ID}
-			}
-			request := sendRequest(t, root, sent, tc.replyTo, refs)
+			request := sendRequest(t, root, sent, "", nil)
 			var notices []Timer
 			if tc.completion > 0 {
 				timer, err := New(request.ID, "bob", request.Thread, request.Subject, request.Kind, sent, tc.completion)
@@ -216,7 +191,7 @@ func TestPromoteNewsAndCompletionTimers(t *testing.T) {
 				notices = append(notices, timer)
 			}
 			if tc.news > 0 {
-				notices = append(notices, armNews(t, root, request, sent, tc.news, tc.targetSession))
+				notices = append(notices, armNews(t, root, request, sent, tc.news))
 			}
 			if tc.arrange != nil {
 				tc.arrange(t, root, request)
@@ -238,6 +213,87 @@ func TestPromoteNewsAndCompletionTimers(t *testing.T) {
 				if timers, err := List(root, "alice"); err != nil || len(timers) != s.left {
 					t.Fatalf("at %s the timers are %v (err %v), want %d", s.at, timers, err, s.left)
 				}
+			}
+		})
+	}
+}
+
+// The first-news review found false notices for bridged and routed senders,
+// missing sent copies, and requests that continued another request.
+func TestPromoteNewsFromRecipient(t *testing.T) {
+	sent := time.Date(2026, 11, 23, 9, 0, 0, 500000, time.UTC)
+	for _, tc := range []struct {
+		name        string
+		from        string
+		project     string
+		missingCopy bool
+		second      bool
+		continues   bool
+		noRefs      bool
+		before      bool
+		wantFirst   bool
+	}{
+		{name: "bridged sender", from: "host/bob"},
+		{name: "sender names its own project", from: "bob", project: "canonical-build"},
+		{name: "missing sent copy", from: "bob", missingCopy: true},
+		{name: "reply references only the second request", from: "bob", second: true, wantFirst: true},
+		{name: "unreferenced news ends both clocks", from: "bob", second: true, noRefs: true},
+		{name: "unreferenced message predates request", from: "bob", noRefs: true, before: true, wantFirst: true},
+		{name: "continued request receives its own reply", from: "bob", second: true, continues: true, wantFirst: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base, root := openTestRoot(t)
+			var sourceRoute, replyRoute string
+			if tc.project != "" {
+				sourceRoute, replyRoute = "alice@lead", "bob@build"
+			}
+			first := sendRequest(t, root, sent, sourceRoute, nil)
+			firstTimer := armNews(t, root, first, sent, time.Hour)
+			if tc.missingCopy {
+				if err := root.Remove(filepath.Join(fsq.MailboxRootRelativePath("alice", fsq.MailboxOutboxSent), first.ID+".md")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			target := first
+			var secondTimer Timer
+			if tc.second {
+				var refs []string
+				if tc.continues {
+					refs = []string{first.ID}
+				}
+				next := sent.Add(time.Minute)
+				target = sendRequest(t, root, next, "", refs)
+				secondTimer = armNews(t, root, target, next, time.Hour)
+			}
+			at := sent.Add(2 * time.Minute)
+			if tc.before {
+				at = sent.Add(-time.Nanosecond)
+			}
+			var refs []string
+			if !tc.noRefs {
+				refs = []string{target.ID}
+			}
+			id, err := format.NewMessageID(at)
+			if err != nil {
+				t.Fatal(err)
+			}
+			msg := format.Message{Header: format.Header{
+				Schema: 1, ID: id, From: tc.from, To: []string{"alice"},
+				Thread: first.Thread, Created: at.Format(time.RFC3339Nano),
+				FromProject: tc.project, ReplyTo: replyRoute, Refs: refs, Kind: format.KindStatus,
+			}, Body: "progress"}
+			if _, err := fsq.DeliverToInbox(root, "alice", id+".md", marshal(t, msg)); err != nil {
+				t.Fatal(err)
+			}
+			if err := Promote(root, "alice", sent.Add(2*time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+			names := inboxNames(t, base)
+			if got := slices.Contains(names, firstTimer.NoticeID+".md"); got != tc.wantFirst {
+				t.Errorf("first notice present = %v, want %v", got, tc.wantFirst)
+			}
+			if tc.second && slices.Contains(names, secondTimer.NoticeID+".md") {
+				t.Error("unexpected second notice")
 			}
 		})
 	}

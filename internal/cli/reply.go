@@ -11,7 +11,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/route"
-	"github.com/avivsinai/agent-message-queue/internal/thread"
 )
 
 func runReply(args []string) error {
@@ -328,12 +327,6 @@ func runReply(args []string) error {
 		default:
 			kind = originalMsg.Header.Kind
 		}
-	}
-	if err := validateNewsWithin(*newsWithinFlag, 1, kind, labels); err != nil {
-		return err
-	}
-	if *newsWithinFlag > 0 && kind == thread.DefaultReplyKind(originalMsg.Header.Kind) {
-		return UsageError("--news-within requires a new request: a %s reply continues the original's obligation; name another --kind", kind)
 	}
 
 	sourceSession := ""

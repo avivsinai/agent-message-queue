@@ -48,22 +48,40 @@ func TestSendNewsWithinShowsInThreadOpen(t *testing.T) {
 		t.Fatalf("drain text = %q (err %v), want a News by line", text, err)
 	}
 
-	open := func() threadOpenObligation {
+	// Read the wire value so an omitted key, null and false stay distinct.
+	type obligation struct {
+		Opener       threadOpenOpener `json:"opener"`
+		NewsBy       string           `json:"news_by"`
+		State        string           `json:"state"`
+		OwnerReplied json.RawMessage  `json:"owner_replied"`
+	}
+	open := func(id string) obligation {
 		t.Helper()
 		stdout, stderr := captureOutput(t, func() error { return runThread([]string{"open", "--json", "--root", root}) })
-		var result threadOpenResult
+		var result struct {
+			Obligations []obligation `json:"obligations"`
+		}
 		if err := json.Unmarshal([]byte(stdout), &result); err != nil {
 			t.Fatalf("thread open = %s (err %v), stderr %s", stdout, err, stderr)
 		}
 		for _, ob := range result.Obligations {
-			if ob.Opener.ID == sent.ID {
+			if ob.Opener.ID == id {
 				return ob
 			}
 		}
-		t.Fatalf("thread open = %s, want the obligation of %s", stdout, sent.ID)
-		return threadOpenObligation{}
+		t.Fatalf("thread open = %s, want the obligation of %s", stdout, id)
+		return obligation{}
 	}
-	if ob := open(); ob.NewsBy != sent.News.Due || ob.OwnerReplied {
+	// A status with a closing label can have its own news clock.
+	status := runSendJSONForTest(t, "--root", root, "--me", "alice", "--to", "carol", "--kind", "status", "--labels", "done", "--news-within", "5m", "--body", "review complete", "--json")
+	if status["news"] == nil {
+		t.Fatal("status has no news timer")
+	}
+	unwatched := runSendJSONForTest(t, "--root", root, "--me", "alice", "--to", "carol", "--kind", "todo", "--body", "also review", "--json")
+	if ob := open(unwatched["id"].(string)); ob.OwnerReplied != nil {
+		t.Fatal("unwatched request contains owner_replied")
+	}
+	if ob := open(sent.ID); ob.NewsBy != sent.News.Due || string(ob.OwnerReplied) != "false" {
 		t.Fatalf("before any reply: news_by %q owner_replied %v, want %s and false", ob.NewsBy, ob.OwnerReplied, sent.News.Due)
 	}
 
@@ -72,16 +90,16 @@ func TestSendNewsWithinShowsInThreadOpen(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if ob := open(); ob.State != "acknowledged" || ob.OwnerReplied {
+	if ob := open(sent.ID); ob.State != "acknowledged" || string(ob.OwnerReplied) != "false" {
 		t.Fatalf("after bob wrote only to carol: state %s owner_replied %v, want acknowledged and false", ob.State, ob.OwnerReplied)
 	}
 
 	if _, err := captureStdout(t, func() error {
-		return runReply([]string{"--root", root, "--me", "bob", "--id", sent.ID, "--body", "on it"})
+		return runReply([]string{"--root", root, "--me", "bob", "--id", sent.ID, "--news-within", "5m", "--body", "on it"})
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if ob := open(); !ob.OwnerReplied {
+	if ob := open(sent.ID); string(ob.OwnerReplied) != "true" {
 		t.Fatal("after bob replied to alice: owner_replied false, want true")
 	}
 }

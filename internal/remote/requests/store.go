@@ -51,10 +51,11 @@ var hostSegmentRe = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
 type Record struct {
 	protocol.Snapshot
 
-	// RefusalReason is the adapter's refusal text for a rejected record.
-	// It stays on the durable record and is never copied onto Snapshot, so a
-	// published revision stays byte-identical. Replies surface it as
-	// Outcome.Message.
+	// RefusalReason is the reason of an end the machine decided: the
+	// adapter's refusal text for a rejected record, or why a failed record
+	// that a session grant dispatched holds no answer. It stays on the
+	// durable record and is never copied onto Snapshot, so a published
+	// revision stays byte-identical. Replies surface it as Outcome.Message.
 	RefusalReason string `json:"refusal_reason,omitempty"`
 
 	// Input is the exact submit input, kept until compaction so recovery can
@@ -75,6 +76,14 @@ type Record struct {
 	// The grant is checked again right before the handoff. It stays on the
 	// durable record and is never published.
 	GrantDigest string `json:"grant_digest,omitempty"`
+	// GrantAtPrompt marks a granted request that was dispatched as a stub:
+	// its text is given at the prompt the stub raises, and the endpoint, not
+	// the adapter, judges its completion. It is set in the write that makes
+	// the record dispatching and never changes. GrantTextGiven records that
+	// the endpoint gave the text to the session's hook; a record that holds
+	// it gives no text again. Neither is published.
+	GrantAtPrompt  bool `json:"grant_at_prompt,omitempty"`
+	GrantTextGiven bool `json:"grant_text_given,omitempty"`
 
 	// PublishedRevision is the last revision known to have left through AMQ.
 	PublishedRevision int64 `json:"published_revision"`
