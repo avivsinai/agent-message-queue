@@ -790,6 +790,10 @@ func outcomeLine(r dialog.Resolved) string {
 			label = "Answered"
 		}
 	}
+	switch r.By {
+	case dialog.ByLink:
+		return "→ " + label + " (the link's answer)"
+	}
 	return "→ " + label + " (Buzz)"
 }
 

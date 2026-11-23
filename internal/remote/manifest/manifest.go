@@ -98,6 +98,16 @@ type LinkShare struct {
 // RelaySchemaVersion is the manifest version that may carry a relay object.
 const RelaySchemaVersion = 2
 
+// Approvals policy values of a link share.
+const (
+	// ApprovalsTerminal shows a task's permission dialog on the machine
+	// only (the default, and the value of an empty field).
+	ApprovalsTerminal = "terminal"
+	// ApprovalsLink publishes the dialog to the server as the task's
+	// interaction.
+	ApprovalsLink = "link"
+)
+
 // Relay configures one relay endpoint and the sessions shared on it.
 type Relay struct {
 	// URL is wss://, or ws:// to a loopback host for in-process tests.
@@ -387,7 +397,7 @@ func ValidLinkShare(sh LinkShare) error {
 		return fmt.Errorf("share %q consent must be passkey or local", sh.Binding)
 	case sh.Tools != "" && !toolProfileRe.MatchString(sh.Tools):
 		return fmt.Errorf("share %q tools %q is not a profile name", sh.Binding, sh.Tools)
-	case sh.Approvals != "" && sh.Approvals != "terminal" && sh.Approvals != "link":
+	case sh.Approvals != "" && sh.Approvals != ApprovalsTerminal && sh.Approvals != ApprovalsLink:
 		return fmt.Errorf("share %q approvals must be terminal or link", sh.Binding)
 	}
 	return nil

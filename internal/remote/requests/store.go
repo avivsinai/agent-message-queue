@@ -87,6 +87,12 @@ type Record struct {
 	// ships, recovered with none, or an unlistable directory) publishes
 	// nothing; an empty list is a real baseline.
 	DialogsBefore []string `json:"dialogs_before,omitzero"`
+	// LinkDialogs lists the interaction ids this endpoint selected from the
+	// binding's dialog directory: the link-published interactions. Their
+	// dispositions travel the owed-outcome mechanism, and a missing read
+	// retires as unknown instead of delivery_unknown (R2). Kept until the
+	// record compacts.
+	LinkDialogs []string `json:"link_dialogs,omitzero"`
 	// GrantAtPrompt marks a granted request that was dispatched as a stub:
 	// its text is given at the prompt the stub raises, and the endpoint, not
 	// the adapter, judges its completion. It is set in the write that makes

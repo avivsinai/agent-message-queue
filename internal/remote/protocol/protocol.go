@@ -292,6 +292,12 @@ type Interaction struct {
 	Prompt        string   `json:"prompt,omitempty"`
 	Options       []string `json:"options"`
 	RemoteAnswer  bool     `json:"remote_answer,omitempty"`
+	// ApproveOption and RejectOption name the link's one-tap choices of a
+	// link-published dialog: the allow-once and the deny-once labels. A
+	// server reads a choice's role from these two keys only. Absent on
+	// every other interaction.
+	ApproveOption string `json:"approve_option,omitempty"`
+	RejectOption  string `json:"reject_option,omitempty"`
 }
 
 // ResolutionOutcome is how a pending interaction stopped being pending.
@@ -313,6 +319,11 @@ const (
 	// or its write failed, before it recorded delivery). Neither an answer
 	// nor a terminal resolution is claimed.
 	ResolutionDeliveryUnknown ResolutionOutcome = "delivery_unknown"
+	// ResolutionUnknown: a link-published dialog's files were gone or
+	// unreadable before any resolution could be read. A missing file is
+	// never read as a winner. Grows the enum in place, as delivery_unknown
+	// did; a validator pinned to an older schema copy rejects it.
+	ResolutionUnknown ResolutionOutcome = "unknown"
 )
 
 // MaxResolutions bounds Snapshot.Resolved to the most recent entries.
