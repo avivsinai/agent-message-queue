@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -109,6 +110,68 @@ func TestDoctorFixKeepsAHookTheOwnerRemoved(t *testing.T) {
 		if f.Boundary == "hooks" && strings.Contains(f.Detail, "approval hook") {
 			t.Fatalf("doctor fails the hook the owner removed: %+v", f)
 		}
+	}
+}
+
+// The prompt hook is the owner's own choice: its install writes the marked
+// UserPromptSubmit entry and records its opt-in; --fix puts it back after
+// another writer dropped it, and leaves it out after the owner's uninstall.
+func TestPromptHookInstallsAndDoctorFixKeepsTheOwnersChoice(t *testing.T) {
+	home := fixSandbox(t)
+	settings := claude.SettingsPath(home)
+	bin, _, err := stableExecutable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := claude.OptInPromptHook(home, settings, bin); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var file struct {
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Command string `json:"command"`
+				Timeout int    `json:"timeout"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(raw, &file); err != nil {
+		t.Fatal(err)
+	}
+	groups := file.Hooks["UserPromptSubmit"]
+	if len(groups) != 1 || len(groups[0].Hooks) != 1 {
+		t.Fatalf("UserPromptSubmit chain = %+v", groups)
+	}
+	h := groups[0].Hooks[0]
+	if !strings.HasPrefix(h.Command, "AMQ_PROMPT_HOOK=1 ") || !strings.HasSuffix(h.Command, " || exec '"+bin+"' claude prompt-hook") || h.Timeout != 10 {
+		t.Fatalf("prompt hook = %+v", h)
+	}
+	if in, err := claude.ReadHookOptIn(settings); err != nil || in.Prompt == nil || in.Prompt.Bin != bin {
+		t.Fatalf("opt-in = %+v, %v", in, err)
+	}
+	if err := os.WriteFile(settings, []byte(`{"model":"other-writer"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := doctor([]string{"--fix"}); err != nil {
+		t.Fatal(err)
+	}
+	if form, _ := claude.PromptHookForm(home, settings); form != claude.HookFormCurrent {
+		t.Fatalf("prompt hook form after --fix = %q; want it restored", form)
+	}
+	if err := claude.OptOutHook(settings, claude.HookPrompt); err != nil {
+		t.Fatal(err)
+	}
+	if in, _ := claude.ReadHookOptIn(settings); in.Prompt != nil || !in.PromptRemoved {
+		t.Fatalf("opt-in after uninstall = %+v; want the owner's removal", in)
+	}
+	if _, _, err := doctor([]string{"--fix"}); err != nil {
+		t.Fatal(err)
+	}
+	if state, _ := claude.PromptHookStateAt(settings); state != claude.HookMissing {
+		t.Fatalf("prompt hook %q after uninstall and --fix; want it left removed", state)
 	}
 }
 

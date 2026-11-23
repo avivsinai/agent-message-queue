@@ -105,10 +105,13 @@ const (
 	hookUnreadableLine = "Cannot read %s to check the AMQ %s hook: %v. Run `amq-remote doctor`."
 	approvalLostLine   = "Approvals of this session stay in the terminal: the AMQ approval hook left %s at %s. Run `amq-remote doctor --fix`."
 	stopLostLine       = "Turns of this session sent from Buzz do not complete: the AMQ Stop hook left %s at %s. Run `amq-remote doctor --fix`."
+	promptLostLine     = "Link tasks to this session need a signature each: the AMQ prompt hook left %s at %s. Run `amq-remote doctor --fix`."
 )
 
 // checkHooks reports on one settings file that changed: the approval hook
-// for every session that reads it, the Stop hook for its native sessions.
+// for every session that reads it, the Stop hook for its native sessions,
+// and the prompt hook for its native sessions only while the owner's opt-in
+// of it exists in that file.
 func (s *Agent) checkHooks(path string, info os.FileInfo, readers []hookReader) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -127,7 +130,13 @@ func (s *Agent) checkHooks(path string, info os.FileInfo, readers []hookReader) 
 	for _, h := range []hook{
 		{claude.HookApproval, "approval", approvalLostLine, claude.PermissionHookState, claude.PermissionHookForm, false},
 		{claude.HookStop, "Stop", stopLostLine, claude.StopHookStateAt, claude.StopHookForm, true},
+		{claude.HookPrompt, "prompt", promptLostLine, claude.PromptHookStateAt, claude.PromptHookForm, true},
 	} {
+		if claude.OwnerOnly(h.kind) {
+			if in, err := claude.ReadHookOptIn(path); err != nil || !in.Has(h.kind) {
+				continue
+			}
+		}
 		var to []hookReader
 		for _, r := range readers {
 			if !h.nativeOnly || r.native {

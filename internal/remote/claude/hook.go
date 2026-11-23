@@ -37,9 +37,17 @@ const stopHookMarker = "AMQ_STOP_HOOK=1 "
 // stopHookType is the hook event name in settings.json.
 const stopHookType = "Stop"
 
+// promptHookMarker owns the prompt hook's entry as stopHookMarker owns the
+// Stop hook's; promptHookType is its event.
+const (
+	promptHookMarker = "AMQ_PROMPT_HOOK=1 "
+	promptHookType   = "UserPromptSubmit"
+)
+
 var (
 	stopHook       = hookfile.Spec{Event: stopHookType, Marker: stopHookMarker}
 	permissionSpec = hookfile.Spec{Event: permissionHookType, Marker: permissionHookMarker}
+	promptHook     = hookfile.Spec{Event: promptHookType, Marker: promptHookMarker}
 )
 
 // InstallPermissionHookAt adds the PermissionRequest hook to the settings
@@ -124,29 +132,36 @@ const (
 var (
 	stopHookBinRe       = regexp.MustCompile(`'((?:[^']|'\\'')*)' claude stop-hook$`)
 	permissionHookBinRe = regexp.MustCompile(`'((?:[^']|'\\'')*)' claude permission-hook(?: --wait [0-9]+)?$`)
+	promptHookBinRe     = regexp.MustCompile(`'((?:[^']|'\\'')*)' claude prompt-hook$`)
 )
 
 // StopHookForm reports the form of the one installed Stop hook in the
 // settings file settings, "" when it does not hold exactly one. home roots
 // the markers the current form's gate names.
 func StopHookForm(home, settings string) (string, error) {
-	return hookForm(settings, stopHook, func(cmd string) []byte {
-		m := stopHookBinRe.FindStringSubmatch(cmd)
-		if m == nil {
-			return nil
-		}
-		return stopHookEntry(home, shellUnquote(m[1]))
-	})
+	return kindForm(home, settings, HookStop)
 }
 
 // PermissionHookForm is StopHookForm for the PermissionRequest hook.
 func PermissionHookForm(home, settings string) (string, error) {
-	return hookForm(settings, permissionSpec, func(cmd string) []byte {
-		m := permissionHookBinRe.FindStringSubmatch(cmd)
+	return kindForm(home, settings, HookApproval)
+}
+
+// PromptHookForm is StopHookForm for the UserPromptSubmit hook.
+func PromptHookForm(home, settings string) (string, error) {
+	return kindForm(home, settings, HookPrompt)
+}
+
+// kindForm is the form of the one installed hook of kind, compared with the
+// entry its row renders for the binary the command names.
+func kindForm(home, settings, kind string) (string, error) {
+	row := hookKinds[kind]
+	return hookForm(settings, row.spec, func(cmd string) []byte {
+		m := row.binRe.FindStringSubmatch(cmd)
 		if m == nil {
 			return nil
 		}
-		return permissionHookEntry(home, shellUnquote(m[1]))
+		return row.entry(home, shellUnquote(m[1]))
 	})
 }
 
@@ -199,6 +214,11 @@ func StopHookStateAt(path string) (string, error) {
 	return hookState(path, stopHook)
 }
 
+// PromptHookStateAt is StopHookStateAt for the UserPromptSubmit hook.
+func PromptHookStateAt(path string) (string, error) {
+	return hookState(path, promptHook)
+}
+
 func hookState(path string, spec hookfile.Spec) (string, error) {
 	raw, err := hookfile.ReadBounded(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -249,18 +269,32 @@ func SettingsPath(home string) string {
 }
 
 // stopHookCommand is the shell command the hook runs: the ownership marker
-// assignment, then a gate of shell tests, then the single-quoted binary,
-// exec'd so Claude's signals reach it. The gate repeats what the receiver
-// reads before it writes (stopSessionAllowed): the binding env path, the
-// binding file and every binding in the bindings directory under the AMQ
-// home that home resolves now, and the attachment sentinels under $HOME,
-// the home the receiver resolves. With none of them present the receiver
-// writes nothing, so the hook starts nothing.
+// assignment, then the bound-session gate, then the single-quoted binary,
+// exec'd so Claude's signals reach it.
 func stopHookCommand(home, bin string) string {
+	return gatedCommand(stopHookMarker, home, bin, "stop-hook")
+}
+
+// promptHookCommand is stopHookCommand for the prompt hook: the same gate,
+// so a session that no attachment serves starts nothing at a prompt. The
+// receiver finds its endpoints through the attachment sentinels, which the
+// gate tests.
+func promptHookCommand(home, bin string) string {
+	return gatedCommand(promptHookMarker, home, bin, "prompt-hook")
+}
+
+// gatedCommand is marker, a gate of shell tests, then `exec '<bin>' claude
+// <sub>`. The gate repeats what the Stop receiver reads before it writes
+// (stopSessionAllowed): the binding env path, the binding file and every
+// binding in the bindings directory under the AMQ home that home resolves
+// now, and the attachment sentinels under $HOME, the home the receiver
+// resolves. With none of them present the receiver acts on nothing, so the
+// hook starts nothing.
+func gatedCommand(marker, home, bin, sub string) string {
 	remote := filepath.Join(amqhome.Under(home), "remote")
-	return stopHookMarker + `[ -z "${` + binding.EnvPath + `-}" ] && [ ! -e ` + shellQuote(filepath.Join(remote, "binding.json")) +
+	return marker + `[ -z "${` + binding.EnvPath + `-}" ] && [ ! -e ` + shellQuote(filepath.Join(remote, "binding.json")) +
 		` ] && [ ! -e "$HOME/.claude/sessions/amq-bound" ] && ` + noLiveBindingTest(filepath.Join(remote, "bindings")) +
-		` || exec ` + shellQuote(bin) + " claude stop-hook"
+		` || exec ` + shellQuote(bin) + " claude " + sub
 }
 
 // noLiveBindingTest is a shell test that succeeds when the bindings
@@ -319,6 +353,17 @@ func permissionHookEntry(home, bin string) []byte {
 // a stuck file system without holding a stop longer.
 func stopHookEntry(home, bin string) []byte {
 	return hookfile.CommandEntry(hookfile.CommandHook{Command: stopHookCommand(home, bin), Timeout: 5})
+}
+
+// promptHookTimeout is the installed timeout of the prompt hook, in
+// seconds. The receiver ends its own run within a shorter budget; the
+// timeout bounds a stuck start of the process.
+const promptHookTimeout = 10
+
+// promptHookEntry is the UserPromptSubmit group: no matcher, and the
+// timeout promptHookTimeout.
+func promptHookEntry(home, bin string) []byte {
+	return hookfile.CommandEntry(hookfile.CommandHook{Command: promptHookCommand(home, bin), Timeout: promptHookTimeout})
 }
 
 // StopHookPayload is the subset of Claude Code's Stop-hook stdin payload
