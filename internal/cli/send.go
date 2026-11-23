@@ -22,6 +22,14 @@ func runSend(args []string) error {
 }
 
 func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
+	return runSendStep(args, afterBodyRead, nil)
+}
+
+// runSendStep runs amq send. With deliver nil it reads the body and
+// delivers. With deliver set it is a step of another command: it runs every
+// check a send runs, reads no body and no stdin, and ends in deliver with the
+// authorized message, whose capabilities stay open while deliver runs.
+func runSendStep(args []string, afterBodyRead func(), deliver func(outgoingMessage) error) error {
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
 	common := addCommonFlags(fs)
 	toFlag := fs.String("to", "", "Receiver handle (comma-separated)")
@@ -413,12 +421,15 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 		}
 	}
 
-	body, err := readBody(*bodyFlag, *allowEmptyFlag)
-	if err != nil {
-		return err
-	}
-	if afterBodyRead != nil {
-		afterBodyRead()
+	body := ""
+	if deliver == nil {
+		body, err = readBody(*bodyFlag, *allowEmptyFlag)
+		if err != nil {
+			return err
+		}
+		if afterBodyRead != nil {
+			afterBodyRead()
+		}
 	}
 
 	priority := strings.TrimSpace(*priorityFlag)
@@ -499,7 +510,7 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 		}
 	}
 
-	return deliverOutgoing(outgoingMessage{
+	m := outgoingMessage{
 		command:                  "send",
 		verb:                     "Sent",
 		me:                       me,
@@ -537,7 +548,11 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 		sourceSessionDisplay:       session,
 		jsonExtra:                  map[string]any{"source_root": sourceRoot},
 		propagateOutboxReportError: true,
-	})
+	}
+	if deliver != nil {
+		return deliver(m)
+	}
+	return deliverOutgoing(m)
 }
 
 func loadPeerAgentsForSend(root *fsq.DeliveryRoot, strict bool) ([]string, bool, error) {

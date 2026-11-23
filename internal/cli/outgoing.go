@@ -109,11 +109,44 @@ type outgoingMessage struct {
 	propagateOutboxReportError bool
 }
 
+// outgoingOutcome is what sendOutgoing did after delivery: the message id,
+// the outbox copy's error, each requested clock, and the --wait-for result.
+type outgoingOutcome struct {
+	ID        string
+	OutboxErr error
+	FollowUp  *followUpResult
+	News      *followUpResult
+	// ClockErr names each requested clock that is not armed; the message is
+	// delivered either way.
+	ClockErr error
+	Wait     *waitForResult
+	WaitErr  error
+}
+
 // deliverOutgoing builds, delivers, records, and reports one authorized
-// message. Local delivery verifies its mailbox authorization last;
-// cross-project delivery re-checks both rosters and never creates peer
-// directories; any routed delivery verifies the source base first.
+// message.
 func deliverOutgoing(m outgoingMessage) error {
+	o, err := sendOutgoing(m)
+	if err != nil {
+		return err
+	}
+	if m.silent {
+		// The embedding command owns its stdout/stderr. Surface outbox errors
+		// (only write failures, never success toasts) through the caller.
+		return o.OutboxErr
+	}
+	return printOutgoing(m, o)
+}
+
+// sendOutgoing builds, delivers, and records one authorized message, then
+// arms its clocks and waits as --wait-for asks; it prints nothing. Local
+// delivery verifies its mailbox authorization last; cross-project delivery
+// re-checks both rosters and never creates peer directories; any routed
+// delivery verifies the source base first. Its error means not delivered,
+// or delivered with indeterminate durability; a silent message returns
+// after the outbox copy, with no clocks.
+func sendOutgoing(m outgoingMessage) (outgoingOutcome, error) {
+	var o outgoingOutcome
 	priority := m.priority
 	if m.kind != "" && priority == "" {
 		priority = format.DefaultPriority(m.kind)
@@ -126,8 +159,9 @@ func deliverOutgoing(m outgoingMessage) error {
 	now := time.Now()
 	id, err := format.NewMessageID(now)
 	if err != nil {
-		return err
+		return o, err
 	}
+	o.ID = id
 	if m.outID != nil {
 		*m.outID = id
 	}
@@ -159,15 +193,15 @@ func deliverOutgoing(m outgoingMessage) error {
 	}
 	data, err := msg.Marshal()
 	if err != nil {
-		return err
+		return o, err
 	}
 
 	if m.localAuthorization != nil {
 		if err := prepareLocalSendMailboxes(m.deliveryFS, m.localAuthorization, m.deliveryRoot, m.recipients); err != nil {
-			return err
+			return o, err
 		}
 		if err := m.localAuthorization.Verify(); err != nil {
-			return fmt.Errorf("destination mailbox authorization changed before delivery: %w", err)
+			return o, fmt.Errorf("destination mailbox authorization changed before delivery: %w", err)
 		}
 	}
 
@@ -179,40 +213,40 @@ func deliverOutgoing(m outgoingMessage) error {
 			m.strict,
 		)
 		if currentSourceAgentsErr != nil {
-			return currentSourceAgentsErr
+			return o, currentSourceAgentsErr
 		}
 		if err := checkEndpointRegistration(endpointQueueFor(m.sourceFS, m.sourceConfigFS), endpointSender, m.strict, false, m.me); err != nil {
-			return err
+			return o, err
 		}
 		_, currentPeerAgentsErr := revalidatePeerAgentsForSend(m.peerConfigFS, m.peerConfigPresent, m.strict)
 		if currentPeerAgentsErr != nil {
-			return currentPeerAgentsErr
+			return o, currentPeerAgentsErr
 		}
 		if err := checkEndpointRegistration(endpointQueueFor(m.deliveryFS, m.peerConfigFS), endpointRecipient, m.strict, false, m.recipients...); err != nil {
-			return err
+			return o, err
 		}
 		if err := m.sourceFS.VerifyBase(); err != nil {
-			return err
+			return o, err
 		}
 		for _, r := range m.recipients {
 			if _, err := fsq.DeliverToExistingInbox(m.deliveryFS, r, filename, data); err != nil {
 				var committed *fsq.CommittedDurabilityError
 				if !errors.As(err, &committed) && m.explainPeerDeliveryError != nil {
 					if explained := m.explainPeerDeliveryError(r); explained != nil {
-						return explained
+						return o, explained
 					}
 				}
-				return reportDeliveryError(id, err)
+				return o, reportDeliveryError(id, err)
 			}
 		}
 	} else {
 		if m.targetSession != "" {
 			if err := m.sourceFS.VerifyBase(); err != nil {
-				return err
+				return o, err
 			}
 		}
 		if _, err := fsq.DeliverToInboxes(m.deliveryFS, m.recipients, filename, data); err != nil {
-			return reportDeliveryError(id, err)
+			return o, reportDeliveryError(id, err)
 		}
 	}
 
@@ -223,43 +257,42 @@ func deliverOutgoing(m outgoingMessage) error {
 	// would record a send that never happened.
 	// It is an audit record in the source root.
 	outboxDir := filepath.Join("agents", m.me, "outbox", "sent")
-	outboxErr := error(nil)
 	if _, err := m.sourceFS.WriteFileAtomic(outboxDir, filename, data, 0o600); err != nil {
-		outboxErr = err
+		o.OutboxErr = err
 	}
 	if m.silent {
-		// The embedding command owns its stdout/stderr. Surface outbox errors
-		// (only write failures, never success toasts) through the caller.
-		return outboxErr
+		return o, nil
 	}
 
-	var followUp *followUpResult
 	var followUpErr error
 	if m.followUp > 0 {
-		followUp, followUpErr = armFollowUp(m, id, now)
+		o.FollowUp, followUpErr = armFollowUp(m, id, now)
 	}
-	var news *followUpResult
 	var newsErr error
 	if m.newsWithin > 0 {
-		news, newsErr = armNews(m, id, now)
+		o.News, newsErr = armNews(m, id, now)
 	}
-	followUpErr = joinOutcomeErr(followUpErr, newsErr)
+	o.ClockErr = joinOutcomeErr(followUpErr, newsErr)
 
-	var waitResult *waitForResult
-	var waitErr error
 	if m.waitFor != "" {
 		r, err := receipt.WaitForDeliveryRoot(m.deliveryFS, id, m.recipients[0], m.waitFor, m.waitTimeout, 1*time.Second)
 		if errors.Is(err, os.ErrDeadlineExceeded) {
-			waitResult = &waitForResult{Event: "timeout", Stage: m.waitFor, Timeout: m.waitTimeout.String()}
-			waitErr = TimeoutError("%s --wait-for %s timed out after %s%s", m.command, m.waitFor, m.waitTimeout, m.waitTimeoutHint)
+			o.Wait = &waitForResult{Event: "timeout", Stage: m.waitFor, Timeout: m.waitTimeout.String()}
+			o.WaitErr = TimeoutError("%s --wait-for %s timed out after %s%s", m.command, m.waitFor, m.waitTimeout, m.waitTimeoutHint)
 		} else if err != nil {
-			waitResult = &waitForResult{Event: "error", Stage: m.waitFor, Detail: err.Error()}
-			waitErr = fmt.Errorf("%s --wait-for: %w", m.command, err)
+			o.Wait = &waitForResult{Event: "error", Stage: m.waitFor, Detail: err.Error()}
+			o.WaitErr = fmt.Errorf("%s --wait-for: %w", m.command, err)
 		} else {
-			waitResult = &waitForResult{Event: "matched", Stage: m.waitFor, Receipt: &r}
+			o.Wait = &waitForResult{Event: "matched", Stage: m.waitFor, Receipt: &r}
 		}
 	}
+	return o, nil
+}
 
+// printOutgoing reports a message sendOutgoing delivered, as JSON or text,
+// and returns the --wait-for and clock errors of its outcome.
+func printOutgoing(m outgoingMessage, o outgoingOutcome) error {
+	id := o.ID
 	if m.json {
 		out := map[string]any{
 			"id":      id,
@@ -268,7 +301,7 @@ func deliverOutgoing(m outgoingMessage) error {
 			"subject": m.subject,
 			"session": m.displaySession,
 			"root":    m.deliveryRoot,
-			"outbox":  outboxResult(outboxErr),
+			"outbox":  outboxResult(o.OutboxErr),
 		}
 		for key, value := range m.jsonExtra {
 			out[key] = value
@@ -283,27 +316,27 @@ func deliverOutgoing(m outgoingMessage) error {
 			out["source_session"] = m.sourceSessionDisplay
 			out["target_session"] = m.targetSession
 		}
-		if waitResult != nil {
-			out["wait"] = waitResult
+		if o.Wait != nil {
+			out["wait"] = o.Wait
 		}
-		if followUp != nil {
-			out["follow_up"] = followUp
+		if o.FollowUp != nil {
+			out["follow_up"] = o.FollowUp
 		}
-		if news != nil {
-			out["news"] = news
+		if o.News != nil {
+			out["news"] = o.News
 		}
 		if err := writeJSON(os.Stdout, out); err != nil {
 			return err
 		}
-		return joinOutcomeErr(waitErr, followUpErr)
+		return joinOutcomeErr(o.WaitErr, o.ClockErr)
 	}
 
-	if outboxErr != nil {
-		if err := reportOutboxError(outboxErr); err != nil && m.propagateOutboxReportError {
+	if o.OutboxErr != nil {
+		if err := reportOutboxError(o.OutboxErr); err != nil && m.propagateOutboxReportError {
 			return err
 		}
 	}
-	if waitResult != nil {
+	if waitResult := o.Wait; waitResult != nil {
 		recipient := m.recipients[0]
 		switch waitResult.Event {
 		case "matched":
@@ -322,21 +355,29 @@ func deliverOutgoing(m outgoingMessage) error {
 	} else if err := writeStdout("%s %s to %s (session: %s, root: %s)\n", m.verb, id, strings.Join(m.recipients, ","), m.displaySession, m.deliveryRoot); err != nil {
 		return err
 	}
-	if followUp != nil && followUp.Due != "" {
+	if err := printClockLines(m, o); err != nil {
+		return err
+	}
+	return joinOutcomeErr(o.WaitErr, o.ClockErr)
+}
+
+// printClockLines prints the due time of each clock sendOutgoing armed.
+func printClockLines(m outgoingMessage, o outgoingOutcome) error {
+	if o.FollowUp != nil && o.FollowUp.Due != "" {
 		line := "Follow-up due %s if %s has not replied.\n"
 		if slices.Contains(thread.OpenerKinds, m.kind) {
 			line = "Follow-up due %s unless %s closes it.\n"
 		}
-		if err := writeStdout(line, followUp.Due, m.recipients[0]); err != nil {
+		if err := writeStdout(line, o.FollowUp.Due, m.recipients[0]); err != nil {
 			return err
 		}
 	}
-	if news != nil && news.Due != "" {
-		if err := writeStdout("News notice due %s if %s has sent no reply.\n", news.Due, m.recipients[0]); err != nil {
+	if o.News != nil && o.News.Due != "" {
+		if err := writeStdout("News notice due %s if %s has sent no reply.\n", o.News.Due, m.recipients[0]); err != nil {
 			return err
 		}
 	}
-	return joinOutcomeErr(waitErr, followUpErr)
+	return nil
 }
 
 // followUpResult reports an armed follow-up, or why a delivered message has
