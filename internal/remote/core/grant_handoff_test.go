@@ -1,6 +1,7 @@
 package core_test
 
 import (
+	"errors"
 	"sync/atomic"
 	"testing"
 
@@ -77,6 +78,33 @@ func TestGrantedRequestAtTheHandover(t *testing.T) {
 	}
 	if _, exists, err := store.Get(keyOf(offline)); err != nil || exists {
 		t.Fatalf("granted submit to an offline target left a record (%v, %v)", exists, err)
+	}
+}
+
+// The pi gate's dialog is answered only at the terminal: a link that sent a
+// granted request cannot answer an interaction of that request, and the
+// refusal comes before any lookup (the pi gate spec, invariant 6).
+func TestLinkNeverAnswersAGrantedRequestsInteraction(t *testing.T) {
+	rt := fake.New("fake", "e_1")
+	ep, _, clk := newLinkEndpoint(t, rt)
+	ep.SetGrant(func(string, string, string) string { return "" })
+	granted := linkSource(hostA, "fake")
+	granted.GrantDigest = "sha256:0000000000000000000000000000000000000000000000000000000000000003"
+	cmd := linkSubmit(clk, "fake", "11111111-1111-4111-8111-1111111111f6")
+	if r := submitReply(t, ep, cmd, granted); r.Snapshot.State == protocol.StateRejected {
+		t.Fatalf("granted submit = %s %q, want it to run", r.Snapshot.State, r.Outcome.Code)
+	}
+	rt.Question(cmd.RequestID, "i_1", []string{"Yes, run it", "No"})
+	_, err := ep.Handle(&protocol.Command{
+		Schema: protocol.SchemaCommand, Op: protocol.OpInteractionRespond, RequestRef: protocol.EncodeRef(hostA, "fake", cmd.RequestID),
+		TargetID: "fake", Epoch: "e_1", InteractionID: "i_1", Option: "Yes, run it",
+	}, granted)
+	var ref *protocol.Refusal
+	if !errors.As(err, &ref) || ref.Code != protocol.CodeUnshared || ref.Message != "a link never answers an interaction" {
+		t.Fatalf("link answer = %v, want the link refusal", err)
+	}
+	if n := len(rt.Snapshot().Answers); n != 0 {
+		t.Fatalf("the runtime saw %d answers from the link", n)
 	}
 }
 

@@ -1041,6 +1041,16 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 			return core.Admission{Code: protocol.CodeStaleEpoch, Message: "the pi session changed after inspect; re-inspect"}, nil
 		}
 	}
+	// A granted request runs only where the bridge gates its tool calls,
+	// read from the same liveness as the checks above; it then requires the
+	// gate's revision, so a bridge that does not gate refuses it too.
+	revision := MinBridgeRevision
+	if req.Granted {
+		if asks, why := sessionAsks(live); !asks {
+			return core.Admission{Code: protocol.CodeConsentInvalid, Message: "grant_needs_signature: " + why, NothingSent: true}, nil
+		}
+		revision = GateBridgeRevision
+	}
 	// File I/O outside a.mu: the mutex guards correlation state, not the
 	// seam. A concurrent same-key submit cannot happen (the endpoint's
 	// per-runtime reservation serializes dispatches), and a bind after the
@@ -1053,9 +1063,10 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		NotAfter:       req.NotAfter,
 		EpochHint:      epochHint,
 		CreatedAt:      protocol.FormatTime(a.now()),
-		BridgeRevision: MinBridgeRevision,
+		BridgeRevision: revision,
 		Origin:         originOf(req.Origin),
 		Event:          eventOf(req.Origin),
+		Granted:        req.Granted,
 	}
 	err := a.dir.publishRequest(preq)
 
@@ -1268,6 +1279,22 @@ func (a *Attachment) CancelExact(key requests.Key, epoch string) (core.CancelEvi
 		return core.CancelEvidence{Disposition: protocol.CancelRequested, Message: "cancel published for " + r.ref}, nil
 	}
 	return core.CancelEvidence{Disposition: protocol.CancelUnsupported, Message: "pi adapter has no native cancel seam; the run resolves from the bridge event stream"}, nil
+}
+
+// SessionAsks implements core.PermissionReader from the live bridge's
+// liveness, the read Inspect makes: the session asks only while a fresh
+// bridge gates a granted run's tool calls at pi's terminal. The acp-host
+// wire publishes no gate, so it never asks.
+func (a *Attachment) SessionAsks() (bool, string) {
+	return sessionAsks(a.dir.liveness(a.now()))
+}
+
+// WritesWithoutAsking implements core.PermissionReader. With the gate every
+// tool call that can write asks; without it the adapter cannot tell, which
+// counts as writing.
+func (a *Attachment) WritesWithoutAsking(string) bool {
+	asks, _ := a.SessionAsks()
+	return !asks
 }
 
 // Respond implements core.Attachment. The adapter raises no approvals (tool
