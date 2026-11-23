@@ -18,6 +18,9 @@ func runCoopWaitCodex(context.Context, io.Reader) error { return nil }
 // runCoopPromptCodex does nothing where amq wake does not run.
 func runCoopPromptCodex(io.Reader, io.Writer) error { return nil }
 
+// runCoopStopCodex does nothing where amq wake does not run.
+func runCoopStopCodex(io.Reader, io.Writer) error { return nil }
+
 // coopWaitRuns reports no waiter where the waiter does not run.
 func coopWaitRuns(root, me string) bool { return false }
 

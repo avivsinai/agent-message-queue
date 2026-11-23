@@ -210,10 +210,12 @@ the owner's input, typed on the owner's order.
 The person sees the mail as a notice (terminal title, bell, desktop notice),
 once per unread cohort, and one more notice when more mail arrives —
 whatever transport the wake would otherwise use, including the external
-injector (`--inject-via`). On Claude Code with the co-op hooks installed,
-the model learns of the mail at the person's next submit through the
+injector (`--inject-via`). On Claude Code or Codex with the co-op hooks
+installed, the model learns of the mail at the person's next submit through the
 `UserPromptSubmit` hook, and the Stop guard reports unread mail at a turn
-end without extending the turn. The input guard is not needed on an
+end without extending the turn. On Codex, this is a warning line in the
+window. Mail that arrives while the seat is idle has the terminal-title
+notice described above. The input guard is not needed on an
 attended seat: nothing is typed into the terminal anyway.
 
 `attended` is read from the settings file at each wake. A running wake

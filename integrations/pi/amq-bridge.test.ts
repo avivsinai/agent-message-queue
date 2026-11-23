@@ -271,6 +271,25 @@ test("a cancel for the request in flight aborts it and its terminal event is can
 	}
 });
 
+// agent-message-queue-kj9z: Pi 1.5.2 skipped agent_before_settle on Escape.
+test("a remote request interrupted at the terminal ends cancelled", async () => {
+	const h = harness();
+	await h.start();
+	try {
+		h.publish(REF, "remote task", h.generation());
+		await h.waitFor(() => h.sent.length === 1);
+		await h.emit("message_start", userMessage("remote task"));
+		await h.emit("agent_end", { messages: [] });
+		await h.emit("agent_settled", { aborted: true });
+		assert.deepEqual(
+			h.events(REF).map((e) => e.event),
+			["started", "cancelled"],
+		);
+	} finally {
+		await h.done();
+	}
+});
+
 test("a cancel for a request that already ended does nothing", async () => {
 	const h = harness();
 	await h.start();

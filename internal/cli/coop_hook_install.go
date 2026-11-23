@@ -130,19 +130,28 @@ func coopWaitHook(bin, store, event, matcher string) hookfile.CommandHook {
 // stderr alone and prints nothing on stdout, which Codex reads. The shell
 // stays as the parent and ends in || true: exit 2 means something to Codex
 // on Stop, and an older amq exits 2 on the unknown verb.
+// The stop entry has a marker of its own: the editor owns one entry per
+// marker and event chain, and the async wait hook already owns the first.
+const codexStopHookMarker = "AMQ_COOP_STOP_HOOK=1 "
+
 func codexCoopWaitCommand(bin, threads string) string {
-	return codexCoopCommand(bin, threads, "codex-wait")
+	return codexCoopCommand(bin, threads, coopHookMarker, "codex-wait")
 }
 
 // codexCoopPromptCommand is the command of the Codex prompt hook, with the
 // gate and the ending of the wait command: Codex reads stdout and gives
 // exit 2 a meaning on UserPromptSubmit too.
 func codexCoopPromptCommand(bin, threads string) string {
-	return codexCoopCommand(bin, threads, "codex-prompt")
+	return codexCoopCommand(bin, threads, coopHookMarker, "codex-prompt")
 }
 
-func codexCoopCommand(bin, threads, verb string) string {
-	return coopHookMarker + `[ -n "${AM_ME-}" ] || [ -d ` + shellQuote(threads) + ` ] || exit 0; ` +
+// codexCoopStopCommand is the synchronous notice of an attended turn end.
+func codexCoopStopCommand(bin, threads string) string {
+	return codexCoopCommand(bin, threads, codexStopHookMarker, "codex-stop")
+}
+
+func codexCoopCommand(bin, threads, marker, verb string) string {
+	return marker + `[ -n "${AM_ME-}" ] || [ -d ` + shellQuote(threads) + ` ] || exit 0; ` +
 		shellQuote(bin) + " --no-update-check coop hook " + verb + " || true"
 }
 
@@ -161,12 +170,19 @@ func codexCoopHooks(bin, threads string) []hookfile.CommandHook {
 			Async:   true,
 		})
 	}
-	return append(hooks, hookfile.CommandHook{
-		Event:   codexCoopPromptEvent,
-		Marker:  coopHookMarker,
-		Command: codexCoopPromptCommand(bin, threads),
-		Timeout: 2,
-	})
+	return append(hooks,
+		hookfile.CommandHook{
+			Event:   codexCoopPromptEvent,
+			Marker:  coopHookMarker,
+			Command: codexCoopPromptCommand(bin, threads),
+			Timeout: 2,
+		},
+		hookfile.CommandHook{
+			Event:   "Stop",
+			Marker:  codexStopHookMarker,
+			Command: codexCoopStopCommand(bin, threads),
+			Timeout: 2,
+		})
 }
 
 // codexCoopHooksPath is the user hooks file Codex reads:
@@ -183,7 +199,7 @@ func codexCoopHooksPath() (string, error) {
 // new or changed hook until the person approves it, and a chat opened
 // before that does not run it.
 const codexCoopHookTrustNote = "Codex runs the new hooks only after you approve them: open Settings > Hooks in the\n" +
-	"Codex app (/hooks in the CLI) and approve the AMQ_COOP_HOOK entries, then start a\n" +
+	"Codex app (/hooks in the CLI) and approve the AMQ_COOP_HOOK and AMQ_COOP_STOP_HOOK entries, then start a\n" +
 	"new chat and run amq coop join in it.\n"
 
 // coopHookHarness reads --harness of install-hooks and uninstall-hooks.
@@ -203,8 +219,8 @@ func runCoopInstallHooks(args []string) error {
 	harnessName := fs.String("harness", "claude", "claude, or codex for the hooks of a joined Codex chat")
 	usage := usageWithFlags(fs, "amq coop install-hooks [--dry-run] [--harness claude|codex]",
 		"Install the co-op hooks in $CLAUDE_CONFIG_DIR/settings.json (default",
-		"~/.claude/settings.json), or with --harness codex the wait hook and the",
-		"prompt hook in $CODEX_HOME/hooks.json.",
+		"~/.claude/settings.json), or with --harness codex the wait, attended-stop",
+		"notice and prompt hooks in $CODEX_HOME/hooks.json.",
 		"",
 		"SessionStart (startup, resume, clear, compact) gives the agent its co-op",
 		"preamble: handle, session, peers, unread count, and what announces new mail.",
@@ -228,6 +244,9 @@ func runCoopInstallHooks(args []string) error {
 		"The prompt hook runs on UserPromptSubmit and adds context with the unread",
 		"count to the person's prompt in a joined chat. A seat with an earlier hook",
 		"installation adds this entry at the next install; approve it in Codex.",
+		"The attended-stop hook runs synchronously at a turn end and shows unread",
+		"mail as a warning, without a block or continuation; reinstall and approve",
+		"it to add this entry to an earlier hook installation.",
 		"",
 		"Running again keeps the same entries and replaces entries of another amq",
 		"binary. Other settings and hooks are not changed. It also lists old project",
@@ -303,7 +322,7 @@ func runCoopUninstallHooks(args []string) error {
 	fs := flag.NewFlagSet("coop uninstall-hooks", flag.ContinueOnError)
 	harnessName := fs.String("harness", "claude", "claude, or codex")
 	usage := usageWithFlags(fs, "amq coop uninstall-hooks [--harness claude|codex]",
-		"Remove the co-op hooks (AMQ_COOP_HOOK entries) from",
+		"Remove the co-op hooks (AMQ_COOP_HOOK and AMQ_COOP_STOP_HOOK entries) from",
 		"$CLAUDE_CONFIG_DIR/settings.json (default ~/.claude/settings.json), or with",
 		"--harness codex from $CODEX_HOME/hooks.json.",
 		"Other settings and hooks are not changed.")
@@ -322,6 +341,9 @@ func runCoopUninstallHooks(args []string) error {
 			return err
 		}
 		if err := hookfile.UninstallCommandHooksAt(path, coopHookMarker, codexCoopHookEvents); err != nil {
+			return err
+		}
+		if err := hookfile.UninstallCommandHooksAt(path, codexStopHookMarker, []string{"Stop"}); err != nil {
 			return err
 		}
 		return writeStdout("co-op hooks removed from %s\n", path)

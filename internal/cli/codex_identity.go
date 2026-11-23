@@ -53,8 +53,8 @@ func adoptCodexThreadIdentity() error {
 	return adoptIdentity(id, "this Codex thread's")
 }
 
-// isCodexHookReceiver reports whether args run a Codex hook receiver: amq
-// coop hook codex-wait or codex-prompt, or amq wake dialog --harness codex.
+// isCodexHookReceiver reports whether args run a Codex hook receiver: a
+// coop hook of Codex or amq wake dialog --harness codex.
 // A receiver takes its seat from the hook input (adoptCodexHookIdentity),
 // so amq adopts no session identity from its environment: a Codex that was
 // started from a shell tool of Codex or of Claude Code inherits that
@@ -65,7 +65,7 @@ func isCodexHookReceiver(args []string) bool {
 	}
 	switch {
 	case args[0] == "coop" && args[1] == "hook":
-		return slices.Contains(args[2:], "codex-wait") || slices.Contains(args[2:], "codex-prompt")
+		return slices.Contains(args[2:], "codex-wait") || slices.Contains(args[2:], "codex-prompt") || slices.Contains(args[2:], "codex-stop")
 	case args[0] == "wake" && args[1] == "dialog":
 		// The flag package keeps the last value of a repeated flag.
 		harness := ""
