@@ -523,8 +523,7 @@ func (r *DeliveryRoot) EnsureAgentDirs(agent string) error {
 // notification-attempt ledger under receipts) use this instead of
 // EnsureAgentDirs so a routine write never recreates inbox or DLQ components
 // an operator or repair path deliberately removed or replaced. Mailbox
-// provisioning stays explicit: init, coop, launch, and a wake's start own
-// EnsureAgentDirs.
+// provisioning stays explicit: init, coop, and launch own EnsureAgentDirs.
 func (r *DeliveryRoot) EnsureAgentDir(agent string, leaf MailboxLeaf) error {
 	if err := ValidateHandle(agent); err != nil {
 		return err
