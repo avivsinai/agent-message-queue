@@ -39,10 +39,10 @@ import (
 
 // Option is one choice the dialog offers.
 type Option struct {
-	N     int    `json:"n"`               // 1-based, as shown in Buzz
-	Label string `json:"label"`           // "Allow once", "Allow this session", "Deny", or the harness's own label
-	Value string `json:"value"`           // harness-specific decision token the seam applies
-	Deny  bool   `json:"deny,omitempty"`  // the option ❌ selects
+	N     int    `json:"n"`              // 1-based, as shown in Buzz
+	Label string `json:"label"`          // "Allow once", "Allow this session", "Deny", or the harness's own label
+	Value string `json:"value"`          // harness-specific decision token the seam applies
+	Deny  bool   `json:"deny,omitempty"` // the option ❌ selects
 	// Scope says how long the decision holds, for an allow and for a deny:
 	// an allow or a deny that holds for this one action is once; one that
 	// persists is always. A turn or a session holds for the named span.

@@ -218,7 +218,7 @@ type Endpoint struct {
 	// option. A rollback undoes only the intent its own respond recorded: a
 	// replay of an earlier intent keeps it. An entry lives while a respond
 	// holds or waits for it.
-	answering map[answerKey]*answerLock
+	answering   map[answerKey]*answerLock
 	consent     ConsentCheck
 	grant       GrantCheck
 	dialogsOpen DialogsOpen
