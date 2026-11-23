@@ -167,7 +167,8 @@ and release it:
 
 ```sh
 amq coop install-hooks --harness codex   # once per user and machine
-# approve the AMQ_COOP_HOOK entries in Codex (Settings > Hooks, /hooks in the CLI)
+# approve the AMQ_COOP_HOOK and AMQ_COOP_STOP_HOOK entries in Codex
+# (Settings > Hooks, /hooks in the CLI)
 amq coop join                            # once per chat, in a new chat
 amq coop leave                           # release the handle
 ```
@@ -193,12 +194,18 @@ amq coop leave                           # release the handle
   turn and is rung again by the next waiter. While a waiter runs, `amq who`
   shows the agent as `active (hook_live)`. `join` prints whether the hook
   will wake the chat, or why not. Without it, run `amq drain --include-body`
-  between tasks.
+  between tasks. An attended seat does not receive this ring; the synchronous
+  Stop hook instead shows new unread mail at a turn end.
 - **The prompt hook tells the model at a submit.** The same install writes a
   `UserPromptSubmit` hook. When you submit a prompt in a joined chat and
   unread mail waits, it adds one line of context with the unread count. It
   prints nothing for the doorbell. Reinstall and approve it to add this entry
   to an earlier hook installation.
+- **The attended-stop hook reports a turn end.** The same install writes a
+  synchronous `Stop` hook. On a seat with `attended` on it shows new unread
+  mail as a warning in the Codex window, without input, a block or another
+  turn. It reports the same mail only once. On any other seat it prints
+  nothing. Reinstall and approve it to add it to an earlier hook installation.
 
 Limits of the Codex wait hook:
 

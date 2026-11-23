@@ -140,22 +140,9 @@ func writeCoopStop(stdin io.Reader, w io.Writer) error {
 		session = "(none)"
 	}
 	// An attended seat never blocks: the person reads the systemMessage and
-	// the model learns of the mail at their next prompt. Every unread
-	// message counts, with no wake baseline: the attended wake types
-	// nothing, so mail after its baseline would otherwise never be reported
-	// at a turn end. An id the guard already reported by a block counts as
-	// noticed too, so attended off-on-off does not print it a third time.
+	// the model learns of the mail at their next prompt.
 	if attended {
-		next := decideCoopStopAttended(pending, old)
-		fresh := freshAttendedIDs(pending, old.NoticedIDs, old.BlockedIDs)
-		if !slices.Equal(next.NoticedIDs, old.NoticedIDs) || !slices.Equal(next.BlockedIDs, old.BlockedIDs) {
-			_ = writeCoopHookState(statePath, next)
-		}
-		if len(fresh) == 0 {
-			return nil
-		}
-		return writeCoopHookJSON(w, map[string]string{"systemMessage": fmt.Sprintf(
-			"AMQ: %d unread message(s). Run amq drain --include-body.", len(pending))})
+		return writeCoopStopAttended(w, pending, old, statePath)
 	}
 	next, out := decideCoopStop(pending, baseline, old, in.StopHookActive, "root="+root+" session="+session)
 	if !slices.Equal(next.BlockedIDs, old.BlockedIDs) || next.ChainBlocks != old.ChainBlocks || !slices.Equal(next.NoticedIDs, old.NoticedIDs) {
@@ -165,6 +152,23 @@ func writeCoopStop(stdin io.Reader, w io.Writer) error {
 		return nil
 	}
 	return writeCoopHookJSON(w, out)
+}
+
+// writeCoopStopAttended reports every unread message once, with no wake
+// baseline: an attended wake types nothing, so mail after its baseline would
+// otherwise never be reported at a turn end. An id already reported by a
+// block is noticed too, so attended off-on-off does not print it a third time.
+func writeCoopStopAttended(w io.Writer, pending []coopStopMessage, old coopStopState, statePath string) error {
+	next := decideCoopStopAttended(pending, old)
+	fresh := freshAttendedIDs(pending, old.NoticedIDs, old.BlockedIDs)
+	if !slices.Equal(next.NoticedIDs, old.NoticedIDs) || !slices.Equal(next.BlockedIDs, old.BlockedIDs) {
+		_ = writeCoopHookState(statePath, next)
+	}
+	if len(fresh) == 0 {
+		return nil
+	}
+	return writeCoopHookJSON(w, map[string]string{"systemMessage": fmt.Sprintf(
+		"AMQ: %d unread message(s). Run amq drain --include-body.", len(pending))})
 }
 
 // decideCoopStopAttended is the attended-seat Stop state: noticed = the
