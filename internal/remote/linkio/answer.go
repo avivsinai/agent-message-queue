@@ -169,6 +169,8 @@ func (c *Carrier) handleAnswerRequest(sess *session, f Frame) {
 			DocumentDigest:    "sha256:" + hex.EncodeToString(sum[:]),
 			Credential:        m.CredentialID,
 		}
+		// Core trusts this source. The carrier owns the authenticated host, and
+		// verifyAnswer matched the signed binding and native session to this view.
 		src := c.source(view, d.NativeSessionID, m.CredentialID, d.Binding)
 		if code, message := c.cfg.Answers.AnswerLinkDialog(src, answer); code != "" {
 			return nil, refuse(string(code), "%s", message)

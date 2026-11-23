@@ -6,7 +6,6 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -20,7 +19,7 @@ import (
 )
 
 // The carrier sends the verified choice to the endpoint. This fixture holds
-// the share policy and uses the machine's exclusive answer writer.
+// the share policy and models its answer slot with real dialog files.
 type wireAnswerBinding struct {
 	available              atomic.Bool
 	loseReply              atomic.Bool
@@ -44,12 +43,14 @@ func (b *wireAnswerBinding) AnswerLinkDialog(src core.Source, answer core.LinkAn
 	if src.NativeSession != b.session || src.Credential != b.want.Credential || answer != b.want {
 		return protocol.CodeInvalid, "verified answer fields differ"
 	}
-	err := dialog.WriteLinkAnswer(b.dir, answer.InteractionID, answer.Option, answer.DocumentDigest, answer.Credential)
-	if errors.Is(err, dialog.ErrLinkAnswered) {
-		return protocol.CodeAlreadyResolved, "the interaction is no longer pending"
-	}
+	won, err := dialog.WriteAnswer(b.dir, dialog.Answer{
+		ID: answer.InteractionID, Option: 1, By: dialog.ByLink, DocumentDigest: answer.DocumentDigest, Credential: answer.Credential,
+	})
 	if err != nil {
 		return protocol.CodeInternal, err.Error()
+	}
+	if !won {
+		return protocol.CodeAlreadyResolved, "the interaction is no longer pending"
 	}
 	if b.loseReply.Swap(false) {
 		// The file is durable but this connection cannot carry the reply.
