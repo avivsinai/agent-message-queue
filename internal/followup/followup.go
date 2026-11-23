@@ -430,9 +430,9 @@ func readMailbox(root *fsq.DeliveryRoot, me string, due []Timer) (mailbox, error
 // outbox copy is missing or whose reply comes from a scope other than the
 // recorded route, has no reply seen. Files stamped earlier than the oldest
 // request less thread.DefaultObligationMaxAge, the window `amq thread open`
-// reads by default, are not read; a direct parent older than that is a
-// settled root. It fills noticeIDs with the notice ids of due timers present
-// in the inbox. A directory that cannot be listed fails the pass.
+// reads by default, are not read. It fills noticeIDs with the notice ids of
+// due timers present in the inbox. A directory that cannot be listed fails
+// the pass.
 func readReplies(root *fsq.DeliveryRoot, me string, due []Timer, noticeIDs map[string]bool) (map[string]bool, error) {
 	var cutoff time.Time
 	for i, t := range due {
@@ -502,10 +502,11 @@ func readReplies(root *fsq.DeliveryRoot, me string, due []Timer, noticeIDs map[s
 			}
 		}
 	}
-	settled := func(id string) bool {
-		stamp, ok := format.IDTime(id)
-		return ok && !cutoff.IsZero() && stamp.Before(cutoff)
-	}
+	// A direct parent outside me's mailbox is a settled root: the promoter
+	// reads no other mailbox, and such a parent's lineage holds no obligation
+	// between me and a recipient, while an unresolved lineage would keep a
+	// request below it from opening its obligation.
+	settled := func(string) bool { return true }
 	red := thread.ReduceObligations(nil, entries, time.Time{}, settled)
 	owners := map[string]string{}
 	for _, t := range due {

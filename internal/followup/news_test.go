@@ -11,9 +11,9 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
-// sendRequest writes alice's todo to bob, sent at sent, into alice's
-// outbox/sent as a send does, and returns its header.
-func sendRequest(t *testing.T, root *fsq.DeliveryRoot, sent time.Time, replyTo string) format.Header {
+// sendRequest writes alice's todo to bob, sent at sent with refs, into
+// alice's outbox/sent as a send does, and returns its header.
+func sendRequest(t *testing.T, root *fsq.DeliveryRoot, sent time.Time, replyTo string, refs []string) format.Header {
 	t.Helper()
 	id, err := format.NewMessageID(sent)
 	if err != nil {
@@ -21,7 +21,7 @@ func sendRequest(t *testing.T, root *fsq.DeliveryRoot, sent time.Time, replyTo s
 	}
 	msg := format.Message{Header: format.Header{
 		Schema: 1, ID: id, From: "alice", To: []string{"bob"}, Thread: "p2p/alice__bob", Subject: "Review the parser",
-		Created: sent.Format(time.RFC3339Nano), Kind: format.KindTodo, ReplyTo: replyTo,
+		Created: sent.Format(time.RFC3339Nano), Refs: refs, Kind: format.KindTodo, ReplyTo: replyTo,
 	}, Body: "please"}
 	if _, err := root.WriteFileAtomic(fsq.MailboxRootRelativePath("alice", fsq.MailboxOutboxSent), id+".md", marshal(t, msg), 0o600); err != nil {
 		t.Fatal(err)
@@ -55,7 +55,7 @@ func deliverToAlice(t *testing.T, root *fsq.DeliveryRoot, request format.Header,
 	}
 	msg := format.Message{Header: format.Header{
 		Schema: 1, ID: id, From: from, To: []string{"alice"}, Thread: request.Thread,
-		Created: at.Format(time.RFC3339Nano), Refs: []string{request.ID}, Kind: kind, Labels: labels, ReplyTo: replyTo,
+		Created: at.Format(time.RFC3339Nano), Refs: append(slices.Clone(request.Refs), request.ID), Kind: kind, Labels: labels, ReplyTo: replyTo,
 	}, Body: "ok"}
 	if _, err := fsq.DeliverToInbox(root, "alice", id+".md", marshal(t, msg)); err != nil {
 		t.Fatal(err)
@@ -85,7 +85,7 @@ func noticeLabels(t *testing.T, base, noticeID string) []string {
 func TestPromoteNewsTimerNoticesASilentRecipientOnce(t *testing.T) {
 	base, root := openTestRoot(t)
 	sent := time.Date(2026, 11, 23, 9, 0, 0, 0, time.UTC)
-	request := sendRequest(t, root, sent, "")
+	request := sendRequest(t, root, sent, "", nil)
 	timer := armNews(t, root, request, sent, 20*time.Minute, "")
 
 	if err := Promote(root, "alice", sent.Add(21*time.Minute)); err != nil {
@@ -131,7 +131,10 @@ func TestPromoteNewsAndCompletionTimers(t *testing.T) {
 		replyTo    string
 		// targetSession is the session a routed send delivered to.
 		targetSession string
-		steps         []step
+		// foreignGrandparent makes the request answer a message whose own
+		// parent is not in alice's mailbox.
+		foreignGrandparent bool
+		steps              []step
 	}{
 		{name: "progress from the recipient ends the news clock", news: 20 * time.Minute,
 			arrange: func(t *testing.T, root *fsq.DeliveryRoot, r format.Header) {
@@ -153,6 +156,12 @@ func TestPromoteNewsAndCompletionTimers(t *testing.T) {
 			arrange: func(t *testing.T, root *fsq.DeliveryRoot, r format.Header) {
 				deliverToAlice(t, root, r, "bob", format.KindStatus, nil, "bob@build")
 			}, steps: []step{{21 * time.Minute, nil, 0}}},
+		// Pre-merge probe: a delegated request whose parent's parent sat in
+		// another mailbox opened no obligation, so a reply still gave the notice.
+		{name: "a request below a parent from another mailbox settles by a reply", news: 20 * time.Minute, foreignGrandparent: true,
+			arrange: func(t *testing.T, root *fsq.DeliveryRoot, r format.Header) {
+				deliverToAlice(t, root, r, "bob", format.KindStatus, nil, "")
+			}, steps: []step{{21 * time.Minute, nil, 0}}},
 		{name: "news at 10m comes first and the completion timer stays", news: 10 * time.Minute, completion: time.Hour,
 			steps: []step{{10 * time.Minute, []string{NewsLabel}, 1}}},
 		{name: "completion at 5m and news at 10m both come once", news: 10 * time.Minute, completion: 5 * time.Minute,
@@ -168,7 +177,23 @@ func TestPromoteNewsAndCompletionTimers(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			base, root := openTestRoot(t)
-			request := sendRequest(t, root, sent, tc.replyTo)
+			var refs []string
+			if tc.foreignGrandparent {
+				// carol's status to alice answers a message alice never held.
+				gone, err := format.NewMessageID(sent.Add(-2 * time.Minute))
+				if err != nil {
+					t.Fatal(err)
+				}
+				parent := format.Message{Header: format.Header{
+					Schema: 1, ID: gone + "-parent", From: "carol", To: []string{"alice"}, Thread: "p2p/alice__bob",
+					Created: sent.Add(-time.Minute).Format(time.RFC3339Nano), Refs: []string{gone}, Kind: format.KindStatus,
+				}, Body: "fyi"}
+				if _, err := fsq.DeliverToInbox(root, "alice", parent.Header.ID+".md", marshal(t, parent)); err != nil {
+					t.Fatal(err)
+				}
+				refs = []string{gone, parent.Header.ID}
+			}
+			request := sendRequest(t, root, sent, tc.replyTo, refs)
 			var notices []Timer
 			if tc.completion > 0 {
 				timer, err := New(request.ID, "bob", request.Thread, request.Subject, request.Kind, sent, tc.completion)
