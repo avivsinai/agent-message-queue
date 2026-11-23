@@ -63,6 +63,8 @@ type wakeConfig struct {
 	inputRecoveryRequired     bool
 	doorbell                  wakeDoorbellState
 	holds                     map[string]wakeHold // set by each inbox scan for the doorbell plan
+	cohortIDs                 []string            // set by each inbox scan: the header ids of the mail it would announce
+	cohortUnreadable          bool                // set by each inbox scan: a pending file has no readable header id
 	// settingsSource reads .wake.settings (raw bytes, whether it exists). nil
 	// disables live settings: direct loop tests and legacy callers.
 	settingsSource                func() ([]byte, bool, error)
@@ -130,6 +132,9 @@ type wakeConfig struct {
 	logNotices                    *wakeLogNoticeFold // folds repeated notices when attention output is a log
 	diagnosticIsTTY               func() bool
 	diagnosticIsForeground        func() bool // the wake leads the stderr terminal's foreground group
+
+	publishedChannel wakeChannel
+	hookYieldReason  string
 }
 
 type wakeNotifierStatus struct {
@@ -644,6 +649,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 	var interruptMessages []wakeMsgInfo
 	interruptCounts := make(map[string]int)
 	currentPending := make(map[string]os.FileInfo)
+	unreadable := false
 	// Every message gets a hold, priority holds or not: the doorbell reads
 	// an addition's urgency from it. A zero policy makes each hold due at
 	// arrival, which holds nothing.
@@ -693,6 +699,10 @@ func notifyNewMessages(cfg *wakeConfig) error {
 			holdPriority = header.Priority
 		}
 		holds[name] = newWakeHold(cfg.settings.holdPolicy(), holdPriority, pendingInfo, scanTime)
+		if err != nil || header.ID == "" {
+			// Its id is not a header id, so no hook can announce it.
+			unreadable = true
+		}
 		if err != nil {
 			// Count corrupt messages too
 			messages = append(messages, wakeMsgInfo{id: strings.TrimSuffix(name, filepath.Ext(name)), from: "unknown", subject: "(parse error)"})
@@ -737,6 +747,8 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		}
 	}
 	cfg.holds = holds
+	cfg.cohortIDs = wakeMessageIDs(messages)
+	cfg.cohortUnreadable = unreadable
 	if cfg.holdPolicyChanged {
 		// A live hold change re-times a held cohort from the same scan's holds,
 		// before planHeld reads the deadline.
@@ -813,6 +825,9 @@ func injectWakeInterruptKey(
 	currentPending map[string]os.FileInfo,
 ) (bool, error) {
 	now := time.Now()
+	if _, held := cfg.hookYield(cfg.wakeDoorbellNow(), cfg.cohortIDs); held {
+		return false, nil
+	}
 	if !cfg.settings.attended &&
 		!usesCoopDoorbell(cfg) &&
 		cfg.interruptKey != "" &&
@@ -1266,16 +1281,13 @@ func deliverNewMessageNotification(
 		}
 		cfg.dialogHold, cfg.dialogHoldBusy, cfg.dialogHoldGeneration = wakeDialogClosed, false, ""
 	}
-	guardedReminder := false
-	if plan.submitOnly && shouldDeferBeforeInject(cfg, deferForInput) {
-		// Like a dialog hold, this is neither a ledger record nor an attempt.
-		if wait, held := cfg.reminderHold(now); held {
-			cfg.doorbell.recordDialogHold(now, wait)
-			persistWakeDoorbellStatusBestEffort(cfg)
-			return nil
-		}
-		guardedReminder = cfg.guardedInputEnabled() && !cfg.inputGuard.lastOwnRead.IsZero()
+	reminder := plan.submitOnly && shouldDeferBeforeInject(cfg, deferForInput)
+	if wait, held := cfg.preAttemptHold(now, reminder, cfg.cohortIDs); held {
+		cfg.doorbell.recordDialogHold(now, wait)
+		persistWakeDoorbellStatusBestEffort(cfg)
+		return nil
 	}
+	guardedReminder := reminder && cfg.guardedInputEnabled() && !cfg.inputGuard.lastOwnRead.IsZero()
 	// A harness released from its trust dialog by its trust record alone
 	// may not accept input yet, so a write then does not confirm the
 	// doorbell: the retry ladder types the full doorbell again, not a bare

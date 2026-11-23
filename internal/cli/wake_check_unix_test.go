@@ -67,6 +67,11 @@ func TestWakeCheckReportsAgentSafeDirectStartFromTTYWithoutMutation(t *testing.T
 	if !got.CanStartHere || got.StartMode != wakeInjectModeRaw || got.LiveWake {
 		t.Fatalf("direct start capability = %#v", got)
 	}
+	// Review finding H4: with no live wake, doorbell read "none", the token
+	// of a live notify-only or attended wake.
+	if strings.Contains(output, `"doorbell"`) {
+		t.Fatalf("wake check with no live wake reports a doorbell: %s", output)
+	}
 	if got.RestartCapability != "agent_safe" || got.OperatorTerminalRequired {
 		t.Fatalf("restart capability = %#v", got)
 	}

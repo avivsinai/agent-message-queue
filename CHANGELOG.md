@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.162.0](https://github.com/avivsinai/agent-message-queue/compare/v0.161.0...v0.162.0) (2026-11-23)
+
+
+### Features
+
+* **wake:** an attended seat is never typed into ([#1586](https://github.com/avivsinai/agent-message-queue/issues/1586)) ([428089b](https://github.com/avivsinai/agent-message-queue/commit/428089b9a5be9bdb23047285659cb873d67c7ac9))
+* **wake:** Claude Code's own hook rings a terminal seat ([#1588](https://github.com/avivsinai/agent-message-queue/issues/1588)) ([e9fdb6b](https://github.com/avivsinai/agent-message-queue/commit/e9fdb6b540bfe8638b84aff7c4dcc77351d9e0d9))
+
 ## [0.161.0](https://github.com/avivsinai/agent-message-queue/compare/v0.160.0...v0.161.0) (2026-11-22)
 
 
