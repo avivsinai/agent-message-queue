@@ -35,7 +35,7 @@ func (e *Endpoint) AnswerLinkDialog(src Source, a LinkAnswer) (protocol.Code, st
 	if e.linkDialogs == nil || src.Binding == "" {
 		return protocol.CodeAnswerUnsupported, "no shared binding takes link answers"
 	}
-	if available, reason := e.linkDialogs.AnswerPolicy(src.Binding); !available {
+	if available, reason := e.linkDialogs.AnswerPolicy(src.Host, src.Binding); !available {
 		return protocol.CodeAnswerUnsupported, reason
 	}
 
@@ -59,6 +59,15 @@ func (e *Endpoint) AnswerLinkDialog(src Source, a LinkAnswer) (protocol.Code, st
 	if rec.Binding == "" || rec.Binding != src.Binding {
 		return protocol.CodeNotFound, "the request does not run on this binding"
 	}
+	// The answer document names the verified native session; a record in
+	// another session, or one whose binding moved to another target or
+	// generation, takes no link answer.
+	if rec.NativeSession == "" || rec.NativeSession != src.NativeSession {
+		return protocol.CodeNotFound, "the request does not run in the verified native session"
+	}
+	if !e.linkDialogs.RequestLive(rec) {
+		return protocol.CodeNotFound, "the request's session is no longer live"
+	}
 
 	// Step 6: the record's pending interaction is this dialog, still live
 	// for a link answer, unchanged since the touch, and the label names
@@ -80,7 +89,7 @@ func (e *Endpoint) AnswerLinkDialog(src Source, a LinkAnswer) (protocol.Code, st
 
 	// Step 7: the exclusive, directory-bound write. The seam owns the
 	// files; a refusal here records nothing.
-	code, msg := e.linkDialogs.WriteAnswer(src.Binding, a.InteractionID, a.Option, a.DocumentDigest, a.Credential)
+	code, msg := e.linkDialogs.WriteAnswer(src.Host, src.Binding, a.InteractionID, a.Option, a.DocumentDigest, a.Credential)
 	if code != "" {
 		return code, msg
 	}
@@ -111,5 +120,5 @@ func (e *Endpoint) LinkAnswerInfo(src Source, binding string) (available bool, r
 	if e.linkDialogs == nil || binding == "" {
 		return false, "approvals_terminal"
 	}
-	return e.linkDialogs.AnswerPolicy(binding)
+	return e.linkDialogs.AnswerPolicy(src.Host, binding)
 }

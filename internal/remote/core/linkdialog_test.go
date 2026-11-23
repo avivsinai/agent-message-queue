@@ -28,16 +28,18 @@ type stubDialogs struct {
 	answers    []string                       // WriteAnswer calls, "binding/id/label"
 }
 
-func (s *stubDialogs) AnswerPolicy(binding string) (bool, string) {
+func (s *stubDialogs) AnswerPolicy(host, binding string) (bool, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.policy != nil {
-		return s.policy(binding)
+		return s.policy(host + "/" + binding)
 	}
 	return true, ""
 }
 
-func (s *stubDialogs) WriteAnswer(binding, id, label, _, _ string) (protocol.Code, string) {
+func (s *stubDialogs) RequestLive(*requests.Record) bool { return true }
+
+func (s *stubDialogs) WriteAnswer(host, binding, id, label, _, _ string) (protocol.Code, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.answers = append(s.answers, binding+"/"+id+"/"+label)

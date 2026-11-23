@@ -591,12 +591,22 @@ func (h *Host) askOwner(turn *turnCollect, req permissionRequest) (chosen int, o
 			if picked.Deny {
 				outcome = dialog.OutcomeDenied
 			}
-			if !resolve(outcome, picked.Label, dialog.ByBuzz) {
+			if !resolve(outcome, picked.Label, answerBy(ans)) {
 				return 0, false, false
 			}
 			return ans.Option - 1, true, false
 		}
 	}
+}
+
+// answerBy carries the answer's own by into the resolution it becomes:
+// a link's answer resolves as by "link", an owner's from Buzz as
+// "buzz". A file with no by reads as Buzz.
+func answerBy(a *dialog.Answer) string {
+	if a != nil && a.By != "" {
+		return a.By
+	}
+	return dialog.ByBuzz
 }
 
 // toolTitle is the tool call's title, "tool call" when it has none.

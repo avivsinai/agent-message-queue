@@ -264,6 +264,15 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 		won, err := dialog.Resolve(dir, dialog.Resolved{ID: req.ID, Outcome: outcome, Label: label, By: by, At: h.now().UTC()})
 		return won && err == nil
 	}
+	// answerBy carries the answer's own by into the resolution it becomes:
+	// a link's answer resolves as by "link", an owner's from Buzz as
+	// "buzz". A hand-written file with no by reads as Buzz.
+	answerBy := func(a *dialog.Answer) string {
+		if a != nil && a.By != "" {
+			return a.By
+		}
+		return dialog.ByBuzz
+	}
 	// expire closes the dialog with no decision. why, when set, is the
 	// resolution's label: Buzz shows "→ Expired: <why>".
 	expire := func(why string) {
@@ -287,7 +296,7 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 					_ = dialog.RejectAnswer(dir, req.ID)
 					break
 				}
-				if resolve(dialog.OutcomeAnswered, answer, dialog.ByBuzz) {
+				if resolve(dialog.OutcomeAnswered, answer, answerBy(a)) {
 					_ = writeDecision(stdout, valueAllow, nil, updated)
 				}
 				return 0
@@ -301,7 +310,7 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 					outcome = dialog.OutcomeDenied
 				}
 				// The first resolution decides: print only after winning it.
-				if resolve(outcome, opt.Label, dialog.ByBuzz) {
+				if resolve(outcome, opt.Label, answerBy(a)) {
 					_ = writeDecision(stdout, opt.Value, sessionRules, nil)
 				}
 				return 0

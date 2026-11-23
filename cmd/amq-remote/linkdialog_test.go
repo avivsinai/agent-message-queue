@@ -150,8 +150,8 @@ func TestLinkDialogHookToSelectorToRequestGet(t *testing.T) {
 	if snap.Interaction == nil || snap.Interaction.InteractionID != reqID {
 		t.Fatalf("snapshot interaction = %+v; want the hook's dialog %s", snap.Interaction, reqID)
 	}
-	if snap.Interaction.RemoteAnswer {
-		t.Fatal("unit A published remote_answer")
+	if !snap.Interaction.RemoteAnswer {
+		t.Fatal("the published dialog carries no live button")
 	}
 	if snap.Interaction.ApproveOption != "Allow once" || snap.Interaction.RejectOption != "Deny" {
 		t.Fatalf("roles = %q/%q", snap.Interaction.ApproveOption, snap.Interaction.RejectOption)
