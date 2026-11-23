@@ -984,40 +984,45 @@ func readWakeCallsLog(t *testing.T, path string) []string {
 // second wake.
 func TestStartWakeAfterUnstableWakeCheckStartsNothing(t *testing.T) {
 	requireWakeProcessLane(t)
-	fakeAMQ, callsLog := writeUnstableWakeCheckAMQ(t, t.TempDir(),
-		`{"schema":1,"live_wake":false,"image_status":"unknown","wake_status":"unverified","wake_pid":4242,"wake_generation":"0123456789abcdef0123456789abcdef","restart_capability":"unavailable","next_action":"wake state changed during inspection; retry amq wake check"}`,
-		`{"schema":2,"wake":{"status":"unverified","live":false,"pid":4242,"generation":"0123456789abcdef0123456789abcdef"},"image":{"status":"unknown"},"restart_capability":"unavailable","action":{"kind":"retry_check","actor":"agent","reason_code":"observation_changed"}}`,
-	)
-	err := NewCLI(fakeAMQ).StartWake(context.Background(), StartWakeRequest{
-		Root: "/tmp/amq-root", Me: "codex", InjectVia: "/tmp/amq-keepalive",
-		Adapter: "ghostty", Target: "ghostty:terminal:abc", Timeout: 5 * time.Second,
-	})
-	if !errors.Is(err, ErrWakeImageIdentityInconclusive) || !strings.Contains(err.Error(), "changed during inspection") {
-		t.Fatalf("StartWake() error = %v, want inconclusive because the wake state changed during inspection", err)
-	}
-	if calls := readWakeCallsLog(t, callsLog); !reflect.DeepEqual(calls, []string{"check"}) {
-		t.Fatalf("calls = %#v, want only the wake check", calls)
+	// l4pj: an unavailable executable changes the action reason on an unstable check.
+	for _, actionReason := range []string{"observation_changed", "executable_identity_unavailable"} {
+		t.Run(actionReason, func(t *testing.T) {
+			fakeAMQ, callsLog := writeUnstableWakeCheckAMQ(t, t.TempDir(),
+				`{"schema":1,"live_wake":false,"image_status":"unknown","wake_status":"unverified","wake_pid":4242,"wake_generation":"0123456789abcdef0123456789abcdef","restart_capability":"unavailable","next_action":"wake state changed during inspection; retry amq wake check"}`,
+				fmt.Sprintf(`{"schema":2,"wake":{"status":"unverified","live":false,"pid":4242,"generation":"0123456789abcdef0123456789abcdef"},"image":{"status":"unknown"},"restart_capability":"unavailable","reload":{"status":"unavailable","reason_code":"reload_observation_changed"},"action":{"kind":"retry_check","actor":"agent","reason_code":%q}}`, actionReason),
+			)
+			err := NewCLI(fakeAMQ).StartWake(context.Background(), StartWakeRequest{
+				Root: "/tmp/amq-root", Me: "codex", InjectVia: "/tmp/amq-keepalive",
+				Adapter: "ghostty", Target: "ghostty:terminal:abc", Timeout: 5 * time.Second,
+			})
+			if !errors.Is(err, ErrWakeImageIdentityInconclusive) || !strings.Contains(err.Error(), "changed during inspection") {
+				t.Fatalf("StartWake() error = %v, want inconclusive because the wake state changed during inspection", err)
+			}
+			if calls := readWakeCallsLog(t, callsLog); !reflect.DeepEqual(calls, []string{"check"}) {
+				t.Fatalf("calls = %#v, want only the wake check", calls)
+			}
+		})
 	}
 }
 
 // Observed case: an amq whose lock appeared while wake check inspected it
 // can report wake status missing beside the retry action; the keepalive took
-// that as an absent wake and forgot its registry row without asking amq to
-// retire it.
+// that as an absent wake. Review of l4pj also found that an unconditional
+// retire here could stop a new generation with the same target.
 func TestRetireWakeAfterUnstableWakeCheckIsNotAlreadyAbsent(t *testing.T) {
 	requireWakeProcessLane(t)
 	fakeAMQ, callsLog := writeUnstableWakeCheckAMQ(t, t.TempDir(),
 		`{"schema":1,"live_wake":false,"image_status":"unknown","wake_status":"missing","restart_capability":"unavailable","next_action":"wake state changed during inspection; retry amq wake check"}`,
-		`{"schema":2,"wake":{"status":"missing","live":false,"generation":null},"image":{"status":"unknown"},"restart_capability":"unavailable","action":{"kind":"retry_check","actor":"agent","reason_code":"observation_changed"}}`,
+		`{"schema":2,"wake":{"status":"missing","live":false,"generation":null},"image":{"status":"unknown"},"restart_capability":"unavailable","reload":{"status":"unavailable","reason_code":"reload_observation_changed"},"action":{"kind":"retry_check","actor":"agent","reason_code":"observation_changed"}}`,
 	)
 	result, err := NewCLI(fakeAMQ).RetireWake(context.Background(), RetireWakeRequest{
 		Root: "/tmp/amq-root", Me: "codex", InjectVia: "/tmp/amq-keepalive",
 		Adapter: "cmux", Target: "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3",
 	})
-	if result.Status == StatusAlreadyAbsent || !errors.Is(err, ErrWakeRetireNotConfirmed) {
-		t.Fatalf("RetireWake() = %+v, %v; want amq's refusal, not already absent", result, err)
+	if result.Retired() || !errors.Is(err, ErrWakeRetireNotConfirmed) {
+		t.Fatalf("RetireWake() = %+v, %v; want unconfirmed retirement", result, err)
 	}
-	if calls := readWakeCallsLog(t, callsLog); !reflect.DeepEqual(calls, []string{"check", "retire"}) {
-		t.Fatalf("calls = %#v, want the wake check then amq wake retire", calls)
+	if calls := readWakeCallsLog(t, callsLog); !reflect.DeepEqual(calls, []string{"check"}) {
+		t.Fatalf("calls = %#v, want only the wake check", calls)
 	}
 }

@@ -32,11 +32,7 @@ const maxWakeStartupStderrBytes = 16 * 1024
 const keepaliveWakeRetryUntil = "injected"
 const wakeCheckSchemaV2 = 2
 
-// The schema-2 action amq wake check reports when its observations differed.
-const (
-	wakeCheckActionRetryCheck        = "retry_check"
-	wakeCheckReasonObservationChange = "observation_changed"
-)
+const wakeReloadReasonObservationChanged = "reload_observation_changed"
 
 const wakeStderrDrainExitGrace = 250 * time.Millisecond
 
@@ -97,10 +93,9 @@ type wakeCheckWireResult struct {
 	Image struct {
 		Status *string `json:"status"`
 	} `json:"image"`
-	Action struct {
-		Kind       string `json:"kind"`
+	Reload struct {
 		ReasonCode string `json:"reason_code"`
-	} `json:"action"`
+	} `json:"reload"`
 }
 
 // RetireWakeRequest names the exact inject-via identity that AMQ must match
@@ -387,7 +382,7 @@ func (c CLI) checkWake(ctx context.Context, req StartWakeRequest) (WakeCheckResu
 	if *wire.Schema != wakeCheckSchemaV2 {
 		return WakeCheckResult{}, fmt.Errorf("amq wake check returned schema %d, want %d", *wire.Schema, wakeCheckSchemaV2)
 	}
-	if wire.Action.Kind == wakeCheckActionRetryCheck && wire.Action.ReasonCode == wakeCheckReasonObservationChange {
+	if wire.Reload.ReasonCode == wakeReloadReasonObservationChanged {
 		return WakeCheckResult{}, ErrWakeCheckUnstable
 	}
 	result := WakeCheckResult{
@@ -426,7 +421,11 @@ func (c CLI) RetireWake(ctx context.Context, req RetireWakeRequest) (RetireWakeR
 	// With no observed generation, a wake check tells an agent with no wake
 	// lock (nothing to retire) from one whose retirement AMQ refused.
 	if req.Generation == "" {
-		if check, err := c.checkWake(ctx, StartWakeRequest{Root: req.Root, Me: req.Me}); err == nil && check.WakeMissing && !check.LiveWake {
+		check, err := c.checkWake(ctx, StartWakeRequest{Root: req.Root, Me: req.Me})
+		if errors.Is(err, ErrWakeCheckUnstable) {
+			return RetireWakeResult{}, fmt.Errorf("%w: %w", ErrWakeRetireNotConfirmed, err)
+		}
+		if err == nil && check.WakeMissing && !check.LiveWake {
 			return RetireWakeResult{Status: StatusAlreadyAbsent, Agent: req.Me, Root: req.Root, Target: req.Target}, nil
 		}
 	}
