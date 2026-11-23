@@ -34,10 +34,6 @@ type Entry struct {
 	// Occurrences lists every copy of the message that a scan saw. Only
 	// CollectAll fills it.
 	Occurrences []Occurrence `json:"-"`
-	// Routes names, per recipient handle, where the sender delivered a
-	// message whose inbox copy is outside the scan. Only the sender's own
-	// record of the send supplies it; a scan never fills it.
-	Routes map[string]Participant `json:"-"`
 }
 
 // Occurrence is one copy of a message in a mailbox directory.

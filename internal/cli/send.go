@@ -131,8 +131,11 @@ func runSendStep(args []string, afterBodyRead func(), deliver func(outgoingMessa
 	if *followUpFlag > 0 && len(recipients) != 1 {
 		return UsageError("--follow-up requires exactly one recipient (got %d)", len(recipients))
 	}
-	if err := validateNewsWithin(*newsWithinFlag, len(recipients), strings.TrimSpace(*kindFlag), splitList(*labelsFlag)); err != nil {
-		return err
+	if *newsWithinFlag < 0 {
+		return UsageError("--news-within must be >= 0")
+	}
+	if *newsWithinFlag > 0 && len(recipients) != 1 {
+		return UsageError("--news-within requires exactly one recipient (got %d)", len(recipients))
 	}
 
 	// Determine delivery root: local, cross-session, or cross-project.

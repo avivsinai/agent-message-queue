@@ -1020,6 +1020,14 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	// filesystem read happens without the lock.
 	a.mu.Unlock()
 	live := a.dir.liveness(a.now())
+	// Check the grant against the same liveness record before the ordinary admission checks.
+	revision := MinBridgeRevision
+	if req.Granted {
+		if asks, why := sessionAsks(live); !asks {
+			return core.Admission{Code: protocol.CodeConsentInvalid, Message: "grant_needs_signature: " + why, NothingSent: true}, nil
+		}
+		revision = GateBridgeRevision
+	}
 	if !live.live {
 		return core.Admission{Code: protocol.CodeAttachmentLost, Message: fmt.Sprintf("no live %s bridge for handle %q (bridge.liveness %s)", a.dir.names.harness, a.handle, live.reason)}, nil
 	}
@@ -1053,9 +1061,10 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		NotAfter:       req.NotAfter,
 		EpochHint:      epochHint,
 		CreatedAt:      protocol.FormatTime(a.now()),
-		BridgeRevision: MinBridgeRevision,
+		BridgeRevision: revision,
 		Origin:         originOf(req.Origin),
 		Event:          eventOf(req.Origin),
+		Granted:        req.Granted,
 	}
 	err := a.dir.publishRequest(preq)
 
@@ -1268,6 +1277,22 @@ func (a *Attachment) CancelExact(key requests.Key, epoch string) (core.CancelEvi
 		return core.CancelEvidence{Disposition: protocol.CancelRequested, Message: "cancel published for " + r.ref}, nil
 	}
 	return core.CancelEvidence{Disposition: protocol.CancelUnsupported, Message: "pi adapter has no native cancel seam; the run resolves from the bridge event stream"}, nil
+}
+
+// SessionAsks implements core.PermissionReader from the live bridge's
+// liveness, the read Inspect makes: the session asks only while a fresh
+// bridge gates a granted run's tool calls at pi's terminal. The acp-host
+// wire publishes no gate, so it never asks.
+func (a *Attachment) SessionAsks() (bool, string) {
+	return sessionAsks(a.dir.liveness(a.now()))
+}
+
+// WritesWithoutAsking implements core.PermissionReader. With the gate every
+// tool call that can write asks; without it the adapter cannot tell, which
+// counts as writing.
+func (a *Attachment) WritesWithoutAsking(string) bool {
+	asks, _ := a.SessionAsks()
+	return !asks
 }
 
 // Respond implements core.Attachment. The adapter raises no approvals (tool

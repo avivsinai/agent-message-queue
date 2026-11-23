@@ -170,6 +170,80 @@ func TestWakeCheckReportsLiveStaleRawImageAndRequiresOwningTerminal(t *testing.T
 	assertWakeCheckTreeUnchanged(t, root, before)
 }
 
+// Observed case: right after a new wake took its lock, the observations of
+// one check differed while the lock inspection said valid, and the check
+// still reported wake_status "valid" and live_wake true beside its retry
+// action. Here the process evidence of the valid lock changes between reads.
+func TestWakeCheckUnstableInspectionOfValidLockIsUnverifiedAndNotLive(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          4242,
+		TTY:          "/dev/ttys005",
+		ProcessStart: "12345",
+		BootID:       "same-boot",
+		Executable:   "amq",
+		WakeMode:     wakeInjectModeRaw,
+		Generation:   "new-generation",
+	})
+	reads := 0
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		reads++
+		return wakeProcessInfo{
+			PID: pid, Running: true, StartToken: "12345", BootID: "same-boot",
+			Executable:     "amq",
+			ExecutablePath: fmt.Sprintf("/opt/amq/%d/amq", reads),
+			Args:           []string{"amq", "wake", "--root", root, "--me", "codex"},
+		}
+	})
+	stubWakeCheckRuntime(t, false, "0.49.14")
+
+	for _, schema := range []string{"1", "2"} {
+		output, err := captureEnvStdout(t, func() error {
+			return runWake([]string{"check", "--root", root, "--me", "codex", "--json", "--json-schema=" + schema})
+		})
+		if err != nil {
+			t.Fatalf("wake check schema %s: %v", schema, err)
+		}
+		var status string
+		var live bool
+		if schema == "1" {
+			var got wakeCheckWire
+			if err := json.Unmarshal([]byte(output), &got); err != nil {
+				t.Fatalf("decode schema 1: %v\n%s", err, output)
+			}
+			status, live = got.WakeStatus, got.LiveWake
+			if got.NextAction != "wake state changed during inspection; retry amq wake check" ||
+				got.RestartCapability != wakeRestartUnavailable {
+				t.Fatalf("schema 1 action = %q restart = %q", got.NextAction, got.RestartCapability)
+			}
+		} else {
+			var got struct {
+				Wake struct {
+					Status string `json:"status"`
+					Live   bool   `json:"live"`
+				} `json:"wake"`
+				Action struct {
+					Kind       string `json:"kind"`
+					ReasonCode string `json:"reason_code"`
+				} `json:"action"`
+			}
+			if err := json.Unmarshal([]byte(output), &got); err != nil {
+				t.Fatalf("decode schema 2: %v\n%s", err, output)
+			}
+			status, live = got.Wake.Status, got.Wake.Live
+			if got.Action.Kind != wakeActionRetryCheck || got.Action.ReasonCode != wakeReasonObservationChanged {
+				t.Fatalf("schema 2 action = %#v", got.Action)
+			}
+		}
+		if status != string(wakeLockUnverified) || live {
+			t.Fatalf("schema %s wake_status = %q live = %t, want unverified and not live\n%s", schema, status, live, output)
+		}
+	}
+}
+
 func TestWakeCheckReportsEligibleInjectViaRepairAsAgentSafe(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {

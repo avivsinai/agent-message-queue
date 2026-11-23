@@ -215,9 +215,9 @@ func Notice(t Timer, me string) format.Message {
 // agents. A message in me's outbox/sent whose refs name the request and whose
 // labels close it for the requester (withdrawn, done, closed) also settles it.
 //
-// A news timer settles when the thread reducer, run over me's mailbox, finds
-// that the request's recipient replied to me about it (Obligation.OwnerReplied);
-// see readReplies.
+// Both timers skip message files stamped before the earliest due request.
+// A news timer settles when the recipient sends news about the request to
+// this mailbox. Only messages still in the inbox at promotion time count.
 //
 // Promotion holds a non-blocking lock on follow-ups/.lock; a busy lock means
 // another promoter is working and this one returns. Per due timer, in order:
@@ -270,24 +270,9 @@ func Promote(root *fsq.DeliveryRoot, me string, now time.Time) error {
 	if len(due) == 0 {
 		return errors.Join(errs...)
 	}
-	var completion, news []Timer
-	for _, t := range due {
-		if t.news() {
-			news = append(news, t)
-		} else {
-			completion = append(completion, t)
-		}
-	}
-	box := mailbox{noticeIDs: map[string]bool{}}
-	if len(completion) > 0 {
-		if box, err = readMailbox(root, me, completion); err != nil {
-			return errors.Join(append(errs, fmt.Errorf("follow-up: scan mailbox: %w", err))...)
-		}
-	}
-	if len(news) > 0 {
-		if box.replied, err = readReplies(root, me, news, box.noticeIDs); err != nil {
-			return errors.Join(append(errs, fmt.Errorf("follow-up: scan mailbox: %w", err))...)
-		}
+	box, err := readMailbox(root, me, due)
+	if err != nil {
+		return errors.Join(append(errs, fmt.Errorf("follow-up: scan mailbox: %w", err))...)
 	}
 	for _, t := range due {
 		if err := promoteOne(root, me, t, box); err != nil {
@@ -325,14 +310,21 @@ type mailbox struct {
 	inbox     []format.Header
 	sent      []format.Header
 	noticeIDs map[string]bool
-	// replied holds the request ids of due news timers whose recipient
-	// replied to me about the request.
-	replied map[string]bool
 }
 
 func (m mailbox) settles(t Timer) bool {
 	if t.news() {
-		return m.replied[t.RequestID]
+		request := thread.Entry{ID: t.RequestID, Thread: t.Thread, RawTime: t.Sent}
+		for _, h := range m.inbox {
+			if h.ID == t.RequestID || !sameHandle(h.From, t.To) {
+				continue
+			}
+			entry := thread.EntryFromHeader(h)
+			if thread.NewsAbout(&request, &entry) {
+				return true
+			}
+		}
+		return false
 	}
 	request := slices.Contains(thread.OpenerKinds, t.RequestKind)
 	for _, h := range m.inbox {
@@ -382,7 +374,11 @@ func readMailbox(root *fsq.DeliveryRoot, me string, due []Timer) (mailbox, error
 		notices[t.NoticeID+".md"] = true
 	}
 	box := mailbox{noticeIDs: map[string]bool{}}
-	for _, leaf := range []fsq.MailboxLeaf{fsq.MailboxInboxNew, fsq.MailboxInboxCur, fsq.MailboxOutboxSent} {
+	leaves := []fsq.MailboxLeaf{fsq.MailboxInboxNew, fsq.MailboxInboxCur}
+	if slices.ContainsFunc(due, func(t Timer) bool { return !t.news() }) {
+		leaves = append(leaves, fsq.MailboxOutboxSent)
+	}
+	for _, leaf := range leaves {
 		d := fsq.MailboxRootRelativePath(me, leaf)
 		entries, err := root.ReadDir(d)
 		if err != nil {
@@ -415,110 +411,6 @@ func readMailbox(root *fsq.DeliveryRoot, me string, due []Timer) (mailbox, error
 		}
 	}
 	return box, nil
-}
-
-// readReplies reports the request ids of the due news timers whose recipient
-// replied to me about the request. It runs the thread reducer over the
-// headers in me's inbox/new, inbox/cur, and outbox/sent and takes its answer,
-// Obligation.OwnerReplied, for the obligation the request opened for its
-// recipient. A routed request's recipient is the session and project the
-// timer recorded.
-//
-// It sees only what the mailbox holds when promotion runs: a reply that me
-// drained and that cleanup removed before the due time is not seen. A request
-// the reducer opens no obligation for in this mailbox, such as one whose
-// outbox copy is missing or whose reply comes from a scope other than the
-// recorded route, has no reply seen. Files stamped earlier than the oldest
-// request less thread.DefaultObligationMaxAge, the window `amq thread open`
-// reads by default, are not read. It fills noticeIDs with the notice ids of
-// due timers present in the inbox. A directory that cannot be listed fails
-// the pass.
-func readReplies(root *fsq.DeliveryRoot, me string, due []Timer, noticeIDs map[string]bool) (map[string]bool, error) {
-	var cutoff time.Time
-	for i, t := range due {
-		stamp, ok := format.IDTime(t.RequestID)
-		if !ok {
-			cutoff = time.Time{}
-			break
-		}
-		if i == 0 || stamp.Before(cutoff) {
-			cutoff = stamp
-		}
-	}
-	if !cutoff.IsZero() {
-		cutoff = cutoff.Add(-thread.DefaultObligationMaxAge)
-	}
-	notices := map[string]bool{}
-	for _, t := range due {
-		notices[t.NoticeID+".md"] = true
-	}
-	var entries []thread.Entry
-	byID := map[string]int{}
-	for _, leaf := range []fsq.MailboxLeaf{fsq.MailboxInboxNew, fsq.MailboxInboxCur, fsq.MailboxOutboxSent} {
-		d := fsq.MailboxRootRelativePath(me, leaf)
-		dirEntries, err := root.ReadDir(d)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return nil, err
-		}
-		for _, entry := range dirEntries {
-			name := entry.Name()
-			if entry.IsDir() || strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".md") {
-				continue
-			}
-			if notices[name] && leaf != fsq.MailboxOutboxSent {
-				noticeIDs[strings.TrimSuffix(name, ".md")] = true
-				continue
-			}
-			if stamp, ok := format.IDTime(name); ok && !cutoff.IsZero() && stamp.Before(cutoff) {
-				continue
-			}
-			path := filepath.Join(d, name)
-			occurrence := thread.Occurrence{Agent: me, Dir: leaf, Path: path}
-			if i, ok := byID[strings.TrimSuffix(name, ".md")]; ok {
-				entries[i].Occurrences = append(entries[i].Occurrences, occurrence)
-				continue
-			}
-			h, err := format.ReadHeaderFileRoot(root, path)
-			if err != nil {
-				continue
-			}
-			if i, ok := byID[h.ID]; ok {
-				entries[i].Occurrences = append(entries[i].Occurrences, occurrence)
-				continue
-			}
-			e := thread.EntryFromHeader(h)
-			e.Occurrences = []thread.Occurrence{occurrence}
-			byID[h.ID] = len(entries)
-			entries = append(entries, e)
-		}
-	}
-	for _, t := range due {
-		if i, ok := byID[t.RequestID]; ok && (t.TargetSession != "" || t.TargetProject != "") {
-			entries[i].Routes = map[string]thread.Participant{
-				t.To: {Project: t.TargetProject, Session: t.TargetSession, Handle: t.To},
-			}
-		}
-	}
-	// A direct parent outside me's mailbox is a settled root: the promoter
-	// reads no other mailbox, and such a parent's lineage holds no obligation
-	// between me and a recipient, while an unresolved lineage would keep a
-	// request below it from opening its obligation.
-	settled := func(string) bool { return true }
-	red := thread.ReduceObligations(nil, entries, time.Time{}, settled)
-	owners := map[string]string{}
-	for _, t := range due {
-		owners[t.RequestID] = t.To
-	}
-	replied := map[string]bool{}
-	for _, ob := range red.Obligations {
-		if to, ok := owners[ob.Opener.ID]; ok && ob.Owner.Handle == to && ob.OwnerReplied {
-			replied[ob.Opener.ID] = true
-		}
-	}
-	return replied, nil
 }
 
 // shortDuration prints d without trailing zero units: 20m, 1h30m, 2h.

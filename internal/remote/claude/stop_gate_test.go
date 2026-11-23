@@ -16,13 +16,14 @@ import (
 // Stop and PermissionRequest hook gates, so every event of every Claude
 // session started amq-remote (bead agent-message-queue-033). A live binding
 // beside them still starts it. Review of the gate: under zsh an empty
-// directory failed the unmatched glob with an error.
+// directory failed the unmatched glob with an error. The prompt hook uses the
+// Stop hook's gate, so it has a row too.
 func TestHookGatesStartNothingForTombstonesOnly(t *testing.T) {
 	shells := []string{"/bin/sh"}
 	if zsh, err := exec.LookPath("zsh"); err == nil {
 		shells = append(shells, zsh)
 	}
-	gates := map[string]func(home, bin string) string{"stop": stopHookCommand, "permission": permissionHookCommand}
+	gates := map[string]func(home, bin string) string{"stop": stopHookCommand, "permission": permissionHookCommand, "prompt": promptHookCommand}
 	for _, shell := range shells {
 		for gate, command := range gates {
 			for _, tc := range []struct {

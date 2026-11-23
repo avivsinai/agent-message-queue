@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,11 +21,18 @@ import (
 var ErrWakeReadinessUncertain = errors.New("amq wake readiness is uncertain; child was left unsignaled")
 var ErrWakeImageIdentityInconclusive = errors.New("amq wake image identity is inconclusive")
 
+// ErrWakeCheckUnstable means amq wake check saw the wake state change while it
+// inspected it. Such a check is no evidence about the wake, so no reader of it
+// may act on its fields.
+var ErrWakeCheckUnstable = errors.New("amq wake state changed during inspection")
+
 const defaultWakeReadyTimeout = 10 * time.Second
 const staleWakeReadyMarkerAge = 24 * time.Hour
 const maxWakeStartupStderrBytes = 16 * 1024
 const keepaliveWakeRetryUntil = "injected"
-const wakeCheckSchemaV1 = 1
+const wakeCheckSchemaV2 = 2
+
+const wakeReloadReasonObservationChanged = "reload_observation_changed"
 
 const wakeStderrDrainExitGrace = 250 * time.Millisecond
 
@@ -73,12 +81,21 @@ type WakeCheckResult struct {
 	WakeMissing bool `json:"-"`
 }
 
+// wakeCheckWireResult is the part of `amq wake check --json --json-schema 2`
+// that keepalive reads.
 type wakeCheckWireResult struct {
-	Schema      *int    `json:"schema"`
-	LiveWake    *bool   `json:"live_wake"`
-	ImageStatus *string `json:"image_status"`
-	Generation  *string `json:"wake_generation"`
-	WakeStatus  *string `json:"wake_status"`
+	Schema *int `json:"schema"`
+	Wake   struct {
+		Status     *string `json:"status"`
+		Live       *bool   `json:"live"`
+		Generation *string `json:"generation"`
+	} `json:"wake"`
+	Image struct {
+		Status *string `json:"status"`
+	} `json:"image"`
+	Reload struct {
+		ReasonCode string `json:"reason_code"`
+	} `json:"reload"`
 }
 
 // RetireWakeRequest names the exact inject-via identity that AMQ must match
@@ -345,7 +362,7 @@ func (c CLI) checkWake(ctx context.Context, req StartWakeRequest) (WakeCheckResu
 	if req.Root != "" {
 		args = append(args, "--root", req.Root)
 	}
-	args = append(args, "--json", "--json-schema", "1")
+	args = append(args, "--json", "--json-schema", strconv.Itoa(wakeCheckSchemaV2))
 
 	stdout, stderr, err := c.run(ctx, args...)
 	if err != nil {
@@ -359,21 +376,24 @@ func (c CLI) checkWake(ctx context.Context, req StartWakeRequest) (WakeCheckResu
 	if err := json.Unmarshal(bytes.TrimSpace(stdout), &wire); err != nil {
 		return WakeCheckResult{}, fmt.Errorf("parse amq wake check output: %w", err)
 	}
-	if wire.Schema == nil || wire.LiveWake == nil || wire.ImageStatus == nil {
-		return WakeCheckResult{}, errors.New("amq wake check omitted required schema, live_wake, or image_status field")
+	if wire.Schema == nil || wire.Wake.Live == nil || wire.Image.Status == nil {
+		return WakeCheckResult{}, errors.New("amq wake check omitted required schema, wake.live, or image.status field")
 	}
-	if *wire.Schema != wakeCheckSchemaV1 {
-		return WakeCheckResult{}, fmt.Errorf("amq wake check returned schema %d, want %d", *wire.Schema, wakeCheckSchemaV1)
+	if *wire.Schema != wakeCheckSchemaV2 {
+		return WakeCheckResult{}, fmt.Errorf("amq wake check returned schema %d, want %d", *wire.Schema, wakeCheckSchemaV2)
+	}
+	if wire.Reload.ReasonCode == wakeReloadReasonObservationChanged {
+		return WakeCheckResult{}, ErrWakeCheckUnstable
 	}
 	result := WakeCheckResult{
 		Schema:      *wire.Schema,
-		LiveWake:    *wire.LiveWake,
-		ImageStatus: *wire.ImageStatus,
+		LiveWake:    *wire.Wake.Live,
+		ImageStatus: *wire.Image.Status,
 	}
-	if wire.Generation != nil {
-		result.Generation = strings.TrimSpace(*wire.Generation)
+	if wire.Wake.Generation != nil {
+		result.Generation = strings.TrimSpace(*wire.Wake.Generation)
 	}
-	result.WakeMissing = wire.WakeStatus != nil && *wire.WakeStatus == wakeStatusMissing
+	result.WakeMissing = wire.Wake.Status != nil && *wire.Wake.Status == wakeStatusMissing
 	return result, nil
 }
 
@@ -401,7 +421,11 @@ func (c CLI) RetireWake(ctx context.Context, req RetireWakeRequest) (RetireWakeR
 	// With no observed generation, a wake check tells an agent with no wake
 	// lock (nothing to retire) from one whose retirement AMQ refused.
 	if req.Generation == "" {
-		if check, err := c.checkWake(ctx, StartWakeRequest{Root: req.Root, Me: req.Me}); err == nil && check.WakeMissing && !check.LiveWake {
+		check, err := c.checkWake(ctx, StartWakeRequest{Root: req.Root, Me: req.Me})
+		if errors.Is(err, ErrWakeCheckUnstable) {
+			return RetireWakeResult{}, fmt.Errorf("%w: %w", ErrWakeRetireNotConfirmed, err)
+		}
+		if err == nil && check.WakeMissing && !check.LiveWake {
 			return RetireWakeResult{Status: StatusAlreadyAbsent, Agent: req.Me, Root: req.Root, Target: req.Target}, nil
 		}
 	}

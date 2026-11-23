@@ -64,6 +64,35 @@ func dropHook(t *testing.T, settings string) {
 	}
 }
 
+// An approval-only opt-in, another writer's copy without the prompt hook,
+// and no prompt opt-in: the agent neither reports nor repairs UserPromptSubmit.
+func TestMachineAgentNeverPostsForPromptHookWithoutOptIn(t *testing.T) {
+	f, settings, posts := hookWatchSession(t, true)
+	b, err := binding.ReadNamed("watched")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Carrier = binding.CarrierNative
+	b.Target, b.NativeSession, b.Handle = "pi:agent", "native-session", ""
+	if err := binding.WriteNamed(b); err != nil {
+		t.Fatal(err)
+	}
+	s := f.s
+	dropHook(t, settings)
+	tick(s, time.Now())
+	tick(s, time.Now())
+	for _, post := range posts() {
+		if strings.Contains(post, "prompt") {
+			t.Fatalf("prompt post without its opt-in = %q", post)
+		}
+	}
+	if raw, err := os.ReadFile(settings); err != nil {
+		t.Fatal(err)
+	} else if state, _ := claude.PromptHookStateAt(settings); state != claude.HookMissing || !bytes.Contains(raw, []byte("other-writer")) {
+		t.Fatalf("file changed: %s; prompt hook %s", raw, state)
+	}
+}
+
 // The machine agent never writes a user's saved harness settings: with the
 // owner's opt-in it put a removed hook back on its own tick. Now it leaves
 // the file as the other writer saved it and says once in the session's

@@ -32,7 +32,10 @@ func (e *Endpoint) get(cmd *protocol.Command, src Source) (protocol.Reply, error
 		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestGet}}, nil
 	}
 	out := protocol.Outcome{Op: protocol.OpRequestGet}
-	if rec.State == protocol.StateRejected {
+	// The reason of an end the machine decided: every rejected record's,
+	// and a failed one's when the endpoint withheld its answer (any other
+	// failed record holds none).
+	if rec.State == protocol.StateRejected || rec.State == protocol.StateFailed {
 		out.Message = rec.RefusalReason
 	}
 	return protocol.Reply{Snapshot: rec.Snapshot, Outcome: out}, nil

@@ -68,10 +68,9 @@ type Obligation struct {
 	// Expired marks an opener created before the reduction's cutoff.
 	Expired bool
 	Last    *Entry
-	// OwnerReplied reports that the owner sent the requester a message the
-	// reduction attributes to this obligation, of any kind, closing or not.
-	// A message from the owner to anyone else acknowledges the obligation but
-	// is no reply.
+	// OwnerReplied reports whether a watched opener received news from its
+	// owner addressed to its requester. An unreferenced message must come
+	// from the owner's own session and project.
 	OwnerReplied bool
 }
 
@@ -262,6 +261,24 @@ func (red *Reduction) run() {
 			red.Deferred[rec.sender.Session]++
 		}
 	}
+	for _, ob := range red.Obligations {
+		if ob.Opener.NewsBy == "" {
+			continue
+		}
+		ob.OwnerReplied = slices.ContainsFunc(red.order, func(rec *record) bool {
+			return rec.sender.Handle == ob.Owner.Handle &&
+				slices.Contains(rec.entry.To, ob.Requester.Handle) &&
+				(len(rec.entry.Refs) != 0 || rec.sender == ob.Owner) &&
+				NewsAbout(ob.Opener, rec.entry)
+		})
+	}
+}
+
+// NewsAbout reports whether a message from the recipient to the requester
+// references the request or, without refs, follows it in the same thread.
+func NewsAbout(request, msg *Entry) bool {
+	return slices.Contains(msg.Refs, request.ID) ||
+		(len(msg.Refs) == 0 && msg.Thread == request.Thread && msg.RawTime.After(request.RawTime))
 }
 
 // classifyLineage marks rec unresolved when following direct parents does
@@ -554,9 +571,6 @@ func otherParty(ob *Obligation, owner bool) Participant {
 
 func act(ob *Obligation, fromOwner bool, msg *Entry) {
 	touch(ob, msg)
-	if fromOwner {
-		ob.OwnerReplied = true
-	}
 	if ob.Closed {
 		return
 	}
@@ -603,18 +617,14 @@ func senderOf(msg *Entry) Participant {
 }
 
 // recipientOf resolves a recipient handle of a message: the session of its
-// inbox copy; else the route its sender recorded; else the sender's session
-// for a local message. A routed message with neither an inbox copy in scope
-// nor a recorded route has no target metadata, so its recipient is
-// unresolved.
+// inbox copy; else the sender's session for a local message. A routed
+// message with no inbox copy in scope has no target metadata, so its
+// recipient is unresolved.
 func recipientOf(rec *record, handle string) (Participant, bool) {
 	for _, occ := range rec.entry.Occurrences {
 		if occ.Agent == handle && (occ.Dir == fsq.MailboxInboxNew || occ.Dir == fsq.MailboxInboxCur) {
 			return Participant{Session: occ.Session, Handle: handle}, true
 		}
-	}
-	if p, ok := rec.entry.Routes[handle]; ok {
-		return p, true
 	}
 	if rec.entry.ReplyTo == "" && rec.sender.Project == "" {
 		return Participant{Session: rec.sender.Session, Handle: handle}, true
@@ -628,11 +638,6 @@ func recipientOf(rec *record, handle string) (Participant, bool) {
 func OpensObligation(kind string, labels []string) bool {
 	return slices.Contains(OpenerKinds, kind) && !hasClosingLabel(labels, closingLabels...)
 }
-
-// DefaultReplyKind is the kind amq reply sends to a message of the kind
-// when none is named. A reply of that kind continues the original's
-// obligation between the same two parties instead of opening one.
-func DefaultReplyKind(kind string) string { return defaultReplyKind(kind) }
 
 // defaultReplyKind is the kind amq reply sends when none is named.
 func defaultReplyKind(kind string) string {

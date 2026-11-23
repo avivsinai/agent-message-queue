@@ -297,6 +297,14 @@ func (e *Endpoint) resubmitTombstoneLocked(cmd *protocol.Command, src Source, ke
 	rec.NativeDispatches = 1
 	rec.ObservedAt = protocol.FormatTime(e.now())
 	e.transitionLocked(rec, causeDispatching, nativeEvidence{})
+	markGrantAtPrompt(rec, t)
+	if rec.GrantAtPrompt && rec.Input == nil {
+		// A link's busy tombstone keeps no input, and a stub's text is
+		// given from the record. The command's input is the stored one:
+		// its digest was compared before this point.
+		input := *cmd.Input
+		rec.Input = &input
+	}
 	if err := e.crashAt(PointBeforeDispatching); err != nil {
 		e.store.ReleaseReservation(key)
 		e.mu.Unlock()
@@ -379,6 +387,7 @@ func (e *Endpoint) dispatchReceivedLocked(cmd *protocol.Command, key requests.Ke
 	rec.NativeDispatches = 1
 	rec.ObservedAt = protocol.FormatTime(e.now())
 	e.transitionLocked(rec, causeDispatching, nativeEvidence{})
+	markGrantAtPrompt(rec, t)
 	if err := e.crashAt(PointBeforeDispatching); err != nil {
 		e.mu.Unlock()
 		return protocol.Reply{}, err
@@ -777,6 +786,7 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 	}
 	rec.NativeDispatches = 1
 	e.transitionLocked(rec, causeDispatching, nativeEvidence{})
+	markGrantAtPrompt(rec, t)
 	if _, err := e.commitLocked(rec, e.targets[rec.TargetID]); err != nil {
 		e.mu.Unlock()
 		return err
