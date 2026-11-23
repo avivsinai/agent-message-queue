@@ -185,17 +185,33 @@ func Factory(_ context.Context, cfg registry.FactoryConfig) (core.Attachment, er
 	if cfg.Target != "" {
 		c.Target = cfg.Target
 	}
-	att, err := Attach(c)
+	att, err := Attach(c, WithStateDir(cfg.StateDir))
 	if err != nil {
 		return nil, err
 	}
 	return att, nil
 }
 
+// Option configures an attachment at build time.
+type Option func(*Attachment)
+
+// WithStateDir names the endpoint's state directory: the attachment's
+// sentinel tells a session's prompt hook where to report, and a granted
+// request runs only while the session cannot write that directory with no
+// dialog. A directory that cannot be made absolute is left unset, and an
+// attachment with none takes no grant.
+func WithStateDir(dir string) Option {
+	return func(a *Attachment) {
+		if abs, err := filepath.Abs(dir); err == nil && dir != "" {
+			a.stateDir = abs
+		}
+	}
+}
+
 // Attach builds the attachment, resolving the session registry once. A
 // missing registry entry is a startup refusal: the adapter never guesses a
 // session identity (the same identity posture as the pi adapter).
-func Attach(cfg config) (*Attachment, error) {
+func Attach(cfg config, opts ...Option) (*Attachment, error) {
 	home, configDir, err := cfg.dirs()
 	if err != nil {
 		return nil, fmt.Errorf("claude adapter: %w", err)
@@ -238,7 +254,10 @@ func Attach(cfg config) (*Attachment, error) {
 		submitting:   map[requests.Key]struct{}{},
 		ctx:          context.Background(),
 	}
-	token, err := bindStopSession(home, reg.SessionID)
+	for _, opt := range opts {
+		opt(att)
+	}
+	token, err := bindStopSession(home, reg.SessionID, att.locator())
 	if err != nil && !errors.Is(err, errUnsupportedPlatform) {
 		return nil, fmt.Errorf("claude adapter: %w", err)
 	}
@@ -392,6 +411,15 @@ type Attachment struct {
 	// submitting holds the keys a Submit is sending; their run is recorded
 	// only once the frame is written.
 	submitting map[requests.Key]struct{}
+	// stateDir is the endpoint's absolute state directory, set at build;
+	// empty when the attachment was built with none.
+	stateDir string
+	// prompt is the latest prompt report of the attached session, kept in
+	// memory only: the evidence SessionAsks reads before a stub is sent.
+	prompt *observedPrompt
+	// turn is what the poller knows of the prompts of the turn its cursor
+	// is inside.
+	turn turnState
 	// closed: the endpoint unsubscribed. The poller is stopped and never
 	// restarted; the attachment is being replaced or shut down.
 	closed bool
@@ -504,7 +532,7 @@ func (a *Attachment) trackBoundSession(sessionID string) {
 	}
 	prev, prevToken := a.boundSession, a.boundToken
 	a.boundSession = sessionID
-	token, _ := bindStopSession(a.home, sessionID)
+	token, _ := bindStopSession(a.home, sessionID, a.locator())
 	a.boundToken = token
 	if prev != "" {
 		unbindStopSession(a.home, prev, prevToken)

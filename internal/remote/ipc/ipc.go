@@ -69,7 +69,33 @@ type Request struct {
 	// its target admits new work. Local-only: it is the owner's action on
 	// the machine and never enters the command wire.
 	Release *ReleaseRequest `json:"release,omitempty"`
+	// Prompt reports one prompt of a session to the attachment its locator
+	// names and asks for the text of the granted request whose stub raised
+	// it. Local-only: a session's prompt hook sends it.
+	Prompt *PromptRequest `json:"prompt,omitempty"`
 }
+
+// PromptRequest is a session hook's report of one prompt: the attachment
+// instance its locator named, the native session, the permission mode the
+// harness gave the hook, the id of a granted stub when the prompt is one,
+// and how long the hook still waits.
+type PromptRequest struct {
+	TargetID      string `json:"target_id"`
+	Instance      string `json:"instance"`
+	NativeSession string `json:"native_session"`
+	Mode          string `json:"mode"`
+	StubID        string `json:"stub_id,omitempty"`
+	WaitMS        int    `json:"wait_ms,omitempty"`
+}
+
+// PromptReply carries the text of the granted request, or nothing.
+type PromptReply struct {
+	Text string `json:"text,omitempty"`
+}
+
+// PromptHandler answers a prompt report. serve supplies it; without one the
+// endpoint refuses the report.
+type PromptHandler func(PromptRequest) PromptReply
 
 // ReleaseRequest names the uncertain request to release.
 type ReleaseRequest struct {
@@ -227,8 +253,12 @@ type Server struct {
 	registrar Registrar
 	link      LinkHandler
 	activity  ActivityHandler
+	prompt    PromptHandler
 	version   string
 }
+
+// SetPromptHandler installs the prompt report handler. Call it before Serve.
+func (s *Server) SetPromptHandler(h PromptHandler) { s.prompt = h }
 
 // SetActivityHandler installs the activity stream handler. Call it before
 // Serve.
@@ -309,12 +339,12 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	_ = conn.SetReadDeadline(time.Time{})
 	// An activity record carries no other operation: checkPin fences the
 	// activity ref, so another operation must not ride on that check.
-	if req.Activity != nil && (req.Command != nil || req.Wait != nil || req.Native != nil || req.Register != nil || req.Link != nil || req.Features || req.Release != nil) {
+	if req.Activity != nil && (req.Command != nil || req.Wait != nil || req.Native != nil || req.Register != nil || req.Link != nil || req.Features || req.Release != nil || req.Prompt != nil) {
 		writeRecord(conn, Response{Error: &ErrorBody{Code: string(protocol.CodeInvalid), Message: "activity request carries another operation"}})
 		return
 	}
 	// The same holds for a release: checkPin fences its ref only.
-	if req.Release != nil && (req.Command != nil || req.Wait != nil || req.Native != nil || req.Register != nil || req.Link != nil || req.Features) {
+	if req.Release != nil && (req.Command != nil || req.Wait != nil || req.Native != nil || req.Register != nil || req.Link != nil || req.Features || req.Prompt != nil) {
 		writeRecord(conn, Response{Error: &ErrorBody{Code: string(protocol.CodeInvalid), Message: "release request carries another operation"}})
 		return
 	}
@@ -385,6 +415,12 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 			return
 		}
 		writeRecord(conn, Response{Reply: mustJSON(session)})
+	case req.Prompt != nil:
+		if s.prompt == nil {
+			writeRecord(conn, errorResponse(protocol.Refuse(protocol.CodeUnsupported, "this endpoint does not take prompt reports")))
+			return
+		}
+		writeRecord(conn, Response{Reply: mustJSON(s.prompt(*req.Prompt))})
 	case req.Native != nil:
 		id := s.ep.NativeSessionID(req.Native.TargetID)
 		if id == "" {
@@ -529,6 +565,40 @@ func Call(stateDir string, req Request) (*Response, error) {
 		return nil, fmt.Errorf("read endpoint response: %w", err)
 	}
 	return resp, nil
+}
+
+// Prompt sends one prompt report to the endpoint at stateDir and returns its
+// reply. The dial, the write and the read all end within within. An
+// endpoint that does not know the report answers with an error.
+func Prompt(stateDir string, req PromptRequest, within time.Duration) (PromptReply, error) {
+	deadline := time.Now().Add(within)
+	conn, err := net.DialTimeout("unix", SocketPath(stateDir), within)
+	if err != nil {
+		return PromptReply{}, protocol.Refuse(protocol.CodeEndpointUnreachable, "no endpoint at %s", SocketPath(stateDir))
+	}
+	defer func() { _ = conn.Close() }()
+	if err := conn.SetDeadline(deadline); err != nil {
+		return PromptReply{}, err
+	}
+	data, err := json.Marshal(Request{Prompt: &req})
+	if err != nil {
+		return PromptReply{}, err
+	}
+	if _, err := conn.Write(append(data, '\n')); err != nil {
+		return PromptReply{}, fmt.Errorf("write prompt report: %w", err)
+	}
+	resp, _, err := readRecordLimit[Response](conn, MaxRecordBytes)
+	if err != nil {
+		return PromptReply{}, fmt.Errorf("read prompt reply: %w", err)
+	}
+	if err := resp.AsError(); err != nil {
+		return PromptReply{}, err
+	}
+	var out PromptReply
+	if err := json.Unmarshal(resp.Reply, &out); err != nil {
+		return PromptReply{}, fmt.Errorf("decode prompt reply: %w", err)
+	}
+	return out, nil
 }
 
 // Activity streams the activity of one request from the endpoint at

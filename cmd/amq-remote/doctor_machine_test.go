@@ -189,12 +189,14 @@ func TestDoctorReportsAMissingApprovalHookWithoutAnEndpoint(t *testing.T) {
 	}
 	// Only native mode needs the Stop hook: on this mailbox-only machine
 	// its absence is a note.
-	stopNoted := false
+	// The prompt hook is the owner's choice: its absence is a note too.
+	stopNoted, promptNoted := false, false
 	for _, n := range out.(map[string]any)["notes"].([]boundaryFailure) {
 		stopNoted = stopNoted || n.Boundary == "hooks" && n.Subject == settings && strings.Contains(n.Detail, "Stop hook")
+		promptNoted = promptNoted || n.Boundary == "hooks" && n.Subject == settings && n.Detail == promptHookMissingNote
 	}
-	if !stopNoted {
-		t.Fatalf("missing Stop hook not noted: %v", out.(map[string]any)["notes"])
+	if !stopNoted || !promptNoted {
+		t.Fatalf("missing Stop or prompt hook not noted: %v", out.(map[string]any)["notes"])
 	}
 	var text bytes.Buffer
 	printDoctor(&text, doctorReport(out.(map[string]any)))

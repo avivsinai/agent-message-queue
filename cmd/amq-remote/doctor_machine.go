@@ -162,6 +162,8 @@ type hookFile struct {
 	ProbeVersion    string `json:"probe_version,omitempty"`
 	Stop            string `json:"stop"`
 	StopForm        string `json:"stop_form,omitempty"`
+	Prompt          string `json:"prompt"`
+	PromptForm      string `json:"prompt_form,omitempty"`
 	Guard           string `json:"guard"`
 	DisableAllHooks bool   `json:"disable_all_hooks,omitempty"`
 }
@@ -174,13 +176,18 @@ const (
 	probeSkipped = "skipped"
 )
 
-// doctorHooks checks the approval hook, the Stop hook and the wake dialog
-// guard in each settings file, and that the installed approval command
-// reaches amq-remote. A missing or stale entry fails, except a missing Stop
-// hook while native is false, and a missing approval hook or guard while no
-// binding and no machine agent exists (the hook's gate stays closed then, so
-// nothing can reach Buzz yet), which are notes; disableAllHooks is a note,
-// because a project or managed setting can turn hooks on again.
+// promptHookMissingNote is doctor's note for a settings file without the
+// prompt hook. The hook is the owner's choice, so its absence never fails.
+const promptHookMissingNote = "the AMQ prompt hook (UserPromptSubmit) is not installed, so a Claude Code session takes no link session grant and each link task needs a signature; to install it: amq-remote claude install-prompt-hook"
+
+// doctorHooks checks the approval hook, the Stop hook, the prompt hook and
+// the wake dialog guard in each settings file, and that the installed
+// approval command reaches amq-remote. A missing or stale entry fails,
+// except a missing Stop hook while native is false, a missing prompt hook,
+// and a missing approval hook or guard while no binding and no machine agent
+// exists (the hook's gate stays closed then, so nothing can reach Buzz yet),
+// which are notes; disableAllHooks is a note, because a project or managed
+// setting can turn hooks on again.
 func doctorHooks(files []string, all []binding.Binding, native bool, machine agentInfo, fail, note reportFunc) []hookFile {
 	home, _ := os.UserHomeDir()
 	gateReport := note
@@ -234,6 +241,12 @@ func doctorHooks(files []string, all []binding.Binding, native bool, machine age
 		} else if err == nil {
 			row.StopForm, _ = claude.StopHookForm(home, path)
 			hookFormFinding(row.StopForm, path, "Stop", fix("amq-remote claude install-stop-hook"), fail, note)
+		}
+		if row.Prompt, err = claude.PromptHookStateAt(path); err == nil && row.Prompt == claude.HookMissing {
+			note("hooks", path, promptHookMissingNote, "")
+		} else if err == nil {
+			row.PromptForm, _ = claude.PromptHookForm(home, path)
+			hookFormFinding(row.PromptForm, path, "prompt (UserPromptSubmit)", fix("amq-remote claude install-prompt-hook"), fail, note)
 		}
 		var detail string
 		row.Guard, detail = dialogguard.ClaudeAt(path)

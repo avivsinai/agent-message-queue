@@ -3,6 +3,7 @@ package core
 import (
 	"errors"
 	"slices"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
@@ -34,15 +35,20 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 	// Guard on RunID, not on state. The ONLY event we drop is a
 	// duplicate of a result we already recorded (same RunID, Result present).
 	// Everything else flows — including a completion for a cancelled record.
+	// forget: the end decided here leaves the stored prompt report of the
+	// target with no evidence behind it, as of forgetAt.
+	forget, forgetAt := false, time.Time{}
 	switch ev.Type {
 	case EventRunCompleted, EventRunFailed, EventRunCancelled:
+		nev := nativeEvidence{runID: ev.RunID, result: ev.Result, grantedDigest: ev.GrantedTextDigest}
 		// The duplicate guard must compare EVIDENCE, not just presence.
 		// A late FINAL result F for the same run is NOT a duplicate of partial P
 		// — the digests differ. Dropping F keeps P, memoed AckDigest(P), while
 		// the runtime holds F: digests never match, slot never releases. Drop
-		// only when the digest equals what we already recorded.
+		// only when the digest equals what we already recorded, compared in
+		// the form a write would store.
 		if ev.RunID != "" && rec.NativeRun != nil && *rec.NativeRun == ev.RunID && rec.Result != nil &&
-			protocol.EvidenceDigest(ev.Result) == protocol.EvidenceDigest(rec.Result) {
+			protocol.EvidenceDigest(storedForm(rec, nev)) == protocol.EvidenceDigest(rec.Result) {
 			// Same run, same evidence — a true duplicate native event.
 			e.mu.Unlock()
 			return
@@ -51,7 +57,6 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 			e.mu.Unlock()
 			return
 		}
-		nev := nativeEvidence{runID: ev.RunID, result: ev.Result}
 		if rec.State.Terminal() {
 			// A run event on an already-terminal record: record the result +
 			// NativeRun without changing State (the cancel stands, the result
@@ -60,14 +65,16 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 			nev.runTerminal = true
 			e.transitionLocked(rec, causeNone, nev)
 		} else if rec.State == protocol.StateRunning || rec.State == protocol.StateDispatching || rec.State == protocol.StateUncertain {
+			c := causeCancelledByRequest
 			switch ev.Type {
 			case EventRunCompleted:
-				e.transitionLocked(rec, causeCompleted, nev)
+				c = causeCompleted
 			case EventRunFailed:
-				e.transitionLocked(rec, causeFailed, nev)
-			default:
-				e.transitionLocked(rec, causeCancelledByRequest, nev)
+				c = causeFailed
 			}
+			c, nev, forget = grantedOutcome(rec, c, nev)
+			forgetAt = e.now()
+			e.transitionLocked(rec, c, nev)
 		} else {
 			// Non-terminal but not a live-run state (e.g. received): a run event
 			// for a record that was never dispatched is spurious.
@@ -137,10 +144,17 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 			ackAtt = t.att
 		}
 	}
+	var forgetter PromptHandover
+	if forget {
+		forgetter = e.promptHandoverLocked(targetID)
+	}
 	e.publishLocked(rec)
 	ackKey, ackEpoch := ev.Key, rec.Epoch
 	terminal := rec.State.Terminal()
 	e.mu.Unlock()
+	if forgetter != nil {
+		forgetter.ForgetPrompt(forgetAt)
+	}
 	// Use the attachment captured under the lock; never re-read
 	// e.targets after unlocking (a concurrent Register would race the map).
 	if terminal && ackAtt != nil && ackDigest != "" && e.crashAt(PointBeforeAck) == nil {
@@ -252,6 +266,9 @@ type nativeEvidence struct {
 	option            string
 	localIntervention bool
 	runTerminal       bool // the run is definitively finished (noop_terminal) — confirm a pending cancel
+	// grantedDigest is the evidence's GrantedTextDigest: what ties a run's
+	// result to a record dispatched as a stub (grantedResult).
+	grantedDigest string
 }
 
 // transitionLocked applies one state transition to rec, deriving every field
@@ -269,7 +286,8 @@ type nativeEvidence struct {
 //     sets confirmed (or keeps ev.cancel.Disposition if the abort was
 //     inconclusive — cancel_requested). cancelled_before_admission sets
 //     confirmed. cancel_requested sets the disposition without going terminal.
-//  4. rec.Result: set from ev.result when evidence carries one; a terminal
+//  4. rec.Result: set from ev.result, as grantedResult passes it, when
+//     evidence carries one; a terminal
 //     result arriving on an already-terminal record (onNative does not
 //     discard it) updates Result WITHOUT changing State (the cancel stands, the
 //     result is acknowledged).
@@ -303,6 +321,9 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 }
 
 func (e *Endpoint) applyTransitionLocked(rec *requests.Record, c cause, ev nativeEvidence) {
+	// Every result this transition stores goes through grantedResult,
+	// judged against the record as it was before this transition.
+	res := grantedResult(rec, ev)
 	switch c {
 	case causeNone:
 		// Evidence-only update: record Result/NativeRun/Interaction without
@@ -311,8 +332,8 @@ func (e *Endpoint) applyTransitionLocked(rec *requests.Record, c cause, ev nativ
 		// and by the noop_terminal abort path. If ev.runTerminal is set (the
 		// run is definitively finished — noop_terminal), a pending cancel is
 		// now confirmed (the run stopped, natively).
-		if ev.result != nil {
-			rec.Result = boundResult(ev.result)
+		if res != nil {
+			rec.Result = boundResult(res)
 		}
 		if ev.runTerminal && rec.State.Terminal() && rec.Cancel != nil && rec.Cancel.Disposition != protocol.CancelConfirmed {
 			rec.Cancel.Disposition = protocol.CancelConfirmed
@@ -362,20 +383,26 @@ func (e *Endpoint) applyTransitionLocked(rec *requests.Record, c cause, ev nativ
 			run := ev.runID
 			rec.NativeRun = &run
 		}
-		if ev.result != nil {
-			rec.Result = boundResult(ev.result)
+		if res != nil {
+			rec.Result = boundResult(res)
 		}
 		rec.Interaction = nil
 	case causeFailed:
+		// Empty but for a failure the endpoint decided (grantedOutcome). A
+		// record already failed keeps the reason it holds: evidence that only
+		// confirms the end (a Submit that returns after the run ended) carries
+		// none.
+		if rec.State != protocol.StateFailed || ev.reason != "" {
+			rec.RefusalReason = protocol.BoundReason(ev.reason)
+		}
 		rec.State = protocol.StateFailed
 		rec.Code = protocol.CodeNativeError
-		rec.RefusalReason = ""
 		if ev.runID != "" {
 			run := ev.runID
 			rec.NativeRun = &run
 		}
-		if ev.result != nil {
-			rec.Result = boundResult(ev.result)
+		if res != nil {
+			rec.Result = boundResult(res)
 		}
 		rec.Interaction = nil
 	case causeCancelledByRequest:
@@ -389,8 +416,8 @@ func (e *Endpoint) applyTransitionLocked(rec *requests.Record, c cause, ev nativ
 		// Retain partial output at cancellation. A cancelled run may
 		// have produced a result (partial output) — dropping it here means NO
 		// result and NO ack digest, so the native slot is never released.
-		if ev.result != nil {
-			rec.Result = boundResult(ev.result)
+		if res != nil {
+			rec.Result = boundResult(res)
 		}
 		if rec.Cancel == nil {
 			rec.Cancel = &protocol.Cancel{RequestedAt: protocol.FormatTime(e.now())}

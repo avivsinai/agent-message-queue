@@ -75,6 +75,7 @@ amq-remote doctor [--fix] [--root ROOT]
 amq-remote version
 amq-remote claude install-stop-hook | uninstall-stop-hook
 amq-remote claude install-approval-hook | uninstall-approval-hook
+amq-remote claude install-prompt-hook | uninstall-prompt-hook
 amq-remote pi bridge-path
 amq-remote statusline [--session ID] [--plain]
 ```
@@ -682,7 +683,7 @@ flag list; the `share` flags are in the table below.
 
 | Flag | Default | Commands |
 | --- | --- | --- |
-| `--root DIR` | `AM_ROOT`; link commands and `mcp`: the link's root; `service`: the machine root | every command except `dialogs`, `version`, `pi bridge-path`, `claude install-stop-hook`, `claude uninstall-stop-hook`, and `claude uninstall-approval-hook` |
+| `--root DIR` | `AM_ROOT`; link commands and `mcp`: the link's root; `service`: the machine root | every command except `dialogs`, `version`, `pi bridge-path`, `claude install-stop-hook`, `claude uninstall-stop-hook`, `claude uninstall-approval-hook`, `claude install-prompt-hook`, and `claude uninstall-prompt-hook` |
 | `--json` | false | `sessions`, `inspect`, `submit`, `status`, `wait`, `cancel`, `requests`, `requests release`, `attach`, `detach`, `bindings`, `dialogs`, `channel reset`, `mirror`, the `link` commands, `service`, `doctor`, and `mcp` (errors only; `mcp` always speaks JSON-RPC on stdout) |
 
 ### `serve` and `up`
@@ -1061,7 +1062,12 @@ state directory:
   dialog guard in the form their installers write now, and the Stop hook
   when native mode is in use. While no binding and no machine agent exists,
   nothing can reach Buzz yet, so a missing approval hook or guard is a
-  note. Doctor runs the installed
+  note. The prompt hook is the owner's choice: a file without it gets the
+  note "the AMQ prompt hook (UserPromptSubmit) is not installed, so a
+  Claude Code session takes no link session grant and each link task needs
+  a signature; to install it: amq-remote claude install-prompt-hook", and
+  an installed one is checked for its form (`prompt` and `prompt_form` in
+  the `hooks` row). Doctor runs the installed
   approval command through `sh -c` with `AMQ_HOOK_PROBE=1`, an empty stdin
   and `AMQ_REMOTE_BINDING` set to an existing binding, so its gate opens;
   the receiver then prints its version and binds and posts nothing. A
@@ -1122,7 +1128,9 @@ step is idempotent: a second run changes nothing.
 - In every settings file the hook check reads (the one the environment names
   only when its directory exists), it installs or migrates what the check
   flags: the approval hook, the Stop hook (where native mode needs it, or to
-  migrate an installed one) and the wake dialog guard. It never installs a
+  migrate an installed one), the prompt hook (only in a file where the owner
+  installed it with `install-prompt-hook`, never because another hook is
+  installed there) and the wake dialog guard. It never installs a
   hook the owner removed with its uninstall command. A repair keeps the
   installed binary unless it is the versioned target of the stable path it
   would write. The hooks run the `amq-remote` and `amq` on PATH when those
@@ -1135,7 +1143,7 @@ opt-in (see the approval hook below). `--fix` never restarts amq-acp or a wake o
 
 | Link | Fails when |
 | --- | --- |
-| `hooks` | A settings file lacks the approval hook or the wake dialog guard, holds one in a stale form, cannot be read, or its approval command does not reach amq-remote. It also fails without the Stop hook when a native binding or an endpoint manifest entry exists; on a mailbox-only machine that is a note. The subject is the settings file; the remedy names its `CLAUDE_CONFIG_DIR`. |
+| `hooks` | A settings file lacks the approval hook or the wake dialog guard, holds one in a stale form, cannot be read, or its approval command does not reach amq-remote. It also fails without the Stop hook when a native binding or an endpoint manifest entry exists; on a mailbox-only machine that is a note. A missing prompt hook is always a note; a prompt hook in a stale form fails. The subject is the settings file; the remedy names its `CLAUDE_CONFIG_DIR`. |
 | `machine_agent` | The machine agent does not serve, or its relay has not been authenticated for more than a minute. |
 | `channel` | A binding's channel is `uncertain` or `failed`. |
 | `mailbox` | A mailbox binding's handle is unregistered, or its wake is not live or runs another image. |
@@ -1200,6 +1208,56 @@ behind. The hook command itself always exits 0, so a broken bridge never
 blocks Claude Code. After an endpoint restart, a request that was in flight
 reads `uncertain`.
 
+### Session grants and the prompt hook
+
+A Claude Code session shows its permission mode only in a hook's input, at
+a prompt. AMQ's prompt hook reads it there:
+
+```text
+amq-remote claude install-prompt-hook     # adds a UserPromptSubmit hook to ~/.claude/settings.json
+amq-remote claude uninstall-prompt-hook   # removes only that hook
+amq-remote claude prompt-hook             # the receiver the installed hook runs
+```
+
+The hook runs at each prompt of each Claude Code session on the machine,
+but its command starts `amq-remote` only when an attachment or a binding
+exists, as the Stop hook's command does. The receiver decides nothing: it
+reports the session id and the `permission_mode` of its input, and the
+stub's id when the prompt is a granted task's stub, to each endpoint that
+serves the session. When an endpoint gives the stub's task text, the
+receiver prints it as the prompt's added context, after one line that
+names the request and the text's SHA-256; for any other prompt it prints
+nothing. Its timeout is 10 seconds, and it always exits 0. A receiver
+that cannot finish, for example on a filesystem that does not answer,
+delays that one prompt by at most those 10 seconds; the prompt then goes
+on with no added context, and a granted task whose text was not given
+ends `rejected` at its deadline.
+
+With the hook installed, a session takes a link session grant while the
+latest prompt the hook reported is in a mode that asks, or refuses, before
+an action that is not allowed in advance (`default`, `acceptEdits` or
+`dontAsk`): a granted task from the linked server runs in that session with
+no signature per task. The endpoint keeps that report in memory only, so
+after an endpoint restart the session takes no grant until its next prompt.
+The mode of the prompt that the task's stub raises decides again: in
+another mode the task ends `rejected` (`grant_needs_signature: <mode>`).
+A session whose working directory holds, or is inside, the endpoint's state
+directory, the AMQ home or `~/.claude/sessions` takes no grant
+(`state_in_workspace`): a granted task for it, before the send or at the
+prompt its stub raises, is refused with
+`grant_unsupported: state_in_workspace: ...`. A session in a turn answers
+`busy`. A granted
+task's text is at most 8192 bytes. A session in `plan`, `auto` or
+`bypassPermissions`, and every
+session on a machine without the hook, takes no grant: each link task needs
+a signature, as it does with no grant. Nothing changes for a signed task.
+
+The hook is the owner's own choice. `install-prompt-hook` records the
+owner's opt-in for that settings file; no other hook's opt-in installs it.
+`doctor --fix` puts it back only in a file where the owner installed it,
+and never after `uninstall-prompt-hook`; the machine agent posts about it
+only for such a file.
+
 ### Approvals from the Buzz channel
 
 Every dialog a connected session raises in its terminal also shows in the
@@ -1232,9 +1290,9 @@ amq-remote claude uninstall-approval-hook   # removes only that hook
 
 The hook runs the `amq-remote` on PATH when that is this binary. Install
 also records, under `~/.amq/remote/hooks/`, that the owner wants this hook
-in this settings file; `install-stop-hook` and `doctor --fix` record the
-same for theirs, and the uninstall commands replace it with the owner's
-removal.
+in this settings file; `install-stop-hook`, `install-prompt-hook` and
+`doctor --fix` record the same for theirs, and the uninstall commands
+replace it with the owner's removal.
 
 Claude Code applies a PermissionRequest decision only when every
 PermissionRequest hook has ended. A hook of your own that allows or denies
@@ -1250,12 +1308,14 @@ approval hook, the agent posts once per version of the file, across
 restarts of the agent, in the session's channel: "Approvals of this session
 stay in the terminal: the AMQ approval hook left <path> at <mtime>. Run
 `amq-remote doctor --fix`." A native session that lost the Stop hook gets
-the same kind of line for its turns. A hook that is present in an older
+the same kind of line for its turns, and one that lost the prompt hook,
+in a file where the owner installed it, gets one for its link tasks. A hook
+that is present in an older
 form (for example the approval hook with the 10-minute timeout) gets one
 post per version of the file: "The AMQ approval hook in <path> is an older
 form (changed <mtime>). Run `amq-remote doctor --fix`." After
-`uninstall-approval-hook` (or `uninstall-stop-hook`) it never posts about
-that hook in that file.
+`uninstall-approval-hook` (or `uninstall-stop-hook` or
+`uninstall-prompt-hook`) it never posts about that hook in that file.
 
 ### Requests to the owner
 

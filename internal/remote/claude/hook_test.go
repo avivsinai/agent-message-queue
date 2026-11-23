@@ -258,7 +258,7 @@ func TestMailboxBindingIgnoresStaleSentinel(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("AMQ_REMOTE_BINDING", path)
-	if _, err := bindStopSession(home, sid); err != nil {
+	if _, err := bindStopSession(home, sid, nil); err != nil {
 		t.Fatal(err)
 	}
 	RunStopHookReceiver(home, strings.NewReader(`{"session_id":"stale-session","hook_event_name":"Stop"}`), io.Discard)
@@ -334,7 +334,7 @@ func TestStopHookDeniesOddBindingsEntries(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("AMQ_REMOTE_BINDING", filepath.Join(home, "binding.json"))
 			setup(t, home)
-			if _, err := bindStopSession(home, sid); err != nil {
+			if _, err := bindStopSession(home, sid, nil); err != nil {
 				t.Fatal(err)
 			}
 			RunStopHookReceiver(home, strings.NewReader(`{"session_id":"session-y","hook_event_name":"Stop"}`), io.Discard)
