@@ -8,6 +8,18 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.168.3](https://github.com/avivsinai/agent-message-queue/compare/v0.168.2...v0.168.3) (2026-11-23)
+
+
+### Features
+
+* **link:** verify passkey-signed dialog answer frames ([5a78bf9](https://github.com/avivsinai/agent-message-queue/commit/5a78bf99790aa6bd33204c30bde682a4408fcb3d))
+
+
+### Bug Fixes
+
+* **launch:** preserve tmux resource identities across locales ([6fb531f](https://github.com/avivsinai/agent-message-queue/commit/6fb531fc2b6ca60b1b7d8a2387444c5fa260a5b9))
+
 ## [0.168.2](https://github.com/avivsinai/agent-message-queue/compare/v0.168.1...v0.168.2) (2026-11-23)
 
 
