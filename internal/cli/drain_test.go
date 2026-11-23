@@ -100,6 +100,52 @@ func TestRunDrainMovesToCur(t *testing.T) {
 	}
 }
 
+func TestRunDrainAsAnotherHandleNamesThePinnedHandle(t *testing.T) {
+	root := t.TempDir()
+	for _, handle := range []string{"alice", "bob"} {
+		if err := fsq.EnsureAgentDirs(root, handle); err != nil {
+			t.Fatalf("EnsureAgentDirs %s: %v", handle, err)
+		}
+	}
+	msg := format.Message{
+		Header: format.Header{
+			Schema: 1, ID: "msg-bob-1", From: "alice", To: []string{"bob"},
+			Thread: "p2p/alice__bob", Subject: "for bob", Created: "2025-12-24T10:00:00Z",
+		},
+		Body: "hello bob",
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, err := deliverToInboxForTest(t, root, "bob", "msg-bob-1.md", data); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	t.Setenv(envRoot, root)
+	t.Setenv(envMe, "alice")
+
+	stdout, stderr, err := captureEnvOutput(t, func() error {
+		return runDrain([]string{"--me", "bob", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("runDrain: %v", err)
+	}
+	var result drainResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("unmarshal: %v (stdout: %s)", err, stdout)
+	}
+	if result.Count != 1 || result.Drained[0].ID != "msg-bob-1" {
+		t.Fatalf("drain result = %+v, want msg-bob-1 drained", result)
+	}
+	if _, err := os.Stat(filepath.Join(fsq.AgentInboxCur(root, "bob"), "msg-bob-1.md")); err != nil {
+		t.Fatalf("message not in bob's cur: %v", err)
+	}
+	want := "amq: this shell is alice (AM_ME), and this command acts as bob (--me); it does not read or send mail for alice\n"
+	if stderr != want {
+		t.Fatalf("stderr = %q, want %q", stderr, want)
+	}
+}
+
 func TestRunDrainWithBody(t *testing.T) {
 	root := t.TempDir()
 	if err := fsq.EnsureRootDirs(root); err != nil {

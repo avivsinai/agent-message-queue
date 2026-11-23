@@ -237,6 +237,7 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 		}
 		sourceSession = fromSession
 	}
+	noteActingHandle(sourceRoot, me)
 	if targetProject != "" || targetSession != "" {
 		routePlan, err = routeWalker().PlanDelivery(sourceRoot, targetProject, targetSession, route.DeliveryOptions{
 			MirrorPeerSession: true,

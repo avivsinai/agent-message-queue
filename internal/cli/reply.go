@@ -63,6 +63,7 @@ func runReply(args []string) error {
 	if err := guardPinnedSourceContext("reply", root, false, *ignoreSessionPinFlag, common.rootExplicit()); err != nil {
 		return err
 	}
+	noteActingHandle(root, me)
 
 	if *idFlag == "" {
 		return UsageError("--id is required")

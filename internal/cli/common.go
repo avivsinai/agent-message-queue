@@ -325,6 +325,50 @@ func requireMe(handle string) error {
 	return UsageError("--me is required (or set AM_ME, e.g., export AM_ME=your-handle)")
 }
 
+// pinnedHandleOtherThan returns the handle this shell is pinned to (AM_ME
+// with AM_ROOT) and the handle a command acts as, when the two differ in the
+// pinned root. ok is false with no pin, an invalid handle, the same handle,
+// or another root. Roots compare as the session guard compares them: the
+// same clean absolute path or the same directory identity.
+func pinnedHandleOtherThan(root, me string) (pinned, acting string, ok bool) {
+	pinnedRoot := strings.TrimSpace(os.Getenv(envRoot))
+	if pinnedRoot == "" || strings.TrimSpace(root) == "" {
+		return "", "", false
+	}
+	pinned, err := normalizeHandle(os.Getenv(envMe))
+	if err != nil {
+		return "", "", false
+	}
+	acting, err = normalizeHandle(me)
+	if err != nil || acting == pinned {
+		return "", "", false
+	}
+	target, pinnedRoot := absPath(resolveRoot(root)), absPath(resolveRoot(pinnedRoot))
+	if target != pinnedRoot && !sameTreeIdentity(target, pinnedRoot) {
+		return "", "", false
+	}
+	return pinned, acting, true
+}
+
+// actingHandleNote returns the line that tells a caller that a command acts
+// as a handle other than the one its shell is pinned to, or "" when it does
+// not: no pin, the same handle, or another root. root is the command's
+// resolved root and me its resolved handle.
+func actingHandleNote(root, me string) string {
+	pinned, acting, ok := pinnedHandleOtherThan(root, me)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("this shell is %s (AM_ME), and this command acts as %s (--me); it does not read or send mail for %s", pinned, acting, pinned)
+}
+
+// noteActingHandle writes actingHandleNote to stderr when it is not empty.
+func noteActingHandle(root, me string) {
+	if line := actingHandleNote(root, me); line != "" {
+		_ = writeStderr("amq: %s\n", line)
+	}
+}
+
 // loadKnownAgents loads the agent list from config.json.
 // Returns nil slice if config doesn't exist.
 // If strict=true, returns an error for unreadable/corrupt config; otherwise warns to stderr.

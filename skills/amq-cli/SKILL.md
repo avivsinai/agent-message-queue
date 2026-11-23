@@ -19,6 +19,8 @@ Use the first case that applies:
 
 1. `AM_ME` is set (`amq coop exec` or `amq launch` started the session): run
    bare `amq` commands. Do not override `--me` or reconstruct the root.
+   A seat that `amq coop exec` started already has its identity; do not run
+   `amq env --me <handle>` in it.
 2. A Claude Code session with no `AM_ME`, such as a chat of the desktop app:
    run `amq coop join` once; add `--me "<handle>"` when the user named a
    handle or the output says the default is taken. Later bare `amq` commands
