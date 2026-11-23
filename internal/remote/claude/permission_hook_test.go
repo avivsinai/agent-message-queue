@@ -774,6 +774,13 @@ func TestDialogTextBashCompletenessRequiresTheRenderedShape(t *testing.T) {
 			t.Fatalf("%s marked complete: %s", name, input)
 		}
 	}
+	// A command whose render ends in newlines is trimmed before delivery:
+	// with no cwd and no description the trim changes the command, so the
+	// delivered text is not what was marked and the dialog stays
+	// machine-answered (review of ffe44020).
+	if _, complete := dialogText("Bash", "", []byte(`{"command":"ls\n\n"}`)); complete {
+		t.Fatal("trailing newlines marked complete")
+	}
 	got, complete := dialogText("Bash", "/w", []byte(`{"command":"ls","description":"list"}`))
 	if !complete || !strings.Contains(got, "$ ls") || !strings.Contains(got, "in /w") {
 		t.Fatalf("exact shape = %q complete=%v; want the command, the description and the cwd in the text", got, complete)
