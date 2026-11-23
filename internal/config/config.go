@@ -2,7 +2,9 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -192,16 +194,21 @@ func ensureAgentLocked(root *fsq.DeliveryRoot, handle string, create bool) (bool
 	return len(added) > 0, err
 }
 
+// ErrNoConfig reports a root without meta/config.json. It wraps
+// fs.ErrNotExist.
+var ErrNoConfig = fmt.Errorf("no meta/config.json: %w", fs.ErrNotExist)
+
 // AddAgents registers handles in the existing config.json of rootDir with one
 // read-merge-write under the config lock, and returns the handles it added in
-// request order. It never creates a config: a root without one returns an
-// error wrapping fs.ErrNotExist, so a mistyped root does not become a queue.
+// request order. It never creates a config or the config lock: a root without
+// a config returns an error wrapping ErrNoConfig, so a mistyped root does not
+// become a queue.
 //
-// Still under the lock and before the write, provision is called once per
-// requested handle with whether the roster already lists it, so the caller
-// can make a mailbox durable before the roster names it. A provision error
-// aborts the call with the roster unchanged.
-func AddAgents(rootDir string, handles []string, provision func(handle string, registered bool) error) ([]string, error) {
+// Under the lock, after the roster parses and before the write, provision is
+// called once with the pinned root and whether the on-disk roster lists a
+// handle, so the caller can make mailboxes durable before the roster names
+// them. A provision error aborts the call with the roster unchanged.
+func AddAgents(rootDir string, handles []string, provision func(r *fsq.DeliveryRoot, listed func(handle string) bool) error) ([]string, error) {
 	for _, handle := range handles {
 		if err := fsq.ValidateHandle(handle); err != nil {
 			return nil, fmt.Errorf("invalid handle %q: %w", handle, err)
@@ -216,11 +223,15 @@ func AddAgents(rootDir string, handles []string, provision func(handle string, r
 		return nil, fmt.Errorf("open root: %w", err)
 	}
 	defer func() { _ = root.Close() }()
+	// Checked before WithConfigLock, which would create meta/config.lock.
+	if _, err := root.Stat("meta/config.json"); err != nil {
+		return nil, configReadError(root, err)
+	}
 	var added []string
 	err = root.WithConfigLock(func(r *fsq.DeliveryRoot) error {
 		data, rErr := r.ReadRegularNoFollow("meta/config.json")
 		if rErr != nil {
-			return fmt.Errorf("read config: %w", rErr)
+			return configReadError(r, rErr)
 		}
 		added, rErr = mergeAgentsLocked(r, data, handles, provision)
 		return rErr
@@ -231,29 +242,36 @@ func AddAgents(rootDir string, handles []string, provision func(handle string, r
 	return added, nil
 }
 
+func configReadError(root *fsq.DeliveryRoot, err error) error {
+	if errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("%w at %s", ErrNoConfig, root.Base())
+	}
+	return fmt.Errorf("read config: %w", err)
+}
+
 // mergeAgentsLocked appends every handle the parsed roster lacks and rewrites
 // config.json, preserving Version, CreatedUTC, the existing roster order, and
 // every unmodelled key. The caller holds the config lock and read data under
 // it. With nothing to add it only re-syncs meta: a visible registration can
 // follow a failed post-rename sync.
-func mergeAgentsLocked(root *fsq.DeliveryRoot, data []byte, handles []string, provision func(handle string, registered bool) error) ([]string, error) {
+func mergeAgentsLocked(root *fsq.DeliveryRoot, data []byte, handles []string, provision func(r *fsq.DeliveryRoot, listed func(handle string) bool) error) ([]string, error) {
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
-	listed := make(map[string]bool, len(cfg.Agents)+len(handles))
+	onDisk := make(map[string]bool, len(cfg.Agents))
 	for _, a := range cfg.Agents {
-		listed[a] = true
+		onDisk[a] = true
+	}
+	if provision != nil {
+		if err := provision(root, func(handle string) bool { return onDisk[handle] }); err != nil {
+			return nil, err
+		}
 	}
 	var added []string
 	for _, handle := range handles {
-		if provision != nil {
-			if err := provision(handle, listed[handle]); err != nil {
-				return nil, err
-			}
-		}
-		if !listed[handle] {
-			listed[handle] = true
+		if !onDisk[handle] {
+			onDisk[handle] = true
 			added = append(added, handle)
 		}
 	}

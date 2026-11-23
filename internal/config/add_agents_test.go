@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 func seedConfig(t *testing.T, root, doc string) string {
@@ -25,30 +27,30 @@ func seedConfig(t *testing.T, root, doc string) string {
 	return path
 }
 
-type provisionCall struct {
-	handle     string
-	registered bool
-}
-
 func TestAddAgentsMergesPreservingFieldsAndIsIdempotent(t *testing.T) {
 	root := t.TempDir()
 	path := seedConfig(t, root, `{"agents":["codex","claude"],"created_utc":"2026-01-01T00:00:00Z","default_agent":"codex","version":1}`)
 
-	var calls []provisionCall
-	provision := func(handle string, registered bool) error {
-		calls = append(calls, provisionCall{handle, registered})
+	calls := 0
+	var listedSeen map[string]bool
+	provision := func(_ *fsq.DeliveryRoot, listed func(string) bool) error {
+		calls++
+		listedSeen = map[string]bool{}
+		for _, h := range []string{"alpha", "claude", "beta", "codex"} {
+			listedSeen[h] = listed(h)
+		}
 		return nil
 	}
-	added, err := AddAgents(root, []string{"alpha", "claude", "beta"}, provision)
+	added, err := AddAgents(root, []string{"alpha", "claude", "beta", "alpha"}, provision)
 	if err != nil {
 		t.Fatalf("AddAgents: %v", err)
 	}
 	if want := []string{"alpha", "beta"}; !reflect.DeepEqual(added, want) {
 		t.Fatalf("added = %v, want %v", added, want)
 	}
-	wantCalls := []provisionCall{{"alpha", false}, {"claude", true}, {"beta", false}}
-	if !reflect.DeepEqual(calls, wantCalls) {
-		t.Fatalf("provision calls = %v, want %v", calls, wantCalls)
+	wantListed := map[string]bool{"alpha": false, "claude": true, "beta": false, "codex": true}
+	if calls != 1 || !reflect.DeepEqual(listedSeen, wantListed) {
+		t.Fatalf("provision calls = %d, listed = %v; want 1 call seeing the on-disk roster %v", calls, listedSeen, wantListed)
 	}
 
 	written, err := os.ReadFile(path)
@@ -90,11 +92,8 @@ func TestAddAgentsProvisionFailureLeavesRosterUnchanged(t *testing.T) {
 	seed := `{"agents":["codex"],"created_utc":"2026-01-01T00:00:00Z","version":1}`
 	path := seedConfig(t, root, seed)
 	wantErr := errors.New("mkdir failed")
-	_, err := AddAgents(root, []string{"alpha", "beta"}, func(handle string, _ bool) error {
-		if handle == "beta" {
-			return wantErr
-		}
-		return nil
+	_, err := AddAgents(root, []string{"alpha", "beta"}, func(*fsq.DeliveryRoot, func(string) bool) error {
+		return wantErr
 	})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("AddAgents = %v, want %v", err, wantErr)
@@ -106,15 +105,17 @@ func TestAddAgentsProvisionFailureLeavesRosterUnchanged(t *testing.T) {
 
 func TestAddAgentsRequiresExistingConfig(t *testing.T) {
 	root := t.TempDir()
-	_, err := AddAgents(root, []string{"alpha"}, func(string, bool) error {
+	_, err := AddAgents(root, []string{"alpha"}, func(*fsq.DeliveryRoot, func(string) bool) error {
 		t.Fatal("provision called without a config")
 		return nil
 	})
-	if !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("AddAgents = %v, want fs.ErrNotExist", err)
+	if !errors.Is(err, ErrNoConfig) || !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("AddAgents = %v, want ErrNoConfig", err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "meta", "config.json")); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("AddAgents created a config: %v", err)
+	// Review finding (agy-183 R1): taking the config lock first left
+	// meta/config.lock behind in a directory that is not a queue.
+	if _, err := os.Stat(filepath.Join(root, "meta")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("AddAgents created meta/: %v", err)
 	}
 }
 
