@@ -781,9 +781,16 @@ func dialogText(tool string, cwd string, input json.RawMessage) (text string, co
 			b.Write(input)
 		}
 	}
-	text = strings.TrimRight(b.String(), "\n")
+	raw := b.String()
+	text = strings.TrimRight(raw, "\n")
 	if t, cut := protocol.TruncateText(text, maxDialogText); cut {
 		text = t + "\n… full text in the terminal"
+		complete = false
+	}
+	// A qualifying shape keeps the exact rendered text: trimming a trailing
+	// newline changes the command (or a cwd that ends in one), and a text
+	// that differs from what was marked is not the whole decision.
+	if complete && text != raw {
 		complete = false
 	}
 	return text, complete

@@ -47,7 +47,7 @@ func TestDialogForMarksAWholeCommandAndNamesTheTurn(t *testing.T) {
 	a := &Attachment{threadID: "t1"}
 	d := a.dialogFor(ServerRequest{ID: json.RawMessage(`"s1"`), Method: methodCommandApproval,
 		Params: json.RawMessage(`{"threadId":"t1","turnId":"turn-9","kind":"command","command":"rm -rf node_modules","cwd":"/w"}`)})
-	if d == nil || d.req.Turn != "turn-9" || d.turnID != "turn-9" || !d.req.Complete {
+	if d == nil || d.req.Turn != "turn-9" || d.turnID != "turn-9" || d.req.Complete {
 		t.Fatalf("command dialog = %+v", d.req)
 	}
 	d = a.dialogFor(ServerRequest{ID: json.RawMessage(`"s2"`), Method: methodFileChangeApproval,
@@ -62,43 +62,24 @@ func TestDialogForMarksAWholeCommandAndNamesTheTurn(t *testing.T) {
 	}
 }
 
-// The one complete shape (ruling 2026-11-23): the params decode into the
-// plain command-approval shape with unknown fields refused, and the text is
-// built from every field of that shape. A further native field —
-// environmentId, additional permissions, a network context, an amendment
-// decision, grantRoot — refuses the shape and the dialog stays
-// machine-answered.
 func TestDialogForCompletenessCoversTheRenderedDecisionOnly(t *testing.T) {
 	a := &Attachment{threadID: "t1"}
-	not := func(name, params string) {
-		t.Helper()
+	// No codex command approval is marked complete (review of ffe44020):
+	// the 0.171.0 native schema requires itemId and startedAtMs in every
+	// command approval, so the params never reduce to a fully rendered
+	// shape, and the optional decision fields render incompletely. The
+	// command text is still rendered for the owner.
+	for name, params := range map[string]string{
+		"plain shape":    `{"threadId":"t1","turnId":"u","itemId":"i1","startedAtMs":1,"kind":"command","command":"ls","cwd":"/w","availableDecisions":["accept","decline"]}`,
+		"minimal shape":  `{"threadId":"t1","turnId":"u","kind":"command","command":"ls"}`,
+		"writeStdin":     `{"threadId":"t1","turnId":"u","itemId":"i1","startedAtMs":1,"kind":"writeStdin","command":"cat"}`,
+		"object command": `{"threadId":"t1","turnId":"u","itemId":"i1","startedAtMs":1,"kind":"command","command":{"command":"ls"}}`,
+		"env id":         `{"threadId":"t1","turnId":"u","itemId":"i1","startedAtMs":1,"kind":"command","command":"ls","environmentId":"env-7"}`,
+	} {
 		d := a.dialogFor(ServerRequest{ID: json.RawMessage(`"s"`), Method: methodCommandApproval,
 			Params: json.RawMessage(params)})
-		if d != nil && d.req.Complete {
-			t.Fatalf("%s marked complete: %+v", name, d.req)
+		if d == nil || d.req.Complete {
+			t.Fatalf("%s marked complete: %+v", name, d)
 		}
-	}
-	not("writeStdin kind", `{"threadId":"t1","turnId":"u","kind":"writeStdin","command":"cat"}`)
-	not("humanCommand kind", `{"threadId":"t1","turnId":"u","kind":"humanCommand","command":{"command":"ls"}}`)
-	not("object command", `{"threadId":"t1","turnId":"u","kind":"command","command":{"command":"ls"}}`)
-	not("empty command", `{"threadId":"t1","turnId":"u","kind":"command","command":"   "}`)
-	not("environmentId", `{"threadId":"t1","turnId":"u","kind":"command","command":"ls","environmentId":"env-7"}`)
-	not("additional permissions", `{"threadId":"t1","turnId":"u","kind":"command","command":"ls",
-		"additionalPermissions":{"fileSystem":{"entries":[{"access":"write","path":{"value":{"kind":"project_roots","path":"src"}}}]}}}`)
-	not("network context", `{"threadId":"t1","turnId":"u","kind":"command","command":"ls",
-		"networkApprovalContext":{"host":"x","protocol":"https"}}`)
-	not("grantRoot", `{"threadId":"t1","turnId":"u","kind":"command","command":"ls","grantRoot":"/w"}`)
-	not("amendment decision", `{"threadId":"t1","turnId":"u","kind":"command","command":"ls",
-		"availableDecisions":["accept",{"acceptWithExecpolicyAmendment":{}}]}`)
-	not("other thread", `{"threadId":"t2","turnId":"u","kind":"command","command":"ls"}`)
-
-	// The plain shape still marks, with every field of the shape in the text.
-	d := a.dialogFor(ServerRequest{ID: json.RawMessage(`"ok"`), Method: methodCommandApproval,
-		Params: json.RawMessage(`{"threadId":"t1","turnId":"u","kind":"command","command":"ls","cwd":"/w","reason":"build","availableDecisions":["accept","decline"]}`)})
-	if d == nil || !d.req.Complete {
-		t.Fatalf("plain command approval not marked complete: %+v", d)
-	}
-	if !strings.Contains(d.req.Text, "$ ls") || !strings.Contains(d.req.Text, "in /w") || !strings.Contains(d.req.Text, "reason: build") {
-		t.Fatalf("plain text incomplete: %q", d.req.Text)
 	}
 }

@@ -1712,7 +1712,6 @@ func (a *Attachment) dialogFor(req ServerRequest) *openDialog {
 	}
 	d := &openDialog{reqID: req.ID, turnID: p.TurnID, done: make(chan struct{}),
 		req: dialog.Request{ID: dialog.NewID(), Harness: "codex", Session: a.threadID, Turn: p.TurnID, PID: os.Getpid()}}
-	wholeCommand := false // a positively recognized, fully rendered command
 	var b strings.Builder
 	line := func(format string, args ...any) {
 		if b.Len() > 0 {
@@ -1731,44 +1730,13 @@ func (a *Attachment) dialogFor(req ServerRequest) *openDialog {
 	switch req.Method {
 	case methodCommandApproval:
 		d.req.Tool = "exec"
-		// The one complete shape (ruling 2026-11-23): the params decode into
-		// the plain command-approval shape with unknown fields refused, and
-		// the text is built from every field of that shape. A further native
-		// field — environmentId, additional permissions, a network context,
-		// an amendment decision, grantRoot — refuses the shape and the
-		// dialog stays machine-answered; the shared renderer below still
-		// shows it on the local path.
-		var cp struct {
-			ThreadID string `json:"threadId"`
-			TurnID   string `json:"turnId"`
-			Kind     string `json:"kind"`
-			Command  string `json:"command"`
-			Cwd      string `json:"cwd"`
-			Reason   string `json:"reason"`
-			// The choices the terminal offers, carried as typed options.
-			AvailableDecisions []json.RawMessage `json:"availableDecisions"`
-		}
-		cpDec := json.NewDecoder(bytes.NewReader(req.Params))
-		cpDec.DisallowUnknownFields()
-		err := cpDec.Decode(&cp)
-		plainChoices := err == nil // an amendment decision is an object, not a name
-		for _, dec := range cp.AvailableDecisions {
-			if s := strings.TrimSpace(string(dec)); s == "" || s[0] != '"' {
-				plainChoices = false
-			}
-		}
-		if err == nil && cp.ThreadID == a.threadID && cp.Kind == "command" && strings.TrimSpace(cp.Command) != "" && plainChoices {
-			line("$ %s", cp.Command)
-			if cp.Cwd != "" {
-				line("in %s", cp.Cwd)
-			}
-			if cp.Reason != "" {
-				line("reason: %s", cp.Reason)
-			}
-			d.req.Options, d.reply = decisions(p.AvailableDecisions, "accept", "decline")
-			wholeCommand = true
-			break
-		}
+		// No codex command approval is marked complete. The 0.171.0 native
+		// schema requires itemId and startedAtMs in every command approval,
+		// so the params never reduce to a fully rendered shape, and the
+		// decision fields the schema allows (environmentId, additional
+		// permissions, a network context, an amendment decision) render
+		// incompletely here. The terminal dialog stays the record; the
+		// typed choices still serve local/Buzz.
 		switch c := p.Command.(type) {
 		case string:
 			if strings.TrimSpace(c) != "" {
@@ -1789,10 +1757,6 @@ func (a *Attachment) dialogFor(req ServerRequest) *openDialog {
 		}
 		if g := grantsText(p.AdditionalPermissions); g != "" {
 			line("additional permissions:\n%s", g)
-			// grantsText renders only each grant's kind; distinct subpaths of
-			// the same kind render alike, so the text is not the whole
-			// decision and the dialog stays machine-answered.
-			wholeCommand = false
 		}
 		d.req.Options, d.reply = decisions(p.AvailableDecisions, "accept", "decline")
 	case methodFileChangeApproval:
@@ -1857,12 +1821,8 @@ func (a *Attachment) dialogFor(req ServerRequest) *openDialog {
 	text := b.String()
 	if t, cut := protocol.TruncateText(text, maxDialogText); cut {
 		text = t + "\n… full text in the terminal"
-	} else if wholeCommand {
-		// A command approval whose positively rendered command was not cut
-		// holds its full command (R6): a native request with no command, an
-		// unreadable shape, or a cut text stays machine-answered.
-		d.req.Complete = true
 	}
+	// No codex dialog is marked complete: see the command case above.
 	d.req.Text = text
 	return d
 }
