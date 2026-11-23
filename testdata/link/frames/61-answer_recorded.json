@@ -1,0 +1,17 @@
+{
+  "body_def": "answer_reply",
+  "description": "Reserved success body after a durable answer write. A verification-only endpoint cannot emit it.",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "answer": {
+        "interaction_id": "d-5644edd335ce43efb10d5c640672479d",
+        "request_ref": "amqr1_nruw42znmvtgknbzmmytmyzyha4tmobtguagg33emv4duzdfnvxqan3ggnqteyzrmuwtkyrzmqwtizjymewtsyzsgewtozbumu2wmntbhbrdsma",
+        "state": "recorded"
+      }
+    },
+    "gen": 12,
+    "re": "m_sa",
+    "schema": "amq.remote.link/1"
+  }
+}

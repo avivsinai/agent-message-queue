@@ -1,0 +1,16 @@
+{
+  "body_def": "error_reply",
+  "description": "The typed refusal for signed_answer. The message is illustrative.",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "error": {
+        "code": "clock_skew",
+        "message": "check your clock: the consent was issued at 2026-10-09T14:02:00Z, this machine says 2026-10-09T14:05:00Z"
+      }
+    },
+    "gen": 12,
+    "re": "m_sa",
+    "schema": "amq.remote.link/1"
+  }
+}
