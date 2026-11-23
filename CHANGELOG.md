@@ -8,6 +8,21 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.169.0](https://github.com/avivsinai/agent-message-queue/compare/v0.168.3...v0.169.0) (2026-11-23)
+
+
+### Features
+
+* **codex:** show complete command approvals on linked tasks ([62eb379](https://github.com/avivsinai/agent-message-queue/commit/62eb379375f7ef660629ac641ecd8c99a1e38278))
+* **remote:** a link sees its task's permission dialogs ([af6ff8f](https://github.com/avivsinai/agent-message-queue/commit/af6ff8f288d161ee7f756a36e2c9eaa0356fbe51))
+* **remote:** a linked server answers a permission dialog with a passkey-signed choice ([#1625](https://github.com/avivsinai/agent-message-queue/issues/1625)) ([b30f3eb](https://github.com/avivsinai/agent-message-queue/commit/b30f3ebe952b387aee1c419e988647b9ed87d169))
+
+
+### Bug Fixes
+
+* **remote:** a pinned link dialog settles while its record is uncertain ([af6ff8f](https://github.com/avivsinai/agent-message-queue/commit/af6ff8f288d161ee7f756a36e2c9eaa0356fbe51))
+* **remote:** settle a resolution the horizon's present-read sees ([af6ff8f](https://github.com/avivsinai/agent-message-queue/commit/af6ff8f288d161ee7f756a36e2c9eaa0356fbe51))
+
 ## [0.168.3](https://github.com/avivsinai/agent-message-queue/compare/v0.168.2...v0.168.3) (2026-11-23)
 
 
