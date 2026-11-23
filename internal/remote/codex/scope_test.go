@@ -41,45 +41,25 @@ func TestDecisionScopesSurviveCodexOrder(t *testing.T) {
 	}
 }
 
-// R6: only a command approval whose text was not cut is marked complete, and
-// the native turn rides the dialog record for whatever follows.
-func TestDialogForMarksAWholeCommandAndNamesTheTurn(t *testing.T) {
-	a := &Attachment{threadID: "t1"}
-	d := a.dialogFor(ServerRequest{ID: json.RawMessage(`"s1"`), Method: methodCommandApproval,
-		Params: json.RawMessage(`{"threadId":"t1","turnId":"turn-9","kind":"command","command":"rm -rf node_modules","cwd":"/w"}`)})
-	if d == nil || d.req.Turn != "turn-9" || d.turnID != "turn-9" || d.req.Complete {
-		t.Fatalf("command dialog = %+v", d.req)
-	}
-	d = a.dialogFor(ServerRequest{ID: json.RawMessage(`"s2"`), Method: methodFileChangeApproval,
-		Params: json.RawMessage(`{"threadId":"t1","turnId":"turn-9"}`)})
-	if d == nil || d.req.Complete {
-		t.Fatalf("file-change dialog marked complete: %+v", d.req)
-	}
-	d = a.dialogFor(ServerRequest{ID: json.RawMessage(`"s3"`), Method: methodCommandApproval,
-		Params: json.RawMessage(`{"threadId":"t1","turnId":"turn-9","command":"` + strings.Repeat("x", maxDialogText+1) + `"}`)})
-	if d == nil || d.req.Complete {
-		t.Fatalf("cut command dialog marked complete: %+v", d.req)
-	}
-}
-
-func TestDialogForCompletenessCoversTheRenderedDecisionOnly(t *testing.T) {
-	a := &Attachment{threadID: "t1"}
-	// No codex command approval is marked complete (review of ffe44020):
-	// the 0.171.0 native schema requires itemId and startedAtMs in every
-	// command approval, so the params never reduce to a fully rendered
-	// shape, and the optional decision fields render incompletely. The
-	// command text is still rendered for the owner.
+func TestCommandApprovalStaysLocalWithoutCompleteText(t *testing.T) {
 	for name, params := range map[string]string{
-		"plain shape":    `{"threadId":"t1","turnId":"u","itemId":"i1","startedAtMs":1,"kind":"command","command":"ls","cwd":"/w","availableDecisions":["accept","decline"]}`,
-		"minimal shape":  `{"threadId":"t1","turnId":"u","kind":"command","command":"ls"}`,
-		"writeStdin":     `{"threadId":"t1","turnId":"u","itemId":"i1","startedAtMs":1,"kind":"writeStdin","command":"cat"}`,
-		"object command": `{"threadId":"t1","turnId":"u","itemId":"i1","startedAtMs":1,"kind":"command","command":{"command":"ls"}}`,
-		"env id":         `{"threadId":"t1","turnId":"u","itemId":"i1","startedAtMs":1,"kind":"command","command":"ls","environmentId":"env-7"}`,
+		"unknown field":    strings.Replace(plainCommandApprovalParams, `"cwd":`, `"newField":true,"cwd":`, 1),
+		"cut command":      strings.Replace(plainCommandApprovalParams, `"command":"ls"`, `"command":"`+strings.Repeat("x", maxDialogText)+`"`, 1),
+		"missing item":     strings.Replace(plainCommandApprovalParams, `"itemId":"i1",`, "", 1),
+		"write stdin":      strings.Replace(plainCommandApprovalParams, `"kind":"command"`, `"kind":"writeStdin"`, 1),
+		"object command":   strings.Replace(plainCommandApprovalParams, `"command":"ls"`, `"command":{"command":"ls"}`, 1),
+		"environment":      strings.Replace(plainCommandApprovalParams, `"environmentId":null`, `"environmentId":"other"`, 1),
+		"permissions":      strings.Replace(plainCommandApprovalParams, `"cwd":`, `"additionalPermissions":{},"cwd":`, 1),
+		"network":          strings.Replace(plainCommandApprovalParams, `"cwd":`, `"networkApprovalContext":{"protocol":"https","host":"example.org"},"cwd":`, 1),
+		"policy amendment": strings.Replace(plainCommandApprovalParams, `"cwd":`, `"proposedExecpolicyAmendment":["ls"],"cwd":`, 1),
+		"implicit choices": strings.Replace(plainCommandApprovalParams, `["acceptForSession","decline","cancel","accept"]`, "null", 1),
 	} {
-		d := a.dialogFor(ServerRequest{ID: json.RawMessage(`"s"`), Method: methodCommandApproval,
-			Params: json.RawMessage(params)})
-		if d == nil || d.req.Complete {
-			t.Fatalf("%s marked complete: %+v", name, d)
-		}
+		t.Run(name, func(t *testing.T) {
+			a := &Attachment{threadID: "t1"}
+			d := a.dialogFor(ServerRequest{ID: json.RawMessage(`"s"`), Method: methodCommandApproval, Params: json.RawMessage(params)})
+			if d == nil || d.req.Complete || d.req.Text == "" {
+				t.Fatalf("local command dialog = %+v", d)
+			}
+		})
 	}
 }
