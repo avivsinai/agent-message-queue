@@ -201,7 +201,11 @@ question or review request, the reply that closes it cancels the timer. A
 progress reply leaves it armed. For any other message, any reply from the
 recipient cancels it. A live wake, the wait hook, or the next `drain`,
 `read` or `monitor` checks the timer. The recipient sees the due time in
-drain output as `Reply by:`.
+drain output as `Reply by:`. `--news-within 20m` on a request arms a separate
+news timer: one notice if the recipient sends the sender no reply about the
+request in that time, ended by any such reply. The promoter judges the reply
+by the thread reducer over the sender's mailbox as it is then (a reply that
+cleanup already removed is not seen), and the recipient sees `News by:`.
 
 **Sessions**: Named sessions are child queue roots. A participating shell is
 pinned by `AM_ROOT`, `AM_BASE_ROOT`, and `AM_SESSION`; AMQ-managed identity

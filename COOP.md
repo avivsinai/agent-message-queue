@@ -342,9 +342,13 @@ run `amq drain --include-body` once.
 time, and proof to return in `brief.md`. Dispatch one assignment:
 
 ```sh
-amq send --to builder --kind todo --follow-up 30m \
+amq send --to builder --kind todo --news-within 10m --follow-up 30m \
   --subject "Build the requested change" --body @brief.md
 ```
+
+`--news-within` gives one notice if the builder sends no reply about the
+assignment within that time. `--follow-up` gives one notice if the assignment
+is still open at its expected finish.
 
 **Builder.** Run `amq drain --include-body` and copy the assignment's `ID`
 into the shell variable `brief_id`. Acknowledge with an ETA. Once the work
@@ -357,8 +361,9 @@ amq reply --id "$brief_id" --kind status --body "Started. ETA 15 minutes."
 amq reply --id "$brief_id" --kind status --labels done --body @result.md
 ```
 
-A progress reply keeps the completion timer armed. The closing reply cancels
-it. The drain's `Close with:` line gives the command for that request kind.
+A progress reply keeps the completion timer armed and ends the news clock. The
+closing reply cancels both. The drain's `Close with:` line gives the command
+for that request kind.
 
 **Lead.** Drain the result. Run `amq-board sync --init` once to initialize
 this project's board. At each later check:

@@ -53,6 +53,8 @@ type threadOpenObligation struct {
 	ReplyDestination      *threadOpenDestination `json:"reply_destination"`
 	ReplyDestinationError string                 `json:"reply_destination_error,omitempty"`
 	State                 string                 `json:"state"`
+	NewsBy                string                 `json:"news_by,omitempty"`
+	OwnerReplied          bool                   `json:"owner_replied"`
 	Completion            threadOpenRecipe       `json:"completion"`
 	Acknowledge           threadOpenRecipe       `json:"acknowledge"`
 	LastActivity          *threadOpenActivity    `json:"last_activity,omitempty"`
@@ -509,13 +511,15 @@ func obligationJSON(ob *thread.Obligation, now time.Time) threadOpenObligation {
 			Priority:     opener.Priority,
 			Labels:       nonNil(opener.Labels),
 		},
-		OwedBy:      ob.Owner,
-		OwedByKind:  owedByKind,
-		OwedTo:      ob.Requester,
-		State:       ob.State,
-		Completion:  completionRecipe(opener.Kind),
-		Acknowledge: threadOpenRecipe{Kind: format.KindStatus, Labels: []string{}},
-		AgeSeconds:  int64(now.Sub(opener.RawTime) / time.Second),
+		OwedBy:       ob.Owner,
+		OwedByKind:   owedByKind,
+		OwedTo:       ob.Requester,
+		State:        ob.State,
+		NewsBy:       opener.NewsBy,
+		OwnerReplied: ob.OwnerReplied,
+		Completion:   completionRecipe(opener.Kind),
+		Acknowledge:  threadOpenRecipe{Kind: format.KindStatus, Labels: []string{}},
+		AgeSeconds:   int64(now.Sub(opener.RawTime) / time.Second),
 	}
 	if dest, err := replyDestination(ob); err != nil {
 		out.ReplyDestinationError = err.Error()

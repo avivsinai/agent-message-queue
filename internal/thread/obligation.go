@@ -68,6 +68,11 @@ type Obligation struct {
 	// Expired marks an opener created before the reduction's cutoff.
 	Expired bool
 	Last    *Entry
+	// OwnerReplied reports that the owner sent the requester a message the
+	// reduction attributes to this obligation, of any kind, closing or not.
+	// A message from the owner to anyone else acknowledges the obligation but
+	// is no reply.
+	OwnerReplied bool
 }
 
 // HumanHandle is the reserved handle of the human in every project: it
@@ -549,6 +554,9 @@ func otherParty(ob *Obligation, owner bool) Participant {
 
 func act(ob *Obligation, fromOwner bool, msg *Entry) {
 	touch(ob, msg)
+	if fromOwner {
+		ob.OwnerReplied = true
+	}
 	if ob.Closed {
 		return
 	}
@@ -595,20 +603,36 @@ func senderOf(msg *Entry) Participant {
 }
 
 // recipientOf resolves a recipient handle of a message: the session of its
-// inbox copy; else the sender's session for a local message. A routed
-// message with no inbox copy in scope has no target metadata, so its
-// recipient is unresolved.
+// inbox copy; else the route its sender recorded; else the sender's session
+// for a local message. A routed message with neither an inbox copy in scope
+// nor a recorded route has no target metadata, so its recipient is
+// unresolved.
 func recipientOf(rec *record, handle string) (Participant, bool) {
 	for _, occ := range rec.entry.Occurrences {
 		if occ.Agent == handle && (occ.Dir == fsq.MailboxInboxNew || occ.Dir == fsq.MailboxInboxCur) {
 			return Participant{Session: occ.Session, Handle: handle}, true
 		}
 	}
+	if p, ok := rec.entry.Routes[handle]; ok {
+		return p, true
+	}
 	if rec.entry.ReplyTo == "" && rec.sender.Project == "" {
 		return Participant{Session: rec.sender.Session, Handle: handle}, true
 	}
 	return Participant{}, false
 }
+
+// OpensObligation reports whether a message of the kind with the labels
+// opens an obligation for its recipients when it continues none: an opener
+// kind without a closing label.
+func OpensObligation(kind string, labels []string) bool {
+	return slices.Contains(OpenerKinds, kind) && !hasClosingLabel(labels, closingLabels...)
+}
+
+// DefaultReplyKind is the kind amq reply sends to a message of the kind
+// when none is named. A reply of that kind continues the original's
+// obligation between the same two parties instead of opening one.
+func DefaultReplyKind(kind string) string { return defaultReplyKind(kind) }
 
 // defaultReplyKind is the kind amq reply sends when none is named.
 func defaultReplyKind(kind string) string {

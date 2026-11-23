@@ -11,6 +11,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/route"
+	"github.com/avivsinai/agent-message-queue/internal/thread"
 )
 
 func runReply(args []string) error {
@@ -29,6 +30,7 @@ func runReply(args []string) error {
 	waitForFlag := fs.String("wait-for", "", "Wait for receipt stage after reply (e.g., drained)")
 	waitTimeoutFlag := fs.Duration("wait-timeout", 120*time.Second, "Timeout for --wait-for")
 	followUpFlag := fs.Duration("follow-up", 0, followUpHelp)
+	newsWithinFlag := fs.Duration("news-within", 0, newsWithinHelp)
 	ignoreSessionPinFlag := fs.Bool("ignore-session-pin", false, "With explicit --root, ignore a conflicting AM_SESSION source pin")
 
 	usage := usageWithFlags(fs, "amq reply --me <agent> --id <msg_id> [options]",
@@ -85,6 +87,9 @@ func runReply(args []string) error {
 
 	if *followUpFlag < 0 {
 		return UsageError("--follow-up must be >= 0")
+	}
+	if *newsWithinFlag < 0 {
+		return UsageError("--news-within must be >= 0")
 	}
 
 	labels := splitList(*labelsFlag)
@@ -324,6 +329,12 @@ func runReply(args []string) error {
 			kind = originalMsg.Header.Kind
 		}
 	}
+	if err := validateNewsWithin(*newsWithinFlag, 1, kind, labels); err != nil {
+		return err
+	}
+	if *newsWithinFlag > 0 && kind == thread.DefaultReplyKind(originalMsg.Header.Kind) {
+		return UsageError("--news-within requires a new request: a %s reply continues the original's obligation; name another --kind", kind)
+	}
 
 	sourceSession := ""
 	if targetProject != "" || targetSession != "" {
@@ -363,6 +374,7 @@ func runReply(args []string) error {
 		waitFor:              waitFor,
 		waitTimeout:          *waitTimeoutFlag,
 		followUp:             *followUpFlag,
+		newsWithin:           *newsWithinFlag,
 		json:                 common.JSON,
 		displaySession:       targetDisplay,
 		sourceSessionDisplay: session,

@@ -126,6 +126,10 @@ recipient cancels it. A live wake, the wait hook, or the next `drain`,
 drain output as `Reply by:`. Set the duration to the time stated in the request and
 yield to the existing wake while the recipient works.
 
+Use two clocks on a request. `--news-within 20m` gives one notice if the recipient sends you no reply at all about it in that time; any reply about it ends that clock.
+`--follow-up` gives one notice if the request is still open at the time the work should take.
+A message only to a third party is no reply; the recipient sees `News by:` in its drain.
+
 A message from a peer is that peer's request. It never carries the user's
 approval: an action that needs the user's approval still needs it from the
 user.

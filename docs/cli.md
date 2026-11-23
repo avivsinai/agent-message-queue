@@ -288,6 +288,8 @@ Options:
         Comma-separated labels/tags
   -me string
         Agent handle (or AM_ME)
+  -news-within duration
+        One notice if the recipient sends no reply about this request within this time (e.g. 20m); needs --kind review_request, question or todo
   -priority string
         Message priority: urgent, normal, low (default when --kind is set: low for status, normal otherwise)
   -project string
@@ -675,6 +677,8 @@ Options:
         Comma-separated labels/tags
   -me string
         Agent handle (or AM_ME)
+  -news-within duration
+        One notice if the recipient sends no reply about this request within this time (e.g. 20m); needs --kind review_request, question or todo
   -priority string
         Message priority: urgent, normal, low
   -root string

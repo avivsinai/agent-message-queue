@@ -20,6 +20,7 @@ type inboxItem struct {
 	MovedToDLQ    bool              `json:"moved_to_dlq,omitempty"`
 	ParseError    string            `json:"parse_error,omitempty"`
 	ReplyBy       string            `json:"reply_by,omitempty"`
+	NewsBy        string            `json:"news_by,omitempty"`
 	Completion    *threadOpenRecipe `json:"completion,omitempty"`
 	FailureReason string            `json:"-"`
 	Filename      string            `json:"-"` // actual filename on disk

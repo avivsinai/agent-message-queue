@@ -167,13 +167,16 @@ func outputDrainItems(jsonOutput bool, me string, includeBody bool, items []inbo
 			fromDisplay, item.Thread, item.ID, subject, priority, kind, item.Created); err != nil {
 			return err
 		}
-		if item.ReplyBy != "" {
-			relative := replyByRelative(item.ReplyBy, time.Now())
+		for _, due := range []struct{ label, at string }{{"Reply by", item.ReplyBy}, {"News by", item.NewsBy}} {
+			if due.at == "" {
+				continue
+			}
+			relative := replyByRelative(due.at, time.Now())
 			if relative == "" {
-				if err := writeStdout("  Reply by: %s\n", sanitizeForTTY(item.ReplyBy)); err != nil {
+				if err := writeStdout("  %s: %s\n", due.label, sanitizeForTTY(due.at)); err != nil {
 					return err
 				}
-			} else if err := writeStdout("  Reply by: %s (%s)\n", item.ReplyBy, relative); err != nil {
+			} else if err := writeStdout("  %s: %s (%s)\n", due.label, due.at, relative); err != nil {
 				return err
 			}
 		}
