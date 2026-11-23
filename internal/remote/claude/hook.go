@@ -485,8 +485,10 @@ func stopBoundDir(home, sessionID string) string {
 
 // bindStopSession records one attachment's ownership of this session.
 // Each attachment gets its own sentinel file, so one attachment's cleanup
-// cannot drop a replacement that still owns the session.
-func bindStopSession(home, sessionID string) (string, error) {
+// cannot drop a replacement that still owns the session. The file holds
+// locator, the attachment's prompt locator, or nothing; its name is the
+// returned token, which is the attachment's instance.
+func bindStopSession(home, sessionID string, locator []byte) (string, error) {
 	if !sessionIDRe.MatchString(sessionID) {
 		return "", fmt.Errorf("stop session %q is not a file-safe id", sessionID)
 	}
@@ -516,10 +518,71 @@ func bindStopSession(home, sessionID string) (string, error) {
 		}
 	}
 	token := filepath.Base(f.Name())
-	if err := f.Close(); err != nil {
+	_, werr := f.Write(locator)
+	if err := errors.Join(werr, f.Close()); err != nil {
+		removeRegular(f.Name())
 		return "", err
 	}
 	return token, nil
+}
+
+// PromptEndpoint is one attachment that serves a session, as its sentinel
+// file names it: the endpoint's state directory, the target, and the
+// attachment instance (the sentinel's name).
+type PromptEndpoint struct {
+	StateDir, Target, Instance string
+}
+
+// promptLocator is the content of an attachment's sentinel file when the
+// attachment can give a granted request's text at a prompt.
+type promptLocator struct {
+	StateDir string `json:"state_dir"`
+	Target   string `json:"target"`
+}
+
+// maxPromptEndpoints bounds how many sentinels of one session the prompt
+// hook reads, and maxLocatorBytes one sentinel's size.
+const (
+	maxPromptEndpoints = 16
+	maxLocatorBytes    = 4 << 10
+)
+
+// PromptEndpoints returns the attachments that serve session sessionID and
+// give a granted request's text at a prompt: every regular sentinel file of
+// the session, read bounded with no link followed, whose content is a
+// locator with an absolute state directory and a target. An empty sentinel
+// (an attachment built with no state directory) names none.
+func PromptEndpoints(home, sessionID string) []PromptEndpoint {
+	if !sessionIDRe.MatchString(sessionID) {
+		return nil
+	}
+	dir := stopBoundDir(home, sessionID)
+	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() {
+		return nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out []PromptEndpoint
+	for _, e := range entries {
+		if len(out) == maxPromptEndpoints {
+			break
+		}
+		if !e.Type().IsRegular() {
+			continue
+		}
+		raw, err := readRegularBounded(filepath.Join(dir, e.Name()), maxLocatorBytes)
+		if err != nil {
+			continue
+		}
+		var loc promptLocator
+		if json.Unmarshal(raw, &loc) != nil || !filepath.IsAbs(loc.StateDir) || loc.Target == "" {
+			continue
+		}
+		out = append(out, PromptEndpoint{StateDir: loc.StateDir, Target: loc.Target, Instance: e.Name()})
+	}
+	return out
 }
 
 // unbindStopSession drops one attachment's sentinel when that attachment

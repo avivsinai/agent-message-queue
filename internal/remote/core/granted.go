@@ -55,7 +55,7 @@ func (e *Endpoint) GrantedPrompt(req PromptReport) string {
 	if ok {
 		h, ok = t.att.(PromptHandover)
 	}
-	if !ok || h.PromptInstance() != req.Instance {
+	if !ok || req.Instance == "" || h.PromptInstance() != req.Instance {
 		e.mu.Unlock()
 		return ""
 	}

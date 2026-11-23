@@ -269,6 +269,10 @@ type transcriptEntry struct {
 	// Model is message.model; "<synthetic>" on a line Claude Code writes
 	// itself.
 	Model string
+	// HookContext is the content of an entry that records the context a
+	// UserPromptSubmit hook added (attachment type hook_additional_context):
+	// the hook's text, or a preview of it when the harness cut it.
+	HookContext []string
 }
 
 // toolUseRef is one tool_use block: its id, tool name and actionHash of
@@ -306,9 +310,11 @@ func parseTranscriptLine(line string) (transcriptEntry, bool) {
 		TurnOrigin    string      `json:"turnOrigin"`
 		Origin        *peerOrigin `json:"origin"`
 		Attachment    *struct {
-			Type   string      `json:"type"`
-			Prompt string      `json:"prompt"`
-			Origin *peerOrigin `json:"origin"`
+			Type      string          `json:"type"`
+			Prompt    string          `json:"prompt"`
+			Origin    *peerOrigin     `json:"origin"`
+			HookEvent string          `json:"hookEvent"`
+			Content   json.RawMessage `json:"content"`
 		} `json:"attachment"`
 		Message struct {
 			ID         string          `json:"id"`
@@ -330,6 +336,9 @@ func parseTranscriptLine(line string) (transcriptEntry, bool) {
 		}
 	}
 	origin := raw.Origin
+	if raw.Type == "attachment" && raw.Attachment != nil && raw.Attachment.Type == "hook_additional_context" && raw.Attachment.HookEvent == "UserPromptSubmit" {
+		e.HookContext = hookContent(raw.Attachment.Content)
+	}
 	if raw.Type == "attachment" && raw.Attachment != nil && raw.Attachment.Type == "queued_command" {
 		e.Type, e.Absorbed, e.Meta, e.Text, origin = "user", true, false, raw.Attachment.Prompt, raw.Attachment.Origin
 		e.Blocks, e.ToolUses, e.ToolResults, e.PromptID = nil, nil, nil, ""
@@ -364,6 +373,20 @@ func parseTranscriptLine(line string) (transcriptEntry, bool) {
 		e.TS = ts.UnixMilli()
 	}
 	return e, true
+}
+
+// hookContent is the content of a hook's added-context entry: its strings,
+// whether the harness wrote one string or a list of them.
+func hookContent(raw json.RawMessage) []string {
+	var list []string
+	if json.Unmarshal(raw, &list) == nil {
+		return list
+	}
+	var one string
+	if json.Unmarshal(raw, &one) == nil && one != "" {
+		return []string{one}
+	}
+	return nil
 }
 
 // decodeContent renders a transcript message content field as text: a

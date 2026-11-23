@@ -302,6 +302,13 @@ func TestGrantedPromptHandsTheTextOverOnce(t *testing.T) {
 		if got := f.ep.GrantedPrompt(r); got != "" || rt.observed != 0 || f.record(t, id).GrantTextGiven {
 			t.Fatalf("stale locator: text %q, observed %d, mark %v; want nothing", got, rt.observed, f.record(t, id).GrantTextGiven)
 		}
+		// An attachment that publishes no instance (no locator) takes no
+		// report, also one that names none.
+		rt.set(func(r *promptRuntime) { r.instance = "" })
+		r.Instance = ""
+		if got := f.ep.GrantedPrompt(r); got != "" || rt.observed != 0 {
+			t.Fatalf("no instance: text %q, observed %d; want nothing", got, rt.observed)
+		}
 	})
 
 	t.Run("an attachment replaced between the two locks gives nothing", func(t *testing.T) {
