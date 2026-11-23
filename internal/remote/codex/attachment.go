@@ -1692,10 +1692,6 @@ func (a *Attachment) dialogFor(req ServerRequest) *openDialog {
 		Cwd      string `json:"cwd"`
 		Reason   string `json:"reason"`
 		// item/commandExecution/requestApproval, item/fileChange/requestApproval
-		// The command approval kind: only "command" is a plain command
-		// decision; writeStdin and humanCommand decide more than the shown
-		// command.
-		Kind           string `json:"kind"`
 		Command        any    `json:"command"`
 		GrantRoot      string `json:"grantRoot"`
 		NetworkContext *struct {
@@ -1722,6 +1718,7 @@ func (a *Attachment) dialogFor(req ServerRequest) *openDialog {
 	}
 	d := &openDialog{reqID: req.ID, turnID: p.TurnID, done: make(chan struct{}),
 		req: dialog.Request{ID: dialog.NewID(), Harness: "codex", Session: a.threadID, Turn: p.TurnID, PID: os.Getpid()}}
+	var completeText string
 	var b strings.Builder
 	line := func(format string, args ...any) {
 		if b.Len() > 0 {
@@ -1740,13 +1737,12 @@ func (a *Attachment) dialogFor(req ServerRequest) *openDialog {
 	switch req.Method {
 	case methodCommandApproval:
 		d.req.Tool = "exec"
-		// No codex command approval is marked complete. The 0.171.0 native
-		// schema requires itemId and startedAtMs in every command approval,
-		// so the params never reduce to a fully rendered shape, and the
-		// decision fields the schema allows (environmentId, additional
-		// permissions, a network context, an amendment decision) render
-		// incompletely here. The terminal dialog stays the record; the
-		// typed choices still serve local/Buzz.
+		d.req.Options, d.reply = decisions(p.AvailableDecisions, "accept", "decline")
+		completeText = plainCommandText(req.Params)
+		if completeText != "" {
+			b.WriteString(completeText)
+			break
+		}
 		switch c := p.Command.(type) {
 		case string:
 			if strings.TrimSpace(c) != "" {
@@ -1768,7 +1764,6 @@ func (a *Attachment) dialogFor(req ServerRequest) *openDialog {
 		if g := grantsText(p.AdditionalPermissions); g != "" {
 			line("additional permissions:\n%s", g)
 		}
-		d.req.Options, d.reply = decisions(p.AvailableDecisions, "accept", "decline")
 	case methodFileChangeApproval:
 		d.req.Tool = "apply_patch"
 		a.mu.Lock()
@@ -1831,8 +1826,9 @@ func (a *Attachment) dialogFor(req ServerRequest) *openDialog {
 	text := b.String()
 	if t, cut := protocol.TruncateText(text, maxDialogText); cut {
 		text = t + "\n… full text in the terminal"
+	} else {
+		d.req.Complete = completeText != "" && text == completeText
 	}
-	// No codex dialog is marked complete: see the command case above.
 	d.req.Text = text
 	return d
 }
