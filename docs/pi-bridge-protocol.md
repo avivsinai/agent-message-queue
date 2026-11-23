@@ -454,7 +454,9 @@ its run like this:
   `aborted`, `error`);
 - the terminal event at `agent_settled` after the start, the notification that
   pi will not continue on its own: `completed`, `cancelled` for `aborted`, or
-  `failed` for `error`. A settle before the start belongs to other work and
+  `failed` for `error`. When `agent_settled` carries `aborted: true`, the
+  request ends `cancelled` even if pi skipped `agent_before_settle`.
+  A settle before the start belongs to other work and
   never ends the request;
 - the end of ownership at the next user `message_start` after the start, such
   as a local follow-up or local steering between tool turns. The request then

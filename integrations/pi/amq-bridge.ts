@@ -447,14 +447,14 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 		if (f?.started) f.outcome = event.outcome;
 	});
 
-	pi.on("agent_settled", () => {
+	pi.on("agent_settled", (event) => {
 		const b = bridge;
 		const f = active();
 		// A settle before the request started belongs to other work. It is
 		// never the request's outcome; the start watchdog in scan closes a
 		// request that never starts.
 		if (!b || !f || !f.started) return;
-		if (f.outcome === "aborted") {
+		if (event.aborted || f.outcome === "aborted") {
 			settle(b, { event: "cancelled" });
 		} else if (f.outcome === "error") {
 			settle(b, { event: "failed", error: f.lastError || "pi run ended with an error" });
