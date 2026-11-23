@@ -433,11 +433,22 @@ func (e *Endpoint) recoverOwedOutcomes(rec *requests.Record) error {
 		// may still arrive; unknown is only for a dialog with no files and
 		// no history entry.
 		if isLinkDialog(cur, id) {
-			if e.linkDialogs != nil && cur.Binding != "" && e.linkDialogs.Present(cur.Binding, id) {
-				continue // the dialog's files exist: the outcome may still arrive
+			present, r, resolved := false, protocol.Resolution{}, false
+			if e.linkDialogs != nil && cur.Binding != "" {
+				present, r, resolved = e.linkDialogs.Present(cur.Binding, id)
 			}
-			if owes(cur, id) && retireOutcomeLocked(cur, id) {
-				changed = true
+			switch {
+			case resolved:
+				// A resolution landed after the unlocked ask: settle it now.
+				if settleOwedNative(cur, r) {
+					changed = true
+				}
+			case present:
+				// The dialog's files exist: the outcome may still arrive.
+			default:
+				if owes(cur, id) && retireOutcomeLocked(cur, id) {
+					changed = true
+				}
 			}
 			continue
 		}

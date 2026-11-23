@@ -29,13 +29,13 @@ type LinkDialogs interface {
 	// the pinned interaction with the returned outcome.
 	Outcome(binding, id string) (resolution protocol.Resolution, done bool)
 
-	// Present reports whether the dialog still exists on the machine: its
-	// request file is there and no resolution has replaced it. It answers
-	// for a published dialog at the retirement horizon — a dialog whose
-	// files are gone and whose outcome never arrived is unknown; one whose
-	// files exist stays owed, because its resolution may still arrive (the
-	// hook can wait for its answer far beyond the horizon).
-	Present(binding, id string) bool
+	// Present reports the dialog's state at the retirement horizon.
+	// present: the request file exists and no resolution replaced it — the
+	// outcome may still arrive, so the horizon keeps the id owed. When the
+	// lookup instead sees a resolution — one that landed after the
+	// caller's outcome ask — resolved carries it, so the caller settles
+	// that outcome instead of retiring it as unknown.
+	Present(binding, id string) (present bool, res protocol.Resolution, resolved bool)
 }
 
 // SetLinkDialogs installs the link-dialog seam. Until it is set, no link

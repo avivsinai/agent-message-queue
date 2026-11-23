@@ -214,17 +214,27 @@ func (s *linkDialogSource) render(dir string, rec *requests.Record, id string) (
 	return in, true
 }
 
-// Present reports whether the dialog still exists on the machine: its
-// request file is readable and no resolution replaced it.
-func (s *linkDialogSource) Present(binding, id string) bool {
+// Present reports the dialog's state at the retirement horizon: present
+// when its request file is readable and no resolution replaced it; when the
+// lookup sees a resolution, resolved carries it mapped.
+func (s *linkDialogSource) Present(binding, id string) (bool, protocol.Resolution, bool) {
 	dir, err := dialog.DirRead(binding)
 	if err != nil {
-		return false
+		return false, protocol.Resolution{}, false
 	}
 	phase, _, _, resolved, err := dialog.Lookup(dir, id)
+	if err != nil {
+		return false, protocol.Resolution{}, false
+	}
+	if resolved != nil {
+		return false, mapResolved(*resolved), true
+	}
 	// An answered-but-unresolved dialog still exists: its resolution may
 	// land or be rejected, so it stays owed.
-	return err == nil && (phase == dialog.PhaseOpen || phase == dialog.PhaseAnswered) && resolved == nil
+	if phase == dialog.PhaseOpen || phase == dialog.PhaseAnswered {
+		return true, protocol.Resolution{}, false
+	}
+	return false, protocol.Resolution{}, false
 }
 
 // Outcome reads how a published dialog ended, in the ratified order: the

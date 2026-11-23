@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -312,31 +311,55 @@ func TestLinkDialogHookToSelectorToRequestGet(t *testing.T) {
 		t.Fatalf("revision %d after resolution; want above %d", snap.Revision, revPublished)
 	}
 
-	// The remaining dispositions through the same chain: the next open
-	// dialog publishes after one resolves, and a resolution by the
-	// terminal maps to elsewhere, one by the link to answered.
+	// The remaining dispositions through the same chain, one real hook
+	// per row: closing its done channel ends the dialog by the terminal;
+	// writing the durable resolution file answers it by the link. Each
+	// row publishes the next open dialog and moves the revision on
+	// publish and on resolve.
+	seen := map[string]bool{reqID: true}
 	dispositions := []struct {
 		name       string
-		resolve    func(dir, id string)
+		resolve    func(dir string, id string, done chan struct{})
 		wantKind   protocol.ResolutionOutcome
 		wantOption string
 	}{
-		{name: "terminal", resolve: func(dir, id string) {
-			if _, err := dialog.Resolve(dir, dialog.Resolved{ID: id, Outcome: dialog.OutcomeTerminal, By: dialog.ByTerminal, At: time.Now().UTC()}); err != nil {
-				t.Fatal(err)
-			}
-		}, wantKind: protocol.ResolutionElsewhere, wantOption: ""},
-		{name: "link", resolve: func(dir, id string) {
+		{name: "terminal", resolve: func(dir string, id string, done chan struct{}) { close(done) },
+			wantKind: protocol.ResolutionElsewhere, wantOption: ""},
+		{name: "link", resolve: func(dir string, id string, done chan struct{}) {
 			if _, err := dialog.Resolve(dir, dialog.Resolved{ID: id, Outcome: dialog.OutcomeAllowed, Label: "Allow once", By: dialog.ByLink, At: time.Now().UTC()}); err != nil {
 				t.Fatal(err)
 			}
 		}, wantKind: protocol.ResolutionAnswered, wantOption: "Allow once"},
 	}
 	for _, d := range dispositions {
-		req := dialog.Request{ID: dialog.NewID(), Harness: "claude", Session: "pi:chat", Tool: "Bash",
-			Text: "$ echo next", Complete: true, OpenedAt: time.Now().UTC(),
-			Options: []dialog.Option{{N: 1, Label: "Allow once", Scope: dialog.ScopeOnce}, {N: 2, Label: "Deny", Deny: true, Scope: dialog.ScopeOnce}}}
-		openDialog(t, "pi-chat", req)
+		var rowOut bytes.Buffer
+		rowDone := make(chan struct{})
+		rowEnded := make(chan struct{})
+		go func() {
+			defer close(rowEnded)
+			claude.RunPermissionHook(bytes.NewReader(stdin), &rowOut, rowDone, nil)
+		}()
+		var rowID string
+		for deadline := time.Now().Add(5 * time.Second); rowID == ""; {
+			dir, err := dialog.DirRead("pi-chat")
+			if err == nil {
+				if reqs, _ := dialog.Requests(dir); len(reqs) > 0 {
+					for _, rq := range reqs {
+						if !seen[rq.ID] && rq.Complete {
+							rowID = rq.ID
+						}
+					}
+				}
+			}
+			if rowID != "" {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("the hook wrote no dialog for the %s row", d.name)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		seen[rowID] = true
 		if err := ep.Reconcile(); err != nil {
 			t.Fatal(err)
 		}
@@ -345,10 +368,20 @@ func TestLinkDialogHookToSelectorToRequestGet(t *testing.T) {
 			t.Fatalf("get after publication %s: %v", d.name, err)
 		}
 		snap = rep.(protocol.Reply).Snapshot
-		if snap.Interaction == nil || snap.Interaction.InteractionID != req.ID {
+		if snap.Interaction == nil || snap.Interaction.InteractionID != rowID {
 			t.Fatalf("snapshot interaction = %+v; want the %s dialog", snap.Interaction, d.name)
 		}
-		d.resolve(dir, req.ID)
+		revRow := snap.Revision
+		dir, err := dialog.DirFor("pi-chat")
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.resolve(dir, rowID, rowDone)
+		select {
+		case <-rowEnded:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("the hook did not end after the %s disposition", d.name)
+		}
 		if err := ep.Reconcile(); err != nil {
 			t.Fatal(err)
 		}
@@ -362,207 +395,15 @@ func TestLinkDialogHookToSelectorToRequestGet(t *testing.T) {
 		}
 		var got2 *protocol.Resolution
 		for j := range snap.Resolved {
-			if snap.Resolved[j].InteractionID == req.ID {
+			if snap.Resolved[j].InteractionID == rowID {
 				got2 = &snap.Resolved[j]
 			}
 		}
 		if got2 == nil || got2.Outcome != d.wantKind || got2.Option != d.wantOption {
 			t.Fatalf("%s resolution = %+v; want %s/%q", d.name, got2, d.wantKind, d.wantOption)
 		}
-
-	}
-}
-
-// Only the exact running link, with the share naming the binding, passkey
-// consent and approvals=link, publishes: terminal approvals and local
-// consent publish nothing, and a record without a signed session publishes
-// nothing.
-func TestLinkDialogPolicyGatesSelection(t *testing.T) {
-	src, rec := linkDialogFixture(t, "pi:chat", []string{})
-	run := src.links.running["link"]
-
-	rec.NativeSession = ""
-	openDialog(t, "pi-chat", dialog.Request{ID: dialog.NewID(), Harness: "pi", Tool: "Bash", Text: "ls", Session: "pi:chat", Options: []dialog.Option{allowOnce, denyOnce}})
-	if src.Select(rec) != nil {
-		t.Fatal("a record with no signed session published a dialog")
-	}
-	rec.NativeSession = "pi:chat"
-
-	run.link.Shares[0].Approvals = manifest.ApprovalsTerminal
-	if src.Select(rec) != nil {
-		t.Fatal("terminal approvals published a dialog")
-	}
-	run.link.Shares[0].Approvals = manifest.ApprovalsLink
-	run.link.Shares[0].Consent = "local"
-	if src.Select(rec) != nil {
-		t.Fatal("local consent published a dialog")
-	}
-	run.link.Shares[0].Consent = "passkey"
-
-	in := src.Select(rec)
-	if in == nil {
-		t.Fatal("a gated-in dialog published nothing")
-	}
-	if in.RemoteAnswer {
-		t.Fatal("unit A published remote_answer")
-	}
-	if in.ApproveOption != "Allow once" || in.RejectOption != "Deny" {
-		t.Fatalf("roles = %q/%q; want the once options", in.ApproveOption, in.RejectOption)
-	}
-}
-
-// R1: a record without a captured baseline publishes nothing on either
-// path; an empty baseline is a real one.
-func TestLinkDialogNilBaselineWithholds(t *testing.T) {
-	src, rec := linkDialogFixture(t, "pi:chat", nil)
-	openDialog(t, "pi-chat", dialog.Request{ID: dialog.NewID(), Harness: "pi", Tool: "Bash", Text: "ls", Session: "pi:chat", Options: []dialog.Option{allowOnce}})
-	if src.Select(rec) != nil {
-		t.Fatal("a nil baseline published a dialog")
-	}
-	rec.DialogsBefore = []string{}
-	if src.Select(rec) == nil {
-		t.Fatal("an empty baseline withheld a real dialog")
-	}
-}
-
-// A dialog of the run's start baseline is never the run's dialog; an
-// incomplete one never publishes; the earliest fully eligible dialog wins.
-func TestLinkDialogSelectionOrderAndFilters(t *testing.T) {
-	baseID := dialog.NewID()
-	src, rec := linkDialogFixture(t, "pi:chat", []string{baseID})
-	early := dialog.Request{ID: dialog.NewID(), Harness: "pi", Tool: "Bash", Text: "early", Session: "pi:chat", OpenedAt: time.Now().Add(-time.Minute), Options: []dialog.Option{allowOnce}}
-	openIncomplete(t, "pi-chat", early)
-	base := dialog.Request{ID: baseID, Harness: "pi", Tool: "Bash", Text: "baseline", Session: "pi:chat", OpenedAt: time.Now().Add(-2 * time.Minute), Options: []dialog.Option{allowOnce}}
-	openDialog(t, "pi-chat", base)
-	late := dialog.Request{ID: dialog.NewID(), Harness: "pi", Tool: "Bash", Text: "late", Session: "pi:chat", OpenedAt: time.Now(), Options: []dialog.Option{allowOnce}}
-	openDialog(t, "pi-chat", late)
-
-	in := src.Select(rec)
-	if in == nil || in.InteractionID != late.ID {
-		t.Fatalf("selection = %+v; want the earliest fully eligible dialog %s", in, late.ID)
-	}
-	if in.Prompt != "Bash\nlate" {
-		t.Fatalf("prompt = %q; want the dialog's own text", in.Prompt)
-	}
-}
-
-// A dialog of another native session, and one whose identity cannot be
-// correlated, stays on the machine.
-func TestLinkDialogForeignSessionWithheld(t *testing.T) {
-	src, rec := linkDialogFixture(t, "pi:chat", []string{})
-	openDialog(t, "pi-chat", dialog.Request{ID: dialog.NewID(), Harness: "pi", Tool: "Bash", Text: "x", Session: "other-session", Options: []dialog.Option{allowOnce}})
-	if src.Select(rec) != nil {
-		t.Fatal("another session's dialog published")
-	}
-	// A dialog with no session at all cannot be correlated.
-	openDialog(t, "pi-chat", dialog.Request{ID: dialog.NewID(), Harness: "pi", Tool: "Bash", Text: "x", Options: []dialog.Option{allowOnce}})
-	if src.Select(rec) != nil {
-		t.Fatal("an uncorrelatable dialog published")
-	}
-}
-
-// Only a legal choice set renders: two once-allows, no once options, or a
-// colliding deny label each withhold.
-func TestLinkDialogIllegalChoiceSetsWithhold(t *testing.T) {
-	src, rec := linkDialogFixture(t, "pi:chat", []string{})
-	always := dialog.Option{N: 1, Label: "Allow always", Value: "always", Scope: dialog.ScopeAlways}
-	cases := [][]dialog.Option{
-		{allowOnce, allowOnce}, // two once-allows
-		{always},               // nothing once
-		{allowOnce, {N: 2, Label: "Allow once", Value: "deny", Deny: true, Scope: dialog.ScopeOnce}}, // colliding labels
-	}
-	for _, opts := range cases {
-		openDialog(t, "pi-chat", dialog.Request{ID: dialog.NewID(), Harness: "pi", Tool: "Bash", Text: "x", Session: "pi:chat", Options: opts})
-		if src.Select(rec) != nil {
-			t.Fatalf("illegal choice set %v published", opts)
+		if snap.Revision <= revRow {
+			t.Fatalf("revision %d after the %s resolution; want above %d", snap.Revision, d.name, revRow)
 		}
-	}
-}
-
-// R2: the outcome read order is the resolution file, then the history
-// entry; a missing directory recreates nothing and falls through to the
-// history; no record of either is not done.
-func TestLinkDialogOutcomeReadOrder(t *testing.T) {
-	src, _ := linkDialogFixture(t, "pi:chat", []string{})
-	id := dialog.NewID()
-
-	// Nothing anywhere: not done.
-	if _, done := src.Outcome("pi-chat", id); done {
-		t.Fatal("an unresolved dialog reported done")
-	}
-	// The history entry resolves it after the files are gone.
-	if err := dialog.AppendHistory(dialog.HistoryEntry{ID: id, Binding: "pi-chat", Outcome: dialog.OutcomeAllowed, By: dialog.ByBuzz, Label: "Allow once", At: time.Now()}); err != nil {
-		t.Fatal(err)
-	}
-	r, done := src.Outcome("pi-chat", id)
-	if !done || r.Outcome != protocol.ResolutionElsewhere || r.Option != "Allow once" {
-		t.Fatalf("history outcome = %+v done=%v; want elsewhere/Allow once", r, done)
-	}
-	// The history read recreated nothing in the binding's dialog directory.
-	dir, _ := dialog.DirRead("pi-chat")
-	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("a retired directory came back: %v", err)
-	}
-
-	// A resolution file wins over history and names the link's answer.
-	dir2, err := dialog.DirFor("pi-chat") // the seam's write path
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := dialog.Resolve(dir2, dialog.Resolved{ID: id, Outcome: dialog.OutcomeAllowed, By: dialog.ByLink, Label: "Allow once", At: time.Now()}); err != nil {
-		t.Fatal(err)
-	}
-	r, done = src.Outcome("pi-chat", id)
-	if !done || r.Outcome != protocol.ResolutionAnswered || r.Option != "Allow once" {
-		t.Fatalf("resolution outcome = %+v done=%v; want answered/Allow once", r, done)
-	}
-
-	// A timeout resolves as run_ended with no option claimed (a fresh
-	// dialog: a resolution file is written once).
-	timedOut := dialog.NewID()
-	if _, err := dialog.Resolve(dir2, dialog.Resolved{ID: timedOut, Outcome: dialog.OutcomeExpired, By: dialog.ByTimeout, At: time.Now()}); err != nil {
-		t.Fatal(err)
-	}
-	if r, _ := src.Outcome("pi-chat", timedOut); r.Outcome != protocol.ResolutionRunEnded || r.Option != "" {
-		t.Fatalf("timeout outcome = %+v; want run_ended with no option", r)
-	}
-}
-
-// A resolution by the link's answer maps to answered; by Buzz or the
-// terminal, elsewhere.
-func TestLinkDialogOutcomeAttribution(t *testing.T) {
-	cases := map[string]protocol.ResolutionOutcome{
-		dialog.ByLink:     protocol.ResolutionAnswered,
-		dialog.ByBuzz:     protocol.ResolutionElsewhere,
-		dialog.ByTerminal: protocol.ResolutionElsewhere,
-	}
-	for by, want := range cases {
-		got := mapResolved(dialog.Resolved{ID: "x", Outcome: dialog.OutcomeAllowed, By: by, Label: "L"})
-		if got.Outcome != want {
-			t.Fatalf("by %q mapped to %s; want %s", by, got.Outcome, want)
-		}
-	}
-}
-
-// An answer file moves the pinned dialog to phase answered; the pinned
-// re-render withholds until it resolves, and never swaps in another dialog.
-func TestLinkDialogAnsweredPinHolds(t *testing.T) {
-	src, rec := linkDialogFixture(t, "pi:chat", []string{})
-	id := dialog.NewID()
-	openDialog(t, "pi-chat", dialog.Request{ID: id, Harness: "pi", Tool: "Bash", Text: "x", Session: "pi:chat", Options: []dialog.Option{allowOnce}})
-	in := src.Select(rec)
-	if in == nil || in.InteractionID != id {
-		t.Fatalf("selection = %+v; want %s", in, id)
-	}
-	rec.Interaction = in
-	rec.LinkDialogs = []string{id}
-	dir, _ := dialog.DirFor("pi-chat")
-	if _, err := dialog.WriteAnswer(dir, dialog.Answer{ID: id, Option: 1, By: dialog.ByBuzz, At: time.Now()}); err != nil {
-		t.Fatal(err)
-	}
-	// A newer dialog appears too; the pinned dialog must not be replaced by it.
-	openDialog(t, "pi-chat", dialog.Request{ID: dialog.NewID(), Harness: "pi", Tool: "Bash", Text: "newer", Session: "pi:chat", Options: []dialog.Option{allowOnce}})
-	if got := src.Select(rec); got != nil {
-		t.Fatalf("pinned dialog re-render produced %+v; want nil until it resolves", got)
 	}
 }

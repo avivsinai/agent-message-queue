@@ -16,20 +16,25 @@ import (
 // per call, and an Outcome map. It records what it was asked, so a test can
 // see which seam the endpoint consulted.
 type stubDialogs struct {
-	mu      sync.Mutex
-	selects int
-	lastSel func(rec *requests.Record) *protocol.Interaction
-	out     map[string]protocol.Resolution
-	askOut  int
-	gone    map[string]bool // ids whose files are gone: Present reports false
+	mu         sync.Mutex
+	selects    int
+	lastSel    func(rec *requests.Record) *protocol.Interaction
+	out        map[string]protocol.Resolution
+	askOut     int
+	gone       map[string]bool                // ids whose files are gone: Present reports not present
+	presentRes map[string]protocol.Resolution // resolutions Present sees in the outcome-read race
 }
 
 // Present answers for a published dialog at the retirement horizon: files
-// exist and no resolution replaced them, unless the test marked the id gone.
-func (s *stubDialogs) Present(_, id string) bool {
+// exist and no resolution replaced them, unless the test marked the id gone
+// or planted a resolution in the Outcome-to-Present window.
+func (s *stubDialogs) Present(_, id string) (bool, protocol.Resolution, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return !s.gone[id]
+	if r, ok := s.presentRes[id]; ok {
+		return false, r, true
+	}
+	return !s.gone[id], protocol.Resolution{}, false
 }
 
 func (s *stubDialogs) markGone(id string) {
@@ -238,6 +243,61 @@ func TestLinkDialogOpenDialogNotRetiredAtHorizon(t *testing.T) {
 	}
 	if slices.Contains(rec.OwedOutcomes, "ld_3") {
 		t.Fatalf("owed outcomes = %v; want ld_3 settled", rec.OwedOutcomes)
+	}
+}
+
+// Regression (review of 9090b1e7): a resolution that lands after the
+// outcome ask misses but before the horizon's present-read — the lookup
+// returns it resolved — is settled, never retired as unknown.
+func TestLinkDialogResolutionSeenByHorizonPresentSettles(t *testing.T) {
+	store, now := openStore(t)
+	clk := now()
+	rt := fake.New("fake", "e_1")
+	ep := core.New(core.Config{Store: store, Now: func() time.Time { return clk }})
+	ep.Register(rt)
+	ep.SetConsent(func(string, string) bool { return true })
+	ep.SetDialogsOpen(func(string) ([]string, error) { return nil, nil })
+	stub := &stubDialogs{}
+	ep.SetLinkDialogs(stub)
+
+	id := "11111111-1111-4111-8111-1111111111d5"
+	if _, err := ep.Handle(submitCmd(id), linkShare("sess-1")); err != nil {
+		t.Fatal(err)
+	}
+	stub.setSelect(func(*requests.Record) *protocol.Interaction { return linkInteraction("ld_3") })
+	if err := ep.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	stub.setSelect(nil)
+	rt.Complete(id, "done")
+	key := requests.Key{CreatorHost: "link-x", TargetID: "fake", RequestID: id}
+
+	// The outcome ask misses, then the resolution lands before Present
+	// reads: the horizon settles it instead of publishing unknown.
+	clk = clk.Add(protocol.DefaultCompactHorizon + time.Minute)
+	stub.presentRes = map[string]protocol.Resolution{
+		"ld_3": {InteractionID: "ld_3", Outcome: protocol.ResolutionAnswered, Option: "Deny"},
+	}
+	if err := ep.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	rec, _, _ := store.Get(key)
+	var got *protocol.Resolution
+	for i := range rec.Resolved {
+		if rec.Resolved[i].InteractionID == "ld_3" {
+			got = &rec.Resolved[i]
+		}
+	}
+	if got == nil || got.Outcome != protocol.ResolutionAnswered || got.Option != "Deny" {
+		t.Fatalf("resolution = %+v; want answered/Deny, not unknown", got)
+	}
+	for i := range rec.Resolved {
+		if rec.Resolved[i].InteractionID == "ld_3" && rec.Resolved[i].Outcome == protocol.ResolutionUnknown {
+			t.Fatal("unknown published although the final read saw the resolution")
+		}
+	}
+	if slices.Contains(rec.OwedOutcomes, "ld_3") || slices.Contains(rec.RetiredOutcomes, "ld_3") {
+		t.Fatalf("obligations = owed %v retired %v; want ld_3 settled", rec.OwedOutcomes, rec.RetiredOutcomes)
 	}
 }
 
