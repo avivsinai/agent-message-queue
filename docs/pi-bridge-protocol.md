@@ -421,25 +421,40 @@ task again with a new `request_id`.
 **The guard.** Right before it hands a granted request to pi, the extension
 arms the guard: it makes a random arm id (16 bytes, hex), adds it to the
 guard's state, and writes `granted-guard.<pid>.json` (mode 0600, replaced
-whole), which holds `{"pid": <pid>, "arms": [{"arm", "ref", "armed_at"}]}`
-for every open arm of that pi process. A write that fails sends nothing and
+whole), which holds `{"pid": <pid>, "started": <seconds>, "arms": [{"arm",
+"ref", "armed_at"}]}` for every open arm of that pi process; `started` is the
+process's start in Unix seconds. A write that fails sends nothing and
 settles the request `failed`. The text handed to pi is the request's text, an
 empty line, and the line `[AMQ granted task <arm>]`, so only that message
 carries the arm. The guard is the state of the pi process, not of the
 mailbox: a bridge that loses its mailbox, a new session and a reload keep it,
 and the extension never reads, changes or removes another process's file. A
-reload loads the extension again in the same process; the new instance reads
-the file of its own process id and keeps those arms open. pi does not reload
-while a run is active.
+reload loads the extension again in the same process; at `session_start`,
+which pi emits before any run, the new instance reads the file of its own
+process id and keeps those arms open. A file of its own process id whose
+`started` is more than 2 seconds from this process's start was left by an
+earlier process with the same pid number: the extension removes it and
+restores nothing. So a pi process that ends with an open arm leaves its
+file, and a later process with the same pid number removes it. pi does not
+reload while a run is active.
 
-**When an arm ends.** An arm ends when the user message that carries its line
-started and, after that, pi emits `agent_settled` while it holds no pending
-message; or when `sendUserMessage` throws, which proves that nothing was
-delivered. Each arm ends on its own evidence; one granted task that settles
-ends only its own arm. An arm with no such evidence stays open until the pi
-process exits: for example when an input extension removed the line from the
-message, and across an abort, a retry, a compaction and a reload. The file is
-removed when no arm is open.
+**When an arm ends.** An arm ends in three steps, all in the pi session that
+ran its granted message: the user message that carries its line starts;
+after that, that session emits `agent_settled` while pi holds no pending
+message; after that, the person types a prompt in that session (pi's
+`input` event with source `interactive`, which pi emits before the run that
+the prompt starts). The arm ends at that prompt, so the person's own run is
+not guarded by it. A run that no person typed, such as a turn that another
+extension starts after the settle, stays guarded until the person types;
+a message that the person types into such a run, as steering or a
+follow-up, ends the arm too. A message typed while the granted run is
+active ends nothing. An arm also ends when `sendUserMessage` throws, which
+proves that nothing was delivered. Each arm ends on its own evidence: the
+end of one granted task removes only its own arm, and the events of another
+session do not move it. An arm with no such
+evidence stays open until the pi process exits: for example when an input
+extension removed the line from the message, and across an abort, a retry, a
+compaction and a reload. The file is removed when no arm is open.
 
 **What the guard asks.** While any arm is open, every tool call pi makes,
 including a nested call (`parentToolCallId`), an MCP tool and any other
@@ -451,24 +466,35 @@ person's own runs too:
   `builtin:<name>`). A tool that an extension registers under one of these
   names asks.
 - A session that is not in the terminal UI at that moment blocks the call.
-- The call's text is its whole input as indented JSON. A text longer than
-  2000 characters blocks the call with no dialog: a task that needs such a
-  call is sent with a signature.
-- Otherwise pi's terminal shows a dialog. Its title is "A task that a linked
-  server sent wants to run `<tool>`:", or, when no open arm's message has
-  started, "A task that a linked server sent may still run in this session.
-  `<tool>` wants to run:", then the call's text. A tool that is not pi's own
-  built-in adds "This is a tool of an extension. AMQ cannot see what it does
-  or starts; one yes covers the whole call." The options are `No` (first, so
-  Enter does not approve) and `Yes, run it`. Only `Yes, run it` runs the
-  call. `No`, Escape, an aborted run and a dialog that fails block it.
+- The call's text is its whole input as indented JSON. In it, and in the
+  tool's name, every character that a terminal can use to hide or reorder
+  text is written as its `\uXXXX` escape: C1 controls (U+007F to U+009F),
+  format characters (Unicode category Cf: bidi overrides and isolates,
+  zero-width characters, the soft hyphen, U+FEFF), U+2028 and U+2029.
+- A call whose text does not fit one screen blocks with no dialog: a text
+  longer than 2000 characters, or one that takes more than 20 rows at 80
+  columns (the sum over its lines of the line's length divided by 80,
+  rounded up, at least 1 per line). A task that needs such a call is sent
+  with a signature.
+- Otherwise pi's terminal shows a text input. Its title is "A task that a
+  linked server sent wants to run `<tool>`:", or, when no open arm's
+  message has started, "A task that a linked server sent may still run in
+  this session. `<tool>` wants to run:", then the call's text. A tool that is
+  not pi's own built-in adds "This is a tool of an extension. AMQ cannot see
+  what it does or starts; one yes covers the whole call." The title ends with
+  "Type yes to run it. Any other answer does not run it." Only the answer
+  `yes`, after spaces are trimmed and case is lowered, runs the call. Any
+  other text, including text typed ahead into the input, Enter alone,
+  Escape, an aborted run and a dialog that fails block it.
 
 A message that the person types into the granted run does not end the guard,
 so the person is asked for those calls too. When the end of a granted run
 cannot be proven, the guard keeps asking in the person's own later runs, with
 the second title; a restart of pi ends that. The bridge's Buzz copy of the
 dialog has no options: only the person at the terminal answers, and a link's
-`interaction.respond` is refused.
+`interaction.respond` is refused. pi runs the `tool_call` handlers of its
+extensions one after another, so another extension's handler that runs after
+the bridge's can change a call's input after the person typed yes.
 
 The model sees the reason of a blocked call as the tool's error:
 

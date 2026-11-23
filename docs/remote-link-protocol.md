@@ -217,7 +217,8 @@ retired.
    bridge revision 6 or later, publishes `gate: true` in the `tui` surface:
    the bridge then asks the person at pi's terminal before every tool call
    of the granted task except pi's own `read`, `grep`, `find` and `ls`, and
-   in the person's own runs until the granted run is proven over (see
+   in the person's own runs until the person types a prompt after the
+   granted run settled (see
    [the pi guard](pi-bridge-protocol.md#bridge-revision-6-the-guard-of-granted-tasks)).
    A pi session in another mode, a bridge with no gate, or no fresh
    liveness answers `grant_info` not available with reason

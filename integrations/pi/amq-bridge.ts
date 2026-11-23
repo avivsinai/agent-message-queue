@@ -206,14 +206,26 @@ let inactiveNoticeShown = false;
 
 // The guard of granted tasks (docs/pi-bridge-protocol.md, bridge revision
 // 6). While any arm is open, every tool call except pi's own read-only
-// built-ins waits for the yes of the person at the terminal. The arms are
-// state of this module instance plus one file per pi process,
+// built-ins waits for the typed yes of the person at the terminal. The arms
+// are state of this module instance plus one file per pi process,
 // granted-guard.<pid>.json in the bridge directory; no mailbox object holds
 // them, so a displaced bridge, a new session or a reload keeps them. An arm
-// ends only when its granted message started and a later agent_settled came
-// with no pending message, or when its hand-off failed synchronously;
+// ends only when its hand-off failed synchronously, or when its granted
+// message started in a session, that session then settled with no pending
+// message, and after that the person typed a prompt in that session;
 // otherwise it stays for the life of the pi process.
-type Arm = { ref: string; tagged: boolean; dir: string; armedAt: string };
+type Arm = {
+	ref: string;
+	// tagged: the granted message started. owner is the registration whose
+	// session ran it, the only one whose events settle or end the arm.
+	tagged: boolean;
+	owner: ExtensionAPI | null;
+	// settled: the owner's session settled after the tag with no pending
+	// message.
+	settled: boolean;
+	dir: string;
+	armedAt: string;
+};
 const arms = new Map<string, Arm>();
 // guardRestored holds the bridge directories whose guard file this module
 // instance has read.
@@ -221,11 +233,17 @@ const guardRestored = new Set<string>();
 // GUARD_PID is the pi process that loaded this module. It names the only
 // guard file this module reads, writes or removes.
 const GUARD_PID = process.pid;
+// GUARD_START_SLACK_S is how far apart, in seconds, two reads of one
+// process's start may be and still name the same process.
+const GUARD_START_SLACK_S = 2;
 const ARM_ID = /^[0-9a-f]{32}$/;
 const READ_ONLY_BUILTINS = new Set(["read", "grep", "find", "ls"]);
 const gateTextLimit = 2000;
-const gateNo = "No";
-const gateYes = "Yes, run it";
+// A call's text must fit one screen: at most gateRowLimit rows of
+// gateColumns columns.
+const gateRowLimit = 20;
+const gateColumns = 80;
+const gateAsk = "\n\nType yes to run it. Any other answer does not run it.";
 const gateDenied = "The person at the terminal did not approve this call. It is a call of a task that a linked server sent under a session grant.";
 const gateNoTerminal = "This call needs the person's yes at the terminal, and this pi session has no terminal UI.";
 const gateTooLong = "This call is too long to show whole at the terminal for approval. A task that needs it must be sent with a signature.";
@@ -233,6 +251,13 @@ const gateExtensionLine = "This is a tool of an extension. AMQ cannot see what i
 
 function guardFile(dir: string): string {
 	return path.join(dir, `granted-guard.${GUARD_PID}.json`);
+}
+
+// processStarted is the start of this pi process in Unix seconds. With the
+// pid it tells this process's guard file from one that an earlier process
+// with the same pid left.
+function processStarted(): number {
+	return Math.round((Date.now() - process.uptime() * 1000) / 1000);
 }
 
 // armLine is the last line of the text handed to pi for a granted request.
@@ -250,7 +275,7 @@ function writeGuard(dir: string): boolean {
 			fs.rmSync(guardFile(dir), { force: true });
 			return true;
 		}
-		const tmp = writeTemp(dir, JSON.stringify({ pid: GUARD_PID, arms: open }));
+		const tmp = writeTemp(dir, JSON.stringify({ pid: GUARD_PID, started: processStarted(), arms: open }));
 		try {
 			fs.renameSync(tmp, guardFile(dir));
 		} catch (err) {
@@ -265,21 +290,31 @@ function writeGuard(dir: string): boolean {
 
 // restoreGuard reads this process's guard file in dir once per module
 // instance, so the arms an earlier load of the extension in the same pi
-// process opened stay open. A restored arm is not tagged: it ends only with
-// the process.
+// process opened stay open. A file whose start is not this process's start
+// was left by an earlier process with the same pid: it is removed and
+// restores nothing. A restored arm is not tagged: it ends only with the
+// process.
 function restoreGuard(dir: string): void {
 	if (guardRestored.has(dir)) return;
 	guardRestored.add(dir);
-	let rec: { pid?: unknown; arms?: unknown };
+	let rec: { pid?: unknown; started?: unknown; arms?: unknown };
 	try {
 		rec = JSON.parse(fs.readFileSync(guardFile(dir), "utf8"));
 	} catch {
 		return;
 	}
-	if (!rec || rec.pid !== GUARD_PID || !Array.isArray(rec.arms)) return;
+	if (!rec || typeof rec.started !== "number" || Math.abs(rec.started - processStarted()) > GUARD_START_SLACK_S) {
+		try {
+			fs.rmSync(guardFile(dir), { force: true });
+		} catch {
+			// It stays; only a process with this pid reads it.
+		}
+		return;
+	}
+	if (rec.pid !== GUARD_PID || !Array.isArray(rec.arms)) return;
 	for (const a of rec.arms as { arm?: unknown; ref?: unknown; armed_at?: unknown }[]) {
 		if (typeof a?.arm !== "string" || !ARM_ID.test(a.arm) || arms.has(a.arm)) continue;
-		arms.set(a.arm, { ref: typeof a.ref === "string" ? a.ref : "", tagged: false, dir, armedAt: typeof a.armed_at === "string" ? a.armed_at : "" });
+		arms.set(a.arm, { ref: typeof a.ref === "string" ? a.ref : "", tagged: false, owner: null, settled: false, dir, armedAt: typeof a.armed_at === "string" ? a.armed_at : "" });
 	}
 }
 
@@ -287,7 +322,7 @@ function restoreGuard(dir: string): void {
 // of dir. When the file cannot be written the arm is not opened and it
 // returns false, so the request is not sent.
 function openArm(dir: string, arm: string, ref: string): boolean {
-	arms.set(arm, { ref, tagged: false, dir, armedAt: new Date().toISOString() });
+	arms.set(arm, { ref, tagged: false, owner: null, settled: false, dir, armedAt: new Date().toISOString() });
 	if (writeGuard(dir)) return true;
 	arms.delete(arm);
 	return false;
@@ -300,36 +335,68 @@ function endArm(arm: string): void {
 	writeGuard(a.dir);
 }
 
-// endSettledArms ends every tagged arm when pi holds no pending message:
-// the granted message of each started, and the run it joined has settled.
-// An arm with no tag stays.
-function endSettledArms(ctx: ExtensionContext): void {
+// settleArms marks settled every tagged arm of owner when pi holds no
+// pending message: the granted message started in owner's session and the
+// run it joined has settled. The arm stays open until the person types.
+function settleArms(owner: ExtensionAPI, ctx: ExtensionContext): void {
 	if (arms.size === 0) return;
 	let pending = true;
 	try {
 		pending = ctx.hasPendingMessages();
 	} catch {
-		// Unknown counts as pending: the arms stay.
+		// Unknown counts as pending: nothing settles.
 	}
 	if (pending) return;
+	for (const a of arms.values()) {
+		if (a.tagged && a.owner === owner) a.settled = true;
+	}
+}
+
+// endTypedArms ends every settled arm of owner: the person typed a prompt in
+// owner's session after the granted run settled, so the run it starts is
+// the person's own.
+function endTypedArms(owner: ExtensionAPI): void {
 	const dirs = new Set<string>();
 	for (const [arm, a] of arms) {
-		if (!a.tagged) continue;
+		if (!a.settled || a.owner !== owner) continue;
 		arms.delete(arm);
 		dirs.add(a.dir);
 	}
 	for (const dir of dirs) writeGuard(dir);
 }
 
+// HIDDEN matches every character that a terminal can use to hide or reorder
+// text and that JSON leaves as it is: C1 controls, format characters (bidi
+// controls, zero-width characters, the soft hyphen, U+FEFF) and the line
+// and paragraph separators.
+const HIDDEN = /[\u007f-\u009f\u2028\u2029]|\p{Cf}/gu;
+
+// visible writes every HIDDEN character of text as its \uXXXX escape, one
+// per UTF-16 code unit.
+function visible(text: string): string {
+	return text.replace(HIDDEN, (c) => {
+		let out = "";
+		for (let i = 0; i < c.length; i++) out += `\\u${c.charCodeAt(i).toString(16).padStart(4, "0")}`;
+		return out;
+	});
+}
+
 // callText is the text the dialog shows for a call's input: every argument,
-// escaped by JSON, the same for every tool. undefined when the input has no
-// JSON form.
+// escaped by JSON and with no character that can hide text, the same for
+// every tool. undefined when the input has no JSON form.
 function callText(input: unknown): string | undefined {
+	let text: string | undefined;
 	try {
-		return JSON.stringify(input, null, 1);
+		text = JSON.stringify(input, null, 1);
 	} catch {
 		return undefined;
 	}
+	return text === undefined ? undefined : visible(text);
+}
+
+// screenRows is the number of rows text takes at gateColumns columns.
+function screenRows(text: string): number {
+	return text.split("\n").reduce((n, line) => n + Math.max(1, Math.ceil(line.length / gateColumns)), 0);
 }
 
 type ToolCall = { toolName?: unknown; input?: unknown };
@@ -337,7 +404,7 @@ type GateResult = { block: true; reason: string } | undefined;
 
 // gate decides one tool call while an arm is open. A call runs only when it
 // is a read-only built-in of pi itself, or when the person at the terminal
-// picks the exact yes; every other answer and every failure blocks it.
+// types yes; every other answer and every failure blocks it.
 async function gate(pi: ExtensionAPI, event: ToolCall, ctx: ExtensionContext): Promise<GateResult> {
 	const deny = (reason: string): GateResult => ({ block: true, reason });
 	const name = typeof event.toolName === "string" ? event.toolName : "";
@@ -354,13 +421,14 @@ async function gate(pi: ExtensionAPI, event: ToolCall, ctx: ExtensionContext): P
 	try {
 		if (ctx.mode !== "tui") return deny(gateNoTerminal);
 		const text = callText(event.input);
-		if (text === undefined || text.length > gateTextLimit) return deny(gateTooLong);
+		if (text === undefined || text.length > gateTextLimit || screenRows(text) > gateRowLimit) return deny(gateTooLong);
+		const shown = visible(name);
 		const head = [...arms.values()].some((a) => a.tagged)
-			? `A task that a linked server sent wants to run \`${name}\`:`
-			: `A task that a linked server sent may still run in this session. \`${name}\` wants to run:`;
+			? `A task that a linked server sent wants to run \`${shown}\`:`
+			: `A task that a linked server sent may still run in this session. \`${shown}\` wants to run:`;
 		const title = [head, text, ...(builtin ? [] : [gateExtensionLine])].join("\n");
-		const answer = await ctx.ui.select(title, [gateNo, gateYes], { signal: ctx.signal });
-		return answer === gateYes ? undefined : deny(gateDenied);
+		const answer = await ctx.ui.input(title + gateAsk, "", { signal: ctx.signal });
+		return typeof answer === "string" && answer.trim().toLowerCase() === "yes" ? undefined : deny(gateDenied);
 	} catch {
 		return deny(gateDenied);
 	}
@@ -375,14 +443,19 @@ export default function amqPiBridge(pi: ExtensionAPI): void {
 // the plain extension.
 export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = {}): AmqBridge {
 	// The guard does not use the mailbox: these handlers read only the arms,
-	// so a pi that lost or never took its mailbox stays guarded.
-	const loaded = resolveIdentity(options, undefined);
-	if (loaded) restoreGuard(bridgeDir(loaded));
+	// so a pi that lost or never took its mailbox stays guarded. pi emits
+	// session_start, which restores the guard file, before any run.
 	pi.on("tool_call", async (event, ctx) => {
 		if (arms.size === 0) return undefined;
 		return gate(pi, event, ctx);
 	});
-	pi.on("agent_settled", (_event, ctx) => endSettledArms(ctx));
+	pi.on("agent_settled", (_event, ctx) => settleArms(pi, ctx));
+	// pi emits input before the run that the input starts.
+	pi.on("input", (event) => {
+		if (arms.size === 0) return undefined;
+		if (event.source === "interactive") endTypedArms(pi);
+		return undefined;
+	});
 
 	let bridge: Bridge | null = null;
 	// ownerNotice limits the notices about another bridge to once.
@@ -593,7 +666,10 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 			// A granted request's text ends with its arm line, so this
 			// match is the start of the message that carries the arm.
 			const a = f.arm ? arms.get(f.arm) : undefined;
-			if (a) a.tagged = true;
+			if (a) {
+				a.tagged = true;
+				a.owner = pi;
+			}
 		}
 		if (b.deliver) return;
 		if (f.started) {
