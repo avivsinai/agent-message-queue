@@ -85,7 +85,7 @@ var requiredMailboxLeaves = [...]MailboxLeaf{
 // mailbox directory must be is a corrupt layout, not a missing level:
 // refusing here means a multi-recipient delivery fails whole instead of
 // creating part of one tree and then erroring. Companion to
-// DeliveryRoot.refuseNonDirectoryAncestor for the ambient-path layout helpers
+// DeliveryRoot.mkdirHeld for the ambient-path layout helpers
 // that run before a capability is opened.
 func refuseNonDirectoryAmbient(dir string) error {
 	current := dir
