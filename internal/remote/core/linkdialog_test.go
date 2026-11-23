@@ -25,7 +25,8 @@ type stubDialogs struct {
 	presentRes map[string]protocol.Resolution // resolutions Present sees in the outcome-read race
 	policy     func(string) (bool, string)    // AnswerPolicy; nil = available
 	write      func() (protocol.Code, string) // WriteAnswer; nil = durable
-	answers    []string                       // WriteAnswer calls, "binding/id/label"
+	answers    []string                       // WriteAnswer calls, "binding/id/label/role"
+	taken      map[string]bool                // ids whose answer file stands: HasAnswer true
 }
 
 func (s *stubDialogs) AnswerPolicy(host, binding string) (bool, string) {
@@ -39,10 +40,25 @@ func (s *stubDialogs) AnswerPolicy(host, binding string) (bool, string) {
 
 func (s *stubDialogs) RequestLive(*requests.Record) bool { return true }
 
-func (s *stubDialogs) WriteAnswer(host, binding, id, label, _, _ string) (protocol.Code, string) {
+// taken answers the HasAnswer probe: ids recorded by WriteAnswer, or ones
+// the test plants to stand for an answer file the flag missed.
+func (s *stubDialogs) HasAnswer(_, id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.answers = append(s.answers, binding+"/"+id+"/"+label)
+	if s.taken == nil {
+		return false
+	}
+	return s.taken[id]
+}
+
+func (s *stubDialogs) WriteAnswer(host, binding, id, label, role, _, _, _ string) (protocol.Code, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.answers = append(s.answers, binding+"/"+id+"/"+label+"/"+role)
+	if s.taken == nil {
+		s.taken = map[string]bool{}
+	}
+	s.taken[id] = true
 	if s.write != nil {
 		return s.write()
 	}

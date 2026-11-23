@@ -50,12 +50,24 @@ type LinkDialogs interface {
 	// time.
 	RequestLive(rec *requests.Record) bool
 
+	// HasAnswer reports whether the binding's dialog already holds a
+	// recorded answer or a resolution for the id: an already-occupied
+	// answer wins ahead of any digest or option judgment, so a stale
+	// published button cannot turn a recorded answer into a refusal.
+	HasAnswer(binding, id string) bool
+
 	// WriteAnswer records a verified link answer in the binding's dialog
-	// directory: the answers file created exclusively, the file and its
-	// directory synced. "", "" means durable. Any other return is the
-	// refusal code and its reason; nothing was recorded, except for
-	// internal, where durability could not be confirmed.
-	WriteAnswer(host, binding, id, label, documentDigest, credential string) (protocol.Code, string)
+	// directory. Before it writes anything it re-renders the dialog's
+	// record file with the same render publication used and refuses
+	// dialog_changed unless interactionDigest matches that render — the
+	// signature covers the dialog as the record holds it now, not as
+	// publication stored it. role is the choice's expected role as the
+	// stored interaction names it; the write finds the option by label
+	// and role in the rendered interaction. "", "" means durable. Any
+	// other return is the refusal code and its reason; nothing was
+	// recorded, except for internal, where durability could not be
+	// confirmed.
+	WriteAnswer(host, binding, id, label, role, interactionDigest, documentDigest, credential string) (protocol.Code, string)
 }
 
 // SetLinkDialogs installs the link-dialog seam. Until it is set, no link

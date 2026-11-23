@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -21,9 +22,9 @@ import (
 // linkAnswerFixture is the unit A chain machine with the binding's harness
 // named claude: the hook seam that publishes and applies its dialogs is the
 // Claude permission hook the tests drive in process.
-func linkAnswerFixture(t *testing.T) (core.Source, *core.Endpoint) {
+func linkAnswerFixture(t *testing.T) (*linkSet, core.Source, *core.Endpoint) {
 	t.Helper()
-	_, _, linkSrc, ep := linkDialogChainFixture(t)
+	ls, _, linkSrc, ep := linkDialogChainFixture(t)
 	b, err := binding.ReadNamed("pi-chat")
 	if err != nil {
 		t.Fatal(err)
@@ -32,7 +33,7 @@ func linkAnswerFixture(t *testing.T) (core.Source, *core.Endpoint) {
 	if err := binding.WriteNamed(b); err != nil {
 		t.Fatal(err)
 	}
-	return linkSrc, ep
+	return ls, linkSrc, ep
 }
 
 // runHookDialog starts one real Claude PermissionRequest hook and waits
@@ -118,7 +119,8 @@ func waitResolved(t *testing.T, id string) dialog.Resolved {
 // live hook returns the allow decision, and the resolution reads answered
 // with the chosen label, by the link.
 func TestLinkAnswerChainAllow(t *testing.T) {
-	linkSrc, ep := linkAnswerFixture(t)
+	ls, linkSrc, ep := linkAnswerFixture(t)
+	_ = ls
 	id, ref := linkSubmit(t, ep, linkSrc)
 	_ = id
 	reqID, ended, out := runHookDialog(t)
@@ -187,7 +189,8 @@ func TestLinkAnswerChainAllow(t *testing.T) {
 // The deny side: the reject label admits, the hook denies, the resolution
 // reads denied with the label, by the link.
 func TestLinkAnswerChainDeny(t *testing.T) {
-	linkSrc, ep := linkAnswerFixture(t)
+	ls, linkSrc, ep := linkAnswerFixture(t)
+	_ = ls
 	_, ref := linkSubmit(t, ep, linkSrc)
 	reqID, ended, out := runHookDialog(t)
 	if err := ep.Reconcile(); err != nil {
@@ -232,7 +235,8 @@ func TestLinkAnswerChainDeny(t *testing.T) {
 // A competing Buzz answer written first wins: the link's send gets
 // already_resolved, and the outcome reads answered_elsewhere.
 func TestLinkAnswerCompetingBuzzAnswerWins(t *testing.T) {
-	linkSrc, ep := linkAnswerFixture(t)
+	ls, linkSrc, ep := linkAnswerFixture(t)
+	_ = ls
 	_, ref := linkSubmit(t, ep, linkSrc)
 	reqID, ended, _ := runHookDialog(t)
 	if err := ep.Reconcile(); err != nil {
@@ -289,7 +293,8 @@ func TestLinkAnswerCompetingBuzzAnswerWins(t *testing.T) {
 // revision of the same card while an answer waits, and lights again when
 // the seam removes the answer as not valid.
 func TestLinkAnswerRevisionTracksAnswerFile(t *testing.T) {
-	linkSrc, ep := linkAnswerFixture(t)
+	ls, linkSrc, ep := linkAnswerFixture(t)
+	_ = ls
 	_, ref := linkSubmit(t, ep, linkSrc)
 
 	// A dialog record without a hook: the seam under test is publication.
@@ -349,7 +354,8 @@ func TestLinkAnswerRevisionTracksAnswerFile(t *testing.T) {
 // same signed bytes are admitted again: the owner signed that choice for
 // that dialog.
 func TestLinkAnswerReopensAfterSeamReject(t *testing.T) {
-	linkSrc, ep := linkAnswerFixture(t)
+	ls, linkSrc, ep := linkAnswerFixture(t)
+	_ = ls
 	_, ref := linkSubmit(t, ep, linkSrc)
 	reqID, ended, _ := runHookDialog(t)
 	_ = reqID
@@ -392,7 +398,8 @@ func TestLinkAnswerReopensAfterSeamReject(t *testing.T) {
 // The directories exist as they are: a missing answers directory refuses
 // with already_resolved and nothing is created.
 func TestLinkAnswerMissingAnswersDirRefuses(t *testing.T) {
-	linkSrc, ep := linkAnswerFixture(t)
+	ls, linkSrc, ep := linkAnswerFixture(t)
+	_ = ls
 	_, ref := linkSubmit(t, ep, linkSrc)
 	reqID, ended, _ := runHookDialog(t)
 	if err := ep.Reconcile(); err != nil {
@@ -428,6 +435,77 @@ func TestLinkAnswerMissingAnswersDirRefuses(t *testing.T) {
 	_ = ended // the hook keeps waiting; the test does not need its decision
 }
 
+// A live policy drop must not leave the published button lit: when the
+// share's approvals turn terminal or its consent turns local, the next
+// reconcile re-renders the pinned card as a disabled copy with the same
+// text, and a policy back lights the button again.
+func TestLinkAnswerPolicyDropDisablesButton(t *testing.T) {
+	ls, linkSrc, ep := linkAnswerFixture(t)
+	_, ref := linkSubmit(t, ep, linkSrc)
+	reqID, ended, _ := runHookDialog(t)
+	_ = reqID
+	_ = ended
+	if err := ep.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	snap := requestGet(t, ep, linkSrc, ref)
+	if snap.Interaction == nil || !snap.Interaction.RemoteAnswer {
+		t.Fatalf("published = %+v; want the button live", snap.Interaction)
+	}
+
+	disable := func() {
+		if err := ep.Reconcile(); err != nil {
+			t.Fatal(err)
+		}
+		s := requestGet(t, ep, linkSrc, ref)
+		if s.Interaction == nil {
+			t.Fatal("the pinned card stopped publishing")
+		}
+		if s.Interaction.RemoteAnswer {
+			t.Fatalf("the button stayed live under the dead policy: %+v", s.Interaction)
+		}
+		if s.Interaction.Prompt != snap.Interaction.Prompt || s.Interaction.InteractionID != snap.Interaction.InteractionID ||
+			!sameOptions(s.Interaction.Options, snap.Interaction.Options) {
+			t.Fatalf("the disabled copy changed the card: %+v vs %+v", s.Interaction, snap.Interaction)
+		}
+	}
+
+	// Approvals terminal.
+	ls.running["link"].link.Shares[0].Approvals = manifest.ApprovalsTerminal
+	disable()
+	ls.running["link"].link.Shares[0].Approvals = manifest.ApprovalsLink
+	if err := ep.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	if s := requestGet(t, ep, linkSrc, ref); s.Interaction == nil || !s.Interaction.RemoteAnswer {
+		t.Fatalf("restored policy = %+v; want the button live again", s.Interaction)
+	}
+
+	// Consent local.
+	ls.running["link"].link.Shares[0].Consent = "none"
+	disable()
+	ls.running["link"].link.Shares[0].Consent = "passkey"
+	if err := ep.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	if s := requestGet(t, ep, linkSrc, ref); s.Interaction == nil || !s.Interaction.RemoteAnswer {
+		t.Fatalf("restored consent = %+v; want the button live again", s.Interaction)
+	}
+}
+
+// sameOptions compares two option lists by label.
+func sameOptions(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // requestGet is the linked server's read of one running request.
 func requestGet(t *testing.T, ep *core.Endpoint, linkSrc core.Source, ref string) protocol.Snapshot {
 	t.Helper()
@@ -436,4 +514,112 @@ func requestGet(t *testing.T, ep *core.Endpoint, linkSrc core.Source, ref string
 		t.Fatalf("get: %v", err)
 	}
 	return rep.(protocol.Reply).Snapshot
+}
+
+// The write re-renders the dialog's record file with the one render
+// publication used and refuses a signature that does not cover the record
+// as it now stands: text edited after publication, and an approve label
+// moved onto a deny option, both refuse changed; the untouched record
+// still answers.
+func TestLinkAnswerWriteRejectsChangedRecord(t *testing.T) {
+	cases := []struct {
+		name  string
+		shift func(req *dialog.Request)
+	}{
+		{"record text edited", func(req *dialog.Request) { req.Text += "\nsudo make me a sandwich" }},
+		{"approve label moved onto a deny option", func(req *dialog.Request) {
+			req.Options[0].Label, req.Options[1].Label = req.Options[1].Label, req.Options[0].Label
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, linkSrc, ep := linkAnswerFixture(t)
+			_, ref := linkSubmit(t, ep, linkSrc)
+			reqID, _, _ := runHookDialog(t)
+			if err := ep.Reconcile(); err != nil {
+				t.Fatal(err)
+			}
+			snap := requestGet(t, ep, linkSrc, ref)
+			if snap.Interaction == nil || !snap.Interaction.RemoteAnswer {
+				t.Fatalf("published = %+v; want the button live", snap.Interaction)
+			}
+			dir, err := dialog.DirRead("pi-chat")
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "requests", reqID+".json")
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var rec dialog.Request
+			if err := json.Unmarshal(raw, &rec); err != nil {
+				t.Fatal(err)
+			}
+			tc.shift(&rec)
+			shifted, err := json.Marshal(rec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, shifted, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			a := core.LinkAnswer{
+				RequestRef:        ref,
+				InteractionID:     snap.Interaction.InteractionID,
+				InteractionDigest: linkDigest(snap.Interaction),
+				Option:            snap.Interaction.ApproveOption,
+				DocumentDigest:    linkDigest(snap.Interaction),
+				Credential:        "k1",
+			}
+			if code, _ := ep.AnswerLinkDialog(linkSrc, a); code != protocol.CodeDialogChanged {
+				t.Fatalf("shifted record = %s; want dialog_changed", code)
+			}
+			// The untouched record still answers: the refusal names the
+			// change, not the write path.
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if code, msg := ep.AnswerLinkDialog(linkSrc, a); code != "" {
+				t.Fatalf("restored record refused: %s %s", code, msg)
+			}
+		})
+	}
+}
+
+// LinkAnswerInfo's refusal order holds when the harness cannot take link
+// answers at all: approvals and consent still outrank harness_unsupported,
+// and a harness whose seam marks no dialog complete — pi — refuses last.
+func TestLinkAnswerInfoHarnessUnsupportedLast(t *testing.T) {
+	ls, linkSrc, ep := linkAnswerFixture(t)
+	b := ls.running["link"].link.Shares[0].Binding
+	host, err := binding.ReadNamed(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(harness string) {
+		host.Harness = harness
+		if err := binding.WriteNamed(host); err != nil {
+			t.Fatal(err)
+		}
+	}
+	set := func(approvals, consent string) {
+		ls.running["link"].link.Shares[0].Approvals = approvals
+		ls.running["link"].link.Shares[0].Consent = consent
+	}
+	if av, r := ep.LinkAnswerInfo(linkSrc, b); !av || r != "" {
+		t.Fatalf("claude binding = %v %q; want supported", av, r)
+	}
+	write("pi")
+	if av, r := ep.LinkAnswerInfo(linkSrc, b); av || r != "harness_unsupported" {
+		t.Fatalf("pi binding = %v %q; want harness_unsupported", av, r)
+	}
+	set(manifest.ApprovalsTerminal, "local")
+	if _, r := ep.LinkAnswerInfo(linkSrc, b); r != "approvals_terminal" {
+		t.Fatalf("pi binding, terminal = %q; want approvals_terminal first", r)
+	}
+	set(manifest.ApprovalsLink, "local")
+	if _, r := ep.LinkAnswerInfo(linkSrc, b); r != "consent_local" {
+		t.Fatalf("pi binding, consent local = %q; want consent_local first", r)
+	}
 }

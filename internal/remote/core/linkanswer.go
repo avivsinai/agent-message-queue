@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 
+	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 	"github.com/avivsinai/agent-message-queue/internal/remote/jcs"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
@@ -70,11 +71,17 @@ func (e *Endpoint) AnswerLinkDialog(src Source, a LinkAnswer) (protocol.Code, st
 	}
 
 	// Step 6: the record's pending interaction is this dialog, still live
-	// for a link answer, unchanged since the touch, and the label names
-	// one of its two roles.
+	// for a link answer, and unchanged since the touch. The answer file is
+	// the only truth about "already answered": the exclusive create
+	// decides, so an already-recorded answer wins ahead of every digest
+	// and option judgment, and a stored flag the seam has since
+	// invalidated — a bad answer removed — never blocks re-admission.
 	if rec.Interaction == nil || rec.Interaction.InteractionID != a.InteractionID ||
-		!isLinkDialog(rec, a.InteractionID) || !rec.Interaction.RemoteAnswer {
+		!isLinkDialog(rec, a.InteractionID) {
 		return protocol.CodeAlreadyResolved, "the dialog is not waiting for a link answer"
+	}
+	if e.linkDialogs.HasAnswer(src.Binding, a.InteractionID) {
+		return protocol.CodeAlreadyResolved, "the dialog's answer is recorded"
 	}
 	want, err := interactionDigest(rec.Interaction)
 	if err != nil {
@@ -87,9 +94,15 @@ func (e *Endpoint) AnswerLinkDialog(src Source, a LinkAnswer) (protocol.Code, st
 		return protocol.CodeInvalid, "the option is not one of the dialog's link choices"
 	}
 
-	// Step 7: the exclusive, directory-bound write. The seam owns the
+	// Step 7: the exclusive, directory-bound write, with the choice's
+	// expected role as the stored interaction carries it and the signed
+	// digest for the write's own re-render check. The seam owns the
 	// files; a refusal here records nothing.
-	code, msg := e.linkDialogs.WriteAnswer(src.Host, src.Binding, a.InteractionID, a.Option, a.DocumentDigest, a.Credential)
+	role := dialog.RoleApprove
+	if a.Option == rec.Interaction.RejectOption {
+		role = dialog.RoleDeny
+	}
+	code, msg := e.linkDialogs.WriteAnswer(src.Host, src.Binding, a.InteractionID, a.Option, role, want, a.DocumentDigest, a.Credential)
 	if code != "" {
 		return code, msg
 	}
@@ -110,6 +123,15 @@ func interactionDigest(in *protocol.Interaction) (string, error) {
 	}
 	sum := sha256.Sum256(canon)
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
+// InteractionDigest is the value a server signs for one interaction: the
+// identity keys' JCS hash, the remote_answer flag excluded. The machine's
+// answer seam re-renders the dialog's record file and compares this
+// digest against the signed one before it writes — the one rule for what
+// the signature covers, shared by admission and the write.
+func InteractionDigest(in *protocol.Interaction) (string, error) {
+	return interactionDigest(in)
 }
 
 // LinkAnswerInfo reports whether the binding's share takes link answers

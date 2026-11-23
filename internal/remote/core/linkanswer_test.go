@@ -90,8 +90,8 @@ func TestAnswerLinkDialogAdmitsVerifiedAnswer(t *testing.T) {
 	}
 	stub.mu.Lock()
 	defer stub.mu.Unlock()
-	if len(stub.answers) != 1 || stub.answers[0] != "pi-chat/"+in.InteractionID+"/Allow once" {
-		t.Fatalf("seam write = %v; want the binding, id and approve label", stub.answers)
+	if len(stub.answers) != 1 || stub.answers[0] != "pi-chat/"+in.InteractionID+"/Allow once/approve" {
+		t.Fatalf("seam write = %v; want the binding, id, approve label and role", stub.answers)
 	}
 }
 
@@ -109,10 +109,13 @@ func TestAnswerLinkDialogDigestExcludesRemoteAnswerFlagOnly(t *testing.T) {
 	if code, _ := ep.AnswerLinkDialog(src, a); code != "" {
 		t.Fatalf("flag-stripped digest refused: %s", code)
 	}
-	// A moved prompt stales it.
+	// A moved prompt stales it, on a fresh dialog: the first admission
+	// recorded an answer, and a recorded answer wins ahead of the digest.
+	ep, _, _, key, in, src = answerFixture(t)
+	ref = protocol.EncodeRef(key.CreatorHost, key.TargetID, key.RequestID)
 	moved := *in
-	moved.Prompt = "Bash\n$ rm -rf /"
-	a.InteractionDigest = linkDigest(&moved)
+	moved.Prompt = "Bash\n$ wipe everything"
+	a = linkAnswer(ref, &moved, moved.ApproveOption)
 	if code, _ := ep.AnswerLinkDialog(src, a); code != protocol.CodeDialogChanged {
 		t.Fatalf("moved dialog = %s; want dialog_changed", code)
 	}
@@ -171,7 +174,7 @@ func TestAnswerLinkDialogRefusalsInOrder(t *testing.T) {
 		}
 	})
 	t.Run("already_resolved: no interaction, a foreign id, remote_answer false", func(t *testing.T) {
-		ep, store, _, key, in, src := answerFixture(t)
+		ep, store, stub, key, in, src := answerFixture(t)
 		ref := protocol.EncodeRef(key.CreatorHost, key.TargetID, key.RequestID)
 		// No pending interaction.
 		rec, _, _ := store.Get(key)
@@ -191,15 +194,47 @@ func TestAnswerLinkDialogRefusalsInOrder(t *testing.T) {
 		if code, _ := ep.AnswerLinkDialog(src, linkAnswer(ref, in, in.ApproveOption)); code != protocol.CodeAlreadyResolved {
 			t.Fatalf("unselected id = %s; want already_resolved", code)
 		}
-		// remote_answer false: an answer file exists, the button is dark.
+		// remote_answer false with an answer file: the file is the truth
+		// about "already answered" — the first answer wins.
 		rec.LinkDialogs = []string{in.InteractionID}
 		rec.Interaction = in
 		rec.Interaction.RemoteAnswer = false
 		if err := store.WriteMemo(rec); err != nil {
 			t.Fatal(err)
 		}
+		stub.mu.Lock()
+		stub.taken = map[string]bool{in.InteractionID: true}
+		stub.mu.Unlock()
 		if code, _ := ep.AnswerLinkDialog(src, linkAnswer(ref, in, in.ApproveOption)); code != protocol.CodeAlreadyResolved {
-			t.Fatalf("remote_answer false = %s; want already_resolved", code)
+			t.Fatalf("answered file, flag false = %s; want already_resolved", code)
+		}
+		// The stored flag reads false but the answer file is gone — the
+		// seam removed a bad answer before the next reconcile: the call is
+		// admitted, the flag is never the truth.
+		stub.mu.Lock()
+		stub.taken = nil
+		stub.mu.Unlock()
+		if code, _ := ep.AnswerLinkDialog(src, linkAnswer(ref, in, in.ApproveOption)); code != "" {
+			t.Fatalf("stale dark flag with no answer file = %s; want admitted", code)
+		}
+	})
+	t.Run("already_resolved: a recorded answer wins ahead of digest and option", func(t *testing.T) {
+		ep, _, stub, key, in, src := answerFixture(t)
+		ref := protocol.EncodeRef(key.CreatorHost, key.TargetID, key.RequestID)
+		stub.mu.Lock()
+		// An answer file the stale button missed: HasAnswer true, the
+		// published flag still lit, digest and option both wrong.
+		stub.taken = map[string]bool{in.InteractionID: true}
+		stub.mu.Unlock()
+		a := linkAnswer(ref, in, in.RejectOption)
+		a.InteractionDigest = "sha256:" + hex.EncodeToString([]byte("stale"))
+		if code, _ := ep.AnswerLinkDialog(src, a); code != protocol.CodeAlreadyResolved {
+			t.Fatalf("recorded answer with stale flag = %s; want already_resolved", code)
+		}
+		stub.mu.Lock()
+		defer stub.mu.Unlock()
+		if len(stub.answers) != 0 {
+			t.Fatalf("seam wrote again: %v", stub.answers)
 		}
 	})
 	t.Run("dialog_changed: the digest of a moved dialog", func(t *testing.T) {
@@ -232,6 +267,7 @@ func TestAnswerLinkDialogRefusalsInOrder(t *testing.T) {
 			t.Fatalf("seam already_resolved = %s", code)
 		}
 		stub.mu.Lock()
+		stub.taken = nil // the recorded answer is out of the way for the next row
 		stub.write = func() (protocol.Code, string) { return protocol.CodeInternal, "directory sync failed" }
 		stub.mu.Unlock()
 		if code, _ := ep.AnswerLinkDialog(src, linkAnswer(ref, in, in.ApproveOption)); code != protocol.CodeInternal {

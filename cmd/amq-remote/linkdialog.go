@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 	"github.com/avivsinai/agent-message-queue/internal/remote/linkio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
@@ -82,10 +83,6 @@ func (s *linkDialogSource) sharePolicy(rec *requests.Record) (approvals, consent
 // Select returns the interaction to publish for rec: the earliest opened
 // fully eligible dialog (ties by id), or a re-render of the one rec pins.
 func (s *linkDialogSource) Select(rec *requests.Record) *protocol.Interaction {
-	approvals, consent, ok := s.sharePolicy(rec)
-	if !ok || approvals != manifest.ApprovalsLink || !linkio.TakesGrant(consent) {
-		return nil
-	}
 	dir, err := dialog.DirRead(rec.Binding)
 	if err != nil {
 		return nil
@@ -97,12 +94,20 @@ func (s *linkDialogSource) Select(rec *requests.Record) *protocol.Interaction {
 	}
 	if rec.Interaction != nil && slices.Contains(rec.LinkDialogs, rec.Interaction.InteractionID) {
 		// Re-render the pinned dialog only: its answer state may have
-		// moved. A different dialog never steals the pin.
+		// moved. A different dialog never steals the pin. The re-render
+		// runs even when the live policy no longer permits an answer —
+		// then takesAnswers lights the button off and the card stays as a
+		// disabled copy with its published text (R5), instead of the old
+		// live card surviving under a dead policy.
 		in, eligible := s.renderDialog(dir, rec, rec.Interaction.InteractionID, true)
 		if !eligible {
 			return nil
 		}
 		return in
+	}
+	approvals, consent, ok := s.sharePolicy(rec)
+	if !ok || approvals != manifest.ApprovalsLink || !linkio.TakesGrant(consent) {
+		return nil
 	}
 	reqs, err := dialog.Requests(dir)
 	if err != nil {
@@ -171,6 +176,25 @@ func (s *linkDialogSource) renderDialog(dir string, rec *requests.Record, id str
 	if req.Session == "" || req.Session != rec.NativeSession {
 		return nil, false // identity unavailable or not the signed session: withhold
 	}
+	in, ok := renderLinkInteraction(req)
+	if !ok {
+		return nil, false
+	}
+	// remote_answer is true while the dialog has no answer file and
+	// the share still takes link answers: the buttons are live. An
+	// answer file — the link's or the owner's from Buzz — or a policy
+	// that moved takes them dark in a new revision of the same card.
+	in.RemoteAnswer = phase == dialog.PhaseOpen && s.takesAnswers(rec)
+	return in, true
+}
+
+// renderLinkInteraction renders one read dialog record as its interaction,
+// without the answer state: the one render publication and the answer
+// write share, so a record whose text or options changed since
+// publication renders a different dialog and the write's digest check
+// refuses it. ok=false when the record offers no legal link shape: the
+// role scan, the label distinctness, and the prompt, option and id bounds.
+func renderLinkInteraction(req dialog.Request) (*protocol.Interaction, bool) {
 	var (
 		allow, deny dialog.Option
 		haveAllow   bool
@@ -199,7 +223,7 @@ func (s *linkDialogSource) renderDialog(dir string, rec *requests.Record, id str
 		return nil, false // roles must stay distinguishable
 	}
 	prompt := req.Tool + "\n" + req.Text
-	if len(prompt) > maxLinkPromptBytes || len(id) > 128 {
+	if len(prompt) > maxLinkPromptBytes || len(req.ID) > 128 {
 		return nil, false
 	}
 	in := &protocol.Interaction{
@@ -207,11 +231,6 @@ func (s *linkDialogSource) renderDialog(dir string, rec *requests.Record, id str
 		Kind:          "approval",
 		Prompt:        prompt,
 		Options:       []string{},
-		// remote_answer is true while the dialog has no answer file and
-		// the share still takes link answers: the buttons are live. An
-		// answer file — the link's or the owner's from Buzz — or a policy
-		// that moved takes them dark in a new revision of the same card.
-		RemoteAnswer: phase == dialog.PhaseOpen && s.takesAnswers(rec),
 	}
 	for _, o := range req.Options {
 		if (o.Deny && haveDeny && o == deny) || (!o.Deny && haveAllow && o == allow) {
@@ -264,6 +283,20 @@ func (s *linkDialogSource) RequestLive(rec *requests.Record) bool {
 	return ok
 }
 
+// HasAnswer reports whether the binding's dialog already holds a recorded
+// answer or a resolution for the id.
+func (s *linkDialogSource) HasAnswer(bindingName, id string) bool {
+	dir, err := dialog.DirRead(bindingName)
+	if err != nil {
+		return false
+	}
+	phase, _, _, resolved, err := dialog.Lookup(dir, id)
+	if err != nil {
+		return false
+	}
+	return phase == dialog.PhaseAnswered || phase == dialog.PhaseResolved || resolved != nil
+}
+
 // AnswerPolicy reports whether the host's share of the binding takes link
 // answers now, and the reason when it does not: approvals_terminal (no
 // running link under the host shares the binding, or its approvals are
@@ -283,11 +316,12 @@ func (s *linkDialogSource) AnswerPolicy(host, bindingName string) (bool, string)
 		return false, "approvals_terminal"
 	}
 	switch b.Harness {
-	case "claude", "codex", "acp":
+	case "claude", "codex":
 		return true, ""
 	default:
 		// The narrow start of the ratified plan: only the harnesses whose
 		// seam reads an answer file and writes the resolution with its by.
+		// ACP joins when its seam marks dialogs complete; pi never has.
 		return false, "harness_unsupported"
 	}
 }
@@ -333,7 +367,7 @@ func (s *linkDialogSource) linkSharePolicy(host, bindingName string) (approvals,
 // directory: the answers file created exclusively, the file and its
 // directory synced. It creates no directory — a missing one is
 // already_resolved, the same refusal a resolved or answered dialog gets.
-func (s *linkDialogSource) WriteAnswer(host, bindingName, id, label, documentDigest, credential string) (protocol.Code, string) {
+func (s *linkDialogSource) WriteAnswer(host, bindingName, id, label, role, interactionDigest, documentDigest, credential string) (protocol.Code, string) {
 	if _, _, ok := s.linkSharePolicy(host, bindingName); !ok {
 		return protocol.CodeUnshared, "the binding is not shared with this link now"
 	}
@@ -341,7 +375,36 @@ func (s *linkDialogSource) WriteAnswer(host, bindingName, id, label, documentDig
 	if err != nil {
 		return protocol.CodeAlreadyResolved, "the binding's dialog directory is gone"
 	}
-	switch err := dialog.WriteLinkAnswer(dir, id, label, documentDigest, credential); {
+	// The signature covers the dialog as the record file holds it now:
+	// re-render the record with the one render publication used, and
+	// refuse a digest that does not match — a record whose text or
+	// options changed since publication is a changed dialog.
+	_, req, _, resolved, err := dialog.Lookup(dir, id)
+	if err != nil || resolved != nil || req.ID != id {
+		return protocol.CodeAlreadyResolved, "the dialog is not open for an answer"
+	}
+	rendered, ok := renderLinkInteraction(req)
+	if !ok {
+		return protocol.CodeDialogChanged, "the dialog's record no longer renders a legal link dialog"
+	}
+	digest, err := core.InteractionDigest(rendered)
+	if err != nil {
+		return protocol.CodeInternal, err.Error()
+	}
+	if digest != interactionDigest {
+		return protocol.CodeDialogChanged, "the dialog's record no longer matches the signed document"
+	}
+	// The option is found by label and role in the rendered interaction:
+	// approve_option is the allow-once choice, reject_option the deny-once
+	// one.
+	derived := dialog.RoleApprove
+	if label == rendered.RejectOption {
+		derived = dialog.RoleDeny
+	}
+	if label != rendered.ApproveOption && label != rendered.RejectOption || derived != role {
+		return protocol.CodeInvalid, "the label names no such choice of the dialog"
+	}
+	switch err := dialog.WriteLinkAnswer(dir, id, label, derived, documentDigest, credential); {
 	case err == nil:
 		return "", ""
 	case errors.Is(err, dialog.ErrLinkDialogGone), errors.Is(err, dialog.ErrLinkAnswered):
