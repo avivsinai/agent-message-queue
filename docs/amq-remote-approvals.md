@@ -47,6 +47,7 @@ The agent posts each dialog once:
 claude · myrepo wants to run Bash:
 $ go test ./...
 (Run tests)
+in ~/myrepo
 
 1. Allow once
 2. Allow this session: Bash(go test:*)
@@ -57,7 +58,8 @@ React ✅ = 1, ❌ = Deny, or reply a number / yes / no.
 
 The first line names the session that asks and the tool. The body is the
 dialog text as the harness shows it: the command, diff, URL or MCP
-arguments. A body over 3500 bytes is cut and ends with "… full text in the
+arguments, and — for a Bash dialog — the working directory the command runs
+in. A body over 3500 bytes is cut and ends with "… full text in the
 terminal"; the options are still offered. A dialog that asks for text adds
 "or reply with your answer". A dialog with no options ends with "Answer in
 the terminal."

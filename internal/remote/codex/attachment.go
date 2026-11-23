@@ -1682,6 +1682,10 @@ func (a *Attachment) dialogFor(req ServerRequest) *openDialog {
 		Cwd      string `json:"cwd"`
 		Reason   string `json:"reason"`
 		// item/commandExecution/requestApproval, item/fileChange/requestApproval
+		// The command approval kind: only "command" is a plain command
+		// decision; writeStdin and humanCommand decide more than the shown
+		// command.
+		Kind           string `json:"kind"`
 		Command        any    `json:"command"`
 		GrantRoot      string `json:"grantRoot"`
 		NetworkContext *struct {
@@ -1707,7 +1711,7 @@ func (a *Attachment) dialogFor(req ServerRequest) *openDialog {
 		return nil
 	}
 	d := &openDialog{reqID: req.ID, turnID: p.TurnID, done: make(chan struct{}),
-		req: dialog.Request{ID: dialog.NewID(), Harness: "codex", Session: a.threadID, PID: os.Getpid()}}
+		req: dialog.Request{ID: dialog.NewID(), Harness: "codex", Session: a.threadID, Turn: p.TurnID, PID: os.Getpid()}}
 	var b strings.Builder
 	line := func(format string, args ...any) {
 		if b.Len() > 0 {
@@ -1726,9 +1730,18 @@ func (a *Attachment) dialogFor(req ServerRequest) *openDialog {
 	switch req.Method {
 	case methodCommandApproval:
 		d.req.Tool = "exec"
+		// No codex command approval is marked complete. The 0.171.0 native
+		// schema requires itemId and startedAtMs in every command approval,
+		// so the params never reduce to a fully rendered shape, and the
+		// decision fields the schema allows (environmentId, additional
+		// permissions, a network context, an amendment decision) render
+		// incompletely here. The terminal dialog stays the record; the
+		// typed choices still serve local/Buzz.
 		switch c := p.Command.(type) {
 		case string:
-			line("$ %s", c)
+			if strings.TrimSpace(c) != "" {
+				line("$ %s", c)
+			}
 		case nil:
 		default:
 			if raw, err := json.Marshal(c); err == nil {
@@ -1809,6 +1822,7 @@ func (a *Attachment) dialogFor(req ServerRequest) *openDialog {
 	if t, cut := protocol.TruncateText(text, maxDialogText); cut {
 		text = t + "\n… full text in the terminal"
 	}
+	// No codex dialog is marked complete: see the command case above.
 	d.req.Text = text
 	return d
 }
@@ -1859,6 +1873,9 @@ func decisions(raws []json.RawMessage, fallback ...string) ([]dialog.Option, fun
 				scope = dialog.ScopeOnce
 			case "acceptForSession":
 				scope = dialog.ScopeSession
+			case "decline":
+				// A decline refuses this one action (R3).
+				scope = dialog.ScopeOnce
 			}
 			if tok == "decline" || tok == "cancel" && deny < 0 {
 				deny = len(options)
@@ -1934,7 +1951,8 @@ func permissionChoices(requested json.RawMessage) ([]dialog.Option, func(dialog.
 	options := number([]dialog.Option{
 		{Label: "Allow for this turn", Value: "turn", Scope: dialog.ScopeTurn},
 		{Label: "Allow for session", Value: "session", Scope: dialog.ScopeSession},
-		{Label: "Deny", Value: "deny", Deny: true},
+		// The deny refuses this one permissions request (R3).
+		{Label: "Deny", Value: "deny", Deny: true, Scope: dialog.ScopeOnce},
 	})
 	if len(requested) == 0 || string(requested) == "null" {
 		requested = json.RawMessage(`{}`)
@@ -2005,7 +2023,7 @@ func userInputChoices(questions []userQuestion) ([]dialog.Option, bool, func(dia
 func elicitationChoices(mode string, schema json.RawMessage) ([]dialog.Option, bool, func(dialog.Answer) (any, string, string, bool)) {
 	options := number([]dialog.Option{
 		{Label: "Accept", Value: "accept", Scope: dialog.ScopeOnce},
-		{Label: "Decline", Value: "decline", Deny: true},
+		{Label: "Decline", Value: "decline", Deny: true, Scope: dialog.ScopeOnce},
 		{Label: "Cancel", Value: "cancel"},
 	})
 	form := mode != "url" && mode != "openai/userVerification"

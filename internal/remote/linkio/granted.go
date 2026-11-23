@@ -267,7 +267,7 @@ func (c *Carrier) admitGranted(digest string, cmd *protocol.Command) (any, error
 	case len(in.Text) > maxText:
 		return nil, refuse(CodeGrantNeedsSignature, "the text is %d bytes, more than the %d a grant carries; sign this task", len(in.Text), maxText)
 	}
-	src := c.source(view, sg.NativeSessionID, sg.CredentialID)
+	src := c.source(view, sg.NativeSessionID, sg.CredentialID, sg.Binding)
 	src.GrantDigest = sg.Digest
 	out, err := c.cfg.Handle(cmd, src)
 	if err != nil {

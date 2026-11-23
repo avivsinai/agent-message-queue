@@ -111,10 +111,13 @@ func TestPermissionHookAppliesBuzzOption(t *testing.T) {
 	if req.Text != "$ rm -rf node_modules\n(Remove node_modules)" || len(req.Options) != 3 || req.Options[1].Label != "Allow this session: Bash(rm -rf node_modules)" || !req.Options[2].Deny {
 		t.Fatalf("request = %+v", req)
 	}
-	for i, scope := range []string{dialog.ScopeOnce, dialog.ScopeSession, ""} {
+	for i, scope := range []string{dialog.ScopeOnce, dialog.ScopeSession, dialog.ScopeOnce} {
 		if req.Options[i].Scope != scope {
 			t.Fatalf("option %d scope = %q; want %q", i+1, req.Options[i].Scope, scope)
 		}
+	}
+	if !req.Complete {
+		t.Fatal("an uncut Bash dialog is not marked complete")
 	}
 	if _, err := dialog.WriteAnswer(dir, dialog.Answer{ID: req.ID, Option: 2, By: dialog.ByBuzz}); err != nil {
 		t.Fatal(err)
@@ -260,7 +263,10 @@ func TestClaudeAncestorChooser(t *testing.T) {
 // doc says (audit 2026-11-10).
 func TestDialogTextCutsAtByteCap(t *testing.T) {
 	input, _ := json.Marshal(map[string]string{"command": strings.Repeat("é", maxDialogText)})
-	got := dialogText("Bash", input)
+	got, complete := dialogText("Bash", "/w", input)
+	if complete {
+		t.Fatal("a cut Bash dialog is marked complete")
+	}
 	body, cut := strings.CutSuffix(got, "\n… full text in the terminal")
 	if !cut || len(body) > maxDialogText || !utf8.ValidString(body) {
 		t.Fatalf("body %d bytes, cut %v, valid UTF-8 %v; want a cut body of at most %d valid bytes", len(body), cut, utf8.ValidString(body), maxDialogText)
@@ -726,5 +732,68 @@ func TestPermissionHookSendsAnUnanswerableQuestionToTheTerminal(t *testing.T) {
 				t.Fatalf("a terminal-only question printed %q", out)
 			}
 		})
+	}
+}
+
+// R6 starts narrow: only a Bash command's text is proven whole. Another
+// tool's dialog is answered on the machine; a link publishes nothing for it.
+func TestPermissionHookMarksOnlyBashComplete(t *testing.T) {
+	dir := boundHookEnv(t)
+	stdin, _ := json.Marshal(map[string]any{
+		"session_id": "s-1", "hook_event_name": "PermissionRequest",
+		"tool_name": "Edit", "tool_input": map[string]any{"file_path": "/w/main.go", "old_string": "a", "new_string": "b"},
+	})
+	wait := runHook(t, string(stdin))
+	req := openRequest(t, dir)
+	if req.Complete {
+		t.Fatalf("a %s dialog is marked complete: %+v", req.Tool, req)
+	}
+	if _, err := dialog.WriteAnswer(dir, dialog.Answer{ID: req.ID, Option: 1, By: dialog.ByBuzz}); err != nil {
+		t.Fatal(err)
+	}
+	if d := decisionOf(t, wait()); d["behavior"] != "allow" {
+		t.Fatalf("decision = %v, want the owner's allow", d)
+	}
+}
+
+// The one complete shape (ruling 2026-11-23): the Bash tool input decodes
+// into its own two-field struct with unknown fields refused, the text is
+// built from every field plus the hook's working directory, and anything
+// else — a shared-struct field such as file_path, a timeout, a background
+// flag, broken JSON — stays machine-answered on the local/Buzz path.
+func TestDialogTextBashCompletenessRequiresTheRenderedShape(t *testing.T) {
+	for name, input := range map[string]string{
+		"unknown field":     `{"command":"ls","timeout":5000}`,
+		"background flag":   `{"command":"ls","run_in_background":true}`,
+		"broken JSON":       `{"command":"ls"`,
+		"shared struct key": `{"command":"ls","file_path":"/w/main.go"}`,
+		"empty command":     `{"command":"   "}`,
+		"number command":    `{"command":42}`,
+	} {
+		if _, complete := dialogText("Bash", "/w", []byte(input)); complete {
+			t.Fatalf("%s marked complete: %s", name, input)
+		}
+	}
+	// A command whose render ends in newlines is trimmed before delivery:
+	// with no cwd and no description the trim changes the command, so the
+	// delivered text is not what was marked and the dialog stays
+	// machine-answered (review of ffe44020).
+	if _, complete := dialogText("Bash", "", []byte(`{"command":"ls\n\n"}`)); complete {
+		t.Fatal("trailing newlines marked complete")
+	}
+	got, complete := dialogText("Bash", "/w", []byte(`{"command":"ls","description":"list"}`))
+	if !complete || !strings.Contains(got, "$ ls") || !strings.Contains(got, "in /w") {
+		t.Fatalf("exact shape = %q complete=%v; want the command, the description and the cwd in the text", got, complete)
+	}
+	// Without a working directory the text is still complete.
+	if _, complete = dialogText("Bash", "", []byte(`{"command":"ls"}`)); !complete {
+		t.Fatal("plain command without a cwd not marked complete")
+	}
+	// The working directory line shows on every Bash dialog, not only a
+	// strict one (ruling C4): a shape the complete mark refuses still
+	// carries the cwd in its text.
+	got2, complete2 := dialogText("Bash", "/w", []byte(`{"command":"ls","timeout":5000}`))
+	if complete2 || !strings.Contains(got2, "in /w") {
+		t.Fatalf("non-strict Bash render = %q complete=%v; want the cwd line, machine-answered", got2, complete2)
 	}
 }

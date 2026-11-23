@@ -76,6 +76,23 @@ type Record struct {
 	// The grant is checked again right before the handoff. It stays on the
 	// durable record and is never published.
 	GrantDigest string `json:"grant_digest,omitempty"`
+	// Binding is the name of the share a link request was signed for, the
+	// name of its dialog directory; empty on every other request. A record
+	// without it takes no link dialog work.
+	Binding string `json:"binding,omitempty"`
+	// DialogsBefore holds the dialog ids open in the binding's dialog
+	// directory at the moment the request entered running, written once
+	// with the running transition and kept on recovery. A dialog whose id
+	// is in the list is not of the run. A nil list (written before this
+	// ships, recovered with none, or an unlistable directory) publishes
+	// nothing; an empty list is a real baseline.
+	DialogsBefore []string `json:"dialogs_before,omitzero"`
+	// LinkDialogs lists the interaction ids this endpoint selected from the
+	// binding's dialog directory: the link-published interactions. Their
+	// dispositions travel the owed-outcome mechanism, and a missing read
+	// retires as unknown instead of delivery_unknown (R2). Kept until the
+	// record compacts.
+	LinkDialogs []string `json:"link_dialogs,omitzero"`
 	// GrantAtPrompt marks a granted request that was dispatched as a stub:
 	// its text is given at the prompt the stub raises, and the endpoint, not
 	// the adapter, judges its completion. It is set in the write that makes

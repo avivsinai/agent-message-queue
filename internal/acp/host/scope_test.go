@@ -17,12 +17,12 @@ func TestHostPermissionScopesKeepAnAlwaysChoiceExplicit(t *testing.T) {
 	}
 	t.Cleanup(func() { h.Close() })
 	h.setSession("s1")
-	params := json.RawMessage(`{"sessionId":"s1","toolCall":{"toolCallId":"t1","title":"build"},"options":[{"optionId":"always","name":"Always","kind":"allow_always"},{"optionId":"once","name":"Once","kind":"allow_once"},{"optionId":"reject","name":"Reject","kind":"reject_once"}]}`)
+	params := json.RawMessage(`{"sessionId":"s1","toolCall":{"toolCallId":"t1","title":"build"},"options":[{"optionId":"always","name":"Always","kind":"allow_always"},{"optionId":"once","name":"Once","kind":"allow_once"},{"optionId":"reject","name":"Reject","kind":"reject_once"},{"optionId":"reject_always","name":"Reject always","kind":"reject_always"}]}`)
 	answer := h.onRequest("session/request_permission", params)
 	done := make(chan any, 1)
 	go func() { got, _ := answer(); done <- got }()
 	req := waitDialog(t, dir)
-	for i, scope := range []string{dialog.ScopeAlways, dialog.ScopeOnce, ""} {
+	for i, scope := range []string{dialog.ScopeAlways, dialog.ScopeOnce, dialog.ScopeOnce, dialog.ScopeAlways} {
 		if req.Options[i].Scope != scope {
 			t.Fatalf("option %d = %+v; want scope %q", i+1, req.Options[i], scope)
 		}
@@ -40,5 +40,8 @@ func TestHostPermissionScopesKeepAnAlwaysChoiceExplicit(t *testing.T) {
 	outcome := selected["outcome"].(map[string]any)
 	if outcome["optionId"] != "once" {
 		t.Fatalf("selected = %+v; want once", selected)
+	}
+	if !req.Options[3].Deny {
+		t.Fatal("reject_always is not marked a deny option")
 	}
 }

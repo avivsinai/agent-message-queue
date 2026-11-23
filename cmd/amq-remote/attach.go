@@ -59,6 +59,7 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	linkName := fs.String("link", "", "share this session with the linked server of that name (implies --native)")
 	consent := fs.String("consent", "passkey", "with --link: passkey, or local to also confirm each task on this machine")
 	tools := fs.String("tools", "read", "with --link: the server tool profile agents in this session may call (default: the server's default profile, else read); empty for none")
+	approvals := fs.String("approvals", "terminal", "with --link: what the server sees when a task hits a permission dialog: terminal (default, the dialog is shown nowhere over the link) or link (the server sees the dialog as the task's interaction)")
 	if err := fs.Parse(args); err != nil {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
@@ -71,18 +72,18 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	linkFlags := false
 	toolsGiven := false
 	fs.Visit(func(f *flag.Flag) {
-		linkFlags = linkFlags || f.Name == "consent" || f.Name == "tools"
+		linkFlags = linkFlags || f.Name == "consent" || f.Name == "tools" || f.Name == "approvals"
 		toolsGiven = toolsGiven || f.Name == "tools"
 	})
 	if *linkName == "" && linkFlags {
-		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--consent and --tools apply only with --link")
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--consent, --tools and --approvals apply only with --link")
 	}
 	if *linkName != "" {
 		if err := linkio.ValidName(*linkName); err != nil {
 			return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 		}
 		// Check the share before anything is attached or written.
-		if err := manifest.ValidLinkShare(manifest.LinkShare{Binding: "session", Consent: *consent, Tools: *tools}); err != nil {
+		if err := manifest.ValidLinkShare(manifest.LinkShare{Binding: "session", Consent: *consent, Tools: *tools, Approvals: *approvals}); err != nil {
 			return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 		}
 		*nativeMode = true // a linked server reaches a native session only
@@ -208,7 +209,7 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		recordAttachIdentity(stderr, sessionRoot, strings.TrimSpace(*me), cand.Kind)
 	}
 	if *linkName != "" {
-		if err := shareWithLink(stateDir, *linkName, manifest.LinkShare{Binding: nb.Name, Consent: *consent, Tools: *tools}); err != nil {
+		if err := shareWithLink(stateDir, *linkName, manifest.LinkShare{Binding: nb.Name, Consent: *consent, Tools: *tools, Approvals: *approvals}); err != nil {
 			return protocol.ExitActionRequired, err
 		}
 		// No approval pin is written for a link share (only a Buzz relay

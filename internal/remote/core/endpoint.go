@@ -39,12 +39,24 @@ type Source struct {
 	// the grant. Core stores it on the record and asks GrantCheck about it
 	// right before the handoff.
 	GrantDigest string
+	// Binding is the name of the share the request was signed for, the
+	// name of its dialog directory. Empty on every source that names no
+	// binding (local, mailbox, Buzz, a link control call). Core stores it
+	// on the record; a record without it takes no link dialog work.
+	Binding string
 }
 
 // ConsentCheck reports whether the consent key credential of the link with
 // creator host is still accepted. It runs under the endpoint lock, so it
 // reads an immutable snapshot and never waits.
 type ConsentCheck func(creatorHost, credential string) bool
+
+// DialogsOpen lists the dialog ids open in a binding's dialog directory at
+// this moment: the file names of its requests/ directory, read plainly. A
+// missing directory is an empty list; any other read error is returned. It
+// runs under the endpoint lock when the run-start transition calls it, so
+// it does one bounded directory read and never waits on a lock of its own.
+type DialogsOpen func(bindingName string) ([]string, error)
 
 // GrantCheck reports whether the session grant with digest grantDigest still
 // admits a request of the link with creator host to the target targetID: ""
@@ -206,9 +218,11 @@ type Endpoint struct {
 	// option. A rollback undoes only the intent its own respond recorded: a
 	// replay of an earlier intent keeps it. An entry lives while a respond
 	// holds or waits for it.
-	answering map[answerKey]*answerLock
-	consent   ConsentCheck
-	grant     GrantCheck
+	answering   map[answerKey]*answerLock
+	consent     ConsentCheck
+	grant       GrantCheck
+	dialogsOpen DialogsOpen
+	linkDialogs LinkDialogs
 }
 
 // Config configures New.
@@ -277,6 +291,14 @@ func (e *Endpoint) SetGrant(g GrantCheck) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.grant = g
+}
+
+// SetDialogsOpen installs the run-start dialog listing. Until it is set, a
+// run-start transition stores no list, so the record publishes no dialog.
+func (e *Endpoint) SetDialogsOpen(d DialogsOpen) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.dialogsOpen = d
 }
 
 // SetPublish replaces the publisher after construction. Serve uses this

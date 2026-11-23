@@ -88,10 +88,25 @@ type LinkShare struct {
 	// Tools names the server tool profile agents on this binding may call;
 	// empty means none.
 	Tools string `json:"tools,omitempty"`
+	// Approvals is what the server sees when a task of this binding hits a
+	// permission dialog: "link" shows the dialog to the server as the
+	// task's interaction; "terminal" (the default, and the value of an
+	// empty field) shows it nowhere over the link.
+	Approvals string `json:"approvals,omitempty"`
 }
 
 // RelaySchemaVersion is the manifest version that may carry a relay object.
 const RelaySchemaVersion = 2
+
+// Approvals policy values of a link share.
+const (
+	// ApprovalsTerminal shows a task's permission dialog on the machine
+	// only (the default, and the value of an empty field).
+	ApprovalsTerminal = "terminal"
+	// ApprovalsLink publishes the dialog to the server as the task's
+	// interaction.
+	ApprovalsLink = "link"
+)
 
 // Relay configures one relay endpoint and the sessions shared on it.
 type Relay struct {
@@ -373,7 +388,7 @@ var (
 )
 
 // ValidLinkShare checks one share on its own: a binding name, a consent
-// policy and a tool profile name.
+// policy, a tool profile name and an approvals policy.
 func ValidLinkShare(sh LinkShare) error {
 	switch {
 	case !validSession(sh.Binding):
@@ -382,6 +397,8 @@ func ValidLinkShare(sh LinkShare) error {
 		return fmt.Errorf("share %q consent must be passkey or local", sh.Binding)
 	case sh.Tools != "" && !toolProfileRe.MatchString(sh.Tools):
 		return fmt.Errorf("share %q tools %q is not a profile name", sh.Binding, sh.Tools)
+	case sh.Approvals != "" && sh.Approvals != ApprovalsTerminal && sh.Approvals != ApprovalsLink:
+		return fmt.Errorf("share %q approvals must be terminal or link", sh.Binding)
 	}
 	return nil
 }

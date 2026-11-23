@@ -423,6 +423,10 @@ func (s *Agent) keepGoneHistory(name, dir string) bool {
 }
 
 // keepHistory preserves a readable resolution even when the request is gone.
+// The label a link later reads is only the chosen approval option (R2),
+// matched against the request's own options: the owner's typed free-text
+// answer, an expiry reason, and the label of a request that cannot be read
+// again are not retained.
 func (s *Agent) keepHistory(name, dir, id string) bool {
 	res, found, err := dialog.ReadResolved(dir, id)
 	if err != nil || !found {
@@ -434,9 +438,18 @@ func (s *Agent) keepHistory(name, dir, id string) bool {
 		// History holds a tool name only from a seam whose Tool is an identifier.
 		tool = "tool call"
 	}
+	label := ""
+	if res.Outcome == dialog.OutcomeAllowed || res.Outcome == dialog.OutcomeDenied {
+		for _, o := range req.Options {
+			if o.Label != "" && o.Label == res.Label {
+				label = res.Label
+				break
+			}
+		}
+	}
 	return dialog.AppendHistory(dialog.HistoryEntry{
 		ID: id, Binding: name, Harness: req.Harness, Tool: tool,
-		OpenedAt: req.OpenedAt, At: res.At, Outcome: res.Outcome, By: res.By,
+		OpenedAt: req.OpenedAt, At: res.At, Outcome: res.Outcome, By: res.By, Label: label,
 	}) == nil
 }
 
@@ -776,6 +789,10 @@ func outcomeLine(r dialog.Resolved) string {
 		default:
 			label = "Answered"
 		}
+	}
+	switch r.By {
+	case dialog.ByLink:
+		return "→ " + label + " (the link's answer)"
 	}
 	return "→ " + label + " (Buzz)"
 }

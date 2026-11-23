@@ -39,11 +39,15 @@ import (
 
 // Option is one choice the dialog offers.
 type Option struct {
-	N     int    `json:"n"`               // 1-based, as shown in Buzz
-	Label string `json:"label"`           // "Allow once", "Allow this session", "Deny", or the harness's own label
-	Value string `json:"value"`           // harness-specific decision token the seam applies
-	Deny  bool   `json:"deny,omitempty"`  // the option ❌ selects
-	Scope string `json:"scope,omitempty"` // once | turn | session | always for an allow; empty for a deny or a question
+	N     int    `json:"n"`              // 1-based, as shown in Buzz
+	Label string `json:"label"`          // "Allow once", "Allow this session", "Deny", or the harness's own label
+	Value string `json:"value"`          // harness-specific decision token the seam applies
+	Deny  bool   `json:"deny,omitempty"` // the option ❌ selects
+	// Scope says how long the decision holds, for an allow and for a deny:
+	// an allow or a deny that holds for this one action is once; one that
+	// persists is always. A turn or a session holds for the named span.
+	// A Codex cancel and every unclassified option have none.
+	Scope string `json:"scope,omitempty"`
 }
 
 const (
@@ -64,7 +68,13 @@ func ApproveOption(r Request) (Option, bool) {
 	best := 0
 	for _, o := range r.Options {
 		if o.Scope != "" {
+			// A typed dialog never falls back to the positional rule, even
+			// when its only typed choice is a denial.
 			typed = true
+		}
+		if o.Deny {
+			// A deny is never the approving choice, at any scope.
+			continue
 		}
 		scope := approvalScopes[o.Scope]
 		if scope != 0 && (best == 0 || scope < best) {
@@ -72,6 +82,9 @@ func ApproveOption(r Request) (Option, bool) {
 		}
 	}
 	for _, o := range r.Options {
+		if o.Deny {
+			continue
+		}
 		if !typed && o.N == 1 {
 			return o, true
 		}
@@ -93,6 +106,14 @@ type Request struct {
 	FreeText bool      `json:"free_text,omitempty"` // any reply text is the answer
 	OpenedAt time.Time `json:"opened_at"`
 	PID      int       `json:"pid"` // the waiting seam process
+	// Turn is the native turn the dialog belongs to, when the seam has it
+	// in hand (Codex). Empty where no harness reports one.
+	Turn string `json:"turn,omitempty"`
+	// Complete is the seam's positive evidence that Text holds everything
+	// the harness shows for this decision and was not cut. Only a complete
+	// dialog may be published to a link; every other dialog is answered on
+	// the machine. Unset means not proven.
+	Complete bool `json:"complete,omitempty"`
 }
 
 // Answer is the owner's answer from Buzz.
@@ -118,6 +139,10 @@ const (
 	ByBuzz     = "buzz"
 	ByTerminal = "terminal"
 	ByTimeout  = "timeout"
+	// ByLink is the closer of a link's answer applied by the answer seam
+	// (the passkey-signed answer record). Set on resolutions, not answers:
+	// an answer the owner typed still says by.
+	ByLink = "link"
 )
 
 // Resolved records how a dialog ended.
@@ -171,6 +196,24 @@ func DirFor(bindingName string) (string, error) {
 		}
 	}
 	return dir, nil
+}
+
+// DirRead is DirFor without creating anything: the read-side path of a
+// binding's dialogs directory. A retired binding's deleted directory is
+// never recreated by an outcome lookup — a missing directory simply reads
+// as no files (wrap with os.IsNotExist to tell that apart from a real
+// error).
+func DirRead(bindingName string) (string, error) {
+	if bindingName != binding.LegacyName {
+		if err := binding.ValidName(bindingName); err != nil {
+			return "", err
+		}
+	}
+	root, err := Root()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, bindingName), nil
 }
 
 // Owner is whose Buzz messages act on a binding's session: the owner's key,
@@ -283,6 +326,37 @@ func Open(dir string, r Request) error {
 	}
 	_, err = fsq.WriteStateFile(filepath.Dir(dir), filepath.Join(filepath.Base(dir), "requests", r.ID+".json"), raw, 0o600)
 	return err
+}
+
+// OpenRequestIDs lists the dialog ids whose request file exists in the
+// binding's dialog directory at this moment, from a plain directory
+// listing: no record is read and none is filtered, so the result is a
+// complete baseline of what is on disk, an answered-but-unresolved dialog
+// included. A missing directory is the empty list; any other read error is
+// returned. The caller decides what an unlistable directory means.
+func OpenRequestIDs(bindingName string) ([]string, error) {
+	root, err := Root()
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(filepath.Join(root, bindingName, "requests"))
+	if errors.Is(err, os.ErrNotExist) {
+		return []string{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := []string{}
+	for _, e := range entries {
+		// Every matching name counts, whatever its directory entry type:
+		// Requests and readJSON select by filename only, so the baseline
+		// excluded at run start must cover every name they could later
+		// select, of any type.
+		if id, ok := strings.CutSuffix(e.Name(), ".json"); ok && idRe.MatchString(id) {
+			out = append(out, id)
+		}
+	}
+	return out, nil
 }
 
 // Requests returns the open requests, those with no resolved/<id>.json,

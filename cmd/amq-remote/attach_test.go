@@ -1238,6 +1238,87 @@ func TestAttachLinkUsesTheServerDefaultProfileWhenToolsIsOmitted(t *testing.T) {
 	if err != nil || len(mf.Links) != 1 || len(mf.Links[0].Shares) != 1 || mf.Links[0].Shares[0].Tools != "work" {
 		t.Fatalf("shares = %+v, %v; want one default-profile share", mf.Links, err)
 	}
+	if got := mf.Links[0].Shares[0].Approvals; got != "terminal" {
+		t.Fatalf("share approvals = %q; want the terminal default", got)
+	}
+}
+
+// The approvals policy rides the attach: --approvals link is stored on the
+// share so serve knows what to publish for this binding, and a value the
+// manifest does not know refuses the attach.
+func TestAttachLinkStoresTheApprovalsPolicy(t *testing.T) {
+	home := shortHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	for _, k := range []string{"AM_ROOT", "AM_ME", "AM_BASE_ROOT", "AM_SESSION", "AM_ROOT_ID", "AM_BASE_ROOT_ID"} {
+		_ = os.Unsetenv(k)
+	}
+	root, err := binding.EnsureMachineRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	configDir := canonicalTempDir(t)
+	if err := os.MkdirAll(filepath.Join(configDir, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pid := os.Getpid()
+	record := map[string]any{"pid": pid, "sessionId": "session-8", "cwd": "/work/project", "kind": "interactive", "peerProtocol": 1, "version": "test", "updatedAt": time.Now().UnixMilli()}
+	raw, _ := json.Marshal(record)
+	if err := os.WriteFile(filepath.Join(configDir, "sessions", strconv.Itoa(pid)+".json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	stateDir := filepath.Join(root, stateDirName)
+	profiles := []string{"work"}
+	var file = manifest.File{SchemaVersion: manifest.RelaySchemaVersion, Layer: manifest.Layer,
+		Links: []manifest.Link{{Name: "example", URL: "wss://link.example.test/link"}}}
+	if err := manifest.Write(manifest.DefaultPath(stateDir), file); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := linkio.MintDeviceKey(stateDir, "example"); err != nil {
+		t.Fatal(err)
+	}
+	if err := linkio.WritePin(stateDir, "example", linkio.Pin{ServerID: "server", DefaultToolProfile: "work", ToolProfiles: &profiles}); err != nil {
+		t.Fatal(err)
+	}
+	var store *requests.Store
+	store, err = requests.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep := core.New(core.Config{Store: store})
+	srv, err := ipc.Listen(stateDir, ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.SetRegistrar(liveRegistrar(root, stateDir, "remote", ep))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = srv.Serve(ctx) }()
+	t.Cleanup(func() { cancel(); <-done; _ = ep.Close(); _ = store.Close() })
+
+	savedFind, savedCwd, savedHolder, savedHook := findSelf, processCwd, processHolder, claudeStopHookState
+	t.Cleanup(func() {
+		findSelf, processCwd, processHolder, claudeStopHookState = savedFind, savedCwd, savedHolder, savedHook
+	})
+	claudeStopHookState = func() (string, error) { return "installed", nil }
+	findSelf = func(string, string) (registry.Candidate, error) {
+		return registry.Candidate{Kind: "claude", Target: "claude:" + strconv.Itoa(pid), NativeSession: "session-8", Config: json.RawMessage(`{"config_dir":"` + configDir + `","pid":` + strconv.Itoa(pid) + `}`)}, nil
+	}
+	processCwd = func(int) (string, error) { return "/work/pi-proj", nil }
+	processHolder = func(pid int) (launch.HolderIdentity, error) {
+		return launch.HolderIdentity{PID: pid, ProcessStart: "1"}, nil
+	}
+	if code, err := attach([]string{"--self", "--link", "example", "--approvals", "link"}, io.Discard, io.Discard); code != 0 || err != nil {
+		t.Fatalf("attach = %d, %v; want a link share with the policy", code, err)
+	}
+	mf, err := manifest.Load(manifest.DefaultPath(stateDir))
+	if err != nil || len(mf.Links) != 1 || len(mf.Links[0].Shares) != 1 {
+		t.Fatalf("shares = %+v, %v", mf.Links, err)
+	}
+	if got := mf.Links[0].Shares[0].Approvals; got != "link" {
+		t.Fatalf("share approvals = %q; want link", got)
+	}
 }
 
 // agent-message-queue-srt review: an attach of a CLAUDE_CONFIG_DIR session
