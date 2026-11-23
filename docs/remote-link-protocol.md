@@ -178,7 +178,10 @@ retired.
   out; its `not_after` is after the machine's `now`, at most 3 minutes
   ahead and not after the grant's. A busy session answers the outcome
   `busy`; the same command may be sent again, at least 2 seconds apart,
-  until its `not_after`, and every send passes every check again. A granted
+  until its `not_after`, and every send passes every check again. On pi a
+  busy answer can spend the request id, because the pi bridge refuses a
+  busy request after the request was published: a server sends a busy task
+  to pi again with a new `request_id` under the same grant. A granted
   request is never held as a deferred record: a harness that cannot read
   the session's mode while its attachment is offline answers
   `grant_needs_signature`, and a target that is offline at the hand-over
@@ -209,7 +212,17 @@ retired.
    Codex this is the thread's own settings as the app-server reported them
    on the attachment's connection: `approvalPolicy` `untrusted` or
    `on-request`, `approvalsReviewer` `user`, sandbox `readOnly` or
-   `workspaceWrite`. A granted `turn/start` carries no override.
+   `workspaceWrite`. A granted `turn/start` carries no override. pi has no
+   approval mode; on pi the session asks while the live pi bridge, of
+   bridge revision 6 or later, publishes `gate: true` in the `tui` surface:
+   the bridge then asks the person at pi's terminal before every tool call
+   of the granted task except pi's own `read`, `grep`, `find` and `ls`, and
+   in the person's own runs until the person starts a new run after the
+   granted run settled (see
+   [the pi guard](pi-bridge-protocol.md#bridge-revision-6-the-guard-of-granted-tasks)).
+   A pi session in another mode, a bridge with no gate, or no fresh
+   liveness answers `grant_info` not available with reason
+   `mode_unreadable`.
 8. The request is admitted as a link request, with the grant's native
    session and signing key; its record keeps the grant's digest.
 

@@ -3,7 +3,7 @@
 // extension side of it. The adapter writes requests/; this extension writes
 // receipts/, events/, and bridge.liveness.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -13,8 +13,13 @@ export const PROTOCOL = "amq:pi-bridge:v1";
 // (docs/pi-bridge-protocol.md, bridge revision). The adapter sends no new
 // requests to a bridge that publishes a lower revision or none. Revision 4
 // is revision 3 plus pi's session id in liveness; revision 5 adds the exact
-// cancel of one request (cancels/<ref>.json).
-export const BRIDGE_REVISION = 5;
+// cancel of one request (cancels/<ref>.json); revision 6 adds the granted
+// request and the guard that asks the person at the terminal before its
+// tool calls run.
+export const BRIDGE_REVISION = 6;
+// GRANT_REVISION is the lowest request bridge_revision that may carry
+// granted: true.
+const GRANT_REVISION = 6;
 // A request carries the bridge_revision its adapter requires. A request
 // without one comes from an adapter that predates the revision fence and is
 // refused, so an old adapter cannot send work through this bridge.
@@ -170,10 +175,10 @@ type Bridge = {
 	// runStartAt is the byte offset in the activity file where the last
 	// run_start record was written, -1 before the first.
 	runStartAt: number;
-	// requestUser is the ref of the in-flight request whose own user
+	// requestUser identifies the in-flight request whose own user
 	// message started and has not ended yet: the first user message, after
 	// the hand-off, whose text is the request's text.
-	requestUser: string;
+	requestUser: { ref: string; text: string } | null;
 };
 
 type Inflight = {
@@ -183,6 +188,8 @@ type Inflight = {
 	started: boolean;
 	// tagged is true once the request's own user message started.
 	tagged: boolean;
+	// arm is the guard arm of a granted request, "" for any other request.
+	arm: string;
 	lastText: string;
 	lastError: string;
 	// finalText is the text of the request's last assistant message when
@@ -197,6 +204,237 @@ type Inflight = {
 
 let inactiveNoticeShown = false;
 
+// The guard of granted tasks (docs/pi-bridge-protocol.md, bridge revision
+// 6). While any arm is open, every tool call except pi's own read-only
+// built-ins waits for the typed yes of the person at the terminal. The arms
+// are state of this module instance plus one file per pi process,
+// granted-guard.<pid>.json in the bridge directory; no mailbox object holds
+// them, so a displaced bridge, a new session or a reload keeps them. An arm
+// ends only when its hand-off failed synchronously, or when its granted
+// message started in a session, that session then settled with no pending
+// message, and after that the person started a new run in that session;
+// otherwise it stays for the life of the pi process.
+type Arm = {
+	ref: string;
+	// tagged: the granted message started. owner is the registration whose
+	// session ran it, the only one whose events settle or end the arm.
+	tagged: boolean;
+	owner: ExtensionAPI | null;
+	// settled: the owner's session settled after the tag with no pending
+	// message.
+	settled: boolean;
+	dir: string;
+	armedAt: string;
+};
+const arms = new Map<string, Arm>();
+// guardRestored holds the bridge directories whose guard file this module
+// instance has read.
+const guardRestored = new Set<string>();
+// GUARD_PID is the pi process that loaded this module. It names the only
+// guard file this module reads, writes or removes.
+const GUARD_PID = process.pid;
+// The on-disk unit is Unix seconds. Keep millisecond precision across reloads.
+const GUARD_STARTED = Math.round(performance.timeOrigin) / 1000;
+const ARM_ID = /^[0-9a-f]{32}$/;
+const READ_ONLY_BUILTINS = new Set(["read", "grep", "find", "ls"]);
+const gateTextLimit = 2000;
+const gateRowLimit = 20;
+// Pi 1.5.2 ExtensionInputComponent (extension-input.js:30-49) adds two
+// borders, four single-row spacers, the input and its key hints to the title.
+const inputDialogRows = 8;
+// The fullscreen dock reserves a transcript row, a widget spacer and two footer rows.
+const dockRows = 4;
+const gateCannotMeasure = "This pi cannot measure the approval dialog; a task that needs this call must be sent with a signature.";
+const gateDenied = "The person at the terminal did not approve this call. It is a call of a task that a linked server sent under a session grant.";
+const gateNoTerminal = "This call needs the person's yes at the terminal, and this pi session has no terminal UI.";
+const gateTooLong = "This call is too long to show whole at the terminal for approval. A task that needs it must be sent with a signature.";
+const gateExtensionLine = "This is a tool of an extension. AMQ cannot see what it does or starts; one yes covers the whole call.";
+
+function guardFile(dir: string): string {
+	return path.join(dir, `granted-guard.${GUARD_PID}.json`);
+}
+
+// Only the native hand-off and its ownership match use the tagged text.
+function handoffText(f: Inflight): string {
+	return f.arm ? `${f.text}\n\n[AMQ granted task ${f.arm}]` : f.text;
+}
+
+// writeGuard makes this process's guard file in dir hold the open arms of
+// dir: it replaces the whole file, mode 0600, or removes it when dir has
+// none. It reports whether the file now holds them.
+function writeGuard(dir: string): boolean {
+	const open = [...arms].filter(([, a]) => a.dir === dir).map(([arm, a]) => ({ arm, ref: a.ref, armed_at: a.armedAt }));
+	try {
+		if (open.length === 0) {
+			fs.rmSync(guardFile(dir), { force: true });
+			return true;
+		}
+		const tmp = writeTemp(dir, JSON.stringify({ pid: GUARD_PID, started: GUARD_STARTED, arms: open }));
+		try {
+			fs.renameSync(tmp, guardFile(dir));
+		} catch (err) {
+			fs.rmSync(tmp, { force: true });
+			throw err;
+		}
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+// restoreGuard reads this process's guard file in dir once per module
+// instance, so the arms an earlier load of the extension in the same pi
+// process opened stay open. A file whose start is not this process's start
+// was left by an earlier process with the same pid: it is removed and
+// restores nothing. A restored arm is not tagged: it ends only with the
+// process.
+function restoreGuard(dir: string): void {
+	if (guardRestored.has(dir)) return;
+	guardRestored.add(dir);
+	let rec: { pid?: unknown; started?: unknown; arms?: unknown };
+	try {
+		rec = JSON.parse(fs.readFileSync(guardFile(dir), "utf8"));
+	} catch {
+		return;
+	}
+	if (!rec || rec.pid !== GUARD_PID || !Array.isArray(rec.arms)) return;
+	// An unknown origin leaves the arms open. Only a known different
+	// process start proves that the file is stale.
+	if (typeof rec.started === "number" && Number.isFinite(rec.started) && rec.started > 0 && Math.abs(rec.started - GUARD_STARTED) > 1) {
+		try {
+			fs.rmSync(guardFile(dir), { force: true });
+		} catch {
+			// It stays; only a process with this pid reads it.
+		}
+		return;
+	}
+	for (const a of rec.arms as { arm?: unknown; ref?: unknown; armed_at?: unknown }[]) {
+		if (typeof a?.arm !== "string" || !ARM_ID.test(a.arm) || arms.has(a.arm)) continue;
+		arms.set(a.arm, { ref: typeof a.ref === "string" ? a.ref : "", tagged: false, owner: null, settled: false, dir, armedAt: typeof a.armed_at === "string" ? a.armed_at : "" });
+	}
+}
+
+// openArm opens arm for the granted request ref and writes the guard file
+// of dir. When the file cannot be written the arm is not opened and it
+// returns false, so the request is not sent.
+function openArm(dir: string, arm: string, ref: string): boolean {
+	arms.set(arm, { ref, tagged: false, owner: null, settled: false, dir, armedAt: new Date().toISOString() });
+	if (writeGuard(dir)) return true;
+	arms.delete(arm);
+	return false;
+}
+
+function endArm(arm: string): void {
+	const a = arms.get(arm);
+	if (!a) return;
+	arms.delete(arm);
+	writeGuard(a.dir);
+}
+
+// settleArms marks settled every tagged arm of owner when pi holds no
+// pending message: the granted message started in owner's session and the
+// run it joined has settled. The arm stays open until the person types.
+function settleArms(owner: ExtensionAPI, ctx: ExtensionContext): void {
+	if (arms.size === 0) return;
+	let pending = true;
+	try {
+		pending = ctx.hasPendingMessages();
+	} catch {
+		// Unknown counts as pending: nothing settles.
+	}
+	if (pending) return;
+	for (const a of arms.values()) {
+		if (a.tagged && a.owner === owner) a.settled = true;
+	}
+}
+
+// endTypedArms ends every settled arm of owner: the person typed a prompt in
+// owner's session after the granted run settled, so the run it starts is
+// the person's own.
+function endTypedArms(owner: ExtensionAPI): void {
+	const dirs = new Set<string>();
+	for (const [arm, a] of arms) {
+		if (!a.settled || a.owner !== owner) continue;
+		arms.delete(arm);
+		dirs.add(a.dir);
+	}
+	for (const dir of dirs) writeGuard(dir);
+}
+
+// C0, DEL, C1, format controls and Unicode line/paragraph separators.
+const HIDDEN = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]|\p{Cf}/gu;
+
+// visible writes every HIDDEN character of text as its \uXXXX escape, one
+// per UTF-16 code unit.
+function visible(text: string): string {
+	return text.replace(HIDDEN, (c) => {
+		let out = "";
+		for (let i = 0; i < c.length; i++) out += `\\u${c.charCodeAt(i).toString(16).padStart(4, "0")}`;
+		return out;
+	});
+}
+
+// callText is the text the dialog shows for a call's input: every argument,
+// escaped by JSON and with no character that can hide text, the same for
+// every tool. undefined when the input has no JSON form.
+function callText(input: unknown): string | undefined {
+	let text: string | undefined;
+	try {
+		text = JSON.stringify(input, null, 1);
+	} catch {
+		return undefined;
+	}
+	// JSON has already escaped controls in its strings. Keep its layout newlines.
+	return text === undefined ? undefined : text.split("\n").map(visible).join("\n");
+}
+
+type ToolCall = { toolName?: unknown; input?: unknown };
+type GateResult = { block: true; reason: string } | undefined;
+
+// gate decides one tool call while an arm is open. A call runs only when it
+// is a read-only built-in of pi itself, or when the person at the terminal
+// types yes; every other answer and every failure blocks it.
+async function gate(pi: ExtensionAPI, event: ToolCall, ctx: ExtensionContext): Promise<GateResult> {
+	const deny = (reason: string): GateResult => ({ block: true, reason });
+	const name = typeof event.toolName === "string" ? event.toolName : "";
+	let source: { source?: unknown; path?: unknown } | undefined;
+	try {
+		source = pi.getAllTools().find((t) => t.name === name)?.sourceInfo as { source?: unknown; path?: unknown } | undefined;
+	} catch {
+		source = undefined;
+	}
+	// pi's own tool, not an extension's: a built-in extension's tools also
+	// carry source builtin, under the path of that extension.
+	const builtin = source?.source === "builtin" && source.path === `builtin:${name}`;
+	if (builtin && READ_ONLY_BUILTINS.has(name)) return undefined;
+	try {
+		if (ctx.mode !== "tui") return deny(gateNoTerminal);
+		const text = callText(event.input);
+		if (text === undefined || text.length > gateTextLimit) return deny(gateTooLong);
+		const shown = visible(name);
+		const head = [...arms.values()].some((a) => a.tagged)
+			? `A task that a linked server sent wants to run \`${shown}\`:`
+			: `A task that a linked server sent may still run in this session. \`${shown}\` wants to run:`;
+		const title = [head, text, ...(builtin ? [] : [gateExtensionLine])].join("\n") + `\n\nType yes to run ${shown}. Any other answer does not run it.`;
+		// The dialog title has one cell of padding on either side. Pi's
+		// wrapper counts glyph cells and uses the same word breaks as its Text.
+		const tui = await import("@earendil-works/pi-tui").catch(() => undefined);
+		if (typeof tui?.wrapTextWithAnsi !== "function") return deny(gateCannotMeasure);
+		const terminalColumns = process.stdout.columns || 80;
+		if (terminalColumns < 40) return deny(gateTooLong);
+		const columns = terminalColumns - 2;
+		const rows = process.stdout.rows || Infinity;
+		const availableTitleRows = rows - inputDialogRows - dockRows;
+		if (tui.wrapTextWithAnsi(text, columns).length > gateRowLimit || tui.wrapTextWithAnsi(title, columns).length > availableTitleRows) {
+			return deny(gateTooLong);
+		}
+		const answer = await ctx.ui.input(title, "", { signal: ctx.signal });
+		return typeof answer === "string" && answer.trim().toLowerCase() === "yes" ? undefined : deny(gateDenied);
+	} catch {
+		return deny(gateDenied);
+	}
+}
+
 export default function amqPiBridge(pi: ExtensionAPI): void {
 	registerAmqBridge(pi);
 }
@@ -205,6 +443,21 @@ export default function amqPiBridge(pi: ExtensionAPI): void {
 // its own identity, delivery, or upgrade remedy; without options this is
 // the plain extension.
 export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = {}): AmqBridge {
+	// The guard does not use the mailbox: these handlers read only the arms,
+	// so a pi that lost or never took its mailbox stays guarded. pi emits
+	// session_start, which restores the guard file, before any run.
+	pi.on("tool_call", async (event, ctx) => {
+		if (arms.size === 0) return undefined;
+		return gate(pi, event, ctx);
+	});
+	pi.on("agent_settled", (_event, ctx) => settleArms(pi, ctx));
+	// pi emits input before the run that the input starts.
+	pi.on("input", (event) => {
+		if (arms.size === 0) return undefined;
+		if (event.source === "interactive" && event.streamingBehavior === undefined) endTypedArms(pi);
+		return undefined;
+	});
+
 	let bridge: Bridge | null = null;
 	// ownerNotice limits the notices about another bridge to once.
 	const ownerNotice = { shown: false };
@@ -357,7 +610,10 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 		bridge = null;
 		ownerNotice.shown = false;
 		session = { identity: resolveIdentity(options, ctx) };
-		if (session.identity) serve(ctx, session.identity);
+		if (session.identity) {
+			restoreGuard(bridgeDir(session.identity));
+			serve(ctx, session.identity);
+		}
 		closeMarker();
 		if (!session.identity && !options.identity && !inactiveNoticeShown) {
 			// A host that gives no identity for this session keeps the bridge
@@ -404,10 +660,17 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 		if (!b || !f || f.terminal) return;
 		const msg = event.message as { role?: string; content?: unknown };
 		if (msg.role !== "user") return;
-		const own = !f.tagged && textOf(msg.content) === f.text;
+		const own = !f.tagged && textOf(msg.content) === handoffText(f);
 		if (own) {
 			f.tagged = true;
-			b.requestUser = f.ref;
+			b.requestUser = { ref: f.ref, text: f.text };
+			// A granted request's text ends with its arm line, so this
+			// match is the start of the message that carries the arm.
+			const a = f.arm ? arms.get(f.arm) : undefined;
+			if (a) {
+				a.tagged = true;
+				a.owner = pi;
+			}
 		}
 		if (b.deliver) return;
 		if (f.started) {
@@ -614,7 +877,7 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOption
 		runs: 0,
 		runOutcome: "",
 		runStartAt: -1,
-		requestUser: "",
+		requestUser: null,
 	};
 	writeLiveness(b, true);
 	closeOrphanedReceipts(b);
@@ -895,12 +1158,16 @@ function scan(pi: ExtensionAPI, b: Bridge): void {
 		if (claim === "error") continue; // retried on the next poll
 		markHandled(b, ref);
 		if (claim === "taken") continue; // another bridge process already claimed it
+		// A granted request's text ends with the line of its own arm, so its
+		// own user message is the only one that matches it.
+		const arm = verdict.granted ? randomBytes(16).toString("hex") : "";
 		const f: Inflight = {
 			ref,
 			text: verdict.text,
 			deliveredAt: Date.now(),
 			started: false,
 			tagged: false,
+			arm,
 			lastText: "",
 			lastError: "",
 			finalText: "",
@@ -920,9 +1187,16 @@ function scan(pi: ExtensionAPI, b: Bridge): void {
 			}
 			continue;
 		}
+		// The guard is armed before the hand-off, so the first tool call of
+		// the granted run already finds it.
+		if (arm && !openArm(b.dir, arm, ref)) {
+			settle(b, { event: "failed", error: "the guard of a granted task could not be armed; nothing was sent to pi" });
+			continue;
+		}
 		try {
-			pi.sendUserMessage(verdict.text, { deliverAs: "followUp" });
+			pi.sendUserMessage(handoffText(f), { deliverAs: "followUp" });
 		} catch (err) {
+			if (arm) endArm(arm); // proven non-delivery
 			settle(b, { event: "failed", error: `sendUserMessage: ${String(err)}` });
 		}
 	}
@@ -986,7 +1260,7 @@ function busyReason(b: Bridge): string {
 	}
 }
 
-type Verdict = { refuse: string; error: string; text: string; notAfter: string; origin?: { carrier: string; name: string } };
+type Verdict = { refuse: string; error: string; text: string; notAfter: string; granted: boolean; origin?: { carrier: string; name: string } };
 
 // MAX_ORIGIN_NAME is the protocol's bound on a request origin's name.
 const MAX_ORIGIN_NAME = 64;
@@ -1001,7 +1275,7 @@ function originOf(v: unknown): { carrier: string; name: string } | undefined {
 }
 
 function examine(b: Bridge, ref: string): Verdict {
-	const refuse = (reason: string, error: string): Verdict => ({ refuse: reason, error, text: "", notAfter: "" });
+	const refuse = (reason: string, error: string): Verdict => ({ refuse: reason, error, text: "", notAfter: "", granted: false });
 	let req: Record<string, unknown>;
 	try {
 		req = JSON.parse(fs.readFileSync(path.join(b.dir, "requests", `${ref}.json`), "utf8"));
@@ -1028,7 +1302,33 @@ function examine(b: Bridge, ref: string): Verdict {
 	// absent or empty hint addresses none, so a request retained across
 	// session_start never runs in a session it was not sent to.
 	if (hint !== b.generation) return refuse("generation", "epoch_hint does not match the live session generation");
-	return { refuse: "", error: "", text: req.text, notAfter: req.not_after as string, origin: originOf(req.origin) };
+	const { granted = false } = req;
+	if (typeof granted !== "boolean") return refuse("invalid", "granted is not a boolean");
+	if (granted) {
+		// A granted request runs only where the guard asks the person at
+		// this pi's terminal: the TUI, with this extension's own hand-off. A
+		// bridge that cannot ask publishes no gate, so this is a second fence.
+		if (rev < GRANT_REVISION) {
+			return refuse("revision", `a granted request needs bridge_revision ${GRANT_REVISION} or later, and this one needs ${rev}: upgrade amq-remote to the release that matches this extension and restart it`);
+		}
+		if (modeOf(b.ctx) !== "tui" || b.deliver) return refuse("unsupported", "a granted task needs the pi terminal UI");
+	}
+	return { refuse: "", error: "", text: req.text, notAfter: req.not_after as string, granted, origin: originOf(req.origin) };
+}
+
+// modeOf is pi's run mode now, "" when the context cannot tell.
+function modeOf(ctx: ExtensionContext): string {
+	try {
+		return ctx.mode;
+	} catch {
+		return "";
+	}
+}
+
+// gates reports whether this bridge can guard a granted task: pi runs in
+// its TUI and the bridge hands requests to pi with its own sendUserMessage.
+function gates(b: Bridge): boolean {
+	return b.surface === "tui" && !b.deliver;
 }
 
 // claimReceipt publishes receipts/<ref>.json create-new. The receipt is the
@@ -1076,6 +1376,7 @@ function writeLiveness(b: Bridge, live: boolean): void {
 		surface: b.surface,
 		session_generation: b.generation,
 		bridge_revision: BRIDGE_REVISION,
+		gate: gates(b) || undefined,
 		session_id: sessionIdOf(b.ctx) || undefined,
 		activity: ACTIVITY_VERSION,
 		upgrade: b.upgrade || undefined,
@@ -1307,7 +1608,7 @@ function activityHooks(pi: ExtensionAPI, get: () => Bridge | null): void {
 		appendActivity(b, { kind: "settled", status: event.aborted ? "aborted" : b.runOutcome || "error" });
 		b.run = "";
 		b.runOutcome = "";
-		b.requestUser = "";
+		b.requestUser = null;
 	});
 	pi.on("turn_start", () => {
 		const b = get();
@@ -1327,10 +1628,10 @@ function activityHooks(pi: ExtensionAPI, get: () => Bridge | null): void {
 		const msg = event.message as { role?: string; content?: unknown };
 		if (msg.role !== "user" && msg.role !== "assistant") return;
 		// The request's own user message carries its ref.
-		const id = msg.role === "user" ? b.requestUser : "";
-		if (msg.role === "user") b.requestUser = "";
-		const text = truncateUtf8(textOf(msg.content), MAX_ACTIVITY_TEXT);
-		if (text) appendActivity(b, { kind: msg.role, id, text });
+		const request = msg.role === "user" ? b.requestUser : null;
+		if (msg.role === "user") b.requestUser = null;
+		const text = truncateUtf8(request?.text ?? textOf(msg.content), MAX_ACTIVITY_TEXT);
+		if (text) appendActivity(b, { kind: msg.role, id: request?.ref, text });
 	});
 	pi.on("tool_execution_start", (event) => {
 		const b = get();
