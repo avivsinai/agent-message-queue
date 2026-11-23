@@ -326,9 +326,10 @@ func OpenRequestIDs(bindingName string) ([]string, error) {
 	}
 	out := []string{}
 	for _, e := range entries {
-		if !e.Type().IsRegular() {
-			continue
-		}
+		// Every matching name counts, whatever its directory entry type:
+		// Requests and readJSON select by filename only, so the baseline
+		// excluded at run start must cover every name they could later
+		// select, of any type.
 		if id, ok := strings.CutSuffix(e.Name(), ".json"); ok && idRe.MatchString(id) {
 			out = append(out, id)
 		}

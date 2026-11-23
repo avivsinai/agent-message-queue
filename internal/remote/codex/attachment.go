@@ -1682,6 +1682,10 @@ func (a *Attachment) dialogFor(req ServerRequest) *openDialog {
 		Cwd      string `json:"cwd"`
 		Reason   string `json:"reason"`
 		// item/commandExecution/requestApproval, item/fileChange/requestApproval
+		// The command approval kind: only "command" is a plain command
+		// decision; writeStdin and humanCommand decide more than the shown
+		// command.
+		Kind           string `json:"kind"`
 		Command        any    `json:"command"`
 		GrantRoot      string `json:"grantRoot"`
 		NetworkContext *struct {
@@ -1731,13 +1735,12 @@ func (a *Attachment) dialogFor(req ServerRequest) *openDialog {
 		case string:
 			if strings.TrimSpace(c) != "" {
 				line("$ %s", c)
-				wholeCommand = true
+				wholeCommand = p.Kind == "command"
 			}
 		case nil:
 		default:
 			if raw, err := json.Marshal(c); err == nil {
 				line("$ %s", raw)
-				wholeCommand = true
 			}
 		}
 		where()
@@ -1749,6 +1752,10 @@ func (a *Attachment) dialogFor(req ServerRequest) *openDialog {
 		}
 		if g := grantsText(p.AdditionalPermissions); g != "" {
 			line("additional permissions:\n%s", g)
+			// grantsText renders only each grant's kind; distinct subpaths of
+			// the same kind render alike, so the text is not the whole
+			// decision and the dialog stays machine-answered.
+			wholeCommand = false
 		}
 		d.req.Options, d.reply = decisions(p.AvailableDecisions, "accept", "decline")
 	case methodFileChangeApproval:

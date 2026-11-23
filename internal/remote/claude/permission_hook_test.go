@@ -755,3 +755,23 @@ func TestPermissionHookMarksOnlyBashComplete(t *testing.T) {
 		t.Fatalf("decision = %v, want the owner's allow", d)
 	}
 }
+
+// Only a Bash input of exactly the rendered shape — command and optional
+// description — is marked complete: an unknown decision-bearing field such
+// as a timeout or a background flag is not shown, and the dialog stays
+// machine-answered on the local/Buzz path.
+func TestDialogTextBashCompletenessRequiresTheRenderedShape(t *testing.T) {
+	for name, input := range map[string]string{
+		"unknown field":     `{"command":"ls","timeout":5000}`,
+		"background flag":   `{"command":"ls","run_in_background":true}`,
+		"broken JSON":       `{"command":"ls"`,
+		"trailing newlines": "{\"command\":\"ls\\n\\n\"}",
+	} {
+		if _, complete := dialogText("Bash", []byte(input)); complete {
+			t.Fatalf("%s marked complete: %s", name, input)
+		}
+	}
+	if _, complete := dialogText("Bash", []byte(`{"command":"ls","description":"list"}`)); !complete {
+		t.Fatal("the exact rendered shape is not marked complete")
+	}
+}

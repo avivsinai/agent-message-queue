@@ -3,6 +3,7 @@ package dialog
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 	"time"
 
@@ -133,9 +134,21 @@ func TestOpenRequestIDsListsTheDirectoryPlainly(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(dir, "requests", "sub"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// A request-named directory entry of a nonregular type is still a name
+	// Requests could later select, so the baseline lists it too.
+	dirID := NewID()
+	if err := os.Mkdir(filepath.Join(dir, "requests", dirID+".json"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	ids, err = OpenRequestIDs("alpha")
-	if err != nil || len(ids) != 1 || ids[0] != req.ID {
-		t.Fatalf("listing after strays = %v, %v; want [%s]", ids, err, req.ID)
+	if err != nil || len(ids) != 2 {
+		t.Fatalf("listing after strays = %v, %v; want the request and the request-named directory", ids, err)
+	}
+	sort.Strings(ids)
+	want := []string{req.ID, dirID}
+	sort.Strings(want)
+	if ids[0] != want[0] || ids[1] != want[1] {
+		t.Fatalf("listing = %v, %v; want {%s %s}", ids, err, want[0], want[1])
 	}
 	// An unlistable directory returns the error.
 	if err := os.Chmod(filepath.Join(dir, "requests"), 0o000); err != nil {

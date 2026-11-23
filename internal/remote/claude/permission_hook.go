@@ -692,7 +692,12 @@ func dialogText(tool string, input json.RawMessage) (text string, complete bool)
 			ReplaceAll bool   `json:"replace_all"`
 		} `json:"edits"`
 	}
-	decodeErr := json.Unmarshal(input, &in)
+	// Only a Bash input of exactly the rendered shape — command and optional
+	// description, nothing else — can be marked complete (R6): an unknown
+	// decision-bearing field would not be shown.
+	dec := json.NewDecoder(bytes.NewReader(input))
+	dec.DisallowUnknownFields()
+	decodeErr := dec.Decode(&in)
 	var b strings.Builder
 	switch {
 	case tool == "Bash" && in.Command != "":
