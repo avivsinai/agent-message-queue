@@ -435,6 +435,7 @@ func TestStubMsgID(t *testing.T) {
 		{"the wrapper with a stub", wrap(grantedStub(id)), true},
 		{"a stub among other text", wrap("please also\n" + grantedStub(id)), false},
 		{"a bare stub", grantedStub(id), false},
+		{"another tag around a stub", "<note>\n" + grantedStub(id) + "\n</cross-session-message>", false},
 		{"a bad id", wrap(grantedStub("p3-0001")), false},
 	}
 	for _, row := range rows {

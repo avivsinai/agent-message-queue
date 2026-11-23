@@ -492,6 +492,31 @@ func TestGrantedStubSettlement(t *testing.T) {
 		}
 	})
 
+	// A restart reads the run's end from Lookup, not from an event.
+	t.Run("a run that ended while the endpoint was down is judged at the restart", func(t *testing.T) {
+		rt := newPromptRuntime()
+		f := newGrantFixture(t, rt)
+		const id = "11111111-1111-4111-8111-111111111317"
+		f.submit(t, id, true)
+		f.ep.GrantedPrompt(report(id, "default"))
+		f.open(t, nil)
+		rt.set(func(r *promptRuntime) { r.digest = sha("another text") })
+		rt.Complete(id, "the answer")
+		if rec := f.record(t, id); rec.State != protocol.StateRunning {
+			t.Fatalf("record while the endpoint was down = %s, want running", rec.State)
+		}
+		f.open(t, rt)
+		if err := f.ep.Reconcile(); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		if rec := f.record(t, id); rec.State != protocol.StateFailed || rec.Result == nil || rec.Result.Text != "" || rt.forgets != 1 {
+			t.Fatalf("record = %s result %+v forgets %d; want failed with no text and the report forgotten", rec.State, rec.Result, rt.forgets)
+		}
+		if got := f.get(t, id); got.Outcome.Message != "the answer cannot be attributed to this task; the task may have run" {
+			t.Fatalf("request.get message = %q", got.Outcome.Message)
+		}
+	})
+
 	// Pre-merge review: the Submit that returns after the run ended failed
 	// again with no reason and cleared the withheld answer's reason.
 	t.Run("a run that ends before its Submit returns keeps the withheld reason", func(t *testing.T) {
