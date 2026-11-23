@@ -528,7 +528,7 @@ func (s *Agent) dialogPostDir(name string) string {
 
 // dialogStep posts req once, then reads the owner's reactions on the post
 // every reactionPollGap until it is answered: ❌ picks the deny option and
-// beats ✅, which picks option 1.
+// beats ✅, which picks the narrowest approval.
 func (s *Agent) dialogStep(t dialogTarget, dir string, req dialog.Request, now time.Time) {
 	path := filepath.Join(s.dialogPostDir(t.name), req.ID+".json")
 	p, found := readDialogPost(path)
@@ -725,18 +725,25 @@ func dialogText(label string, req dialog.Request) string {
 		deny = deny || o.Deny
 	}
 	var how []string
+	legacyNo := false
+	for _, option := range req.Options {
+		if option.Scope == "" && option.N == 1 {
+			legacyNo = true
+		}
+	}
+	approve, canApprove := dialog.ApproveOption(req)
 	if len(req.Options) > 0 {
-		if approve, ok := dialog.ApproveOption(req); ok {
+		if canApprove {
 			how = append(how, fmt.Sprintf("React ✅ = %d", approve.N))
 		}
 		if deny {
 			how = append(how, "❌ = Deny")
 		}
 		tail := "or reply a number"
-		if _, ok := dialog.ApproveOption(req); ok {
+		if canApprove {
 			tail += " / yes"
 		}
-		if deny {
+		if deny || legacyNo {
 			tail += " / no"
 		}
 		how = append(how, tail)

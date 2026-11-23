@@ -30,3 +30,12 @@ func TestTypedDialogReactionAndHintUseNarrowestOption(t *testing.T) {
 		t.Fatalf("always-only hint = %q", text)
 	}
 }
+
+// wb7p review: typed scope omits no-ineligible-approval shortcuts without
+// changing the byte-compatible legacy free-text question hint.
+func TestLegacyFreeTextDialogHintKeepsYesNo(t *testing.T) {
+	req := dialog.Request{FreeText: true, Options: []dialog.Option{{N: 1, Label: "Choice A"}, {N: 2, Label: "Choice B"}}}
+	if text := dialogText("pi", req); !strings.Contains(text, "or reply a number / yes / no, or reply with your answer.") {
+		t.Fatalf("legacy hint = %q", text)
+	}
+}
