@@ -69,8 +69,8 @@ type Obligation struct {
 	Expired bool
 	Last    *Entry
 	// OwnerReplied reports whether a watched opener received news from its
-	// owner addressed to its requester. An unreferenced message must come
-	// from the owner's own session and project.
+	// owner addressed to its requester. A message that does not reference
+	// the opener must come from the owner's own session and project.
 	OwnerReplied bool
 }
 
@@ -268,17 +268,18 @@ func (red *Reduction) run() {
 		ob.OwnerReplied = slices.ContainsFunc(red.order, func(rec *record) bool {
 			return rec.sender.Handle == ob.Owner.Handle &&
 				slices.Contains(rec.entry.To, ob.Requester.Handle) &&
-				(len(rec.entry.Refs) != 0 || rec.sender == ob.Owner) &&
+				(slices.Contains(rec.entry.Refs, ob.Opener.ID) || rec.sender == ob.Owner) &&
 				NewsAbout(ob.Opener, rec.entry)
 		})
 	}
 }
 
 // NewsAbout reports whether a message from the recipient to the requester
-// references the request or, without refs, follows it in the same thread.
+// is news for the request's news clock: it references the request, or it was
+// created after it. The clock asks whether the recipient is heard from, not
+// which request a message is about, so a report on other work counts.
 func NewsAbout(request, msg *Entry) bool {
-	return slices.Contains(msg.Refs, request.ID) ||
-		(len(msg.Refs) == 0 && msg.Thread == request.Thread && msg.RawTime.After(request.RawTime))
+	return slices.Contains(msg.Refs, request.ID) || msg.RawTime.After(request.RawTime)
 }
 
 // classifyLineage marks rec unresolved when following direct parents does

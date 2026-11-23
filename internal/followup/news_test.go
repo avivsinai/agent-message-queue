@@ -218,8 +218,9 @@ func TestPromoteNewsAndCompletionTimers(t *testing.T) {
 	}
 }
 
-// The first-news review found false notices for bridged and routed senders,
-// missing sent copies, and requests that continued another request.
+// The first-news review found false notices for bridged and routed senders
+// and for missing sent copies; the first use in the field found one for a
+// report that referenced another request.
 func TestPromoteNewsFromRecipient(t *testing.T) {
 	sent := time.Date(2026, 11, 23, 9, 0, 0, 500000, time.UTC)
 	for _, tc := range []struct {
@@ -230,16 +231,22 @@ func TestPromoteNewsFromRecipient(t *testing.T) {
 		second      bool
 		continues   bool
 		noRefs      bool
+		otherRef    bool
 		before      bool
 		wantFirst   bool
 	}{
 		{name: "bridged sender", from: "host/bob"},
 		{name: "sender names its own project", from: "bob", project: "canonical-build"},
 		{name: "missing sent copy", from: "bob", missingCopy: true},
-		{name: "reply references only the second request", from: "bob", second: true, wantFirst: true},
+		// Observed on the lead's seat: the builder reported twice through a
+		// hand-off notice that referenced its original order, and the news
+		// clock of the lead's later request for the same work still fired.
+		{name: "a report that references another request ends the clock", from: "bob", otherRef: true},
+		{name: "a reply to a later request ends the earlier clock too", from: "bob", second: true},
 		{name: "unreferenced news ends both clocks", from: "bob", second: true, noRefs: true},
-		{name: "unreferenced message predates request", from: "bob", noRefs: true, before: true, wantFirst: true},
-		{name: "continued request receives its own reply", from: "bob", second: true, continues: true, wantFirst: true},
+		{name: "a message created before the request is no news", from: "bob", noRefs: true, before: true, wantFirst: true},
+		{name: "a report on other work created before the request is no news", from: "bob", otherRef: true, before: true, wantFirst: true},
+		{name: "a reply to a continued request ends both clocks", from: "bob", second: true, continues: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			base, root := openTestRoot(t)
@@ -272,6 +279,9 @@ func TestPromoteNewsFromRecipient(t *testing.T) {
 			var refs []string
 			if !tc.noRefs {
 				refs = []string{target.ID}
+			}
+			if tc.otherRef {
+				refs = []string{"2026-11-22T08-00-00.000Z_pid1_00000000"}
 			}
 			id, err := format.NewMessageID(at)
 			if err != nil {
