@@ -10,6 +10,10 @@ import (
 
 const (
 	hookRingGrace = 2 * time.Minute
+	// hookRecordSkew is how far a hook record's file time may be ahead of a
+	// scan's now and still be a record written at now: the scan reads its
+	// clock before it reads the records, which another process writes.
+	hookRecordSkew = wakeDoorbellRetryBase
 	// The waiter writes its rang IDs before attempting delivery, so the
 	// file's time is the time of its last ring.
 	coopWaitStateFile = ".rewake-hook-state.json"
@@ -59,7 +63,8 @@ func (cfg *wakeConfig) applyPublishedChannel(channel wakeChannel) {
 // waiter holds the lock, no hook announced it, and the waiter's last ring
 // of any message is younger than hookRingGrace (the turn that ring started
 // runs, and its end starts the waiter that rings this message). A record
-// time in the future counts as old. An announced message whose record is
+// time ahead of now by at most hookRecordSkew is a record written at now; a
+// time further ahead counts as old. An announced message whose record is
 // old was not followed by a drain, so the wake types for it even while a
 // waiter holds the lock. An empty cohort is not covered, and neither is a
 // cohort with a file that has no readable header id: the waiter cannot
@@ -75,7 +80,7 @@ func (cfg *wakeConfig) hookYield(now time.Time, ids []string) (time.Duration, bo
 	seen := coopAnnounced(fsq.AgentBase(cfg.root, cfg.me), "", true)
 	// grace is what is left of hookRingGrace after a record written at at.
 	grace := func(at time.Time) time.Duration {
-		if age := now.Sub(at); !at.IsZero() && age >= 0 && age < hookRingGrace {
+		if age, ok := hookRecordAge(now, at); ok && age < hookRingGrace {
 			return hookRingGrace - age
 		}
 		return 0
@@ -113,6 +118,18 @@ func (cfg *wakeConfig) hookYield(now time.Time, ids []string) (time.Duration, bo
 		_ = writeWakeDiagnostic(cfg, "amq wake: hook doorbell: %s\n", reason)
 	}
 	return wait, wait > 0
+}
+
+// hookRecordAge is the age at now of a hook record whose file time is at.
+// A time ahead of now by at most hookRecordSkew is a record written at now
+// (age 0). A zero time, or a time further ahead, is no evidence: ok is
+// false.
+func hookRecordAge(now, at time.Time) (age time.Duration, ok bool) {
+	age = now.Sub(at)
+	if at.IsZero() || age < -hookRecordSkew {
+		return 0, false
+	}
+	return max(age, 0), true
 }
 
 // coopAnnouncement is what the co-op hooks announced to an agent. ids maps

@@ -65,6 +65,13 @@ func TestHookDoorbellYieldsOnlyToCurrentDeliveryEvidence(t *testing.T) {
 		{"10 no waiter, another message rung 3 minutes ago", wakeChannelHook, false, &record{[]string{"other"}, 3 * time.Minute}, nil, one, false},
 		// An empty id stands for a file with no readable header.
 		{"11 waiter, an inbox file with no readable header", wakeChannelHook, true, nil, nil, []mail{{"broken.md", ""}}, false},
+		// Row 12 comes from finding H22, codex's live run T11 on 899a64b0:
+		// the waiter wrote its rang record just after the wake's scan read
+		// its clock, the negative age read as old, and the wake typed the
+		// full doorbell 1.6 s after a fresh ring. Row 13 keeps the guard: a
+		// time far ahead is not a fresh ring.
+		{"12 no waiter, mail rung 50 ms after the scan's now", wakeChannelHook, false, &record{[]string{"mail"}, -50 * time.Millisecond}, nil, one, true},
+		{"13 no waiter, mail rung 1 hour after the scan's now", wakeChannelHook, false, &record{[]string{"mail"}, -time.Hour}, nil, one, false},
 		{"unpublished", "", true, nil, nil, one, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
