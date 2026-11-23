@@ -85,18 +85,57 @@ func runCoopPromptCodex(stdin io.Reader, w io.Writer) error {
 	}
 	// Input the receiver cannot read whole, a prompt cut by the bound among
 	// it, names no chat and no prompt to speak for.
-	if json.NewDecoder(io.LimitReader(stdin, coopPromptInputLimit)).Decode(&in) != nil || !codexidentity.ValidThread(in.SessionID) {
+	if json.NewDecoder(io.LimitReader(stdin, coopPromptInputLimit)).Decode(&in) != nil {
 		return nil
 	}
-	if adoptCodexHookIdentity(in.SessionID) != nil {
-		return nil
-	}
-	root, me, session, err := coopHookContext()
-	if err != nil || root == "" || me == "" || !codexThreadMayBe(in.SessionID, root, me) {
+	root, me, session, err := coopHookIdentity(in.SessionID)
+	if err != nil {
 		return nil
 	}
 	writeCoopPromptFor(w, in.Prompt, root, me, session)
 	return nil
+}
+
+// runCoopStopCodex reports attended mail at a turn end, without a block,
+// continuation or, on any error, output.
+func runCoopStopCodex(stdin io.Reader, w io.Writer) error {
+	var in struct {
+		SessionID string `json:"session_id"`
+	}
+	if json.NewDecoder(io.LimitReader(stdin, maxWakeDialogHookInputBytes)).Decode(&in) != nil {
+		return nil
+	}
+	root, me, _, err := coopHookIdentity(in.SessionID)
+	if err != nil || readSeatDoorbell(root, me).ringer != doorbellNone {
+		return nil
+	}
+	pending, err := coopStopPending(root, me)
+	if err != nil {
+		return nil
+	}
+	statePath := filepath.Join(fsq.AgentBase(root, me), coopStopStateFile)
+	old, err := readCoopStopStateChecked(statePath)
+	if err != nil {
+		return nil
+	}
+	if err := writeCoopStopAttendedState(w, pending, old, statePath, false); err != nil {
+		return nil
+	}
+	return nil
+}
+
+// coopHookIdentity resolves the only seat a Codex hook may speak for: its
+// valid input thread, whose identity the process carries or the thread owns.
+// The caller clears its output on any error; none reaches the user or model.
+func coopHookIdentity(thread string) (root, me, session string, err error) {
+	if !codexidentity.ValidThread(thread) || adoptCodexHookIdentity(thread) != nil {
+		return "", "", "", errors.New("codex hook identity unavailable")
+	}
+	root, me, session, err = coopHookContext()
+	if err != nil || root == "" || me == "" || !codexThreadMayBe(thread, root, me) {
+		return "", "", "", errors.New("codex hook thread does not match")
+	}
+	return root, me, session, nil
 }
 
 // codexThreadMayBe reports whether thread may speak for (root, me). A

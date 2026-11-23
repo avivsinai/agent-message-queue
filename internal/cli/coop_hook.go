@@ -28,7 +28,7 @@ const coopHookPeerActive = 10 * time.Minute
 
 func runCoopHook(args []string) error {
 	fs := flag.NewFlagSet("coop hook", flag.ContinueOnError)
-	usage := usageWithFlags(fs, "amq coop hook session-start|stop|prompt|wait|codex-wait|codex-prompt",
+	usage := usageWithFlags(fs, "amq coop hook session-start|stop|prompt|wait|codex-wait|codex-prompt|codex-stop",
 		"Hook receivers for the co-op hooks; amq coop install-hooks installs them.",
 		"They read AM_ME, AM_ROOT and the session pin from the environment, or the",
 		"identity amq coop join bound to the session, and never read .amqrc. They exit",
@@ -68,14 +68,18 @@ func runCoopHook(args []string) error {
 		"next waiter.",
 		"",
 		"codex-prompt is prompt for a joined Codex chat: it reads the thread id from",
-		"the hook input's session_id, and always exits 0.")
+		"the hook input's session_id, and always exits 0.",
+		"",
+		"codex-stop reports unread mail at a turn end on an attended joined Codex",
+		"chat, as a systemMessage with no block or continuation; otherwise prints",
+		"nothing and always exits 0.")
 	if handled, err := parseFlagsAllowPositionals(fs, args, usage); err != nil {
 		return err
 	} else if handled {
 		return nil
 	}
 	if fs.NArg() != 1 {
-		return UsageError("coop hook needs exactly one of: session-start, stop, prompt, wait, codex-wait, codex-prompt")
+		return UsageError("coop hook needs exactly one of: session-start, stop, prompt, wait, codex-wait, codex-prompt, codex-stop")
 	}
 	switch fs.Arg(0) {
 	case "session-start":
@@ -90,8 +94,10 @@ func runCoopHook(args []string) error {
 		return runCoopWaitCodex(context.Background(), os.Stdin)
 	case "codex-prompt":
 		return runCoopPromptCodex(os.Stdin, os.Stdout)
+	case "codex-stop":
+		return runCoopStopCodex(os.Stdin, os.Stdout)
 	default:
-		return UsageError("coop hook needs exactly one of: session-start, stop, prompt, wait, codex-wait, codex-prompt")
+		return UsageError("coop hook needs exactly one of: session-start, stop, prompt, wait, codex-wait, codex-prompt, codex-stop")
 	}
 }
 
