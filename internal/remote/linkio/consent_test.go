@@ -169,6 +169,7 @@ func TestSignedSubmitRunsOverTheLink(t *testing.T) {
 	clk.ns.Store(time.Date(2026, 10, 9, 14, 2, 10, 0, time.UTC).UnixNano())
 	got := make(chan *protocol.Command, 1)
 	var host string
+	var calls atomic.Int32
 	c, _ := startCarrier(t, fs, clk, func(cfg *Config) {
 		cfg.StoreID = view.StoreID
 		cfg.ConsentKeys = func() []ConsentKey { return []ConsentKey{key} }
@@ -178,6 +179,9 @@ func TestSignedSubmitRunsOverTheLink(t *testing.T) {
 				src.NativeSession != doc.NativeSessionID || src.Credential != key.CredentialID ||
 				len(src.Shared) != 1 || src.Shared[0] != doc.Command.TargetID {
 				t.Errorf("source %+v, want this link's sink %s with the signed session, key and shared target", src, host)
+			}
+			if calls.Add(1) > 1 {
+				return protocol.Reply{Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeBusy}}, nil
 			}
 			got <- cmd
 			return protocol.Reply{Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Evidence: "submitted"}}, nil
@@ -199,6 +203,22 @@ func TestSignedSubmitRunsOverTheLink(t *testing.T) {
 	var rep outcomeReply
 	if err := decodeStrict(r.Body, "", &rep); err != nil || r.Re != "m_s1" || rep.Outcome.Evidence != "submitted" {
 		t.Fatalf("reply %s: want the submit's Outcome", r.Body)
+	}
+	// A busy refusal of the same signed document has exactly the body of
+	// the contract's busy frame: an outcome reply with no other key.
+	fs.send(Frame{Schema: SchemaFrame, ID: "m_s2", Gen: gen, Body: frame.Frame.Body})
+	r = fs.next()
+	var contract struct {
+		Frame struct {
+			Body json.RawMessage `json:"body"`
+		} `json:"frame"`
+	}
+	if err := json.Unmarshal(readLinkFixture(t, "frames/10-submit_refused_busy.json"), &contract); err != nil {
+		t.Fatal(err)
+	}
+	var busy, want any
+	if err := json.Unmarshal(r.Body, &busy); err != nil || json.Unmarshal(contract.Frame.Body, &want) != nil || r.Re != "m_s2" || !reflect.DeepEqual(busy, want) {
+		t.Fatalf("busy reply %s: want the contract's busy body %s", r.Body, contract.Frame.Body)
 	}
 }
 

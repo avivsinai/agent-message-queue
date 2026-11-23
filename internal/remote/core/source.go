@@ -73,10 +73,10 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 			e.mu.Unlock()
 			return protocol.Reply{}, protocol.Refuse(protocol.CodeUnshared, "only the owner's Buzz share can cancel its requests")
 		}
-		// A link creates no tombstones: it cancels only after its submit's
-		// outcome, and its commands for one request run in order, so an
-		// absent request is one it never sent. Nobody else may plant one in
-		// a link's namespace either.
+		// A link's cancel plants no tombstone: it cancels only after its
+		// submit's outcome, and its commands for one request run in order, so
+		// an absent request is one it never sent. Nobody else may plant one
+		// in a link's namespace either.
 		if isLink(src) {
 			e.mu.Unlock()
 			return protocol.Reply{}, noRecord()

@@ -224,13 +224,17 @@ func decideCoopStop(pending []coopStopMessage, baseline *time.Time, old coopStop
 	slices.Sort(ids)
 	ids = slices.Compact(ids)
 
-	next := coopStopState{NoticedIDs: old.NoticedIDs, BlockedIDs: []string{}}
+	next := coopStopState{Schema: 1, NoticedIDs: old.NoticedIDs, BlockedIDs: []string{}}
 	// Drained mail leaves the state: keep only ids still pending, so the
 	// state does not grow with every message ever reported (the same filter
-	// decideCoopStopAttended applies on the attended path).
-	pendingSeen := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		pendingSeen[id] = true
+	// decideCoopStopAttended applies on the attended path). The set is every
+	// pending message, not the baseline-filtered ids: a noticed id the wake
+	// does not ring for is still unread and must stay noticed.
+	pendingSeen := make(map[string]bool, len(pending))
+	for _, msg := range pending {
+		if msg.ID != "" {
+			pendingSeen[msg.ID] = true
+		}
 	}
 	kept := make([]string, 0, len(old.NoticedIDs))
 	for _, id := range old.NoticedIDs {

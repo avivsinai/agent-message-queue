@@ -468,10 +468,10 @@ func TestCoopStopAttendedStateHoldsOnlyPendingIDs(t *testing.T) {
 	}
 	// An id an earlier unattended block reported stays reported: an attended
 	// seat that keeps it pending reports it again only as a systemMessage
-	// count, never as a second block.
+	// count, never as a second block. Called with the OLD state, as the hook
+	// does — against the next state every pending id is already noticed.
 	blockedOld := coopStopState{Schema: 1, BlockedIDs: []string{"kept"}}
-	blockedGot := decideCoopStopAttended([]coopStopMessage{kept}, blockedOld)
-	if fresh := freshAttendedIDs([]coopStopMessage{kept}, blockedGot.NoticedIDs, blockedGot.BlockedIDs); len(fresh) != 0 {
+	if fresh := freshAttendedIDs([]coopStopMessage{kept}, blockedOld.NoticedIDs, blockedOld.BlockedIDs); len(fresh) != 0 {
 		t.Fatalf("blocked id reported again by freshAttendedIDs: %v, want none", fresh)
 	}
 	// Drained mail leaves the unattended state too: decideCoopStop prunes
@@ -483,6 +483,16 @@ func TestCoopStopAttendedStateHoldsOnlyPendingIDs(t *testing.T) {
 	}
 	if out == nil {
 		t.Fatal("unattended stop with fresh mail blocked, want a block decision")
+	}
+	// A noticed id that is pending but after the wake baseline stays in
+	// NoticedIDs: the wake does not ring for it, yet it is unread, so
+	// attended on again must not print a second systemMessage for it.
+	baseline := time.Now().Add(-time.Hour)
+	after := coopStopMessage{ID: "after", Created: baseline.Add(time.Second).Format(time.RFC3339Nano)}
+	noticed := coopStopState{Schema: 1, NoticedIDs: []string{"after"}}
+	keptNext, _ := decideCoopStop([]coopStopMessage{after}, &baseline, noticed, false, "root=r session=s")
+	if !slices.Equal(keptNext.NoticedIDs, []string{"after"}) {
+		t.Fatalf("noticed id after the baseline pruned: %v, want [after]", keptNext.NoticedIDs)
 	}
 }
 
