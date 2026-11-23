@@ -34,10 +34,11 @@ type NotifyPlan struct {
 }
 
 type NotifyReport struct {
-	State    Snapshot
-	Model    Model
-	Problems []Problem
-	Err      error
+	State     Snapshot
+	Model     Model
+	Problems  []Problem
+	Err       error
+	NoticeErr error
 }
 
 type deliveredEntry struct {
@@ -55,8 +56,8 @@ type deliveredSet struct {
 // is written atomically after its send succeeds. A crash between a send and
 // its record sends that one notice again on the next run.
 func Notify(ctx context.Context, plan NotifyPlan) NotifyReport {
-	if info, err := os.Lstat(plan.Store.Dir); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return NotifyReport{Err: errors.New("the board has no published snapshot; run amq-board sync --init")}
+	if err := plan.Store.safeDirectory(); err != nil {
+		return NotifyReport{Err: err}
 	}
 	unknown := map[string]bool{}
 	for _, handle := range append([]string{plan.Sender}, plan.Recipients...) {
@@ -80,7 +81,7 @@ func Notify(ctx context.Context, plan NotifyPlan) NotifyReport {
 		return NotifyReport{Err: err}
 	}
 	var report NotifyReport
-	err := lock.WithExclusiveFileLockUntil(filepath.Join(filepath.Dir(plan.Store.Dir), "notify.lock"), func() bool { return ctx.Err() != nil }, func() error {
+	err := lock.WithExclusiveFileLockUntil(filepath.Join(plan.Store.Dir, "notify.lock"), func() bool { return ctx.Err() != nil }, func() error {
 		delivered, err := plan.Store.readDelivered()
 		if err != nil {
 			return err
@@ -138,7 +139,7 @@ func Notify(ctx context.Context, plan NotifyPlan) NotifyReport {
 		return errors.Join(failures...)
 	})
 	if err != nil {
-		report.Err = errors.Join(report.Err, err)
+		report.NoticeErr = err
 	}
 	return report
 }
@@ -170,23 +171,19 @@ func notifySortedKeys(set map[string]bool) []string {
 }
 
 func (s Store) ensureDeliveredDir() error {
-	if err := os.MkdirAll(filepath.Dir(s.Dir), 0o700); err != nil {
-		return err
-	}
 	if err := s.safeDirectory(); err != nil {
 		return err
 	}
-	if info, err := os.Lstat(filepath.Dir(filepath.Join(s.Dir, "notify.lock"))); err != nil {
+	if info, err := os.Lstat(filepath.Join(s.Dir, "notify.lock")); err == nil && !info.Mode().IsRegular() {
+		return errors.New("floor notification lock is not a regular file")
+	} else if err != nil && !os.IsNotExist(err) {
 		return err
-	} else if !info.IsDir() {
-		return errors.New("floor notice state parent is not a directory")
 	}
 	return nil
 }
 
 func (s Store) readDelivered() (map[deliveredEntry]bool, error) {
-	file := filepath.Join(filepath.Dir(s.Dir), "floor-notices.json")
-	raw, err := fsq.ReadRegularNoFollowBounded(file, 64<<20)
+	raw, err := fsq.ReadRegularNoFollowBounded(filepath.Join(s.Dir, "floor-notices.json"), 64<<20)
 	if errors.Is(err, os.ErrNotExist) {
 		return map[deliveredEntry]bool{}, nil
 	}
@@ -222,7 +219,7 @@ func (s Store) writeDelivered(set map[deliveredEntry]bool) error {
 	if err != nil {
 		return err
 	}
-	if _, err := fsq.WriteStateFile(filepath.Dir(s.Dir), "floor-notices.json", append(raw, '\n'), 0o600); err != nil {
+	if _, err := s.writeFile("floor-notices.json", append(raw, '\n'), 0o600); err != nil {
 		return fmt.Errorf("floor notification delivery set: %w", err)
 	}
 	return nil

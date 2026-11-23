@@ -40,7 +40,7 @@ An unclosed request older than `obligation_max_age` (14 days by default) expires
 
 `amq-board check --notify lead,alt --as floor` sends one ordinary status message with label `floor` for each new incident to each listed recipient. Create `floor` as a mailbox in the board's session. If the board uses the base queue directly rather than a session, name a complete declared base-root mailbox and complete declared base-root recipients instead. The sender is this dedicated observer, never a working seat or interactive agent. Every sender and recipient resolves in the live route at the board's session root or base root before the first send. A sender equal to a recipient is an error. This is an explicit broadcast to all listed recipients, not one alternate receiving only after another fails. Each send has the observed problem as its text, so both recipients see what the observer saw. The sender receives no notice copy.
 
-The delivered set is beside the board directory, scoped by incident, recipient and that recipient root's session name (empty for the base queue). One lock covers reading, evaluation, sends and pruning. Each incident/recipient/session pair is recorded after its send succeeds. The operator's supervisor schedules the two commands; AMQ starts nothing:
+The delivered set is under the board directory, scoped by incident, recipient and that recipient root's session name (empty for the base queue). One lock covers reading, evaluation, sends and pruning. Each incident/recipient/session pair is recorded after its send succeeds. The operator's supervisor schedules the two commands; AMQ starts nothing:
 
 ```sh
 

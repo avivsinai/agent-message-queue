@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -104,27 +105,30 @@ func publishNotificationNews(t *testing.T, ctx context.Context, store Store, id 
 
 // The happy path publishes and reads real source history before sending.
 func TestNotifyReadsUnderItsLock(t *testing.T) {
-	store := noticeStore(t)
-	plan, r := noticeTestPlan(t, store)
-	ctx := context.Background()
-	publishNotificationNews(t, ctx, store, "prior-floor-incident")
-	if report := Notify(ctx, plan); report.Err != nil || len(r.calls) != 2 {
-		t.Fatalf("initial observation: %+v %v", r.calls, report.Err)
-	}
-	held, ok, err := lock.TryExclusive(filepath.Join(filepath.Dir(store.Dir), "notify.lock"))
-	if err != nil || !ok {
-		t.Fatalf("hold notifier lock: %v", err)
-	}
-	answer := make(chan NotifyReport, 1)
-	go func() { answer <- Notify(ctx, plan) }()
-	// This later run observes the later publication, not facts captured before
-	// it queued behind the earlier caller.
-	publishNotificationNews(t, ctx, store, "later-floor-incident")
-	held()
-	report := <-answer
-	if report.Err != nil || len(report.Problems) != 2 || len(r.calls) != 4 {
-		t.Fatalf("new incident pruned or missed: %+v %+v %v", r.calls, report.Problems, report.Err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		store := noticeStore(t)
+		plan, r := noticeTestPlan(t, store)
+		ctx := context.Background()
+		publishNotificationNews(t, ctx, store, "prior-floor-incident")
+		if report := Notify(ctx, plan); report.Err != nil || len(r.calls) != 2 {
+			t.Fatalf("initial observation: %+v %v", r.calls, report.Err)
+		}
+		held, ok, err := lock.TryExclusive(filepath.Join(store.Dir, "notify.lock"))
+		if err != nil || !ok {
+			t.Fatalf("hold notifier lock: %v", err)
+		}
+		answer := make(chan NotifyReport, 1)
+		go func() { answer <- Notify(ctx, plan) }()
+		synctest.Wait()
+		// This later run observes the later publication, not facts captured before
+		// it queued behind the earlier caller.
+		publishNotificationNews(t, ctx, store, "later-floor-incident")
+		held()
+		report := <-answer
+		if report.Err != nil || len(report.Problems) != 2 || len(r.calls) != 4 {
+			t.Fatalf("new incident pruned or missed: %+v %+v %v", r.calls, report.Problems, report.Err)
+		}
+	})
 }
 
 func TestNotifyIncidentDeliverySet(t *testing.T) {
@@ -161,6 +165,41 @@ func TestNotifyIncidentDeliverySet(t *testing.T) {
 	if report := Notify(ctx, plan); report.Err != nil || len(r.calls) != 2 {
 		t.Fatalf("second run resent = %+v, %v", r.calls, report.Err)
 	}
+	// A stale view adds stale-only pairs and retains the current request.
+	state, err := store.ReadContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.PublishedAt = time.Now().UTC().Add(-plan.Config.LivenessWindow - time.Second)
+	staleData, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writeFile("snapshot.json", staleData, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if report := Notify(ctx, plan); report.Err == nil || len(r.calls) != 4 {
+		t.Fatalf("wrong stale handling: %+v %v", r.calls, report.Err)
+	}
+	if report := Notify(ctx, plan); report.Err == nil || len(r.calls) != 4 {
+		t.Fatalf("second stale run resent stale: %+v %v", r.calls, report.Err)
+	}
+	delivered, err := store.readDelivered()
+	newsProblem := Problem{Kind: ProblemNewsOverdue, Request: base + "#news"}
+	if err != nil || !delivered[plan.deliveredPair(newsProblem.Incident(), "lead")] || !delivered[plan.deliveredPair(newsProblem.Incident(), "alt")] {
+		t.Fatalf("stale pruned ongoing pairs: %+v %v", delivered, err)
+	}
+	state.PublishedAt = time.Now().UTC()
+	freshData, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writeFile("snapshot.json", freshData, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if report := Notify(ctx, plan); report.Err != nil || len(r.calls) != 4 {
+		t.Fatalf("stale-to-fresh repeated an ongoing incident: %+v %v", r.calls, report.Err)
+	}
 	// A real reply settles the first request; a new request reissues delivery.
 	reply := thread.Entry{ID: "reply", From: "worker", To: []string{"lead"}, Thread: "work", Subject: "started", Kind: "status", Created: now.Format(time.RFC3339), Refs: []string{"news"}}
 	rawReply, err := json.Marshal(reply)
@@ -172,7 +211,7 @@ func TestNotifyIncidentDeliverySet(t *testing.T) {
 	if err := store.Commit(ctx, acquisition); err != nil {
 		t.Fatal(err)
 	}
-	if report := Notify(ctx, plan); report.Err != nil || len(r.calls) != 2 {
+	if report := Notify(ctx, plan); report.Err != nil || len(r.calls) != 4 {
 		t.Fatalf("answer did not settle: %+v %v", r.calls, report.Err)
 	}
 	fresh := thread.Entry{ID: "fresh-news", From: "lead", To: []string{"worker"}, Thread: "another", Subject: "next work", Kind: "todo", Created: now.Format(time.RFC3339), NewsBy: now.Add(-time.Minute).Format(time.RFC3339)}
@@ -185,11 +224,19 @@ func TestNotifyIncidentDeliverySet(t *testing.T) {
 	if err := store.Commit(ctx, acquisition); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Commit(ctx, acquisition); err != nil {
-		t.Fatal(err)
-	}
-	if report := Notify(ctx, plan); report.Err != nil || len(r.calls) != 4 {
+	if report := Notify(ctx, plan); report.Err != nil || len(r.calls) != 6 {
 		t.Fatalf("recurring incident not sent: %+v %v", r.calls, report.Err)
+	}
+}
+
+func TestNotifyDedupOfChangingProblemText(t *testing.T) {
+	plan := NotifyPlan{Session: "s1"}
+	base := Problem{Kind: ProblemSeatAtLimit, Session: "s1", Handle: "lead", CardID: "one", Text: "old"}
+	changed := base
+	changed.CardID, changed.Text = "two", "a different example"
+	seen := map[deliveredEntry]bool{plan.deliveredPair(base.Incident(), "lead"): true}
+	if !seen[plan.deliveredPair(changed.Incident(), "lead")] {
+		t.Fatal("changing the example card creates a fictitious new delivery")
 	}
 }
 
@@ -204,9 +251,8 @@ func TestNotifyReadErrorRetainsDeliveredPairs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	state.Generation++
 	state.PublishedAt = time.Now().UTC()
-	state.Schema = Schema
+	state.Generation++
 	data, err := json.Marshal(state)
 	if err != nil {
 		t.Fatal(err)
@@ -240,8 +286,12 @@ func TestNotifyAbsentStoreDoesNotBlockInitialization(t *testing.T) {
 		t.Fatal(err)
 	}
 	report := Notify(ctx, plan)
-	if report.Err == nil || len(r.calls) != 0 {
-		t.Fatalf("uninitialized board notified: %v %+v", report.Err, r.calls)
+	if report.Err == nil || report.NoticeErr != nil || len(r.calls) != 0 {
+		t.Fatalf("uninitialized board notified: %+v %+v", report.Err, r.calls)
+	}
+	_, ordinaryErr := plan.Store.ReadContext(ctx)
+	if ordinaryErr == nil || report.Err.Error() != ordinaryErr.Error() {
+		t.Fatalf("no-board error differs from plain check: %v / %v", report.Err, ordinaryErr)
 	}
 	if err := plan.Store.Init(ctx); err != nil {
 		t.Fatal(err)
@@ -252,8 +302,8 @@ func TestNotifyRetriesOnlyFailedRecipientAndScopesSessions(t *testing.T) {
 	plan, r := noticeTestPlan(t, noticeStore(t))
 	publishNotificationNews(t, context.Background(), plan.Store, "request-retry")
 	r.failTo = "lead"
-	if report := Notify(context.Background(), plan); report.Err == nil || len(r.calls) != 2 {
-		t.Fatalf("first stale attempt: %+v %v", r.calls, report.Err)
+	if report := Notify(context.Background(), plan); report.Err != nil || report.NoticeErr == nil || len(r.calls) != 2 {
+		t.Fatalf("delivery failure hid a valid observation: %+v %v", r.calls, report)
 	}
 	r.failTo = ""
 	other := plan
