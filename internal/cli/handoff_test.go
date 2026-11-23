@@ -11,6 +11,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/thread"
 )
 
 const handoffTestCommit = "0123456789abcdef0123456789abcdef01234567"
@@ -121,8 +122,8 @@ func TestHandoffSendsReviewAndTellsRequester(t *testing.T) {
 	for _, ob := range open.Obligations {
 		if ob.Opener.ID == request {
 			found = true
-			if !ob.OwnerReplied {
-				t.Fatalf("alice's request: owner_replied false after the notice")
+			if ob.State != thread.StateAcknowledged {
+				t.Fatalf("alice's request: state %q after the notice, want it acknowledged", ob.State)
 			}
 		}
 	}
