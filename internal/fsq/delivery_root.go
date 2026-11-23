@@ -879,6 +879,44 @@ func (r *DeliveryRoot) WriteFileExclusive(dir, filename string, data []byte, per
 	return committedPath, nil
 }
 
+// WriteFileWholeExclusive publishes one immutable root-relative file with
+// CreateNewFile's whole-file semantics on the held handle: the bytes go to
+// a synced temporary file in dir that is then hard-linked onto the final
+// name, which fails when the name exists. A crash can therefore never
+// leave an empty or partial file at the final name, where it would block
+// every later writer. Both names are root-relative, so the link never
+// leaves the held tree, and the directory is synced after the link
+// through the handle's sync seam. When the name already exists the error
+// wraps os.ErrExist and the existing file is untouched. The caller
+// supplies dir that already exists; the write never creates directories.
+func (r *DeliveryRoot) WriteFileWholeExclusive(dir, filename string, data []byte, perm os.FileMode) error {
+	if err := r.VerifyBase(); err != nil {
+		return err
+	}
+	tmpPath := filepath.Join(dir, fmt.Sprintf(".%s.tmp-%d", filename, time.Now().UnixNano()))
+	file, err := r.root.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err != nil {
+		return err
+	}
+	if err := writeAllAndSync(file, data); err != nil {
+		_ = file.Close()
+		_ = r.root.Remove(tmpPath)
+		return err
+	}
+	if err := file.Close(); err != nil {
+		_ = r.root.Remove(tmpPath)
+		return err
+	}
+	if err := r.root.Link(tmpPath, filepath.Join(dir, filename)); err != nil {
+		_ = r.root.Remove(tmpPath)
+		return err
+	}
+	if err := r.root.Remove(tmpPath); err != nil {
+		return err
+	}
+	return r.syncDir(dir)
+}
+
 // ReadFile reads a root-relative file through the pinned capability.
 func (r *DeliveryRoot) ReadFile(name string) ([]byte, error) {
 	if err := r.VerifyBase(); err != nil {

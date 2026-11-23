@@ -453,11 +453,11 @@ func WriteLinkAnswer(dir, id, label, role, interactionDigest, documentDigest, cr
 	// The dialog directory is pinned through its parent: opened as a
 	// direct child with no link followed, its identity the same object
 	// before and after the open.
-	dialogRoot, err := openPinnedChild(filepath.Dir(dir), filepath.Base(dir))
+	dialogRoot, closeStore, err := openPinnedChild(filepath.Dir(dir), filepath.Base(dir))
 	if err != nil {
 		return fmt.Errorf("dialog directory %s: %w", dir, ErrLinkDialogGone)
 	}
-	defer func() { _ = dialogRoot.Close() }()
+	defer closeStore()
 	answers, err := dialogRoot.OpenDirectChild("answers")
 	if err != nil {
 		return fmt.Errorf("answers directory missing: %w", ErrLinkDialogGone)
@@ -525,11 +525,15 @@ func WriteLinkAnswer(dir, id, label, role, interactionDigest, documentDigest, cr
 	if err != nil {
 		return err
 	}
-	// The exclusive publish through the answers handle: the name appears
-	// only whole and content-synced, and the pinned sync the fault seam
-	// covers carries it to durability. An existing name is the first
-	// answer's win.
-	if _, err := answers.WriteFileExclusive(".", id+".json", raw, 0o600); err != nil {
+	// Whole-file, exclusive publication through the held answers handle:
+	// WriteFileWholeExclusive writes a synced temp file and hard-links it
+	// onto the answer's name without replacement, so an interruption can
+	// never leave an empty or partial file at the final name, where it
+	// would block every later answer. An existing name is the first
+	// answer's win. The pinned syncs the fault seam covers carry the file
+	// and its directory entries to durability; a returned sync error
+	// leaves the record written but unconfirmed.
+	if err := answers.WriteFileWholeExclusive(".", id+".json", raw, 0o600); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return fmt.Errorf("answer for %s recorded first: %w", id, ErrLinkAnswered)
 		}
@@ -540,25 +544,25 @@ func WriteLinkAnswer(dir, id, label, role, interactionDigest, documentDigest, cr
 
 // openPinnedChild opens name as a direct, non-symlink directory child of
 // base with its identity confirmed across the open: the way fsq's held
-// creation opens a child, at the level the dialog store hands out.
-func openPinnedChild(base, name string) (*fsq.DeliveryRoot, error) {
+// creation opens a child, at the level the dialog store hands out. It
+// returns the child root and the parent store's close: OpenDirectChild
+// returns an independently owned root, so the caller closes the child
+// first and then the parent, deterministically — no GC.
+func openPinnedChild(base, name string) (*fsq.DeliveryRoot, func(), error) {
 	identity, err := fsq.SnapshotDeliveryRoot(base)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	store, err := fsq.OpenDeliveryRoot(base, identity)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	// OpenDeliveryRoot holds the base; the child root's lifetime ends with
-	// the process, so close the store root when the child closes. The
-	// borrowed child from OpenDirectChild is closed with the store.
 	child, err := store.OpenDirectChild(name)
 	if err != nil {
 		_ = store.Close()
-		return nil, err
+		return nil, nil, err
 	}
-	return child, nil
+	return child, func() { _ = store.Close() }, nil
 }
 
 // readIDFile reads one id file of a dialog directory through an opened

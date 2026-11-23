@@ -1,6 +1,7 @@
 package fsq
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -43,6 +44,34 @@ func TestWriteFileExclusiveDoesNotReplace(t *testing.T) {
 	}
 	if _, err := root.WriteFileExclusive(dir, "once.json", []byte("second\n"), 0o600); err == nil {
 		t.Fatal("second WriteFileExclusive replaced an existing name")
+	}
+	data, err := os.ReadFile(filepath.Join(base, dir, "once.json"))
+	if err != nil || string(data) != "first\n" {
+		t.Fatalf("exclusive file contents = %q, %v", data, err)
+	}
+}
+
+func TestWriteFileWholeExclusivePublishesWholeAndKeepsFirst(t *testing.T) {
+	base := t.TempDir()
+	if err := EnsureAgentDirs(base, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	root := openDeliveryRootForTest(t, base)
+	dir := filepath.Join("agents", "alice", "receipts")
+	if err := root.WriteFileWholeExclusive(dir, "once.json", []byte("first\n"), 0o600); err != nil {
+		t.Fatalf("first WriteFileWholeExclusive: %v", err)
+	}
+	if err := root.WriteFileWholeExclusive(dir, "once.json", []byte("second\n"), 0o600); !os.IsNotExist(err) && !errors.Is(err, os.ErrExist) {
+		t.Fatalf("second WriteFileWholeExclusive = %v, want os.ErrExist", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(base, dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != "once.json" {
+			t.Fatalf("temp file %q left behind", e.Name())
+		}
 	}
 	data, err := os.ReadFile(filepath.Join(base, dir, "once.json"))
 	if err != nil || string(data) != "first\n" {
