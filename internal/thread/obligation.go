@@ -69,8 +69,9 @@ type Obligation struct {
 	Expired bool
 	Last    *Entry
 	// OwnerReplied reports whether a watched opener received news from its
-	// owner addressed to its requester. An unreferenced message must come
-	// from the owner's own session and project.
+	// owner addressed to its requester. A message that does not reference
+	// the opener must go from the owner to the requester as the same two
+	// participants, session and project included.
 	OwnerReplied bool
 }
 
@@ -266,19 +267,28 @@ func (red *Reduction) run() {
 			continue
 		}
 		ob.OwnerReplied = slices.ContainsFunc(red.order, func(rec *record) bool {
-			return rec.sender.Handle == ob.Owner.Handle &&
-				slices.Contains(rec.entry.To, ob.Requester.Handle) &&
-				(len(rec.entry.Refs) != 0 || rec.sender == ob.Owner) &&
-				NewsAbout(ob.Opener, rec.entry)
+			if rec.sender.Handle != ob.Owner.Handle || !slices.Contains(rec.entry.To, ob.Requester.Handle) ||
+				!NewsAbout(ob.Opener, rec.entry) {
+				return false
+			}
+			if slices.Contains(rec.entry.Refs, ob.Opener.ID) {
+				return true
+			}
+			// A message that does not name the opener is news only between
+			// the obligation's own two parties: a report to the same handle
+			// in another session did not reach this requester.
+			to, ok := recipientOf(rec, ob.Requester.Handle)
+			return ok && rec.sender == ob.Owner && to == ob.Requester
 		})
 	}
 }
 
 // NewsAbout reports whether a message from the recipient to the requester
-// references the request or, without refs, follows it in the same thread.
+// is news for the request's news clock: it references the request, or it was
+// created after it. The clock asks whether the recipient is heard from, not
+// which request a message is about, so a report on other work counts.
 func NewsAbout(request, msg *Entry) bool {
-	return slices.Contains(msg.Refs, request.ID) ||
-		(len(msg.Refs) == 0 && msg.Thread == request.Thread && msg.RawTime.After(request.RawTime))
+	return slices.Contains(msg.Refs, request.ID) || msg.RawTime.After(request.RawTime)
 }
 
 // classifyLineage marks rec unresolved when following direct parents does

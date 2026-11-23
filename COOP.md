@@ -347,8 +347,8 @@ amq send --to builder --kind todo --news-within 10m --follow-up 30m \
 ```
 
 `--news-within` gives one notice unless the builder sends the lead a message
-that references the assignment, or a later message in the same thread with
-no refs. The latter ends every open news clock for that pair in the thread.
+after the assignment. Any message counts, also a report on other work: the
+clock asks whether the builder is heard from.
 Each assignment keeps its own `--follow-up` timer for completion. When the lead closes an assignment, both timers end. A routed
 request whose recipient is outside the thread view has no obligation or
 overdue board card in that view, but its sender still gets the notice.
