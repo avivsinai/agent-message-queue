@@ -70,7 +70,8 @@ type Obligation struct {
 	Last    *Entry
 	// OwnerReplied reports whether a watched opener received news from its
 	// owner addressed to its requester. A message that does not reference
-	// the opener must come from the owner's own session and project.
+	// the opener must go from the owner to the requester as the same two
+	// participants, session and project included.
 	OwnerReplied bool
 }
 
@@ -266,10 +267,18 @@ func (red *Reduction) run() {
 			continue
 		}
 		ob.OwnerReplied = slices.ContainsFunc(red.order, func(rec *record) bool {
-			return rec.sender.Handle == ob.Owner.Handle &&
-				slices.Contains(rec.entry.To, ob.Requester.Handle) &&
-				(slices.Contains(rec.entry.Refs, ob.Opener.ID) || rec.sender == ob.Owner) &&
-				NewsAbout(ob.Opener, rec.entry)
+			if rec.sender.Handle != ob.Owner.Handle || !slices.Contains(rec.entry.To, ob.Requester.Handle) ||
+				!NewsAbout(ob.Opener, rec.entry) {
+				return false
+			}
+			if slices.Contains(rec.entry.Refs, ob.Opener.ID) {
+				return true
+			}
+			// A message that does not name the opener is news only between
+			// the obligation's own two parties: a report to the same handle
+			// in another session did not reach this requester.
+			to, ok := recipientOf(rec, ob.Requester.Handle)
+			return ok && rec.sender == ob.Owner && to == ob.Requester
 		})
 	}
 }
