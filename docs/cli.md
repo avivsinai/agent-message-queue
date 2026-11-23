@@ -23,6 +23,7 @@ options not repeated here.
 - [amq drain](#amq-drain)
 - [amq monitor](#amq-monitor)
 - [amq reply](#amq-reply)
+- [amq handoff](#amq-handoff)
 - [amq dlq](#amq-dlq)
 - [amq wake](#amq-wake)
 - [amq upgrade](#amq-upgrade)
@@ -110,6 +111,7 @@ Commands:
   drain        Drain new messages (read, move to cur, emit receipts)
   monitor      Combined watch+drain for co-op mode
   reply        Reply to a message (auto thread/refs)
+  handoff      Hand a candidate commit to a reviewer and tell the requester
   dlq          Dead letter queue management
   wake         Background waker (TIOCSTI injection)
   upgrade      Upgrade amq to the latest release
@@ -691,6 +693,54 @@ Options:
         Wait for receipt stage after reply (e.g., drained)
   -wait-timeout duration
         Timeout for --wait-for (default 2m0s)
+```
+
+## amq handoff
+
+```text
+$ amq handoff --help
+Usage:
+  amq handoff --me <agent> --id <request> --to <reviewer> --commit <sha> --body <text|@file> [options]
+
+Hand a candidate to a reviewer and tell the requester, in one command.
+The reviewer gets a review_request for the commit. The requester of --id gets a
+status labelled handed-off that names the reviewer, the commit and the review request.
+The request stays open: close it yourself when the reviewed candidate is ready.
+
+--id must be an open request that you owe. Both messages are routed and authorized
+before either is written. A message already in your outbox is not sent again, so
+running the same command again completes a hand-off that stopped part way.
+
+Example:
+  amq handoff --id <request> --to reviewer --commit <sha> --body "ready for review" --follow-up 1h
+
+Options:
+  -body string
+        Body string, @file, or - / empty to read stdin
+  -commit string
+        Full commit id of the candidate (40 or 64 lowercase hex characters)
+  -follow-up duration
+        Notify me if the reviewer has not closed the review request after this duration (e.g. 30m)
+  -id string
+        Id of the open request you owe
+  -json
+        Emit JSON output
+  -me string
+        Agent handle (or AM_ME)
+  -news-within duration
+        One notice if the reviewer sends no reply about the review request within this time (e.g. 20m)
+  -project string
+        Reviewer's peer project, as on send
+  -root string
+        Root directory for the queue (default ".agent-mail")
+  -session string
+        Reviewer's session, as on send
+  -strict
+        Error on unknown handles (default: send and reply warn)
+  -subject string
+        Review request subject (default: Review: <original subject>)
+  -to string
+        Reviewer handle (exactly one)
 ```
 
 ## amq dlq

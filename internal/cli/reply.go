@@ -14,6 +14,14 @@ import (
 )
 
 func runReply(args []string) error {
+	return runReplyStep(args, nil)
+}
+
+// runReplyStep runs amq reply. With deliver nil it reads the body and
+// delivers. With deliver set it is a step of another command: it runs every
+// check a reply runs, reads no body and no stdin, and ends in deliver with
+// the authorized message, whose capabilities stay open while deliver runs.
+func runReplyStep(args []string, deliver func(outgoingMessage) error) error {
 	fs := flag.NewFlagSet("reply", flag.ContinueOnError)
 	common := addCommonFlags(fs)
 	idFlag := fs.String("id", "", "Message ID to reply to (a bridged message may be addressed by its header ID even though it is stored under a transfer filename)")
@@ -297,9 +305,12 @@ func runReply(args []string) error {
 		}
 	}
 
-	body, err := readBody(*bodyFlag, *allowEmptyFlag)
-	if err != nil {
-		return err
+	body := ""
+	if deliver == nil {
+		body, err = readBody(*bodyFlag, *allowEmptyFlag)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Determine subject
@@ -338,7 +349,7 @@ func runReply(args []string) error {
 	if targetSession != "" {
 		targetDisplay = targetSession
 	}
-	return deliverOutgoing(outgoingMessage{
+	m := outgoingMessage{
 		command:              "reply",
 		verb:                 "Replied",
 		me:                   me,
@@ -375,5 +386,9 @@ func runReply(args []string) error {
 			"in_reply_to":  originalMsg.Header.ID,
 			"original_box": originalBox,
 		},
-	})
+	}
+	if deliver != nil {
+		return deliver(m)
+	}
+	return deliverOutgoing(m)
 }

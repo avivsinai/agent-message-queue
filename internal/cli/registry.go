@@ -64,6 +64,7 @@ func init() {
 		{Name: "drain", Summary: "Drain new messages (read, move to cur, emit receipts)", Handler: runDrain},
 		{Name: "monitor", Summary: "Combined watch+drain for co-op mode", Handler: runMonitor},
 		{Name: "reply", Summary: "Reply to a message (auto thread/refs)", Handler: runReply},
+		{Name: "handoff", Summary: "Hand a candidate commit to a reviewer and tell the requester", Handler: runHandoff},
 		{
 			Name:        "dlq",
 			Summary:     "Dead letter queue management",

@@ -57,6 +57,12 @@ result, the real output of a real run, each place where the work differs from
 the brief); and the time you expect. Send it with `--follow-up` of that time.
 One brief, one scope: two workers never get the same files.
 
+When the work needs a review, the brief names the reviewer. The builder hands
+its candidate off with `amq handoff`: the reviewer gets a review request for
+the exact commit and you get a `handed-off` status, while your request stays
+open. The reviewer answers the builder, and the builder closes your request
+when the reviewed candidate is ready.
+
 When the work takes design, write the design yourself and brief the build.
 
 ## Review and done
