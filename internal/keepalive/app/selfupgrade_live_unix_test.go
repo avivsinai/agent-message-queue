@@ -139,7 +139,7 @@ func writeKeepaliveLiveFakeAMQ(t *testing.T, path string) {
 	const script = `#!/bin/sh
 printf '%s\n' "$*" >> "$AMQ_KEEPALIVE_LIVE_CALLS"
 if [ "$1" = "wake" ] && [ "$2" = "check" ]; then
-  printf '%s\n' '{"schema":1,"live_wake":false,"image_status":"none"}'
+  printf '%s\n' '{"schema":2,"wake":{"live":false},"image":{"status":"none"}}'
   exit 0
 fi
 if [ "$1" = "wake" ]; then

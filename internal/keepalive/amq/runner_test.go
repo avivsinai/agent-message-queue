@@ -136,68 +136,68 @@ func TestStartWakeRefreshesOnlyConclusivelyDifferentLiveImages(t *testing.T) {
 	}{
 		{
 			name:         "different image retires then starts",
-			checkOutput:  `{"schema":1,"live_wake":true,"image_status":"different","wake_generation":"0123456789abcdef0123456789abcdef"}`,
+			checkOutput:  `{"schema":2,"wake":{"live":true,"generation":"0123456789abcdef0123456789abcdef"},"image":{"status":"different"}}`,
 			retireOutput: `{"status":"retired","agent":"codex","pid":4242}`,
 			wantCalls:    []string{"check", "retire", "start"},
 		},
 		{
 			name:         "outdated image retires then starts",
-			checkOutput:  `{"schema":1,"live_wake":true,"image_status":"outdated","wake_generation":"0123456789abcdef0123456789abcdef"}`,
+			checkOutput:  `{"schema":2,"wake":{"live":true,"generation":"0123456789abcdef0123456789abcdef"},"image":{"status":"outdated"}}`,
 			retireOutput: `{"status":"retired","agent":"codex","pid":4242}`,
 			wantCalls:    []string{"check", "retire", "start"},
 		},
 		{
 			name:          "different image without generation preserves wake",
-			checkOutput:   `{"schema":1,"live_wake":true,"image_status":"different"}`,
+			checkOutput:   `{"schema":2,"wake":{"live":true},"image":{"status":"different"}}`,
 			wantCalls:     []string{"check"},
 			wantErrIs:     ErrWakeImageIdentityInconclusive,
 			wantErrString: "omitted generation",
 		},
 		{
 			name:        "current image starts without retire",
-			checkOutput: `{"schema":1,"live_wake":true,"image_status":"current"}`,
+			checkOutput: `{"schema":2,"wake":{"live":true},"image":{"status":"current"}}`,
 			wantCalls:   []string{"check", "start"},
 		},
 		{
 			name:        "no live wake starts",
-			checkOutput: `{"schema":1,"live_wake":false,"image_status":"unknown"}`,
+			checkOutput: `{"schema":2,"wake":{"live":false},"image":{"status":"unknown"}}`,
 			wantCalls:   []string{"check", "start"},
 		},
 		{
 			name:        "unknown live image preserves wake",
-			checkOutput: `{"schema":1,"live_wake":true,"image_status":"unknown"}`,
+			checkOutput: `{"schema":2,"wake":{"live":true},"image":{"status":"unknown"}}`,
 			wantCalls:   []string{"check"},
 			wantErrIs:   ErrWakeImageIdentityInconclusive,
 		},
 		{
 			name:        "unrecognized live image status preserves wake",
-			checkOutput: `{"schema":1,"live_wake":true,"image_status":"future"}`,
+			checkOutput: `{"schema":2,"wake":{"live":true},"image":{"status":"future"}}`,
 			wantCalls:   []string{"check"},
 			wantErrIs:   ErrWakeImageIdentityInconclusive,
 		},
 		{
 			name:        "schema mismatch is inconclusive",
-			checkOutput: `{"schema":2,"live_wake":true,"image_status":"different"}`,
+			checkOutput: `{"schema":1,"wake":{"live":true},"image":{"status":"different"}}`,
 			wantCalls:   []string{"check"},
 			wantErrIs:   ErrWakeImageIdentityInconclusive,
 		},
 		{
 			name:          "missing schema is inconclusive",
-			checkOutput:   `{"live_wake":false,"image_status":"unknown"}`,
+			checkOutput:   `{"wake":{"live":false},"image":{"status":"unknown"}}`,
 			wantCalls:     []string{"check"},
 			wantErrIs:     ErrWakeImageIdentityInconclusive,
 			wantErrString: "omitted required",
 		},
 		{
 			name:          "missing live wake is inconclusive",
-			checkOutput:   `{"schema":1,"image_status":"unknown"}`,
+			checkOutput:   `{"schema":2,"image":{"status":"unknown"}}`,
 			wantCalls:     []string{"check"},
 			wantErrIs:     ErrWakeImageIdentityInconclusive,
 			wantErrString: "omitted required",
 		},
 		{
 			name:          "missing image status is inconclusive",
-			checkOutput:   `{"schema":1,"live_wake":false}`,
+			checkOutput:   `{"schema":2,"wake":{"live":false}}`,
 			wantCalls:     []string{"check"},
 			wantErrIs:     ErrWakeImageIdentityInconclusive,
 			wantErrString: "omitted required",
@@ -218,7 +218,7 @@ func TestStartWakeRefreshesOnlyConclusivelyDifferentLiveImages(t *testing.T) {
 		},
 		{
 			name:          "retirement refusal does not start",
-			checkOutput:   `{"schema":1,"live_wake":true,"image_status":"different","wake_generation":"0123456789abcdef0123456789abcdef"}`,
+			checkOutput:   `{"schema":2,"wake":{"live":true,"generation":"0123456789abcdef0123456789abcdef"},"image":{"status":"different"}}`,
 			retireOutput:  `{"status":"refused","reason":"target identity changed"}`,
 			retireExit:    "1",
 			wantCalls:     []string{"check", "retire"},
@@ -227,7 +227,7 @@ func TestStartWakeRefreshesOnlyConclusivelyDifferentLiveImages(t *testing.T) {
 		},
 		{
 			name:          "retired output with failed exit does not start",
-			checkOutput:   `{"schema":1,"live_wake":true,"image_status":"different","wake_generation":"0123456789abcdef0123456789abcdef"}`,
+			checkOutput:   `{"schema":2,"wake":{"live":true,"generation":"0123456789abcdef0123456789abcdef"},"image":{"status":"different"}}`,
 			retireOutput:  `{"status":"retired","agent":"codex","pid":4242}`,
 			retireExit:    "1",
 			wantCalls:     []string{"check", "retire"},
@@ -316,7 +316,7 @@ printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-
 			if !reflect.DeepEqual(gotCalls, tc.wantCalls) {
 				t.Fatalf("call order = %#v, want %#v\n%s", gotCalls, tc.wantCalls, data)
 			}
-			wantCheck := "check\twake check --me codex --root /tmp/amq-root --json --json-schema 1"
+			wantCheck := "check\twake check --me codex --root /tmp/amq-root --json --json-schema 2"
 			if lines[0] != wantCheck {
 				t.Fatalf("wake check argv = %q, want %q", lines[0], wantCheck)
 			}
@@ -795,7 +795,7 @@ func writeStartWakeExecutable(t *testing.T, path string, body string) string {
 	body = strings.TrimPrefix(body, "#!/bin/sh\n")
 	return writeExecutable(t, path, `#!/bin/sh
 if [ "$1" = "wake" ] && [ "$2" = "check" ]; then
-  printf '%s\n' '{"schema":1,"live_wake":false,"image_status":"unknown"}'
+  printf '%s\n' '{"schema":2,"wake":{"live":false},"image":{"status":"unknown"}}'
   exit 0
 fi
 `+body)
@@ -926,7 +926,7 @@ func TestRetireWakeWithNoWakeLockIsAlreadyAbsent(t *testing.T) {
 	dir := t.TempDir()
 	fakeAMQ := writeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
 if [ "$1" = "wake" ] && [ "$2" = "check" ]; then
-  printf '%s\n' '{"schema":1,"live_wake":false,"image_status":"unknown","wake_status":"missing"}'
+  printf '%s\n' '{"schema":2,"wake":{"status":"missing","live":false},"image":{"status":"unknown"}}'
   exit 0
 fi
 printf '%s\n' '{"status":"refused","reason":"no wake lock present; wake process absence cannot be proven"}'
@@ -938,5 +938,86 @@ exit 6
 	})
 	if err != nil || !result.Retired() {
 		t.Fatalf("RetireWake() = %+v, %v; want already absent", result, err)
+	}
+}
+
+// writeUnstableWakeCheckAMQ fakes an amq whose wake check answers in the
+// schema it is asked for and logs each call's operation.
+func writeUnstableWakeCheckAMQ(t *testing.T, dir, schema1, schema2 string) (string, string) {
+	t.Helper()
+	callsLog := filepath.Join(dir, "calls.log")
+	t.Setenv("AMQ_KEEPALIVE_CALLS_LOG", callsLog)
+	t.Setenv("AMQ_KEEPALIVE_CHECK_SCHEMA1", schema1)
+	t.Setenv("AMQ_KEEPALIVE_CHECK_SCHEMA2", schema2)
+	fakeAMQ := writeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
+if [ "$1" = "wake" ] && [ "$2" = "check" ]; then
+  printf 'check\n' >> "$AMQ_KEEPALIVE_CALLS_LOG"
+  case "$*" in
+    *"--json-schema 2"*) printf '%s\n' "$AMQ_KEEPALIVE_CHECK_SCHEMA2" ;;
+    *) printf '%s\n' "$AMQ_KEEPALIVE_CHECK_SCHEMA1" ;;
+  esac
+  exit 0
+fi
+if [ "$1" = "wake" ] && [ "$2" = "retire" ]; then
+  printf 'retire\n' >> "$AMQ_KEEPALIVE_CALLS_LOG"
+  printf '%s\n' '{"status":"refused","reason":"wake identity is not confirmed"}'
+  exit 6
+fi
+printf 'start\n' >> "$AMQ_KEEPALIVE_CALLS_LOG"
+exit 11
+`)
+	return fakeAMQ, callsLog
+}
+
+func readWakeCallsLog(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read calls log: %v", err)
+	}
+	return strings.Fields(string(data))
+}
+
+// Observed case: right after a new wake took its lock, the observations of
+// one wake check differed. The check reported an unverified, not-live wake
+// beside its retry action, and the keepalive read "not live" and started a
+// second wake.
+func TestStartWakeAfterUnstableWakeCheckStartsNothing(t *testing.T) {
+	requireWakeProcessLane(t)
+	fakeAMQ, callsLog := writeUnstableWakeCheckAMQ(t, t.TempDir(),
+		`{"schema":1,"live_wake":false,"image_status":"unknown","wake_status":"unverified","wake_pid":4242,"wake_generation":"0123456789abcdef0123456789abcdef","restart_capability":"unavailable","next_action":"wake state changed during inspection; retry amq wake check"}`,
+		`{"schema":2,"wake":{"status":"unverified","live":false,"pid":4242,"generation":"0123456789abcdef0123456789abcdef"},"image":{"status":"unknown"},"restart_capability":"unavailable","action":{"kind":"retry_check","actor":"agent","reason_code":"observation_changed"}}`,
+	)
+	err := NewCLI(fakeAMQ).StartWake(context.Background(), StartWakeRequest{
+		Root: "/tmp/amq-root", Me: "codex", InjectVia: "/tmp/amq-keepalive",
+		Adapter: "ghostty", Target: "ghostty:terminal:abc", Timeout: 5 * time.Second,
+	})
+	if !errors.Is(err, ErrWakeImageIdentityInconclusive) || !strings.Contains(err.Error(), "changed during inspection") {
+		t.Fatalf("StartWake() error = %v, want inconclusive because the wake state changed during inspection", err)
+	}
+	if calls := readWakeCallsLog(t, callsLog); !reflect.DeepEqual(calls, []string{"check"}) {
+		t.Fatalf("calls = %#v, want only the wake check", calls)
+	}
+}
+
+// Observed case: an amq whose lock appeared while wake check inspected it
+// can report wake status missing beside the retry action; the keepalive took
+// that as an absent wake and forgot its registry row without asking amq to
+// retire it.
+func TestRetireWakeAfterUnstableWakeCheckIsNotAlreadyAbsent(t *testing.T) {
+	requireWakeProcessLane(t)
+	fakeAMQ, callsLog := writeUnstableWakeCheckAMQ(t, t.TempDir(),
+		`{"schema":1,"live_wake":false,"image_status":"unknown","wake_status":"missing","restart_capability":"unavailable","next_action":"wake state changed during inspection; retry amq wake check"}`,
+		`{"schema":2,"wake":{"status":"missing","live":false,"generation":null},"image":{"status":"unknown"},"restart_capability":"unavailable","action":{"kind":"retry_check","actor":"agent","reason_code":"observation_changed"}}`,
+	)
+	result, err := NewCLI(fakeAMQ).RetireWake(context.Background(), RetireWakeRequest{
+		Root: "/tmp/amq-root", Me: "codex", InjectVia: "/tmp/amq-keepalive",
+		Adapter: "cmux", Target: "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3",
+	})
+	if result.Status == StatusAlreadyAbsent || !errors.Is(err, ErrWakeRetireNotConfirmed) {
+		t.Fatalf("RetireWake() = %+v, %v; want amq's refusal, not already absent", result, err)
+	}
+	if calls := readWakeCallsLog(t, callsLog); !reflect.DeepEqual(calls, []string{"check", "retire"}) {
+		t.Fatalf("calls = %#v, want the wake check then amq wake retire", calls)
 	}
 }
