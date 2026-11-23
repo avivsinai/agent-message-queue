@@ -496,9 +496,10 @@ type wakePayload struct {
 }
 
 type wakeNotification struct {
-	input      wakePayload
-	output     wakePayload
-	submitOnly bool
+	recordInputDecision func(string, wakeInputDecision)
+	input               wakePayload
+	output              wakePayload
+	submitOnly          bool
 }
 
 func peerWakeNotification(output string) wakeNotification {
@@ -956,6 +957,12 @@ func deliverWithNotificationLedger(
 	writer := notificationattempt.NewWriter(cfg.root, cfg.me)
 	if cfg.injectVia == "" || cfg.injectMode == wakeInjectModeNone {
 		var prepared notificationattempt.Record
+		notice.recordInputDecision = func(status string, decision wakeInputDecision) {
+			prepared.InputGuard = wakeInputGuardValue(status)
+			if prepared.InputGuard != inputGuardOff {
+				prepared.InputDecision = string(decision)
+			}
+		}
 		var prepareErr error
 		attempted := false
 		previousAttemptStart := cfg.onNotificationAttemptStart
@@ -1841,7 +1848,12 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 	// this point would replay already accepted text.
 	resumeGuarded := guardInput && pending.guardInput && pending.pending() && pending.phase != wakeInputPayloadPending
 	if guardInput && !resumeGuarded {
-		switch cfg.inputDecision(false) {
+		status := cfg.inputGuard.status(cfg.settings)
+		decision := cfg.inputDecision(false, status)
+		if notice.recordInputDecision != nil {
+			notice.recordInputDecision(status, decision)
+		}
+		switch decision {
 		case inputPlain:
 			if !waitForWakeInputQuiet(cfg) {
 				return deliverWakeTransientAttention(cfg, notice.output, nil)
