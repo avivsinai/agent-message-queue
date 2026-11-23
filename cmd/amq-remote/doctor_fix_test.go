@@ -175,6 +175,36 @@ func TestPromptHookInstallsAndDoctorFixKeepsTheOwnersChoice(t *testing.T) {
 	}
 }
 
+// Z4/P2: --fix leaves another writer's prompt hook alone without an
+// opt-in and does not report its ErrNoOptIn refusal as a failed repair.
+func TestDoctorFixWithoutPromptOptInReportsNoPromptFailure(t *testing.T) {
+	home := fixSandbox(t)
+	settings := claude.SettingsPath(home)
+	bin, _, err := stableExecutable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := claude.OptInPermissionHook(home, settings, bin); err != nil {
+		t.Fatal(err)
+	}
+	if in, err := claude.ReadHookOptIn(settings); err != nil || in.Approval == nil || in.Prompt != nil || in.PromptRemoved {
+		t.Fatalf("prompt consent = %+v, %v; want none", in, err)
+	}
+	if err := os.Remove(settings); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := doctor([]string{"--fix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failures := out.(map[string]any)["failing"].([]boundaryFailure); len(failures) != 0 {
+		t.Fatalf("--fix failures without the prompt opt-in = %+v", failures)
+	}
+	if state, _ := claude.PromptHookStateAt(settings); state != claude.HookMissing {
+		t.Fatalf("prompt hook = %q; want the other writer's file left alone", state)
+	}
+}
+
 // Review of the doctor that checks every mode: a machine with only
 // ~/.claude, no binding and no machine agent, failed the missing approval
 // hook and guard, although their gate stays closed there by design.
