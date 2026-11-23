@@ -1731,11 +1731,48 @@ func (a *Attachment) dialogFor(req ServerRequest) *openDialog {
 	switch req.Method {
 	case methodCommandApproval:
 		d.req.Tool = "exec"
+		// The one complete shape (ruling 2026-11-23): the params decode into
+		// the plain command-approval shape with unknown fields refused, and
+		// the text is built from every field of that shape. A further native
+		// field — environmentId, additional permissions, a network context,
+		// an amendment decision, grantRoot — refuses the shape and the
+		// dialog stays machine-answered; the shared renderer below still
+		// shows it on the local path.
+		var cp struct {
+			ThreadID string `json:"threadId"`
+			TurnID   string `json:"turnId"`
+			Kind     string `json:"kind"`
+			Command  string `json:"command"`
+			Cwd      string `json:"cwd"`
+			Reason   string `json:"reason"`
+			// The choices the terminal offers, carried as typed options.
+			AvailableDecisions []json.RawMessage `json:"availableDecisions"`
+		}
+		cpDec := json.NewDecoder(bytes.NewReader(req.Params))
+		cpDec.DisallowUnknownFields()
+		err := cpDec.Decode(&cp)
+		plainChoices := err == nil // an amendment decision is an object, not a name
+		for _, dec := range cp.AvailableDecisions {
+			if s := strings.TrimSpace(string(dec)); s == "" || s[0] != '"' {
+				plainChoices = false
+			}
+		}
+		if err == nil && cp.ThreadID == a.threadID && cp.Kind == "command" && strings.TrimSpace(cp.Command) != "" && plainChoices {
+			line("$ %s", cp.Command)
+			if cp.Cwd != "" {
+				line("in %s", cp.Cwd)
+			}
+			if cp.Reason != "" {
+				line("reason: %s", cp.Reason)
+			}
+			d.req.Options, d.reply = decisions(p.AvailableDecisions, "accept", "decline")
+			wholeCommand = true
+			break
+		}
 		switch c := p.Command.(type) {
 		case string:
 			if strings.TrimSpace(c) != "" {
 				line("$ %s", c)
-				wholeCommand = p.Kind == "command"
 			}
 		case nil:
 		default:

@@ -230,7 +230,7 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 	if in.ToolName == toolAskUserQuestion || in.ToolName == toolExitPlanMode {
 		tool = ""
 	}
-	text, complete := dialogText(in.ToolName, in.ToolInput)
+	text, complete := dialogText(in.ToolName, in.Cwd, in.ToolInput)
 	if in.ToolName != "Bash" {
 		// R6 starts narrow: only a Bash command's text is proven whole.
 		complete = false
@@ -668,9 +668,11 @@ func chosen(options []dialog.Option, n int) (dialog.Option, bool) {
 // dialogText renders the call as the terminal dialog shows it: the command,
 // the edit as a diff, the file, the URL, or the input as JSON. Complete is
 // true only where the rendered text is everything the terminal shows for the
-// decision and can never be cut: a Bash command (the stdin the hook reads is
-// bounded, and input that did not parse whole opens no dialog).
-func dialogText(tool string, input json.RawMessage) (text string, complete bool) {
+// decision and can never be cut. The one complete shape is Bash (ruling
+// 2026-11-23): its input decodes into its own two-field struct with unknown
+// fields refused, and the text is built from every field of that struct plus
+// the harness's working directory when it gives one.
+func dialogText(tool string, cwd string, input json.RawMessage) (text string, complete bool) {
 	var in struct {
 		Command      string `json:"command"`
 		Description  string `json:"description"`
@@ -692,24 +694,37 @@ func dialogText(tool string, input json.RawMessage) (text string, complete bool)
 			ReplaceAll bool   `json:"replace_all"`
 		} `json:"edits"`
 	}
-	// Only a Bash input of exactly the rendered shape — command and optional
-	// description, nothing else — can be marked complete (R6): an unknown
-	// decision-bearing field would not be shown.
-	dec := json.NewDecoder(bytes.NewReader(input))
-	dec.DisallowUnknownFields()
-	decodeErr := dec.Decode(&in)
+	_ = json.Unmarshal(input, &in) // the shared renderer renders what it knows
 	var b strings.Builder
 	switch {
 	case tool == "Bash" && in.Command != "":
+		// The one complete shape (ruling 2026-11-23): the Bash tool input
+		// decodes into its own struct — command and optional description,
+		// unknown fields refused — and the text is built from every field
+		// of that struct plus the hook's working directory. An Edit's
+		// file_path on a Bash decision, a timeout, a background flag: none
+		// of that decodes here, so the dialog stays machine-answered.
+		var bash struct {
+			Command     string `json:"command"`
+			Description string `json:"description"`
+		}
+		bashDec := json.NewDecoder(bytes.NewReader(input))
+		bashDec.DisallowUnknownFields()
+		if bashDec.Decode(&bash) == nil && strings.TrimSpace(bash.Command) != "" {
+			b.WriteString("$ " + bash.Command)
+			if bash.Description != "" {
+				b.WriteString("\n(" + bash.Description + ")")
+			}
+			if cwd != "" {
+				b.WriteString("\nin " + cwd)
+			}
+			complete = true
+			break
+		}
 		b.WriteString("$ " + in.Command)
 		if in.Description != "" {
 			b.WriteString("\n(" + in.Description + ")")
 		}
-		// The command is the whole decision text only when the input decoded
-		// fully and nothing of the command was lost in rendering (R6): a
-		// decoder error or a stripped trailing newline means the text shown
-		// is not the whole command, and the dialog stays machine-answered.
-		complete = decodeErr == nil && in.Command == strings.TrimRight(in.Command, "\n")
 	case tool == "Edit" && in.FilePath != "":
 		b.WriteString(in.FilePath + "\n")
 		writeDiff(&b, in.OldString, in.NewString, in.ReplaceAll)

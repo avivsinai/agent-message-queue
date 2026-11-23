@@ -263,7 +263,7 @@ func TestClaudeAncestorChooser(t *testing.T) {
 // doc says (audit 2026-11-10).
 func TestDialogTextCutsAtByteCap(t *testing.T) {
 	input, _ := json.Marshal(map[string]string{"command": strings.Repeat("é", maxDialogText)})
-	got, complete := dialogText("Bash", input)
+	got, complete := dialogText("Bash", "/w", input)
 	if complete {
 		t.Fatal("a cut Bash dialog is marked complete")
 	}
@@ -756,22 +756,30 @@ func TestPermissionHookMarksOnlyBashComplete(t *testing.T) {
 	}
 }
 
-// Only a Bash input of exactly the rendered shape — command and optional
-// description — is marked complete: an unknown decision-bearing field such
-// as a timeout or a background flag is not shown, and the dialog stays
-// machine-answered on the local/Buzz path.
+// The one complete shape (ruling 2026-11-23): the Bash tool input decodes
+// into its own two-field struct with unknown fields refused, the text is
+// built from every field plus the hook's working directory, and anything
+// else — a shared-struct field such as file_path, a timeout, a background
+// flag, broken JSON — stays machine-answered on the local/Buzz path.
 func TestDialogTextBashCompletenessRequiresTheRenderedShape(t *testing.T) {
 	for name, input := range map[string]string{
 		"unknown field":     `{"command":"ls","timeout":5000}`,
 		"background flag":   `{"command":"ls","run_in_background":true}`,
 		"broken JSON":       `{"command":"ls"`,
-		"trailing newlines": "{\"command\":\"ls\\n\\n\"}",
+		"shared struct key": `{"command":"ls","file_path":"/w/main.go"}`,
+		"empty command":     `{"command":"   "}`,
+		"number command":    `{"command":42}`,
 	} {
-		if _, complete := dialogText("Bash", []byte(input)); complete {
+		if _, complete := dialogText("Bash", "/w", []byte(input)); complete {
 			t.Fatalf("%s marked complete: %s", name, input)
 		}
 	}
-	if _, complete := dialogText("Bash", []byte(`{"command":"ls","description":"list"}`)); !complete {
-		t.Fatal("the exact rendered shape is not marked complete")
+	got, complete := dialogText("Bash", "/w", []byte(`{"command":"ls","description":"list"}`))
+	if !complete || !strings.Contains(got, "$ ls") || !strings.Contains(got, "in /w") {
+		t.Fatalf("exact shape = %q complete=%v; want the command, the description and the cwd in the text", got, complete)
+	}
+	// Without a working directory the text is still complete.
+	if _, complete = dialogText("Bash", "", []byte(`{"command":"ls"}`)); !complete {
+		t.Fatal("plain command without a cwd not marked complete")
 	}
 }
