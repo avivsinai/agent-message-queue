@@ -101,7 +101,8 @@ func (h *wakePiBridgeHarness) respond() {
 	for _, e := range entries {
 		name := e.Name()
 		if !strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".decision.json") ||
-			strings.HasSuffix(name, ".result.json") || strings.HasSuffix(name, ".cohort.json") {
+			strings.HasSuffix(name, ".result.json") || strings.HasSuffix(name, ".cohort.json") ||
+			strings.HasSuffix(name, ".turn.json") {
 			continue
 		}
 		candidate := strings.TrimSuffix(name, ".json")
@@ -164,7 +165,8 @@ func (h *wakePiBridgeHarness) publishedRequests() []string {
 	var names []string
 	for _, e := range entries {
 		if strings.HasSuffix(e.Name(), ".json") && !strings.HasSuffix(e.Name(), ".decision.json") &&
-			!strings.HasSuffix(e.Name(), ".result.json") && !strings.HasSuffix(e.Name(), ".cohort.json") {
+			!strings.HasSuffix(e.Name(), ".result.json") && !strings.HasSuffix(e.Name(), ".cohort.json") &&
+			!strings.HasSuffix(e.Name(), ".turn.json") {
 			names = append(names, e.Name())
 		}
 	}
@@ -777,6 +779,23 @@ func (h *wakePiBridgeHarness) writeBridgeResult(attemptID string, accepted bool)
 	}
 }
 
+func (h *wakePiBridgeHarness) writeBridgeTurn(attemptID, phase string) {
+	h.t.Helper()
+	dir := filepath.Join(h.root, "agents", "codex", "extensions", "pi-bridge", "doorbell")
+	payload, err := json.Marshal(map[string]any{
+		"protocol":  wakePiBridgeProtocol,
+		"attempt":   attemptID,
+		"phase":     phase,
+		"updatedAt": h.now.UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, attemptID+".turn.json"), payload, 0o600); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
 // TestWakePiBridgeResultBeatsClaimProcessingAfterDrain is the stock-pi live
 // finding: pi claims and writes its acceptance result before the wake's
 // next delivery tick, and a fast drain empties the inbox so no delivery
@@ -882,50 +901,115 @@ func TestWakePiBridgeAcceptedTurnLeavingMailUnreadReturnsToCadence(t *testing.T)
 }
 
 // TestWakePiBridgeClaimedAskHoldsThroughASlowTurn is the stock-pi live
-// finding: pi claims the doorbell, its model turn takes tens of seconds
-// before message_start, and the bridge refuses new asks while that turn
-// runs. The wake holds the claim: it never re-asks, never types, and the
-// unsent draft stays untouched until the acceptance lands and the turn
-// drains the mail once.
+// finding, in pi's real shape: pi claims AND accepts (message_start)
+// before the next wake tick, attests its turn running, and only then
+// spends the model turn. The attestation holds the busy terminal while it
+// says running — even when a second message arrives mid-turn and the
+// pending ids change, the failure that killed the id-keyed hold — and the
+// unsent draft stays untouched until the turn attests its end and drains
+// the mail once.
 func TestWakePiBridgeClaimedAskHoldsThroughASlowTurn(t *testing.T) {
 	h := newWakePiBridgeHarness(t)
 	h.capableBridge()
 	h.bridgeDecision = "claimed"
 	h.deliverPending()
 	h.deliver() // publish A
-	h.respond() // pi claims
-	h.deliver() // the claim presents; the wake holds
+	h.respond() // pi claims AND accepts before the next tick
 	attemptA := strings.TrimSuffix(h.publishedRequests()[0], ".json")
-
-	// The turn runs. Any ask in this window would be refused by the busy
-	// bridge; the wake must not issue one, and must not fall back.
-	h.bridgeDecision = "refused"
-	h.advance(26 * time.Second)
-	h.deliver()
-	if got := h.typedChunks(); len(got) != 0 {
-		t.Fatalf("a slow claimed turn got the terminal typed: %q", got)
-	}
-	if got := len(h.publishedRequests()); got != 1 {
-		t.Fatalf("the wake published %d asks while a claim was outstanding, want 1", got)
-	}
-
-	// message_start: the acceptance result lands; the wake still types
-	// nothing and lets the turn finish.
 	h.writeBridgeResult(attemptA, true)
+	h.writeBridgeTurn(attemptA, "running")
+
+	h.deliver() // the collector records the rows and advances the cohort's cadence
+	if got := h.typedChunks(); len(got) != 0 {
+		t.Fatalf("an accepted turn got the terminal typed: %q", got)
+	}
+	if got := strings.Count(h.ledgerLog(), "accepted by pi (message_start)"); got != 1 {
+		t.Fatalf("the acceptance was recorded %d times, want once", got)
+	}
+
+	// The turn runs. A second message arrives mid-turn, so the pending ids
+	// grow past the accepted attempt's own ids; the attestation, not an id
+	// key, is what holds. The ladder's base delays the next ask past the
+	// 2s decision recheck.
+	h.bridgeDecision = "refused"
 	h.advance(2 * time.Second)
 	h.deliver()
-	if got := h.typedChunks(); len(got) != 0 {
-		t.Fatalf("an accepted ask got the terminal typed: %q", got)
+	if got := h.publishedRequests(); len(got) != 0 {
+		t.Fatalf("the wake re-asked before the ladder's base: %v", got)
 	}
-	log := h.ledgerLog()
-	if !strings.Contains(log, "presented by the pi bridge") || !strings.Contains(log, "accepted by pi (message_start)") {
-		t.Fatalf("the ledger lost the presentation or the acceptance: %s", log)
+	h.advance(3 * time.Second)
+	h.deliver() // the ladder's 5s base: publish B
+	if got := len(h.publishedRequests()); got != 1 {
+		t.Fatalf("asks on disk %v, want the ladder-paced re-ask", got)
+	}
+	h.respond() // pi refuses: its turn still runs
+	h.advance(2 * time.Second)
+	h.deliver() // the refusal reconciles; the running attestation holds
+	if got := h.typedChunks(); len(got) != 0 {
+		t.Fatalf("a refusal pasted over an accepted turn: %q", got)
 	}
 
-	// The turn drains the mail once; the doorbell never typed.
+	// Well past input_max_hold: the hold persists while pi attests the
+	// turn running, and the wake keeps asking instead of typing.
+	h.advance(20 * time.Second)
+	h.deliver()
+	if got := h.typedChunks(); len(got) != 0 {
+		t.Fatalf("the terminal pasted over the accepted turn: %q", got)
+	}
+
+	// The turn attests its end and drains the mail once; the hold is spent
+	// and nothing types. The unsent draft was never touched.
+	h.writeBridgeTurn(attemptA, "ended")
 	h.deliverEmpty()
 	if got := h.typedChunks(); len(got) != 0 {
 		t.Fatalf("the doorbell typed during the turn: %q", got)
+	}
+}
+
+// TestWakePiBridgeEndedTurnFollowsTheRatifiedBusyBound: once pi attests
+// the doorbell's turn ended, the running-turn exception is spent. A later
+// busy turn that has nothing to do with the doorbell — the user's own
+// work, with the message still unread — follows the configured
+// input_max_hold and the terminal fallback runs, exactly as without any
+// acceptance.
+func TestWakePiBridgeEndedTurnFollowsTheRatifiedBusyBound(t *testing.T) {
+	h := newWakePiBridgeHarness(t)
+	h.capableBridge()
+	h.cfg.settings.inputMaxHold = 15 * time.Second
+	h.bridgeDecision = "claimed"
+	h.deliverPending()
+	h.deliver() // publish A
+	h.respond() // pi claims and accepts
+	attemptA := strings.TrimSuffix(h.publishedRequests()[0], ".json")
+	h.writeBridgeResult(attemptA, true)
+	h.writeBridgeTurn(attemptA, "running")
+	h.deliver() // rows recorded, cadence advanced
+
+	// The doorbell's turn ends without draining; pi then starts unrelated
+	// work and refuses every re-ask.
+	h.writeBridgeTurn(attemptA, "ended")
+	h.bridgeDecision = "refused"
+	h.advance(5 * time.Second)
+	h.deliver() // the ladder's base: publish B
+	if got := len(h.publishedRequests()); got != 1 {
+		t.Fatalf("asks on disk %v, want the ladder-paced re-ask", got)
+	}
+	h.respond() // pi refuses: unrelated work
+	h.advance(2 * time.Second)
+	h.deliver() // the attestation says ended: the busy clock starts
+	if got := h.typedChunks(); len(got) != 0 {
+		t.Fatalf("the busy bound typed early: %q", got)
+	}
+
+	// The full input_max_hold passes: the next refusal reconciles past the
+	// bound and the ratified fallback owns the doorbell.
+	h.advance(15 * time.Second)
+	h.deliver() // the bound is over; the wake asks once more
+	h.respond() // pi still refuses
+	h.advance(2 * time.Second)
+	h.deliver() // the refusal reconciles past the expired bound
+	if !h.fullLineTyped() {
+		t.Fatalf("the ended turn did not release the busy bound: %q", h.typedChunks())
 	}
 }
 
