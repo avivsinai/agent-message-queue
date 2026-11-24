@@ -44,6 +44,18 @@ REGISTRY_URL="${REGISTRY_URL%/}"
 [[ "$REGISTRY_URL" =~ ^https://[^/[:space:]]+(/[^[:space:]]*)?$ ]] ||
   die "Skild registry URL must use HTTPS"
 
+# Command bodies never contain a temporary path. Local paths with an
+# apostrophe or backslash cannot turn into shell source on a later failure.
+TEMP_RESPONSE_FILE=""
+TEMP_OUTPUT_FILE=""
+cleanup_publication() {
+    [[ -z $TEMP_RESPONSE_FILE ]] || rm -f -- "$TEMP_RESPONSE_FILE"
+    [[ -z $TEMP_OUTPUT_FILE ]] || rm -f -- "$TEMP_OUTPUT_FILE"
+}
+trap cleanup_publication EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 HTTP_STATUS=""
 HTTP_BODY=""
 request_json() {
@@ -55,6 +67,7 @@ request_json() {
   local -a args
 
   response_file="$(mktemp "${TMPDIR:-/tmp}/amq-skild-response.XXXXXX")"
+  TEMP_RESPONSE_FILE=$response_file
   args=(
     --silent
     --show-error
@@ -254,6 +267,7 @@ for dir in "$SKILLS_DIR"/*/; do
     die "skill '$skill' cannot be used as a Skild alias"
   canonical="@$PUBLISHER/$skill"
   output_file="$(mktemp "${TMPDIR:-/tmp}/amq-skild-publish.XXXXXX")"
+  TEMP_OUTPUT_FILE=$output_file
 
   echo "Publishing $canonical@$VERSION"
   if "$NPX_BIN" skild publish --dir "$dir" --skill-version "$VERSION" >"$output_file" 2>&1; then
@@ -267,6 +281,7 @@ for dir in "$SKILLS_DIR"/*/; do
     exit 1
   fi
   rm -f "$output_file"
+
 
   verify_version "$skill"
   reconcile_alias "$skill"
