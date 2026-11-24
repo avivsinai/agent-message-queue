@@ -268,7 +268,8 @@ nothing: it never decides a request outcome.
   "pid": 4242,
   "surface": "tui",
   "session_generation": "3f0c...",
-  "bridge_revision": 6,
+  "bridge_revision": 7,
+  "doorbell": true,
   "gate": true,
   "session_id": "0199c0de-0000-7000-8000-000000000000",
   "activity": 2
@@ -295,7 +296,10 @@ record without it writes version 1, which has no runs. The activity version is
 separate from `bridge_revision`, which names the request rules. `gate: true`
 (revision 6) says that the extension asks the person at pi's terminal before
 a granted task's tool calls; it is absent when the extension cannot (see
-[Bridge revision 6](#bridge-revision-6-the-guard-of-granted-tasks)).
+[Bridge revision 6](#bridge-revision-6-the-guard-of-granted-tasks)). `doorbell:
+true` (revision 7) says that the extension serves the wake doorbell exchange
+(below); the wake still checks `surface`, the owner process and the
+generation itself before it asks.
 
 ## Bridge revision
 
@@ -517,6 +521,41 @@ the adapter sends it no granted request, and it refuses one that carries
 `bridge_revision` 6 with reason `revision`. An adapter that predates
 revision 6 never writes `granted`; a revision-6 bridge serves its requests
 as before.
+
+## Bridge revision 7: the wake doorbell
+
+Revision 7 is revision 6 plus the liveness field `doorbell` and a
+wake-specific exchange under `doorbell/` beside the request wire. The wake
+(the AMQ doorbell sender, not `amq-remote`) asks an idle, serving pi to show
+the fixed doorbell as a visible custom message that starts one turn, so a
+wake touches no terminal bytes on this path. The payload carries no mail
+content: an opaque attempt id, the addressed generation, the wake's pid, and
+a deadline.
+
+- `doorbell/<attempt>.json` — the request, published whole with create-new
+  semantics. Fields: `protocol`, `"op": "doorbell"`, `attempt` (lowercase
+  alphanumerics and dashes, at most 64 characters), `generation` (the
+  addressed session generation), `pid` (the wake's), `deadline` (RFC 3339).
+- `doorbell/<attempt>.decision.json` — one exclusive decision file per
+  attempt; the wake and the bridge race to create it with the same
+  create-new link the receipts use. Only the winner acts. The bridge writes
+  `{"decision":"claimed"}` before it calls pi, or
+  `{"decision":"refused","reason":...}` when pi is busy; a refusal is final
+  for the attempt and the wake asks again in a new attempt. The wake writes
+  `{"decision":"withdrawn"}` at its deadline. A late bridge that reads
+  `withdrawn` does nothing.
+- `doorbell/<attempt>.result.json` — the acceptance evidence: the
+  `message_start` of the extension's own custom entry
+  (`customType: "amq-doorbell"`, its exact `attempt` and `generation`
+  details, the fixed line as content, a non-user role). The bridge publishes
+  it once, whole. A claim, a fresh heartbeat, returning from `sendMessage`,
+  an unrelated start, or matching text alone is not acceptance.
+
+The bridge claims only a request addressed to its own live generation,
+inside the deadline, when pi is idle with nothing pending; it rechecks its
+ownership and the decision immediately before it calls pi. A claim never
+crosses a session boundary. The wake owns cleanup of decided or withdrawn
+attempts; the extension never deletes these files.
 
 ## Session generation and epoch
 

@@ -5,7 +5,7 @@ import { registerHooks, syncBuiltinESMExports } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
-import amqPiBridge, { type AmqBridgeOptions, type AmqOutcome, type AmqRequest, registerAmqBridge } from "./amq-bridge.ts";
+import amqPiBridge, { type AmqBridgeOptions, type AmqOutcome, type AmqRequest, DOORBELL_LINE, registerAmqBridge } from "./amq-bridge.ts";
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
 
@@ -80,6 +80,9 @@ function harness(host?: (root: string) => AmqBridgeOptions, shared?: string, mod
 	}
 	const handlers = new Map<string, Handler[]>();
 	const sent: { content: unknown; options: unknown }[] = [];
+	// customSent records pi.sendMessage calls: the wake doorbell's visible
+	// custom messages, which never touch sendUserMessage.
+	const customSent: { content: unknown; options: unknown }[] = [];
 	const state = { idle: true, pending: false, idleChecks: 0, aborts: 0, lookups: 0, throwSend: false };
 	const notices: string[] = [];
 	// armedAtSend records, for each sendUserMessage, whether a guard file of
@@ -103,6 +106,10 @@ function harness(host?: (root: string) => AmqBridgeOptions, shared?: string, mod
 			armedAtSend.push(guards().length > 0);
 			if (state.throwSend) throw new Error("not delivered");
 			sent.push({ content, options });
+		},
+		sendMessage(content: unknown, options: unknown) {
+			if (state.throwSend) throw new Error("not delivered");
+			customSent.push({ content, options });
 		},
 		getAllTools() {
 			state.lookups++;
@@ -149,6 +156,7 @@ function harness(host?: (root: string) => AmqBridgeOptions, shared?: string, mod
 		dir,
 		bridge,
 		sent,
+		customSent,
 		state,
 		notices,
 		emit,
@@ -1082,7 +1090,7 @@ test("a host application's identity and delivery run a request without AM_ROOT o
 	try {
 		const live = JSON.parse(fs.readFileSync(path.join(h.dir, "bridge.liveness"), "utf8"));
 		assert.equal(live.upgrade, "update the host application");
-		assert.equal(live.bridge_revision, 6);
+		assert.equal(live.bridge_revision, 7);
 
 		h.publish(REF, "remote task", h.generation(), { bridge_revision: 3, origin: { carrier: "link", name: "example" } });
 		await h.waitFor(() => handed.length === 1);
@@ -2013,5 +2021,138 @@ test("guard: a granted request that the bridge cannot guard is refused with noth
 		} finally {
 			await h.done();
 		}
+	}
+});
+
+// The wake doorbell exchange (revision 7): the wake writes one request file
+// under doorbell/ and races the bridge for the attempt's single decision
+// file. A claim shows the fixed line as a visible custom message that
+// starts one turn; a matching message_start is the acceptance result.
+
+// doorbell publishes one wake doorbell request for the attempt.
+function doorbell(h: ReturnType<typeof harness>, attempt: string, fields: Record<string, unknown> = {}) {
+	const file = path.join(h.dir, "doorbell", `${attempt}.json`);
+	const request = {
+		protocol: "amq:pi-bridge:v1",
+		op: "doorbell",
+		attempt,
+		generation: h.generation(),
+		pid: 424242,
+		deadline: new Date(Date.now() + 30_000).toISOString(),
+		...fields,
+	};
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	const tmp = `${file}.tmp-test`;
+	fs.writeFileSync(tmp, JSON.stringify(request));
+	fs.renameSync(tmp, file);
+}
+
+// doorbellDecision reads the attempt's decision file, null when absent.
+function doorbellDecision(h: ReturnType<typeof harness>, attempt: string): Record<string, unknown> | null {
+	try {
+		return JSON.parse(fs.readFileSync(path.join(h.dir, "doorbell", `${attempt}.decision.json`), "utf8"));
+	} catch {
+		return null;
+	}
+}
+
+// doorbellMessageStart is the message_start event pi emits for the custom
+// doorbell entry: a machine role carries the exact attempt and the fixed
+// line as display content.
+function doorbellMessageStart(attempt: string, generation: string, content = DOORBELL_LINE, role = "machine") {
+	return {
+		message: { role, content: { customType: "amq-doorbell", content, display: true, details: { attempt, generation } } },
+	};
+}
+
+test("the doorbell is claimed, shown once as the visible custom message, and accepted by its message_start", async () => {
+	const h = harness();
+	await h.start();
+	try {
+		doorbell(h, "attempt-1");
+		await h.waitFor(() => doorbellDecision(h, "attempt-1") !== null);
+		assert.deepEqual(doorbellDecision(h, "attempt-1")?.decision, "claimed");
+		assert.deepEqual(h.sent, [], "a claim never types into pi");
+		assert.equal(h.customSent.length, 1);
+		assert.deepEqual(h.customSent[0].content, {
+			customType: "amq-doorbell",
+			content: DOORBELL_LINE,
+			display: true,
+			details: { attempt: "attempt-1", generation: h.generation() },
+		});
+		assert.deepEqual(h.customSent[0].options, { triggerTurn: true, deliverAs: "followUp" });
+		// The acceptance result exists only after the matching message_start.
+		assert.equal(fs.existsSync(path.join(h.dir, "doorbell", "attempt-1.result.json")), false);
+		await h.emit("message_start", doorbellMessageStart("attempt-1", h.generation()));
+		const result = JSON.parse(fs.readFileSync(path.join(h.dir, "doorbell", "attempt-1.result.json"), "utf8"));
+		assert.equal(result.accepted, true);
+		assert.equal(result.attempt, "attempt-1");
+		// One start: a second message_start publishes nothing new.
+		await h.emit("message_start", doorbellMessageStart("attempt-1", h.generation()));
+	} finally {
+		await h.done();
+	}
+});
+
+test("a busy seat refuses the doorbell before dispatch and sends nothing", async () => {
+	const h = harness();
+	await h.start();
+	try {
+		h.state.idle = false;
+		doorbell(h, "attempt-2");
+		await h.waitFor(() => doorbellDecision(h, "attempt-1") !== null);
+		assert.equal(doorbellDecision(h, "attempt-2")?.decision, "refused");
+		assert.ok(String(doorbellDecision(h, "attempt-2")?.reason).length > 0);
+		assert.deepEqual(h.customSent, []);
+		assert.deepEqual(h.sent, []);
+	} finally {
+		await h.done();
+	}
+});
+
+test("the wake's withdrawn decision ends the attempt; the bridge does nothing", async () => {
+	const h = harness();
+	await h.start();
+	try {
+		fs.mkdirSync(path.join(h.dir, "doorbell"), { recursive: true });
+		fs.writeFileSync(path.join(h.dir, "doorbell", "attempt-3.decision.json"), JSON.stringify({ protocol: "amq:pi-bridge:v1", attempt: "attempt-3", decision: "withdrawn", generation: "other", pid: 1, at: new Date().toISOString() }));
+		doorbell(h, "attempt-3");
+		await new Promise((r) => setTimeout(r, 400));
+		assert.deepEqual(h.customSent, []);
+		assert.equal(fs.existsSync(path.join(h.dir, "doorbell", "attempt-3.result.json")), false);
+	} finally {
+		await h.done();
+	}
+});
+
+test("a doorbell addressed to an earlier generation is never served", async () => {
+	const h = harness();
+	await h.start();
+	try {
+		doorbell(h, "attempt-4", { generation: "00000000-0000-4000-8000-000000000000" });
+		await new Promise((r) => setTimeout(r, 400));
+		assert.equal(doorbellDecision(h, "attempt-4"), null);
+		assert.deepEqual(h.customSent, []);
+	} finally {
+		await h.done();
+	}
+});
+
+test("a mismatched doorbell message_start is not acceptance", async () => {
+	const h = harness();
+	await h.start();
+	try {
+		doorbell(h, "attempt-5");
+		await h.waitFor(() => h.customSent.length === 1);
+		await h.emit("message_start", doorbellMessageStart("attempt-5", h.generation(), DOORBELL_LINE, "user"));
+		await h.emit("message_start", doorbellMessageStart("attempt-5", h.generation(), "some other line"));
+		await h.emit("message_start", doorbellMessageStart("attempt-9", h.generation()));
+		assert.equal(fs.existsSync(path.join(h.dir, "doorbell", "attempt-5.result.json")), false);
+		// The exact match still accepts afterwards.
+		await h.emit("message_start", doorbellMessageStart("attempt-5", h.generation()));
+		const result = JSON.parse(fs.readFileSync(path.join(h.dir, "doorbell", "attempt-5.result.json"), "utf8"));
+		assert.equal(result.accepted, true);
+	} finally {
+		await h.done();
 	}
 });

@@ -15,11 +15,27 @@ export const PROTOCOL = "amq:pi-bridge:v1";
 // is revision 3 plus pi's session id in liveness; revision 5 adds the exact
 // cancel of one request (cancels/<ref>.json); revision 6 adds the granted
 // request and the guard that asks the person at the terminal before its
-// tool calls run.
-export const BRIDGE_REVISION = 6;
+// tool calls run. Revision 7 adds the wake doorbell exchange
+// (docs/pi-bridge-protocol.md, doorbell): the wake asks an idle serving pi
+// to show the fixed doorbell as a visible custom message that starts one
+// turn. The bridge claims one exclusive decision file per attempt, shows
+// the line, and publishes the matching message_start as the acceptance
+// result. The wake sends no mail content on this path.
+export const BRIDGE_REVISION = 7;
 // GRANT_REVISION is the lowest request bridge_revision that may carry
 // granted: true.
 const GRANT_REVISION = 6;
+// DOORBELL_LINE is the fixed visible line the bridge shows; it matches the
+// harness doorbell constant (internal/harness), so a reader of the
+// transcript sees the same text a typed doorbell leaves.
+export const DOORBELL_LINE = ": AMQ doorbell run amq drain --include-body then act on it";
+// DOORBELL_ATTEMPT bounds the attempt id the wake mints: one durable id per
+// pending cohort, lowercase alphanumerics and dashes.
+const DOORBELL_ATTEMPT = /^[a-z0-9][a-z0-9-]{0,63}$/;
+// DOORBELL_DONE_MAX bounds the attempts this runtime remembers as decided;
+// past it the set resets, because every request is also gated by its
+// generation and deadline on a re-read.
+const DOORBELL_DONE_MAX = 128;
 // A request carries the bridge_revision its adapter requires. A request
 // without one comes from an adapter that predates the revision fence and is
 // refused, so an old adapter cannot send work through this bridge.
@@ -157,6 +173,10 @@ type Bridge = {
 	orphanRetry: Set<string>;
 	// revisionNoticeShown limits the old-adapter notice to once per runtime.
 	revisionNoticeShown: boolean;
+	// doorbell is the state of the wake doorbell exchange: claimed holds each
+	// claimed attempt awaiting its matching message_start, done the attempts
+	// decided or seen expired, so a poll never re-examines them.
+	doorbell: { claimed: Map<string, number>; done: Set<string> };
 	ownerNotice: { shown: boolean };
 	displaced: (b: Bridge) => void;
 	// sessionId is pi's own session id; "" disables activity records.
@@ -633,6 +653,10 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 		closeRemoteDialog();
 		stopWaiting();
 		stop(bridge, event.reason);
+		// A claimed doorbell never crosses a session boundary: a claim whose
+		// acceptance never arrived waits for the wake's deadline, and a new
+		// generation cannot service its predecessor's request.
+		if (bridge) bridge.doorbell.claimed.clear();
 		bridge = null;
 		session = null;
 	});
@@ -654,8 +678,41 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 	// ends that ownership: the request completes only when its last
 	// assistant message is a final answer, otherwise it is uncertain (a
 	// tool-use preamble is never an answer).
+	// The doorbell acceptance comes before the user-role handler: the
+	// custom entry's role is not a user's, and a matching start proves the
+	// bridge's claim reached pi. Require the pending claim, the exact
+	// attempt and generation, the fixed content; anything else never reads
+	// as acceptance (docs/pi-bridge-protocol.md, doorbell).
 	pi.on("message_start", (event) => {
 		const b = bridge;
+		if (b && b.doorbell.claimed.size > 0) {
+			const dm = (event.message ?? {}) as {
+				role?: unknown;
+				content?: { customType?: unknown; content?: unknown; details?: { attempt?: unknown; generation?: unknown } };
+			};
+			if (
+				dm.content &&
+				typeof dm.content === "object" &&
+				dm.content.customType === "amq-doorbell" &&
+				typeof dm.role === "string" &&
+				dm.role !== "user"
+			) {
+				for (const [attempt] of b.doorbell.claimed) {
+					if (
+						dm.content.details?.attempt === attempt &&
+						dm.content.details?.generation === b.generation &&
+						dm.content.content === DOORBELL_LINE
+					) {
+						b.doorbell.claimed.delete(attempt);
+						b.doorbell.done.add(attempt);
+						publishDoorbellResult(b.dir, attempt);
+						return;
+					}
+				}
+				// A doorbell-shaped message is never a request's user message.
+				return;
+			}
+		}
 		const f = b?.inflight;
 		if (!b || !f || f.terminal) return;
 		const msg = event.message as { role?: string; content?: unknown };
@@ -831,7 +888,7 @@ function bridgeDir(identity: AmqIdentity): string {
 function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOptions, identity: AmqIdentity, ownerNotice: { shown: boolean }, displaced: (b: Bridge) => void): Bridge | null {
 	const dir = bridgeDir(identity);
 	try {
-		for (const sub of ["requests", "receipts", "events"]) {
+		for (const sub of ["requests", "receipts", "events", "doorbell"]) {
 			fs.mkdirSync(path.join(dir, sub), { recursive: true, mode: 0o700 });
 		}
 	} catch (err) {
@@ -869,6 +926,7 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOption
 		displaced,
 		orphanRetry: new Set(),
 		revisionNoticeShown: false,
+		doorbell: { claimed: new Map(), done: new Set() },
 		sessionId: sessionIdOf(ctx),
 		turn: "",
 		turns: 0,
@@ -978,9 +1036,144 @@ function stop(b: Bridge | null, reason: string): void {
 // filesystem error is retried then.
 function scanSafely(pi: ExtensionAPI, b: Bridge): void {
 	try {
-		if (owns(b)) scan(pi, b);
+		if (owns(b)) {
+			scan(pi, b);
+			scanDoorbell(pi, b);
+		}
 	} catch {
 		// Retried on the next poll.
+	}
+}
+
+// scanDoorbell serves the wake doorbell exchange (docs/pi-bridge-protocol.md,
+// doorbell): one request file per attempt under doorbell/, one exclusive
+// decision file the wake and this bridge race to create. Only the winner
+// acts: the wake's withdrawn removes the doorbell from this poll; a claim
+// shows the fixed line as a visible custom message that starts one turn;
+// a busy refusal is final for the attempt and the wake asks again. The
+// claim is flushed before pi is called, the deadline and generation are
+// rechecked immediately before it, and a claim never crosses a session
+// boundary: shutdown drops the pending claims and a claimed attempt without
+// acceptance waits for the wake's deadline, like any claim the bridge lost.
+function scanDoorbell(pi: ExtensionAPI, b: Bridge): void {
+	const dir = path.join(b.dir, "doorbell");
+	let names: string[];
+	try {
+		names = fs.readdirSync(dir);
+	} catch {
+		return;
+	}
+	if (b.doorbell.done.size > DOORBELL_DONE_MAX) b.doorbell.done.clear();
+	for (const name of names.sort()) {
+		if (!name.endsWith(".json") || name.endsWith(".decision.json") || name.endsWith(".result.json")) continue;
+		const attempt = name.slice(0, -5);
+		if (!DOORBELL_ATTEMPT.test(attempt) || b.doorbell.claimed.has(attempt) || b.doorbell.done.has(attempt)) continue;
+		let rec: { protocol?: unknown; op?: unknown; attempt?: unknown; generation?: unknown; deadline?: unknown };
+		try {
+			rec = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8"));
+		} catch {
+			continue; // a partial or foreign file is never evidence
+		}
+		if (rec.protocol !== PROTOCOL || rec.op !== "doorbell" || rec.attempt !== attempt) continue;
+		const deadline = typeof rec.deadline === "string" ? Date.parse(rec.deadline) : NaN;
+		if (!Number.isFinite(deadline) || Date.now() > deadline || rec.generation !== b.generation) {
+			b.doorbell.done.add(attempt); // expired or not addressed to this generation; the wake owns the file
+			continue;
+		}
+		const decision = readDoorbellDecision(dir, attempt);
+		if (decision) {
+			if (decision.decision === "claimed" && decision.generation === b.generation) {
+				b.doorbell.claimed.set(attempt, Date.now()); // claimed by an earlier poll of this runtime
+			} else {
+				b.doorbell.done.add(attempt); // withdrawn, refused, or another generation's
+			}
+			continue;
+		}
+		// Busy refusal first: a busy pi gets nothing, and the refusal is
+		// final for the attempt.
+		const busy = busyReason(b);
+		if (busy) {
+			writeDoorbellDecision(b, attempt, { decision: "refused", reason: busy });
+			b.doorbell.done.add(attempt);
+			continue;
+		}
+		if (!writeDoorbellDecision(b, attempt, { decision: "claimed" })) continue; // the wake withdrew first
+		b.doorbell.claimed.set(attempt, Date.now());
+		try {
+			pi.sendMessage(
+				{ customType: "amq-doorbell", content: DOORBELL_LINE, display: true, details: { attempt, generation: b.generation } },
+				{ triggerTurn: true, deliverAs: "followUp" },
+			);
+		} catch (err) {
+			// A synchronous throw is proven non-delivery: unclaim so the wake's
+		// deadline falls back, and record why, best-effort.
+			b.doorbell.claimed.delete(attempt);
+			try {
+				fs.rmSync(path.join(dir, `${attempt}.decision.json`), { force: true });
+			} catch {
+				// The wake's deadline owns the fallback either way.
+			}
+			writeDoorbellDecision(b, attempt, { decision: "failed", reason: `sendMessage: ${String(err)}` });
+		}
+	}
+}
+
+// readDoorbellDecision returns the decision file's body, or null when it is
+// absent or unreadable; an unreadable file is never a win for either side.
+function readDoorbellDecision(dir: string, attempt: string): { decision?: unknown; generation?: unknown } | null {
+	try {
+		return JSON.parse(fs.readFileSync(path.join(dir, `${attempt}.decision.json`), "utf8"));
+	} catch {
+		return null;
+	}
+}
+
+// writeDoorbellDecision races the wake for the attempt's single decision
+// file with create-new link semantics and reports whether this call won.
+function writeDoorbellDecision(b: Bridge, attempt: string, fields: { decision: string; reason?: string }): boolean {
+	const dir = path.join(b.dir, "doorbell");
+	const body = JSON.stringify({
+		protocol: PROTOCOL,
+		attempt,
+		generation: b.generation,
+		pid: process.pid,
+		at: new Date().toISOString(),
+		...fields,
+	});
+	try {
+		linkNew(dir, path.join(dir, `${attempt}.decision.json`), body);
+		syncDir(dir);
+		return true;
+	} catch (err) {
+		// EEXIST is the wake's win or an earlier decision; anything else is
+		// a failed write, recorded best-effort as a failed decision.
+		if ((err as NodeJS.ErrnoException).code !== "EEXIST") {
+			try {
+				linkNew(dir, path.join(dir, `${attempt}.decision.json`), JSON.stringify({ protocol: PROTOCOL, attempt, generation: b.generation, pid: process.pid, at: new Date().toISOString(), decision: "failed", reason: String(err) }));
+			} catch {
+				// Unwritable; the wake's deadline governs.
+			}
+		}
+		return false;
+	}
+}
+
+// publishDoorbellResult records the acceptance evidence: the matching
+// message_start of the addressed generation arrived. The wake reads it for
+// its attempt ledger; control flow never waits for it.
+function publishDoorbellResult(dir: string, attempt: string): void {
+	const out = path.join(dir, "doorbell");
+	const body = JSON.stringify({
+		protocol: PROTOCOL,
+		accepted: true,
+		attempt,
+		at: new Date().toISOString(),
+	});
+	try {
+		linkNew(out, path.join(out, `${attempt}.result.json`), body);
+		syncDir(out);
+	} catch {
+		// Best effort: the wake's deadline governs when evidence is unreadable.
 	}
 }
 
@@ -1376,6 +1569,9 @@ function writeLiveness(b: Bridge, live: boolean): void {
 		surface: b.surface,
 		session_generation: b.generation,
 		bridge_revision: BRIDGE_REVISION,
+		// The wake doorbell exchange exists in this revision; a reader that
+		// wants it still checks surface and the owner process itself.
+		doorbell: true,
 		gate: gates(b) || undefined,
 		session_id: sessionIdOf(b.ctx) || undefined,
 		activity: ACTIVITY_VERSION,
