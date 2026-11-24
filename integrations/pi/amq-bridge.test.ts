@@ -2124,7 +2124,7 @@ test("an accepted doorbell attests its turn running until the turn ends", async 
 		assert.equal(ended.phase, "ended");
 		// A later user turn runs with no attestation of its own.
 		await h.emit("turn_end", {});
-		assert.equal(ended.phase, "ended");
+		assert.equal(JSON.parse(fs.readFileSync(turnFile, "utf8")).phase, "ended");
 	} finally {
 		await h.done();
 	}
