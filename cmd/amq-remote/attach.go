@@ -1671,15 +1671,7 @@ func recordAttachIdentity(stderr io.Writer, root, handle, kind string) {
 	}
 }
 
-// attachApprovalsSentence states where a task's permission dialog is
-// answered under the share's stored approvals policy and consent, by the
-// same rule linkTakesAnswers uses for admission and the published
-// remote_answer flag. The terminal sentence is the sentence attach always
-// said before a share had a policy; the link sentences follow
-// docs/remote-link-protocol.md: with a consent that takes a grant the
-// linked server shows the dialog and the owner can give a signed answer
-// there, while the terminal and Buzz can still answer first; consent
-// local takes no signed answer, so the server never sees the dialog.
+// attachApprovalsSentence describes where the share's policy and consent allow a dialog to be answered.
 func attachApprovalsSentence(approvals, consent string) string {
 	if linkTakesAnswers(approvals, consent) {
 		return "An eligible permission dialog of a task on this share is shown to the linked server. The owner answers it there with a signature or in the session's terminal; the first answer decides."

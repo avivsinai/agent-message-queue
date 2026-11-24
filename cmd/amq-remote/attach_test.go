@@ -1243,9 +1243,6 @@ func TestAttachLinkUsesTheServerDefaultProfileWhenToolsIsOmitted(t *testing.T) {
 	}
 }
 
-// The approvals policy rides the attach: --approvals link is stored on the
-// share so serve knows what to publish for this binding, and a value the
-// manifest does not know refuses the attach.
 // newAttachLinkMachine builds the isolated machine of the attach link
 // tests: a machine root with one enrolled link named example, a live
 // registrar, and the self-session stubs. Returns the link's state dir.
@@ -1316,6 +1313,9 @@ func newAttachLinkMachine(t *testing.T) string {
 	return stateDir
 }
 
+// The approvals policy rides the attach: --approvals link is stored on the
+// share so serve knows what to publish for this binding, and a value the
+// manifest does not know refuses the attach.
 func TestAttachLinkStoresTheApprovalsPolicy(t *testing.T) {
 	stateDir := newAttachLinkMachine(t)
 	if code, err := attach([]string{"--self", "--link", "example", "--approvals", "link"}, io.Discard, io.Discard); code != 0 || err != nil {
@@ -1333,7 +1333,7 @@ func TestAttachLinkStoresTheApprovalsPolicy(t *testing.T) {
 // TestAttachSummaryReportsTheStoredApprovalsPolicy: the preflight of the
 // live run on 0.170.0 saw "approvals": "terminal" and the terminal
 // sentence after attach --approvals link stored link on the share. The
-// summary must state the stored policy; the two link rows fail on main.
+// summary must state the stored policy.
 func TestAttachSummaryReportsTheStoredApprovalsPolicy(t *testing.T) {
 	const terminalSentence = "Tool approvals for this share are answered in the session's terminal; the linked server cannot answer them, so a task that needs one waits there."
 	rows := []struct {
