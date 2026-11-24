@@ -132,7 +132,7 @@ func TestGrantedSubmitToTheReferenceBridge(t *testing.T) {
 		}
 		a.now = func() time.Time { return golden }
 		a.submitWait = 0
-		req := core.BoundRequest{Key: key, Epoch: addressEpoch("golden-generation"), Input: protocol.SubmitInput{Text: "summarize the diff"}, NotAfter: "2036-01-01T00:00:00Z", Granted: granted}
+		req := core.BoundRequest{Key: key, Epoch: "golden-generation", Input: protocol.SubmitInput{Text: "summarize the diff"}, NotAfter: "2036-01-01T00:00:00Z", Granted: granted}
 		if adm, err := a.Submit(req); adm.Code != "" {
 			t.Fatalf("Submit(granted %v) = %+v, %v; want published, waiting for its receipt", granted, adm, err)
 		}

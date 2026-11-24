@@ -25,7 +25,7 @@
 // Evidence: pi's sendUserMessage returns void and swallows rejections, and
 // v1 has no native admission primitive — the per-ref RECEIPT is the only
 // admission proof (protocol: receipts). Until a receipt is observed the adapter
-// publishes the address epoch `unpinned.<generation>` for the live generation,
+// publishes the live generation as the epoch,
 // or the sentinel `unpinned` without one (protocol: session generation and
 // epoch); the first receipt pins the session generation. A key the adapter
 // retains nothing about is EvidenceUnknown, never EvidenceNone.
@@ -109,15 +109,18 @@ type Attachment struct {
 	// upgradeHint is the manifest's remedy for a too-old bridge.
 	upgradeHint string
 	dir         bridgeDir
-	// epoch is the receipt-pinned session generation (protocol: session generation and epoch). Empty means "no
-	// receipt observed yet" — Inspect publishes the address epoch
-	// `unpinned.<generation>` of the live generation, and a first-contact
-	// submit addresses exactly the generation its caller's epoch names.
+	// epoch is the receipt-pinned generation. Before a receipt, the live
+	// generation addresses the same runtime without pinning it.
 	epoch string
 	// epochPID is the pi process that wrote the pinning receipt. A
 	// generation lives inside one process, so a live bridge with another
-	// pid proves the pin stale (see dropStalePinLocked). 0 = unknown.
+	// pid proves the pin stale (see observeLivenessLocked). 0 = unknown.
 	epochPID int
+	// A generation belongs to one process. Remember its live owner even before
+	// a receipt, so contradictory PID evidence cannot reissue the same address.
+	liveGeneration       string
+	livePID              int
+	conflictedGeneration string
 
 	runs      map[requests.Key]*run
 	order     []requests.Key // bind order, for bounded pruning + deterministic consume
@@ -217,8 +220,7 @@ const defaultSubmitWait = 2 * time.Second
 const submitPollStep = 25 * time.Millisecond
 
 // New builds an attachment over the contract's file seam for the manifest
-// target. The epoch is never an argument: it is OBSERVED from receipts
-// (protocol: session generation and epoch) — until the first receipt Inspect publishes the `unpinned` sentinel.
+// target. The bridge supplies the generation and only receipts pin it.
 func New(target, handle string, dir bridgeDir) (*Attachment, error) {
 	if target == "" {
 		return nil, fmt.Errorf("pi: target is required")
@@ -514,31 +516,38 @@ func (a *Attachment) bindRunLocked(key requests.Key, epoch string) *run {
 // order observations by receipt time: with two concurrent readers, a stale
 // read can momentarily regress the pin. The
 // regression is self-healing: the extension answers a stale hint with
-// refused(generation), which unpins to the sentinel and lets the next
-// receipt re-pin. An invalid generation string is never pinned.
+// refused(generation), which drops the pin and lets the next receipt
+// re-pin. An invalid generation string is never pinned.
 func (a *Attachment) observeGenerationLocked(gen string, pid int) {
-	if gen != "" && protocol.ValidEpoch(gen) && gen != a.epoch {
+	if !validGeneration(gen) || gen == a.conflictedGeneration {
+		return
+	}
+	if a.epoch == gen && a.epochPID > 0 && pid > 0 && a.epochPID != pid {
+		a.conflictedGeneration = gen
+		a.epoch, a.epochPID = "", 0
+		return
+	}
+	if gen != a.epoch {
 		a.epoch = gen
 		a.epochPID = pid
 	}
 }
 
-// dropStalePinLocked unpins when the live bridge proves the pinned
-// generation ended: it runs in a different process than the one whose
-// receipt pinned it (kill, crash, app restart), or it publishes a different
-// generation (/new, reload, fork keep the pid).
-// Without this the first submit carried a dead epoch_hint, which the
-// extension refused. Liveness never PINS (protocol: session generation and epoch): the next submit goes out as
-// first contact and its receipt pins the live generation.
-func (a *Attachment) dropStalePinLocked(live livenessState) {
-	if a.epoch == "" || !live.live {
+// observeLivenessLocked drops a stale pin and detects a generation claimed
+// by two processes. Liveness alone never sets the receipt pin.
+func (a *Attachment) observeLivenessLocked(live livenessState) {
+	if !live.live {
 		return
 	}
 	otherProcess := a.epochPID > 0 && live.pid > 0 && live.pid != a.epochPID
-	otherGeneration := live.gen != "" && protocol.ValidEpoch(live.gen) && live.gen != a.epoch
-	if otherProcess || otherGeneration {
-		a.epoch = ""
-		a.epochPID = 0
+	if validGeneration(live.gen) && live.pid > 0 {
+		if (live.gen == a.epoch && otherProcess) || (live.gen == a.liveGeneration && live.pid != a.livePID) {
+			a.conflictedGeneration = live.gen
+		}
+		a.liveGeneration, a.livePID = live.gen, live.pid
+	}
+	if otherProcess || (live.gen != "" && live.gen != a.epoch) || a.epoch == a.conflictedGeneration {
+		a.epoch, a.epochPID = "", 0
 	}
 }
 
@@ -762,8 +771,7 @@ func (a *Attachment) applyEventsLocked(r *run, events []event) {
 				// The pinned generation is proven stale. The refused
 				// event carries no live generation (the extension refused
 				// pre-delivery and wrote no receipt), so the adapter drops
-				// back to the `unpinned` sentinel; the next delivered
-				// request's receipt re-pins the live generation.
+				// the pin until a receipt identifies the new generation.
 				a.epoch = ""
 				a.epochPID = 0
 			}
@@ -873,7 +881,7 @@ func (r *run) result() *protocol.Result {
 }
 
 // Inspect implements core.Attachment. The published epoch is the pinned
-// generation, or the `unpinned` sentinel before the first receipt (protocol: session generation and epoch;
+// generation, or the live generation before the first receipt (protocol: session generation and epoch;
 // an empty epoch would defeat stale-epoch protection because "" == "").
 func (a *Attachment) Inspect() protocol.Session {
 	s, _ := a.InspectSubmit()
@@ -887,14 +895,14 @@ func (a *Attachment) InspectSubmit() (protocol.Session, string) {
 	a.consume()                     // 9a: seam reads outside a.mu; apply under it
 	live := a.dir.liveness(a.now()) // 9a: FS read, no lock
 	a.mu.Lock()
-	a.dropStalePinLocked(live)
+	a.observeLivenessLocked(live)
 	epoch := a.epoch
 	if epoch == "" {
 		// Before the first receipt the epoch names the live generation, so
 		// a submit prepared against it cannot land in a later one.
 		epoch = SentinelUnpinned
-		if e := addressEpoch(live.gen); live.live && e != "" {
-			epoch = e
+		if live.live && validGeneration(live.gen) && live.gen != a.conflictedGeneration {
+			epoch = live.gen
 		}
 	}
 	a.mu.Unlock()
@@ -955,7 +963,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	a.mu.Lock()
 	// Epoch gate: once a receipt pinned a generation, the caller's epoch
 	// must match it exactly. While unpinned (a.epoch == "") the caller's
-	// epoch must be the address epoch `unpinned.<generation>` it read from
+	// epoch must be the live generation it read from
 	// Inspect; that generation is the hint, never a later liveness read.
 	// The endpoint's admissible check compares cmd.Epoch against
 	// Inspect().Epoch, so these only fire on a race; they mirror the
@@ -967,12 +975,11 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		return core.Admission{Code: protocol.CodeStaleEpoch, Message: "epoch does not match the pinned session generation; re-inspect"}, nil
 	}
 	if firstContact {
-		gen, ok := addressedGeneration(req.Epoch)
-		if !ok {
+		if !validGeneration(req.Epoch) || req.Epoch == a.conflictedGeneration {
 			a.mu.Unlock()
 			return core.Admission{Code: protocol.CodeStaleEpoch, Message: "epoch addresses no pi session generation; re-inspect"}, nil
 		}
-		epochHint = gen
+		epochHint = req.Epoch
 	}
 	// The hint is captured in the SAME critical section as the gate
 	// above: re-reading it after the lock-free liveness check would let a
@@ -1036,13 +1043,23 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		// extension lacks the rules this adapter's evidence relies on.
 		return core.Admission{Code: protocol.CodeUnsupported, Message: oldBridgeMessage(a.dir.names, a.handle, live, a.upgradeHint)}, nil
 	}
+	a.mu.Lock()
+	a.observeLivenessLocked(live)
+	conflicted := a.conflictedGeneration == epochHint
+	a.mu.Unlock()
+	if conflicted {
+		return core.Admission{Code: protocol.CodeStaleEpoch, Message: "two bridge processes reported the same session generation; start a new session generation"}, nil
+	}
+	if live.gen != "" && !validGeneration(live.gen) {
+		return core.Admission{Code: protocol.CodeStaleEpoch, Message: "live bridge reports an invalid session generation; re-inspect"}, nil
+	}
 	if firstContact {
 		// First contact: the request addresses the generation the caller
 		// observed at Inspect. A live bridge in another generation means
 		// the session changed (/new, reload, restart), so nothing is
 		// published. This addresses the session only; it is not admission
 		// evidence and never pins (only receipts pin).
-		if !protocol.ValidEpoch(live.gen) {
+		if live.gen == "" {
 			return core.Admission{Code: protocol.CodeAttachmentLost, Message: fmt.Sprintf("live pi bridge for handle %q publishes no valid session_generation", a.handle)}, nil
 		}
 		if live.gen != epochHint {

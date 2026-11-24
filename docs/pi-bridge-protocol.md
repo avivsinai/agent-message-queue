@@ -110,7 +110,7 @@ non-empty protocol string instead of guessing its meaning:
 | `text` | The user message to submit, verbatim. |
 | `deliver_as` | Always `followUp` in v1. |
 | `not_after` | RFC 3339 deadline. The extension does not deliver after it. |
-| `epoch_hint` | The session generation the request addresses: the pinned generation, or on first contact the generation the caller's address epoch names. Always set. |
+| `epoch_hint` | The session generation observed by the caller. Always set. |
 | `created_at` | RFC 3339 publication time; informational. |
 | `bridge_revision` | The bridge revision the adapter requires. Always set. |
 | `origin` | Optional: where the task came from, `{"carrier": "link", "name": "example"}`. `name` is the carrier's own name for the source that sent the task (for a link, the link's name in the AMQ manifest); `carrier` is the AMQ carrier that received it. Both are non-empty, and `name` is at most 64 bytes. The adapter writes `origin` only when both hold, and otherwise leaves the whole object out, so a local, mailbox or Buzz request has none. The extension may show "from <name>"; it is display text, never authority. |
@@ -598,7 +598,8 @@ file groups stay. The extension never deletes these files.
 ## Session generation and epoch
 
 A session generation is an opaque token (`^[A-Za-z0-9_.:-]{1,128}$`) that
-names one pi session runtime. The extension mints a fresh generation on every
+names one pi session runtime. The value `unpinned` and the prefix `unpinned.` are
+reserved. The extension mints a fresh generation on every
 `session_start`: startup, resume, new session, reload, and fork each start a
 new extension runtime. It writes liveness immediately with the new
 generation.
@@ -606,21 +607,22 @@ generation.
 The adapter's epoch rules:
 
 1. **Only receipts pin.** The first receipt pins its `session_generation`,
-   and the adapter then publishes it as the epoch. On restart the adapter
+   which remains the published epoch. On restart the adapter
    rebuilds from `receipts/` oldest first, so the newest receipt sets the
    pin.
 2. **Liveness addresses and may drop a pin, never set one.** Without a pin
-   the adapter publishes the address epoch `unpinned.<generation>` for the
-   live record's `session_generation`, or the sentinel `unpinned` when no
-   live generation is known. A first-contact submit sends the generation
-   its caller's address epoch names as `epoch_hint`, never a generation read
+   the adapter publishes the live record's `session_generation`, or the sentinel
+   `unpinned` when no live generation is known. A first-contact submit sends the generation
+   its caller inspected as `epoch_hint`, never a generation read
    later; when liveness shows another generation at submit time, the submit
    is refused `stale_epoch` and nothing is published. The sentinel addresses
    no generation, so a submit under it is refused `stale_epoch`, including a
    request deferred while the bridge was offline. The address names the
    session the request is for; it is not admission evidence and does not
    pin. A live record whose `session_generation` differs from the pin, or
-   whose `pid` differs from the pinning receipt's `pid`, drops the pin.
+   whose `pid` differs from the pinning receipt's `pid`, drops the pin. If two
+   processes report the same generation, it cannot address new work. A new
+   process mints a fresh generation.
 3. **A hint for another generation is refused.** The extension delivers a
    request only when its `epoch_hint` equals the current generation. An
    absent, empty, or different hint gets a `refused` event with reason

@@ -35,7 +35,7 @@ func TestSubmitDeliversTheRecordOrigin(t *testing.T) {
 	ref := protocol.EncodeRef(src.Host, "pi-1", id)
 	writeReceipt(t, dir, ref, "gen-1", fixedNow)
 	if _, err := ep.Handle(&protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit, RequestID: id, TargetID: "pi-1",
-		Epoch: addressEpoch("gen-1"), NotAfter: protocol.FormatTime(time.Now().Add(time.Hour)),
+		Epoch: "gen-1", NotAfter: protocol.FormatTime(time.Now().Add(time.Hour)),
 		Input: &protocol.SubmitInput{Text: "hi", Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn, MinEvidence: protocol.EvidenceSubmitted}}, src); err != nil {
 		t.Fatal(err)
 	}
