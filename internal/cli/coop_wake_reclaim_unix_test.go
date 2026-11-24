@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
 
 func TestPrepareCoopWakeLockRemovesProvenStaleWithoutPrompt(t *testing.T) {
@@ -166,5 +168,42 @@ func TestPrepareCoopWakeLockLiveAuthoritativeRefusesWithoutMutation(t *testing.T
 	}
 	if !observationClosed {
 		t.Fatal("owner observation failure leaked its returned capability")
+	}
+}
+
+// Field report 2026-11-24: after a machine restart, every pre-restart wake
+// lock was proven stale (boot id mismatch) while the restart gave its PID to
+// an unrelated live process. prepareCoopWakeLock refused coop exec on exactly
+// those locks. A proven-stale lock belongs to no running process; the exact
+// removal sends no signal, so startup must take the stale branch first.
+func TestPrepareCoopWakeLockRemovesProvenStaleLockWhosePIDIsALiveForeignProcess(t *testing.T) {
+	const reusedPID = 99999
+	root := secureTempDirForTest(t)
+	lock := wakeLock{
+		PID:        reusedPID,
+		Generation: "restart-stale",
+		BootID:     "00000000-0000-0000-0000-00000000000" + "1",
+	}
+	// The recorded boot id must be a UUID that is not this boot, so the lock
+	// is proven stale while its PID is live.
+	if current := currentWakeBootID(); launch.IsBootUUID(current) &&
+		launch.CompareBootID(lock.BootID, current) != launch.BootIDMismatch {
+		lock.BootID = "ffffffff-0000-0000-0000-00000000000" + "1"
+		if launch.CompareBootID(lock.BootID, current) != launch.BootIDMismatch {
+			t.Skipf("no provably foreign boot uuid available (current %q)", current)
+		}
+	}
+	lockPath := writeWakeLockForTest(t, root, "codex", lock)
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		// The live process at the reused PID is this test itself: running and
+		// affirmatively proven not to be an amq wake.
+		return wakeProcessInfo{PID: pid, Running: true, Executable: "go", Args: []string{"go", "test"}}
+	})
+
+	if err := prepareCoopWakeLock(root, "codex", false, "unused"); err != nil {
+		t.Fatalf("prepare proven-stale lock with a live reused pid: %v", err)
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("proven-stale lock remains after startup: %v", err)
 	}
 }
