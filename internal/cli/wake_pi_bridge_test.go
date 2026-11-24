@@ -736,7 +736,7 @@ func TestWakePiBridgePruneKeepsOutstandingGroups(t *testing.T) {
 
 	seen := map[string]bool{"doorbell-claim-done.result.json": true}
 	processed := map[string]bool{"doorbell-withdrawn": true, "doorbell-refused": true, "doorbell-claim-done": true}
-	pruneWakePiBridgeAttempts(dir, seen, processed)
+	pruneWakePiBridgeAttempts(dir, seen, processed, time.Now())
 
 	for _, kept := range []string{"doorbell-garbage", "doorbell-undecided", "doorbell-claim-open"} {
 		if _, err := os.Stat(filepath.Join(dir, kept+".json")); err != nil {
@@ -783,10 +783,12 @@ func (h *wakePiBridgeHarness) writeBridgeTurn(attemptID, phase string) {
 	h.t.Helper()
 	dir := filepath.Join(h.root, "agents", "codex", "extensions", "pi-bridge", "doorbell")
 	payload, err := json.Marshal(map[string]any{
-		"protocol":  wakePiBridgeProtocol,
-		"attempt":   attemptID,
-		"phase":     phase,
-		"updatedAt": h.now.UTC().Format(time.RFC3339),
+		"protocol":   wakePiBridgeProtocol,
+		"attempt":    attemptID,
+		"phase":      phase,
+		"generation": h.live.Generation,
+		"pid":        h.live.PID,
+		"updatedAt":  h.now.UTC().Format(time.RFC3339),
 	})
 	if err != nil {
 		h.t.Fatal(err)
@@ -937,8 +939,11 @@ func TestWakePiBridgeClaimedAskHoldsThroughASlowTurn(t *testing.T) {
 	if got := h.publishedRequests(); len(got) != 0 {
 		t.Fatalf("the wake re-asked before the ladder's base: %v", got)
 	}
+	// The second physical message lands mid-turn; the addition pulls the
+	// ladder forward and the next ask covers the grown cohort.
+	h.pending = wakeDoorbellTestFiles(h.t, "pending.md", "second.md")
 	h.advance(3 * time.Second)
-	h.deliver() // the ladder's 5s base: publish B
+	h.deliver() // publish B
 	if got := len(h.publishedRequests()); got != 1 {
 		t.Fatalf("asks on disk %v, want the ladder-paced re-ask", got)
 	}
@@ -1010,6 +1015,74 @@ func TestWakePiBridgeEndedTurnFollowsTheRatifiedBusyBound(t *testing.T) {
 	h.deliver() // the refusal reconciles past the expired bound
 	if !h.fullLineTyped() {
 		t.Fatalf("the ended turn did not release the busy bound: %q", h.typedChunks())
+	}
+}
+
+// TestWakePiBridgeTurnFileRetirement: an ended attestation, and a running
+// one stale past the ask hold, go with their group's retirement; a fresh
+// running attestation outlives the group because the busy hold still
+// reads it after the group's other files are spent.
+func TestWakePiBridgeTurnFileRetirement(t *testing.T) {
+	dir := t.TempDir()
+	ended := time.Now().Add(-time.Hour)
+	running := time.Now()
+	writeTurn := func(id string, phase string, at time.Time) {
+		payload, err := json.Marshal(map[string]any{
+			"protocol":   wakePiBridgeProtocol,
+			"attempt":    id,
+			"phase":      phase,
+			"generation": "gen-1",
+			"pid":        4242,
+			"updatedAt":  at.UTC().Format(time.RFC3339),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, id+".turn.json"), payload, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeTurn("doorbell-a", "ended", ended)
+	writeTurn("doorbell-b", "running", running)
+	writeTurn("doorbell-c", "running", ended)
+	pruneWakePiBridgeAttempts(dir, nil, nil, time.Now())
+
+	if _, err := os.Stat(filepath.Join(dir, "doorbell-a.turn.json")); !os.IsNotExist(err) {
+		t.Fatal("an ended attestation outlived its group")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "doorbell-b.turn.json")); err != nil {
+		t.Fatal("a fresh running attestation was retired with its group")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "doorbell-c.turn.json")); !os.IsNotExist(err) {
+		t.Fatal("a stale running attestation outlived its group")
+	}
+}
+
+// TestWakePiBridgeForeignTurnRecordDoesNotHold: a running attestation that
+// names another pi process — a replacement after a crash — is not evidence
+// for this process's busy hold; the ratified busy bound owns the refusal.
+func TestWakePiBridgeForeignTurnRecordDoesNotHold(t *testing.T) {
+	h := newWakePiBridgeHarness(t)
+	h.capableBridge()
+	h.bridgeDecision = "claimed"
+	h.deliverPending()
+	h.deliver() // publish A
+	h.respond() // pi claims and accepts
+	attemptA := strings.TrimSuffix(h.publishedRequests()[0], ".json")
+	h.writeBridgeResult(attemptA, true)
+	h.writeBridgeTurn(attemptA, "running")
+	h.deliver() // rows recorded, cadence advanced
+
+	// pi crashes; a replacement generation serves the same seat and refuses.
+	h.live.Generation = "gen-2"
+	h.bridgeDecision = "refused"
+	h.advance(5 * time.Second)
+	h.deliver() // the ladder's base: publish B
+	h.respond() // the replacement refuses
+	h.advance(2 * time.Second)
+	h.deliver() // the attestation names gen-1: no hold, the bound owns it
+	if !h.fullLineTyped() {
+		t.Fatalf("a foreign-generation running record held the busy bound: %q", h.typedChunks())
 	}
 }
 

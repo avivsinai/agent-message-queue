@@ -2097,6 +2097,28 @@ test("the doorbell is claimed, shown once as the visible custom message, and acc
 	}
 });
 
+test("an accepted doorbell attests its turn running until the turn ends", async () => {
+	const h = harness();
+	await h.start();
+	try {
+		doorbell(h, "attempt-turn");
+		await h.waitFor(() => doorbellDecision(h, "attempt-turn") !== null);
+		assert.equal(doorbellDecision(h, "attempt-turn")?.decision, "claimed");
+		await h.emit("message_start", doorbellMessageStart("attempt-turn", h.generation()));
+		const turnFile = path.join(h.dir, "doorbell", "attempt-turn.turn.json");
+		const running = JSON.parse(fs.readFileSync(turnFile, "utf8"));
+		assert.equal(running.phase, "running");
+		assert.equal(running.attempt, "attempt-turn");
+		assert.equal(running.generation, h.generation());
+		assert.ok(running.updatedAt.length > 0);
+		await h.emit("turn_end", {});
+		const ended = JSON.parse(fs.readFileSync(turnFile, "utf8"));
+		assert.equal(ended.phase, "ended");
+	} finally {
+		await h.done();
+	}
+});
+
 test("a busy seat refuses the doorbell before dispatch and sends nothing", async () => {
 	const h = harness();
 	await h.start();

@@ -175,8 +175,10 @@ type Bridge = {
 	revisionNoticeShown: boolean;
 	// doorbell is the state of the wake doorbell exchange: claimed holds each
 	// claimed attempt awaiting its matching message_start, done the attempts
-	// decided or seen expired, so a poll never re-examines them.
-	doorbell: { claimed: Map<string, number>; done: Set<string> };
+	// decided or seen expired, so a poll never re-examines them. turn is the
+	// accepted attempt whose model turn is running, mirrored to its turn
+	// attestation file the wake reads for the busy hold.
+	doorbell: { claimed: Map<string, number>; done: Set<string>; turn: string };
 	ownerNotice: { shown: boolean };
 	displaced: (b: Bridge) => void;
 	// sessionId is pi's own session id; "" disables activity records.
@@ -708,6 +710,8 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 					) {
 						b.doorbell.claimed.delete(attempt);
 						b.doorbell.done.add(attempt);
+						b.doorbell.turn = attempt;
+						writeDoorbellTurn(b, attempt, "running");
 						publishDoorbellResult(b.dir, attempt, { accepted: true });
 						return;
 					}
@@ -929,7 +933,7 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOption
 		displaced,
 		orphanRetry: new Set(),
 		revisionNoticeShown: false,
-		doorbell: { claimed: new Map(), done: new Set() },
+		doorbell: { claimed: new Map(), done: new Set(), turn: "" },
 		sessionId: sessionIdOf(ctx),
 		turn: "",
 		turns: 0,
@@ -1185,6 +1189,40 @@ function publishDoorbellResult(dir: string, attempt: string, fields: { accepted:
 		syncDir(out);
 	} catch {
 		// Best effort: the wake's deadline governs when evidence is unreadable.
+	}
+}
+
+// writeDoorbellTurn attests the accepted attempt's turn for the wake's busy
+// hold (docs/pi-bridge-protocol.md, doorbell): phase running when the
+// doorbell's turn begins, phase ended when it completes. Best effort: the
+// wake's ask hold governs a missing or stale attestation, and a running
+// attestation names the generation and pid that own it, so a replacement
+// pi process is never held by an old record.
+function writeDoorbellTurn(b: Bridge, attempt: string, phase: string): void {
+	const out = path.join(b.dir, "doorbell");
+	const body = JSON.stringify({
+		protocol: PROTOCOL,
+		attempt,
+		phase,
+		generation: b.generation,
+		pid: process.pid,
+		updatedAt: new Date().toISOString(),
+	});
+	// The transition running -> ended rewrites this pi's own file: a tmp
+	// write renamed over it, so a reader sees one of the two whole phases
+	// and never a torn record.
+	const tmp = path.join(out, `.${attempt}.turn.json.tmp`);
+	try {
+		fs.writeFileSync(tmp, body);
+		fs.renameSync(tmp, path.join(out, `${attempt}.turn.json`));
+		syncDir(out);
+	} catch {
+		// Best effort: the wake's ask hold governs when evidence is unreadable.
+		try {
+			fs.unlinkSync(tmp);
+		} catch {
+			// Nothing to clean.
+		}
 	}
 }
 
@@ -1827,6 +1865,10 @@ function activityHooks(pi: ExtensionAPI, get: () => Bridge | null): void {
 		const b = get();
 		if (!b) return;
 		appendActivity(b, { kind: "turn_end" });
+		if (b.doorbell.turn) {
+			writeDoorbellTurn(b, b.doorbell.turn, "ended");
+			b.doorbell.turn = "";
+		}
 		b.turn = "";
 	});
 	pi.on("message_end", (event) => {

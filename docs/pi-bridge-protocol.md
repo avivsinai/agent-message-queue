@@ -562,6 +562,17 @@ the request is for, and a deadline.
   heartbeat, returning from `sendMessage`, an unrelated start, or matching
   text alone is not acceptance.
 
+- `doorbell/<attempt>.turn.json` — the turn attestation, written by the
+  extension that accepted the attempt. `phase: "running"` when the
+  accepted custom entry's turn begins, `phase: "ended"` when it
+  completes; each write also carries `protocol`, `attempt`, `generation`,
+  `pid`, and `updatedAt` (RFC 3339). The extension rewrites its own file
+  atomically (tmp write renamed over it), so a reader sees one whole
+  phase. The wake reads it for the busy hold: a running attestation
+  addressed to the live generation and process holds the bound open, and
+  a missing, ended, stale (past the wake's ask hold), or
+  foreign-generation attestation releases it.
+
 The bridge claims only a request addressed to its own live generation and
 its own process, inside the deadline, when pi is idle with nothing
 pending; it rechecks its ownership and the decision immediately before it

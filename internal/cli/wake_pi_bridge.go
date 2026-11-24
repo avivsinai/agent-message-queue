@@ -287,7 +287,7 @@ func (cfg *wakeConfig) runPiBridgeDoorbellAttempt() wakePiBridgeDoorbellResult {
 	// say: reconcile it from disk before any new-ask gate runs.
 	pending, found := newestWakePiBridgeCohortAttempt(doorbellDir, wakePiBridgeAttemptPrefix(ids))
 	if found {
-		return cfg.reconcilePiBridgeAsk(dir, doorbellDir, pending, cohortKey, liveFresh, now)
+		return cfg.reconcilePiBridgeAsk(dir, doorbellDir, pending, cohortKey, live, liveFresh, now)
 	}
 	if !liveFresh {
 		return wakePiBridgeDoorbellResult{}
@@ -295,7 +295,7 @@ func (cfg *wakeConfig) runPiBridgeDoorbellAttempt() wakePiBridgeDoorbellResult {
 	if err := cfg.piBridgeOwnerProofFor(live.PID); err != nil {
 		return wakePiBridgeDoorbellResult{}
 	}
-	pruneWakePiBridgeAttempts(doorbellDir, cfg.piBridgeResultsSeen, cfg.piBridgeAttemptsProcessed)
+	pruneWakePiBridgeAttempts(doorbellDir, cfg.piBridgeResultsSeen, cfg.piBridgeAttemptsProcessed, now)
 	attemptID := wakePiBridgeAttemptID(ids, now)
 	// Attribution is established before the ask is observable: a claim and
 	// its result must never exist without their message ids, so the cohort
@@ -338,7 +338,7 @@ func (cfg *wakeConfig) runPiBridgeDoorbellAttempt() wakePiBridgeDoorbellResult {
 // a claim holds until its result lands or the claim is proven lost, a
 // refusal feeds the busy rules, an expired silence hands the authority to
 // the withdrawn create, and an unreadable decision proves no winner.
-func (cfg *wakeConfig) reconcilePiBridgeAsk(dir, doorbellDir, pending, cohortKey string, liveFresh bool, now time.Time) wakePiBridgeDoorbellResult {
+func (cfg *wakeConfig) reconcilePiBridgeAsk(dir, doorbellDir, pending, cohortKey string, live wakePiBridgeLiveness, liveFresh bool, now time.Time) wakePiBridgeDoorbellResult {
 	engaged := wakePiBridgeDoorbellResult{engaged: true}
 	decision, reason, present := readWakePiBridgeDecisionState(doorbellDir, pending)
 	if !present {
@@ -374,7 +374,7 @@ func (cfg *wakeConfig) reconcilePiBridgeAsk(dir, doorbellDir, pending, cohortKey
 		return cfg.reconcilePiBridgeClaim(doorbellDir, pending, cohortKey, liveFresh, now)
 	case "refused", "failed":
 		cfg.piBridgeAttemptsProcessed[pending] = true
-		if cfg.piBridgeTurnHoldsBusy(liveFresh, cfg.wakeDoorbellNow()) {
+		if cfg.piBridgeTurnHoldsBusy(live, liveFresh, cfg.wakeDoorbellNow()) {
 			// pi attests the doorbell's own turn is still running, so the
 			// busy bound must not run to a terminal paste over it. The
 			// cadence still re-asks on the ladder; the hold ends when pi
@@ -537,13 +537,19 @@ type wakePiBridgeAcceptedTurn struct {
 }
 
 // piBridgeTurnHoldsBusy reports whether pi attests the accepted
-// doorbell's turn is still running. A missing, ended, or unreadable
-// attestation is no hold: an older extension, an unrelated busy turn, and
-// a crashed extension all fall back to the ratified busy bound. The
-// attestation never stops a re-ask; the cohort's cadence and caps own the
-// reminders.
-func (cfg *wakeConfig) piBridgeTurnHoldsBusy(fresh bool, now time.Time) bool {
-	if !fresh || cfg.piBridgeLastAccepted == nil {
+// doorbell's turn is still running. A missing, ended, unreadable, or
+// foreign-generation attestation is no hold: an older extension, an
+// unrelated busy turn, a crashed extension, and a replaced pi process all
+// fall back to the ratified busy bound. The attestation never stops a
+// re-ask; the cohort's cadence and caps own the reminders.
+//
+// The freshness bound is the ask hold, not input_max_hold: a legitimate
+// model turn can outlive a short input_max_hold, so the running-turn
+// exception must not expire mid-turn; the ask hold already bounds the
+// claim the same way, and a crashed extension's stale "running" file
+// releases to the ordinary busy rules after it.
+func (cfg *wakeConfig) piBridgeTurnHoldsBusy(live wakePiBridgeLiveness, ok bool, now time.Time) bool {
+	if !ok || cfg.piBridgeLastAccepted == nil {
 		return false
 	}
 	turn, err := readWakePiBridgeTurnState(
@@ -552,6 +558,9 @@ func (cfg *wakeConfig) piBridgeTurnHoldsBusy(fresh bool, now time.Time) bool {
 	)
 	if err != nil || turn == nil || turn.Phase != "running" {
 		return false
+	}
+	if turn.Generation != live.Generation || turn.PID != live.PID {
+		return false // the running turn belongs to a process that is gone
 	}
 	return now.Before(turn.UpdatedAt.Add(wakePiBridgeAskHold))
 }
@@ -720,7 +729,7 @@ func (cfg *wakeConfig) collectPiBridgeResults() {
 			delete(cfg.piBridgeCadenceDone, id)
 		}
 	}
-	pruneWakePiBridgeAttempts(dir, cfg.piBridgeResultsSeen, cfg.piBridgeAttemptsProcessed)
+	pruneWakePiBridgeAttempts(dir, cfg.piBridgeResultsSeen, cfg.piBridgeAttemptsProcessed, cfg.wakeDoorbellNow())
 }
 
 // wakePiBridgeCohort is the claim-time association between a doorbell
@@ -754,7 +763,7 @@ func readWakePiBridgeCohort(dir string, attemptID string) ([]string, error) {
 // request never published, since no result can name it. An undecided
 // request and an unreadable decision stay: the ask still owes them a wake
 // action, and the retention cap never evicts an outstanding group.
-func pruneWakePiBridgeAttempts(dir string, seen map[string]bool, processed map[string]bool) {
+func pruneWakePiBridgeAttempts(dir string, seen map[string]bool, processed map[string]bool, now time.Time) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
@@ -770,7 +779,7 @@ func pruneWakePiBridgeAttempts(dir string, seen map[string]bool, processed map[s
 	var order []string
 	for _, entry := range entries {
 		name := entry.Name()
-		id := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(name, ".json"), ".decision"), ".result"), ".cohort")
+		id := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(name, ".json"), ".decision"), ".result"), ".cohort"), ".turn")
 		if id == name || !wakePiBridgeAttemptShape(id) {
 			continue
 		}
@@ -824,12 +833,45 @@ func pruneWakePiBridgeAttempts(dir string, seen map[string]bool, processed map[s
 			continue
 		}
 		for _, file := range g.files {
+			// A turn attestation outlives its group while it still says
+			// running and fresh: the busy hold reads it after the group's
+			// other files are spent. An ended attestation, and a running
+			// one stale past the ask hold, go with the group.
+			if strings.HasSuffix(file, ".turn.json") && keepWakePiBridgeTurnFile(file, now) {
+				continue
+			}
 			_ = os.Remove(file)
 		}
 		if seen != nil {
 			delete(seen, g.id+".result.json")
 		}
 	}
+}
+
+// keepWakePiBridgeTurnFile reports whether a running attestation is still
+// live evidence: ended, unreadable, or ask-hold-stale files are spent.
+func keepWakePiBridgeTurnFile(file string, now time.Time) bool {
+	turn, err := readWakePiBridgeTurnFile(file)
+	if err != nil || turn == nil || turn.Phase != "running" {
+		return false
+	}
+	return now.Before(turn.UpdatedAt.Add(wakePiBridgeAskHold))
+}
+
+// readWakePiBridgeTurnFile reads one turn attestation file.
+func readWakePiBridgeTurnFile(file string) (*wakePiBridgeTurnState, error) {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return nil, err
+	}
+	var turn wakePiBridgeTurnState
+	if err := json.Unmarshal(data, &turn); err != nil {
+		return nil, err
+	}
+	if turn.Protocol != wakePiBridgeProtocol || turn.Generation == "" || turn.PID <= 0 || turn.UpdatedAt.IsZero() {
+		return nil, fmt.Errorf("turn attestation %q does not validate", filepath.Base(file))
+	}
+	return &turn, nil
 }
 
 // wakePiBridgeAttemptShape bounds an attempt id the way the bridge reader
@@ -868,33 +910,32 @@ func wakePiBridgeRequestExpired(path string, now time.Time) bool {
 // attempt: the extension writes phase running when the doorbell's turn
 // begins and phase ended when it completes. A missing file is an older
 // extension or a turn that never attested; both are no hold.
-func readWakePiBridgeTurnState(dir, attemptID string) (*struct {
-	Phase     string    `json:"phase"`
-	UpdatedAt time.Time `json:"updatedAt"`
-}, error) {
+// wakePiBridgeTurnState is one turn attestation: the extension writes
+// phase running when the accepted attempt's turn begins and phase ended
+// when it completes. Generation and pid name the pi process that owns the
+// running turn, so a replacement process's fresh heartbeat is never held
+// by an old record.
+type wakePiBridgeTurnState struct {
+	Protocol   string    `json:"protocol"`
+	Attempt    string    `json:"attempt"`
+	Phase      string    `json:"phase"`
+	Generation string    `json:"generation"`
+	PID        int       `json:"pid"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+}
+
+func readWakePiBridgeTurnState(dir, attemptID string) (*wakePiBridgeTurnState, error) {
 	if !wakePiBridgeAttemptShape(attemptID) {
 		return nil, fmt.Errorf("bad attempt id %q", attemptID)
 	}
-	data, err := os.ReadFile(filepath.Join(dir, attemptID+".turn.json"))
+	turn, err := readWakePiBridgeTurnFile(filepath.Join(dir, attemptID+".turn.json"))
 	if err != nil {
 		return nil, err
 	}
-	var turn struct {
-		Protocol  string    `json:"protocol"`
-		Attempt   string    `json:"attempt"`
-		Phase     string    `json:"phase"`
-		UpdatedAt time.Time `json:"updatedAt"`
+	if turn.Attempt != attemptID {
+		return nil, fmt.Errorf("turn attestation for %q names attempt %q", attemptID, turn.Attempt)
 	}
-	if err := json.Unmarshal(data, &turn); err != nil {
-		return nil, err
-	}
-	if turn.Protocol != wakePiBridgeProtocol || turn.Attempt != attemptID || turn.UpdatedAt.IsZero() {
-		return nil, fmt.Errorf("turn attestation for %q does not validate", attemptID)
-	}
-	return &struct {
-		Phase     string    `json:"phase"`
-		UpdatedAt time.Time `json:"updatedAt"`
-	}{Phase: turn.Phase, UpdatedAt: turn.UpdatedAt}, nil
+	return turn, nil
 }
 
 // recordPiBridgePresented records a claimed attempt as a presented
