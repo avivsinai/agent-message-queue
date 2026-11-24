@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 )
 
@@ -18,16 +19,36 @@ func (*nullApprovalField) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// commandApproval is the closed Codex 0.171 command-approval envelope.
+// commandApproval is the closed Codex command-approval envelope.
 type commandApproval struct {
-	threadID, turnID, itemID                                     string
-	startedAtMs                                                  *int64
-	kind, command, cwd, reason                                   string
-	commandActions                                               []json.RawMessage
-	availableDecisions                                           []string
-	approvalID, environmentID                                    nullApprovalField
-	additionalPermissions, networkApprovalContext                nullApprovalField
-	proposedExecpolicyAmendment, proposedNetworkPolicyAmendments nullApprovalField
+	threadID, turnID, itemID                      string
+	startedAtMs                                   *int64
+	kind, command, cwd, reason                    string
+	commandActions                                []json.RawMessage
+	availableDecisions                            []json.RawMessage
+	approvalID, environmentID                     nullApprovalField
+	additionalPermissions, networkApprovalContext nullApprovalField
+	proposedNetworkPolicyAmendments               nullApprovalField
+	proposedExecpolicyAmendment                   *[]string
+}
+
+// amendmentDecision reports whether raw is the one object decision Codex
+// offers with a proposed exec-policy amendment, naming exactly that prefix.
+func amendmentDecision(raw json.RawMessage, proposed *[]string) bool {
+	var outer map[string]json.RawMessage
+	if proposed == nil || json.Unmarshal(raw, &outer) != nil || len(outer) != 1 {
+		return false
+	}
+	inner, ok := outer["acceptWithExecpolicyAmendment"]
+	if !ok {
+		return false
+	}
+	var body map[string][]string
+	if json.Unmarshal(inner, &body) != nil || len(body) != 1 {
+		return false
+	}
+	prefix, ok := body["execpolicy_amendment"]
+	return ok && slices.Equal(prefix, *proposed)
 }
 
 // plainCommandText returns the complete decision text or an empty string.
@@ -58,7 +79,19 @@ func plainCommandText(params json.RawMessage) string {
 	// fallback choices when older servers omit their list.
 	once := false
 	seen := make(map[string]bool)
-	for _, decision := range p.availableDecisions {
+	// A proposed exec-policy amendment and its one decision come together
+	// or not at all. A one-time accept approves this command and applies no
+	// amendment, so the text omits it.
+	amendments := 0
+	for _, raw := range p.availableDecisions {
+		var decision string
+		if json.Unmarshal(raw, &decision) != nil {
+			amendments++
+			if amendments > 1 || !amendmentDecision(raw, p.proposedExecpolicyAmendment) {
+				return ""
+			}
+			continue
+		}
 		if seen[decision] {
 			return ""
 		}
@@ -71,7 +104,7 @@ func plainCommandText(params json.RawMessage) string {
 			return ""
 		}
 	}
-	if !once {
+	if !once || (p.proposedExecpolicyAmendment != nil) != (amendments == 1) {
 		return ""
 	}
 	text := "$ " + p.command + "\nin " + p.cwd

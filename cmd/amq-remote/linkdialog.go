@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 	"github.com/avivsinai/agent-message-queue/internal/remote/linkio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
@@ -174,8 +175,14 @@ func (s *linkDialogSource) renderDialog(dir string, rec *requests.Record, id str
 	if slices.Contains(rec.DialogsBefore, req.ID) {
 		return nil, false // a dialog of the run's start baseline is not of the run
 	}
-	if req.Harness == "codex" && (req.Turn == "" || rec.NativeRun == nil || req.Turn != *rec.NativeRun) {
-		return nil, false // Codex still requires the exact turn
+	if req.Harness == "codex" {
+		turn := ""
+		if rec.NativeRun != nil {
+			turn, _ = codex.TurnOfRun(*rec.NativeRun)
+		}
+		if req.Turn == "" || req.Turn != turn {
+			return nil, false // Codex still requires the exact turn
+		}
 	}
 	// The dialog's own session must be the request's signed session, the
 	// immutable value the record carries — not a second read of the

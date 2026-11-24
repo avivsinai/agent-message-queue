@@ -12,12 +12,34 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
+	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
 	"github.com/avivsinai/agent-message-queue/internal/remote/linkio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
+	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
+
+// Source: live run 2026-11-24. Codex writes a dialog's turn as the bare turn
+// id while the request records the run as the adapter names it; the link
+// must still receive the dialog.
+func TestLinkDialogRendersCodexDialogOfTheRecordsTurn(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "d")
+	req := dialog.Request{ID: dialog.NewID(), Harness: "codex", Session: "thread-1", Tool: "exec",
+		Text: "$ c\nin /w", Complete: true, Turn: "turn-1", OpenedAt: time.Now(),
+		Options: []dialog.Option{{N: 1, Label: "Allow once", Value: "accept", Scope: dialog.ScopeOnce}}}
+	if err := dialog.Open(dir, req); err != nil {
+		t.Fatal(err)
+	}
+	run := codex.RunName("turn-1")
+	rec := &requests.Record{}
+	rec.NativeSession, rec.NativeRun = "thread-1", &run
+	src := &linkDialogSource{links: &linkSet{}}
+	if _, ok := src.render(dir, rec, req.ID); !ok {
+		t.Fatal("the Codex dialog of the record's turn was withheld")
+	}
+}
 
 // linkDialogChainFixture is the full machine face for the end-to-end
 // chain: a live pi binding, a running link sharing it with approvals=link
