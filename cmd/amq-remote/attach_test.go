@@ -1246,7 +1246,11 @@ func TestAttachLinkUsesTheServerDefaultProfileWhenToolsIsOmitted(t *testing.T) {
 // The approvals policy rides the attach: --approvals link is stored on the
 // share so serve knows what to publish for this binding, and a value the
 // manifest does not know refuses the attach.
-func TestAttachLinkStoresTheApprovalsPolicy(t *testing.T) {
+// newAttachLinkMachine builds the isolated machine of the attach link
+// tests: a machine root with one enrolled link named example, a live
+// registrar, and the self-session stubs. Returns the link's state dir.
+func newAttachLinkMachine(t *testing.T) string {
+	t.Helper()
 	home := shortHome(t)
 	t.Setenv("HOME", home)
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
@@ -1309,6 +1313,11 @@ func TestAttachLinkStoresTheApprovalsPolicy(t *testing.T) {
 	processHolder = func(pid int) (launch.HolderIdentity, error) {
 		return launch.HolderIdentity{PID: pid, ProcessStart: "1"}, nil
 	}
+	return stateDir
+}
+
+func TestAttachLinkStoresTheApprovalsPolicy(t *testing.T) {
+	stateDir := newAttachLinkMachine(t)
 	if code, err := attach([]string{"--self", "--link", "example", "--approvals", "link"}, io.Discard, io.Discard); code != 0 || err != nil {
 		t.Fatalf("attach = %d, %v; want a link share with the policy", code, err)
 	}
@@ -1318,6 +1327,55 @@ func TestAttachLinkStoresTheApprovalsPolicy(t *testing.T) {
 	}
 	if got := mf.Links[0].Shares[0].Approvals; got != "link" {
 		t.Fatalf("share approvals = %q; want link", got)
+	}
+}
+
+// TestAttachSummaryReportsTheStoredApprovalsPolicy: the preflight of the
+// live run on 0.170.0 saw "approvals": "terminal" and the terminal
+// sentence after attach --approvals link stored link on the share. The
+// summary must state the stored policy; the two link rows fail on main.
+func TestAttachSummaryReportsTheStoredApprovalsPolicy(t *testing.T) {
+	const terminalSentence = "Tool approvals for this share are answered in the session's terminal; the linked server cannot answer them, so a task that needs one waits there."
+	rows := []struct {
+		name      string
+		flags     []string
+		approvals string
+		sentence  string
+	}{
+		{name: "default", flags: nil, approvals: "terminal", sentence: terminalSentence},
+		{name: "link with passkey consent", flags: []string{"--approvals", "link", "--consent", "passkey"}, approvals: "link",
+			sentence: "An eligible permission dialog of a task on this share is shown to the linked server. The owner answers it there with a signature or in the session's terminal; the first answer decides."},
+		{name: "link with local consent", flags: []string{"--approvals", "link", "--consent", "local"}, approvals: "link",
+			sentence: "This share has --approvals link, but consent local takes no signed answer, so the linked server does not see the dialog. Tool approvals are answered in the session's terminal."},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			stateDir := newAttachLinkMachine(t)
+			if row.name == "link with local consent" {
+				// consent local needs the link's local passkey to exist.
+				if err := linkio.WriteLocalKey(stateDir, "example", linkio.ConsentKey{Origin: "http://localhost:1"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			base := []string{"--self", "--link", "example"}
+			var jsonOut, textOut strings.Builder
+			if code, err := attach(append(base, append(row.flags, "--json")...), &jsonOut, io.Discard); code != 0 || err != nil {
+				t.Fatalf("attach --json = %d, %v", code, err)
+			}
+			var got map[string]any
+			if err := json.Unmarshal([]byte(jsonOut.String()), &got); err != nil {
+				t.Fatalf("json output: %v (%q)", err, jsonOut.String())
+			}
+			if got["approvals"] != row.approvals {
+				t.Fatalf("approvals = %v; want %s", got["approvals"], row.approvals)
+			}
+			if code, err := attach(append(base, row.flags...), &textOut, io.Discard); code != 0 || err != nil {
+				t.Fatalf("attach text = %d, %v (%s)", code, err, textOut.String())
+			}
+			if !strings.Contains(textOut.String(), row.sentence) {
+				t.Fatalf("summary misses the stored policy sentence; got:\n%s", textOut.String())
+			}
+		})
 	}
 }
 

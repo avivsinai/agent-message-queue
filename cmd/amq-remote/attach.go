@@ -212,15 +212,18 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		if err := shareWithLink(stateDir, *linkName, manifest.LinkShare{Binding: nb.Name, Consent: *consent, Tools: *tools, Approvals: *approvals}); err != nil {
 			return protocol.ExitActionRequired, err
 		}
-		// No approval pin is written for a link share (only a Buzz relay
-		// share pins one), so the approval hook leaves every tool permission
-		// prompt to the session's own dialog.
+		// The summary states the policy the share stored: an empty flag
+		// value is terminal, as manifest.ApprovalsTerminal documents.
+		storedApprovals := *approvals
+		if storedApprovals == "" {
+			storedApprovals = manifest.ApprovalsTerminal
+		}
 		if c.json {
-			emitJSON(stdout, withWarning(map[string]any{"connected": true, "name": nb.Name, "root": nb.Root, "target": nb.Target, "link": *linkName, "approvals": "terminal"}, hookWarning))
+			emitJSON(stdout, withWarning(map[string]any{"connected": true, "name": nb.Name, "root": nb.Root, "target": nb.Target, "link": *linkName, "approvals": storedApprovals}, hookWarning))
 			return 0, nil
 		}
 		say(stdout, "Shared %s (%s) with link %s as %s (consent: %s, tools: %s).", nonEmpty(display, cand.Target), cand.Target, *linkName, nb.Name, *consent, nonEmpty(*tools, "none"))
-		say(stdout, "Tool approvals for this share are answered in the session's terminal; the linked server cannot answer them, so a task that needs one waits there.")
+		say(stdout, "%s", attachApprovalsSentence(storedApprovals, *consent))
 		sayWarning(stdout, hookWarning)
 		return 0, nil
 	}
@@ -1666,4 +1669,23 @@ func recordAttachIdentity(stderr io.Writer, root, handle, kind string) {
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "warning: cannot record which harness runs as %s: %v\n", handle, err)
 	}
+}
+
+// attachApprovalsSentence states where a task's permission dialog is
+// answered under the share's stored approvals policy and consent, by the
+// same rule linkTakesAnswers uses for admission and the published
+// remote_answer flag. The terminal sentence is the sentence attach always
+// said before a share had a policy; the link sentences follow
+// docs/remote-link-protocol.md: with a consent that takes a grant the
+// linked server shows the dialog and the owner can give a signed answer
+// there, while the terminal and Buzz can still answer first; consent
+// local takes no signed answer, so the server never sees the dialog.
+func attachApprovalsSentence(approvals, consent string) string {
+	if linkTakesAnswers(approvals, consent) {
+		return "An eligible permission dialog of a task on this share is shown to the linked server. The owner answers it there with a signature or in the session's terminal; the first answer decides."
+	}
+	if approvals == manifest.ApprovalsLink {
+		return "This share has --approvals link, but consent local takes no signed answer, so the linked server does not see the dialog. Tool approvals are answered in the session's terminal."
+	}
+	return "Tool approvals for this share are answered in the session's terminal; the linked server cannot answer them, so a task that needs one waits there."
 }
