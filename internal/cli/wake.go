@@ -85,6 +85,7 @@ type wakeConfig struct {
 	piBridgeAttemptsProcessed     map[string]bool                                  // doorbell attempts whose decision this wake already acted on
 	piBridgeLiveStaleSince        map[string]time.Time                             // the first stale liveness read per cohort, which releases an issued ask only after it persists
 	piBridgeCadenceDone           map[string]bool                                  // doorbell attempts whose presentation already advanced the cohort's cadence
+	piBridgeAcceptedAt            map[string]time.Time                             // the latest acceptance per unread cohort: holds only the busy-refusal terminal while those ids stay pending
 	commands                      *wakeCommands                                    // the owner command queue the wake types (wakecmd); nil = none
 	dialogHold                    wakeDialogState                                  // the state last held for, so each change logs once
 	dialogHoldBusy                bool                                             // the last hold was a busy harness turn, so a change of cause logs once

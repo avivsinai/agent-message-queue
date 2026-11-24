@@ -31,7 +31,12 @@ type wakePiBridgeHarness struct {
 	cfg      *wakeConfig
 	injected []string
 	proofErr error
-	live     *wakePiBridgeLiveness
+	// pending is one stable pending-file identity for the whole harness:
+	// a real inbox file keeps its identity between scans, and a fresh
+	// fabricated mtime per deliver would look like an in-place
+	// replacement and reset the ladder under the collector's accounting.
+	pending map[string]os.FileInfo
+	live    *wakePiBridgeLiveness
 	// bridgeDecision is what the simulated bridge writes when respond()
 	// runs: "claimed", "refused", "garbage" (an unreadable decision file),
 	// or "" (no answer).
@@ -133,10 +138,17 @@ func (h *wakePiBridgeHarness) capableBridge() {
 	h.live = &wakePiBridgeLiveness{PID: 4242, Generation: "gen-1", Surface: "tui", Doorbell: true}
 }
 
+func (h *wakePiBridgeHarness) pendingFiles() map[string]os.FileInfo {
+	h.t.Helper()
+	if h.pending == nil {
+		h.pending = wakeDoorbellTestFiles(h.t, "pending.md")
+	}
+	return h.pending
+}
+
 func (h *wakePiBridgeHarness) deliverPending() {
 	h.t.Helper()
-	files := wakeDoorbellTestFiles(h.t, "pending.md")
-	h.cfg.doorbell.arm(files)
+	h.cfg.doorbell.arm(h.pendingFiles())
 }
 
 // publishedRequests lists the request files under doorbell/.
@@ -220,7 +232,7 @@ func (h *wakePiBridgeHarness) advance(d time.Duration) { h.now = h.now.Add(d) }
 
 func (h *wakePiBridgeHarness) deliver() {
 	h.t.Helper()
-	current := wakeDoorbellTestFiles(h.t, "pending.md")
+	current := h.pendingFiles()
 	notice := peerWakeNotification("test message")
 	if err := deliverNewMessageNotification(h.cfg, notice, false, current); err != nil {
 		h.t.Fatalf("deliverNewMessageNotification: %v", err)
@@ -290,8 +302,13 @@ func TestWakePiBridgeClaimPresentsWithoutSubmitOnly(t *testing.T) {
 	if h.cfg.doorbell.presentationConfirmed {
 		t.Fatal("a bridge claim set the submit-only state")
 	}
-	if h.cfg.doorbell.phase != wakeDoorbellAnnounced {
-		t.Fatalf("phase = %v, want announced (presented)", h.cfg.doorbell.phase)
+	// The presentation advances the cohort's ladder and budget exactly as a
+	// typed attempt does: phase retrying, next attempt on the 5s base.
+	if h.cfg.doorbell.phase != wakeDoorbellRetrying {
+		t.Fatalf("phase = %v, want retrying (presented on the ladder)", h.cfg.doorbell.phase)
+	}
+	if h.cfg.doorbell.attempts != 1 {
+		t.Fatalf("attempts = %d, want the presentation to advance the cadence once", h.cfg.doorbell.attempts)
 	}
 	dir := filepath.Join(h.root, "agents", "codex", "extensions", "pi-bridge", "doorbell")
 	names := h.publishedRequests()
@@ -456,8 +473,13 @@ func TestWakePiBridgeClaimReadBackAfterDeadlinePresents(t *testing.T) {
 	if got := h.typedChunks(); len(got) != 0 {
 		t.Fatalf("the claim typed into the terminal: %q", got)
 	}
-	if h.cfg.doorbell.phase != wakeDoorbellAnnounced {
-		t.Fatalf("phase = %v, want announced (presented)", h.cfg.doorbell.phase)
+	// The presentation advances the cohort's ladder and budget exactly as a
+	// typed attempt does: phase retrying, next attempt on the 5s base.
+	if h.cfg.doorbell.phase != wakeDoorbellRetrying {
+		t.Fatalf("phase = %v, want retrying (presented on the ladder)", h.cfg.doorbell.phase)
+	}
+	if h.cfg.doorbell.attempts != 1 {
+		t.Fatalf("attempts = %d, want the presentation to advance the cadence once", h.cfg.doorbell.attempts)
 	}
 	dir := filepath.Join(h.root, "agents", "codex", "extensions", "pi-bridge", "doorbell")
 	decision, err := os.ReadFile(filepath.Join(dir, strings.TrimSuffix(h.publishedRequests()[0], ".json")+".decision.json"))
@@ -494,6 +516,7 @@ func TestWakePiBridgeClaimThenLaterReminderFallsBackWithFullLine(t *testing.T) {
 	if got := h.typedChunks(); len(got) != 0 {
 		t.Fatalf("the lost claim typed into the terminal itself: %q", got)
 	}
+	h.advance(11 * time.Second)
 	h.deliver()
 	if !h.fullLineTyped() {
 		t.Fatalf("fallback wrote something other than the full fixed line then the submit: %q", h.typedChunks())
@@ -807,37 +830,54 @@ func TestWakePiBridgeResultBeatsClaimProcessingAfterDrain(t *testing.T) {
 }
 
 // TestWakePiBridgeAcceptedTurnLeavingMailUnreadReturnsToCadence: a
-// recorded acceptance is evidence, not a hold. When pi's turn ends
-// without draining — the mail is still new and pi sits idle — the next
-// attempt due asks again on the cohort's cadence instead of staying
-// silent, and the wake still types nothing.
+// recorded acceptance is evidence for the busy rules, not a hold. When
+// pi's turn ends without draining — the mail is still new and pi sits
+// idle — the cohort's own cadence and caps own the reminders: asks resume
+// on the ladder's backoff, each accepted presentation advances the
+// unchanged-cohort budget, the budget parks the cohort at four, and the
+// wake types nothing through every tick.
 func TestWakePiBridgeAcceptedTurnLeavingMailUnreadReturnsToCadence(t *testing.T) {
 	h := newWakePiBridgeHarness(t)
 	h.capableBridge()
 	h.bridgeDecision = "claimed"
 	h.deliverPending()
 	h.deliver() // publish A
-	h.respond() // pi claims
-	h.deliver() // presented
+	h.respond() // pi claims and accepts before the next tick
 	attemptA := strings.TrimSuffix(h.publishedRequests()[0], ".json")
-
 	h.writeBridgeResult(attemptA, true)
-	h.cfg.collectPiBridgeResults() // the turn's acceptance lands; no drain followed
+
+	h.deliver() // the collector records the rows and advances the cadence once
 	if got := strings.Count(h.ledgerLog(), "accepted by pi (message_start)"); got != 1 {
 		t.Fatalf("the acceptance was recorded %d times, want once", got)
 	}
 
-	// The next attempt due: the cadence owns the reminder, so the bridge
-	// is asked again; the wake still types nothing.
-	h.bridgeDecision = "refused"
-	h.advance(3 * time.Second)
-	h.deliver()
-	names := h.publishedRequests()
-	if len(names) != 1 || strings.TrimSuffix(names[0], ".json") == attemptA {
-		t.Fatalf("asks on disk %v, want one fresh re-ask after the acceptance", names)
+	// Several ticks of the ladder: each accepted presentation advances the
+	// budget, the backoff spaces the asks, and nothing ever types.
+	asks, lastID := 0, ""
+	for i := 0; i < 26; i++ {
+		h.advance(2 * time.Second)
+		h.deliver()
+		if got := h.typedChunks(); len(got) != 0 {
+			t.Fatalf("tick %d typed into the terminal: %q", i, got)
+		}
+		if names := h.publishedRequests(); len(names) == 1 {
+			id := strings.TrimSuffix(names[0], ".json")
+			if id != lastID {
+				asks++
+				lastID = id
+				h.respond() // pi claims and accepts the re-ask before the next tick
+				h.writeBridgeResult(id, true)
+			}
+		}
 	}
-	if got := h.typedChunks(); len(got) != 0 {
-		t.Fatalf("the cadence re-ask typed into the terminal: %q", got)
+	if asks != 3 {
+		t.Fatalf("re-asks on the ladder = %d, want three (with the first ask: the budget of four)", asks)
+	}
+	if got := strings.Count(h.ledgerLog(), "accepted by pi (message_start)"); got != 4 {
+		t.Fatalf("acceptances recorded = %d, want one per presented attempt", got)
+	}
+	if h.cfg.doorbell.phase != wakeDoorbellParked {
+		t.Fatalf("phase = %v, want the budget to park the cohort", h.cfg.doorbell.phase)
 	}
 }
 
@@ -902,7 +942,7 @@ func TestWakePiBridgeStaleLivenessReleasesTheClaim(t *testing.T) {
 	h.respond() // pi claims
 	h.deliver() // presented
 
-	h.advance(2 * time.Second)
+	h.advance(5 * time.Second) // the ladder's base: the held claim is read again
 	h.live = nil
 	h.deliver() // one stale read is heartbeat noise: hold
 	if got := h.typedChunks(); len(got) != 0 {
@@ -918,8 +958,10 @@ func TestWakePiBridgeStaleLivenessReleasesTheClaim(t *testing.T) {
 		t.Fatalf("the dead claim's group was not retired: %d files remain", got)
 	}
 
-	// The next pass finds no claim and no fresh bridge: the terminal
-	// fallback owns the doorbell again.
+	// The next pass issues a fresh ask and the bridge stays gone; once the
+	// ask's own deadline passes unanswered, the terminal fallback owns the
+	// doorbell again.
+	h.advance(11 * time.Second)
 	h.deliver()
 	if !h.fullLineTyped() {
 		t.Fatalf("the terminal fallback did not own the full line: %q", h.typedChunks())

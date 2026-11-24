@@ -276,6 +276,7 @@ func (cfg *wakeConfig) runPiBridgeDoorbellAttempt() wakePiBridgeDoorbellResult {
 	sort.Strings(ids)
 	cohortKey := strings.Join(ids, "\x00")
 	doorbellDir := filepath.Join(dir, "doorbell")
+	cfg.prunePiBridgeAcceptanceEvidence(cfg.cohortIDs)
 	if cfg.piBridgeAttemptsProcessed == nil {
 		cfg.piBridgeAttemptsProcessed = map[string]bool{}
 	}
@@ -374,6 +375,16 @@ func (cfg *wakeConfig) reconcilePiBridgeAsk(dir, doorbellDir, pending, cohortKey
 		return cfg.reconcilePiBridgeClaim(doorbellDir, pending, cohortKey, liveFresh, now)
 	case "refused", "failed":
 		cfg.piBridgeAttemptsProcessed[pending] = true
+		if liveFresh && cfg.piBridgeAcceptanceHoldsBusy(cohortKey, cfg.wakeDoorbellNow()) {
+			// pi accepted an earlier doorbell for this same unread mail and
+			// now refuses: the running turn is most likely the doorbell's
+			// own, so the busy bound must not run to a terminal paste over
+			// it. The cadence still re-asks on the ladder; the hold ends
+			// when the mail drains, the liveness goes stale, or the
+			// acceptance hold passes — then the ordinary busy rules own
+			// the outcome again.
+			return wakePiBridgeDoorbellResult{busyHold: true, reason: "pi accepted the doorbell and is busy"}
+		}
 		return cfg.piBridgeBusyOutcome(cohortKey, reason, cfg.wakeDoorbellNow())
 	default:
 		cfg.piBridgeAttemptsProcessed[pending] = true
@@ -516,6 +527,54 @@ func (cfg *wakeConfig) piBridgeBusyOutcome(cohortKey string, reason string, now 
 	return wakePiBridgeDoorbellResult{busyHold: true, reason: busy}
 }
 
+// piBridgeAcceptanceHoldsBusy reports whether a recorded acceptance for
+// exactly this still-unread cohort is recent enough to hold the busy
+// terminal. The evidence never stops a re-ask: the cohort's cadence and
+// caps own the reminders. It only keeps the wake from pasting into the
+// turn that its own doorbell started, until the mail drains, the
+// liveness goes stale, or the hold passes.
+func (cfg *wakeConfig) piBridgeAcceptanceHoldsBusy(cohortKey string, now time.Time) bool {
+	at, ok := cfg.piBridgeAcceptedAt[cohortKey]
+	return ok && now.Before(at.Add(wakePiBridgeAskHold))
+}
+
+// prunePiBridgeAcceptanceEvidence drops acceptance evidence whose message
+// ids are no longer pending: a drained or replaced cohort's acceptance is
+// spent, and the map stays bounded by the live pending set.
+func (cfg *wakeConfig) prunePiBridgeAcceptanceEvidence(currentIDs []string) {
+	if len(cfg.piBridgeAcceptedAt) == 0 {
+		return
+	}
+	pending := make(map[string]bool, len(currentIDs))
+	for _, id := range currentIDs {
+		pending[id] = true
+	}
+	for key := range cfg.piBridgeAcceptedAt {
+		kept := false
+		for _, id := range strings.Split(key, "\x00") {
+			if pending[id] {
+				kept = true
+				break
+			}
+		}
+		if !kept {
+			delete(cfg.piBridgeAcceptedAt, key)
+		}
+	}
+}
+
+// piBridgeAttemptAccounting advances the cohort's cadence and budget for
+// one presented bridge attempt, exactly once: the same ladder and caps
+// that pace a typed attempt pace the next independent reminder, so an
+// accepted turn that leaves the mail unread is re-asked on the ladder and
+// stops at the unchanged-cohort budget.
+func (cfg *wakeConfig) piBridgeAttemptAccounting(now time.Time) {
+	if len(cfg.doorbell.cohort) > 0 {
+		cfg.doorbell.recordAttempt(now)
+	}
+	persistWakeDoorbellStatusBestEffort(cfg)
+}
+
 // piBridgeBusyStart returns the cohort's first refusal, recording now for
 // the first one; only one cohort is ever armed.
 func (cfg *wakeConfig) piBridgeBusyStart(cohortKey string, now time.Time) time.Time {
@@ -586,7 +645,14 @@ func (cfg *wakeConfig) collectPiBridgeResults() {
 		if idsErr != nil || len(ids) == 0 {
 			continue // stays unprocessed: recorded on a later tick
 		}
-		cfg.recordPiBridgePresentedRow(dir, id, ids)
+		if cfg.recordPiBridgePresentedRow(dir, id, ids) {
+			// The claim advances the cohort's cadence and budget exactly
+			// once, here, before the group's later retirement: otherwise a
+			// fast claim and result are counted in the ledger but never in
+			// the wake scheduler, and every decision recheck publishes
+			// another ask.
+			cfg.piBridgeAttemptAccounting(cfg.wakeDoorbellNow())
+		}
 	}
 	// Then the results, each validated against the claim it answers and
 	// recorded only after that claim's presentation row exists.
@@ -639,6 +705,15 @@ func (cfg *wakeConfig) collectPiBridgeResults() {
 		}
 		if resultErr := writer.Result(prepared, notificationattempt.OutcomeWritten, detail); resultErr != nil {
 			continue // stays unseen: recorded on a later tick
+		}
+		if res.Accepted {
+			// The acceptance is evidence for the busy rules, not a hold on
+			// the cadence: it keeps the terminal from pasting into the turn
+			// this doorbell started, for as long as its mail is unread.
+			if cfg.piBridgeAcceptedAt == nil {
+				cfg.piBridgeAcceptedAt = map[string]time.Time{}
+			}
+			cfg.piBridgeAcceptedAt[strings.Join(ids, "\x00")] = cfg.wakeDoorbellNow()
 		}
 		cfg.piBridgeResultsSeen[name] = true
 	}
@@ -809,8 +884,9 @@ func wakePiBridgeRequestExpired(path string, now time.Time) bool {
 // can tell a bridge attempt from a typed one. The claim is never labeled
 // accepted: the acceptance evidence is recorded when its result arrives.
 func (cfg *wakeConfig) recordPiBridgePresented(now time.Time, currentPending map[string]os.FileInfo, attemptID string) {
-	recordWakeAttempt(cfg, now, currentPending, nil)
-	persistWakeDoorbellStatusBestEffort(cfg)
+	if len(cfg.doorbell.cohort) == 0 {
+		cfg.doorbell.arm(currentPending)
+	}
 	// The claim's cohort association is written at publish time, so the
 	// later-arriving result already names the mail this claim presented,
 	// whatever a later delivery carries.
@@ -820,30 +896,36 @@ func (cfg *wakeConfig) recordPiBridgePresented(now time.Time, currentPending map
 	if err != nil || len(ids) == 0 {
 		ids = cfg.cohortIDs
 	}
-	cfg.recordPiBridgePresentedRow(
+	if cfg.recordPiBridgePresentedRow(
 		filepath.Join(cfg.root, "agents", cfg.me, "extensions", "pi-bridge", "doorbell"), attemptID, ids,
-	)
+	) {
+		// Exactly once per attempt, on the row landing: the collector may
+		// already have recorded this row and advanced the cadence on an
+		// earlier tick.
+		cfg.piBridgeAttemptAccounting(now)
+	}
 }
 
 // recordPiBridgePresentedRow writes the presented ledger row once per
 // attempt, attributed to the ids the attempt's own cohort record names.
 // Until the row lands the attempt stays unprocessed, so a failed write is
 // retried on a later tick.
-func (cfg *wakeConfig) recordPiBridgePresentedRow(dir, attemptID string, ids []string) {
+func (cfg *wakeConfig) recordPiBridgePresentedRow(dir, attemptID string, ids []string) bool {
 	if cfg.piBridgeAttemptsProcessed == nil {
 		cfg.piBridgeAttemptsProcessed = map[string]bool{}
 	}
 	if cfg.piBridgeAttemptsProcessed[attemptID] || len(ids) == 0 {
-		return
+		return false
 	}
 	writer := notificationattempt.NewWriter(cfg.root, cfg.me)
 	prepared, prepareErr := writer.Prepare(ids, wakePiBridgeAttemptMode)
 	if prepareErr != nil && !notificationattempt.IsRotationOnly(prepareErr) {
-		return
+		return false
 	}
 	if err := writer.Result(prepared, notificationattempt.OutcomeWritten,
 		fmt.Sprintf("doorbell presented by the pi bridge (attempt %s)", attemptID)); err != nil {
-		return
+		return false
 	}
 	cfg.piBridgeAttemptsProcessed[attemptID] = true
+	return true
 }
