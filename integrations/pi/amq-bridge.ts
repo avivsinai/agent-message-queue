@@ -658,7 +658,15 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 		// A claimed doorbell never crosses a session boundary: a claim whose
 		// acceptance never arrived waits for the wake's deadline, and a new
 		// generation cannot service its predecessor's request.
-		if (bridge) bridge.doorbell.claimed.clear();
+		if (bridge) {
+			bridge.doorbell.claimed.clear();
+			// The same for a running attestation: this process may open a
+			// new session (a fresh generation), and the old turn is over.
+			if (bridge.doorbell.turn) {
+				writeDoorbellTurn(bridge, bridge.doorbell.turn, "ended");
+				bridge.doorbell.turn = "";
+			}
+		}
 		bridge = null;
 		session = null;
 	});
@@ -776,6 +784,14 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 
 	pi.on("agent_settled", (event) => {
 		const b = bridge;
+		// The doorbell's own work ends here: a settle while its turn is
+		// active is its run completing or being interrupted (pi runs one
+		// run at a time, and the doorbell is only claimed when pi is idle).
+		// A later user turn therefore runs with no attestation of its own.
+		if (b?.doorbell.turn) {
+			writeDoorbellTurn(b, b.doorbell.turn, "ended");
+			b.doorbell.turn = "";
+		}
 		const f = active();
 		// A settle before the request started belongs to other work. It is
 		// never the request's outcome; the start watchdog in scan closes a
@@ -1865,9 +1881,12 @@ function activityHooks(pi: ExtensionAPI, get: () => Bridge | null): void {
 		const b = get();
 		if (!b) return;
 		appendActivity(b, { kind: "turn_end" });
+		// pi emits turn_end after every model/tool iteration (pi agent
+		// agent-loop.ts, before the continuation decision), so a tool call
+		// inside the doorbell's work is not its end: refresh the running
+		// attestation and end it only when the run settles.
 		if (b.doorbell.turn) {
-			writeDoorbellTurn(b, b.doorbell.turn, "ended");
-			b.doorbell.turn = "";
+			writeDoorbellTurn(b, b.doorbell.turn, "running");
 		}
 		b.turn = "";
 	});

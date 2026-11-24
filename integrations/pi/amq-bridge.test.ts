@@ -2112,7 +2112,18 @@ test("an accepted doorbell attests its turn running until the turn ends", async 
 		assert.equal(running.generation, h.generation());
 		assert.ok(running.updatedAt.length > 0);
 		await h.emit("turn_end", {});
+		// pi emits turn_end per model/tool iteration: a tool call inside the
+		// doorbell's work refreshes the attestation and never ends it. The
+		// run's settle is the real end.
+		await h.emit("turn_end", {});
+		const stillRunning = JSON.parse(fs.readFileSync(turnFile, "utf8"));
+		assert.equal(stillRunning.phase, "running");
+		assert.ok(Date.parse(stillRunning.updatedAt) >= Date.parse(running.updatedAt));
+		await h.emit("agent_settled", { aborted: false });
 		const ended = JSON.parse(fs.readFileSync(turnFile, "utf8"));
+		assert.equal(ended.phase, "ended");
+		// A later user turn runs with no attestation of its own.
+		await h.emit("turn_end", {});
 		assert.equal(ended.phase, "ended");
 	} finally {
 		await h.done();
