@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.170.0](https://github.com/avivsinai/agent-message-queue/compare/v0.169.0...v0.170.0) (2026-11-24)
+
+
+### Features
+
+* **wake:** a pi seat gets its doorbell through the pi extension, with no keystroke ([be5b5df](https://github.com/avivsinai/agent-message-queue/commit/be5b5df79d196d6ba0f73dc8800d59b30faf9d94))
+
 ## [0.169.0](https://github.com/avivsinai/agent-message-queue/compare/v0.168.3...v0.169.0) (2026-11-23)
 
 
