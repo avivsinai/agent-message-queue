@@ -22,7 +22,7 @@ func TestWakeCheckAndDoctorClassifyVanishedBinaryDir(t *testing.T) {
 	decision := inspectWakeCheckDecision(fixture.root, "codex")
 	v1 := renderWakeCheckV1(decision)
 	v2 := renderWakeCheckV2(decision)
-	wantFix := doctorRootCommandForOS(fixture.root, "", runtime.GOOS, "--ops", "--fix-wake-locks")
+	wantFix := doctorRootCommandForOS(fixture.root, "", runtime.GOOS, "--fix-wake-locks")
 	if v1.WakeStatus != string(wakeLockStale) ||
 		v1.RestartCapability != wakeRestartAgentSafe ||
 		v2.Action.ReasonCode != wakeReasonBinaryDirGone ||
@@ -215,7 +215,7 @@ func TestDoctorForeignMachineLockWithMissingBinaryDirNamesConfirmedRelaunch(t *t
 		return wakeProcessInfo{PID: pid}
 	})
 	stubWakeCheckRuntime(t, true, "0.64.1")
-	fixHint := doctorRootCommandForOS(root, "", runtime.GOOS, "--ops", "--fix-wake-locks")
+	fixHint := doctorRootCommandForOS(root, "", runtime.GOOS, "--fix-wake-locks")
 
 	decision := inspectWakeCheckDecision(root, "codex")
 	v1 := renderWakeCheckV1(decision)

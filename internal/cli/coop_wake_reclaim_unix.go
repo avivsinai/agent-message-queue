@@ -35,12 +35,11 @@ func prepareCoopWakeLock(root, agent string, yes bool, remedy string) (retErr er
 	if !inspection.Exists {
 		return nil
 	}
-	// A live process that affirmative process inspection proves is not this wake
-	// must never be signaled or have its lock removed by a coop retry.
-	if inspection.Process.Running && wakeProcessProvenNotWake(inspection.Process) {
-		return fmt.Errorf("wake lock for %s names a running process proven not to be this wake; refusing to signal or remove it; lock: %s; root: %s; reason: %s; inspect with %s", agent, inspection.LockPath, inspection.Root, inspection.Reason, wakeCheckRemedy(inspection.Root, inspection.Agent).String())
-	}
-	if inspection.Status == wakeLockStale {
+	// Only a stale verdict reached by examining the process proves the lock is
+	// dead. Its exact removal sends no signal, even when the restart gave its
+	// PID to another process. Structural stale verdicts keep the foreign-process
+	// refusal below: their recorded process was never examined.
+	if wakeLockStaleFromProcessExamination(inspection) {
 		if wakeLockHasOwnerMarkers(inspection) {
 			return coopWakeStartupConflictError(inspection, nil)
 		}
@@ -48,6 +47,11 @@ func prepareCoopWakeLock(root, agent string, yes bool, remedy string) (retErr er
 			return fmt.Errorf("remove exact stale wake lock: %w", err)
 		}
 		return nil
+	}
+	// A live process that affirmative process inspection proves is not this wake
+	// must never be signaled or have its lock removed by a coop retry.
+	if inspection.Process.Running && wakeProcessProvenNotWake(inspection.Process) {
+		return fmt.Errorf("wake lock for %s names a running process proven not to be this wake; refusing to signal or remove it; lock: %s; root: %s; reason: %s; inspect with %s", agent, inspection.LockPath, inspection.Root, inspection.Reason, wakeCheckRemedy(inspection.Root, inspection.Agent).String())
 	}
 
 	// Wake acquisition already performs exact-identity retirement for this

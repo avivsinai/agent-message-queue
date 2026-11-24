@@ -250,20 +250,30 @@ const (
 	wakeLockReasonAgentMismatch = "agent mismatch"
 )
 
+func wakeLockStaleFromProcessExamination(inspection wakeLockInspection) bool {
+	if inspection.Status != wakeLockStale {
+		return false
+	}
+	switch inspection.Reason {
+	case wakeLockReasonInvalidPID, wakeLockReasonRootMissing, wakeLockReasonRootMismatch, wakeLockReasonAgentMismatch:
+		// The process was not examined, so the lock is not proven dead.
+		return false
+	default:
+		return true
+	}
+}
+
 func validateWakeLockRepairable(inspection wakeLockInspection) error {
 	if err := validateGenericWakeLifecycleTransition(inspection, wakeGenericRequestMutate); err != nil {
 		return err
 	}
+	if wakeLockStaleFromProcessExamination(inspection) {
+		return nil
+	}
 	if inspection.Status != wakeLockStale {
 		return fmt.Errorf("wake lock status %q is not repairable", inspection.Status)
 	}
-	switch inspection.Reason {
-	case wakeLockReasonInvalidPID, wakeLockReasonRootMissing, wakeLockReasonRootMismatch, wakeLockReasonAgentMismatch:
-		// The process was not examined.
-		return fmt.Errorf("wake lock stale reason %q is not repairable", inspection.Reason)
-	default:
-		return nil
-	}
+	return fmt.Errorf("wake lock stale reason %q is not repairable", inspection.Reason)
 }
 
 func wakeLockHasOwnerMarkers(inspection wakeLockInspection) bool {

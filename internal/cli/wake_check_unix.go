@@ -930,7 +930,7 @@ func classifyStaleWakeCheckRestart(
 	}
 	if wakeInspectionBinaryDirGone(inspection) {
 		fixRemedy := wakeDoctorStaleWakeRemedy(decision.Root)
-		legacyMessage := wakeBinaryDirGoneMessage + "; run " + doctorRootCommandForOS(decision.Root, "", runtime.GOOS, "--ops", "--fix-wake-locks")
+		legacyMessage := wakeBinaryDirGoneMessage + "; run " + doctorRootCommandForOS(decision.Root, "", runtime.GOOS, "--fix-wake-locks")
 		decision.RestartCapability = wakeRestartAgentSafe
 		decision.Action = wakeCheckActionDecision{
 			Kind:          wakeActionManualStaleCleanup,
@@ -975,7 +975,7 @@ func classifyStaleWakeCheckRestart(
 	)
 	legacyMessage := fmt.Sprintf(
 		"from the owning terminal, remove the proven-stale lock with %s, then run %s",
-		doctorRootCommandForOS(decision.Root, "", runtime.GOOS, "--ops", "--fix-wake-locks"),
+		doctorRootCommandForOS(decision.Root, "", runtime.GOOS, "--fix-wake-locks"),
 		startCommand,
 	)
 	decision.RestartCapability = wakeRestartOperatorOnly

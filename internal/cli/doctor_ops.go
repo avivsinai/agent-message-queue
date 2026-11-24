@@ -233,7 +233,6 @@ func runOpsChecksWithSchema(
 		agents = nil
 	}
 
-	validatedAgents := make([]string, 0, len(agents))
 	for _, handle := range agents {
 		// Configured handles are untrusted input. Validate before deriving any
 		// mailbox/presence paths so traversal-like values cannot escape root.
@@ -249,7 +248,6 @@ func runOpsChecksWithSchema(
 			result.Hints = append(result.Hints, opsHint{Code: "config_error", Status: "error", Message: fmt.Sprintf("Ignoring unsafe configured agent handle %q: %v", handle, err)})
 			continue
 		}
-		validatedAgents = append(validatedAgents, handle)
 	}
 
 	// Agent rows: every declared handle (with or without a mailbox) and every
@@ -338,12 +336,7 @@ func runOpsChecksWithSchema(
 	// retains legacy-safe on-disk handles for read-only wake diagnostics;
 	// checkWakeLocks repeats that inspection boundary for untrusted callers.
 	var wakeHints []opsHint
-	result.WakeLocks, wakeHints = checkWakeLocksWithHintsSchema(
-		root,
-		discoveredWakeLockAgents(root, validatedAgents),
-		fixWakeLocks,
-		jsonSchema,
-	)
+	result.WakeLocks, wakeHints = checkProjectWakeLocksOps(root, strings.Join(explicitBaseRoot, ""), fixWakeLocks, jsonSchema)
 
 	// Operational and integration hints
 	result.Hints = append(result.Hints, wakeHints...)
@@ -398,6 +391,12 @@ func readOpsNotificationAttempts(root, agent string) ([]opsNotificationAttempt, 
 func checkUnreadBacklogNoNotifierHints(root string, agents []opsAgent, wakeLocks []opsWakeLock) []opsHint {
 	notifierAbsent := make(map[string]bool, len(wakeLocks))
 	for _, lock := range wakeLocks {
+		// Project-wide ops contains sibling rows, but these agents and their
+		// remedies belong to the selected root. Another session's same handle
+		// must neither suppress nor relabel this root's backlog hint.
+		if absPath(resolveRoot(lock.Root)) != absPath(resolveRoot(root)) {
+			continue
+		}
 		notifierAbsent[lock.Agent] = wakeLockProvesNotifierAbsent(lock)
 	}
 
@@ -861,6 +860,16 @@ func checkWakeLocksWithHintsSchema(
 		lock.RestartStageStatus = stage.Status
 		lock.RestartStageReason = stage.Reason
 		applyWakeBinaryDirGoneOpsReason(&lock, inspection, stage)
+		// A structurally stale or owner-bound lock cannot be removed by the
+		// generic doctor command it was given above or by any shadow branch;
+		// do not direct a repeat of a refused fix. Authoritative claims retain
+		// recover-owner instead.
+		if inspection.Status == wakeLockStale &&
+			strings.HasPrefix(lock.Fix, "amq doctor ") &&
+			(!wakeLockStaleFromProcessExamination(inspection) ||
+				classifyWakeClaimForGenericTransition(inspection) == wakeClaimAuthoritative) {
+			lock.Fix = ""
+		}
 		if lock.HealthStatus == wakeHealthUnresponsive || lock.HealthStatus == wakeHealthDegraded {
 			hints = append(hints, opsHint{
 				Code:   "wake_loop_" + lock.HealthStatus,
@@ -897,7 +906,7 @@ func checkWakeLocksWithHintsSchema(
 				Root:   inspection.Root,
 				Lock:   inspection.LockPath,
 				Reason: inspection.Reason,
-				Fix:    doctorRootCommandForOS(root, "", runtime.GOOS, "--ops", "--fix-wake-locks"),
+				Fix:    doctorRootCommandForOS(root, "", runtime.GOOS, "--fix-wake-locks"),
 			}
 			if fix {
 				fixErr := fixWakeRestartResidueWithoutLock(root, agent)
@@ -974,11 +983,16 @@ func checkWakeLocksWithHintsSchema(
 			lock.TargetPresent = true
 		}
 		if inspection.Status == wakeLockStale {
+			if !wakeLockStaleFromProcessExamination(inspection) {
+				lock.Reason = inspection.Reason + "; not repairable because the process was not examined"
+				appendLock(agent, lock, inspection, staleBinary, stage)
+				continue
+			}
 			if ownerBound {
 				appendLock(agent, lock, inspection, staleBinary, stage)
 				continue
 			}
-			lock.Fix = doctorRootCommandForOS(root, "", runtime.GOOS, "--ops", "--fix-wake-locks")
+			lock.Fix = doctorRootCommandForOS(root, "", runtime.GOOS, "--fix-wake-locks")
 			lock.RepairAvailable = assessment.RepairAvailable
 			lock.RepairReason = assessment.RepairReason
 			lock.Repair = assessment.Repair

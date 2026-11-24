@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -31,6 +32,7 @@ type doctorResult struct {
 	MailboxRepair        *fsq.MailboxRepairResult    `json:"mailbox_repair,omitempty"`
 	ExtensionManifests   []doctorExtensionManifest   `json:"extension_manifests,omitempty"`
 	ExtensionDiagnostics []doctorExtensionDiagnostic `json:"extension_diagnostics,omitempty"`
+	WakeLockSummary      *doctorWakeLockSummary      `json:"wake_locks,omitempty"`
 	Summary              struct {
 		OK    int `json:"ok"`
 		Warn  int `json:"warn"`
@@ -51,7 +53,7 @@ func runDoctor(args []string) error {
 	jsonFlag := fs.Bool("json", false, "Output as JSON")
 	jsonSchemaFlag := addJSONSchemaFlag(fs)
 	opsFlag := fs.Bool("ops", false, "Include runtime operational checks")
-	fixWakeLocksFlag := fs.Bool("fix-wake-locks", false, "With --ops, remove stale wake lock files")
+	fixWakeLocksFlag := fs.Bool("fix-wake-locks", false, "Remove stale wake lock files (implies --ops)")
 	fixMailboxesFlag := fs.Bool("fix-mailboxes", false, "Create missing required directories for configured mailboxes")
 	rootFlag := fs.String("root", "", "Exact AMQ root to inspect or repair")
 	baseRootFlag := fs.String("base-root", "", "Config-authority root for an explicit session --root")
@@ -120,9 +122,6 @@ func runDoctor(args []string) error {
 		}
 		return runDoctorMigrateHome(*jsonFlag, *dryRunFlag, *yesFlag)
 	}
-	if *fixWakeLocksFlag && !*opsFlag {
-		return UsageError("--fix-wake-locks requires --ops")
-	}
 	rootExplicit := flagWasVisited(fs, "root")
 	baseRootExplicit := flagWasVisited(fs, "base-root")
 	if rootExplicit && strings.TrimSpace(*rootFlag) == "" {
@@ -137,6 +136,9 @@ func runDoctor(args []string) error {
 	if *ignoreSessionPinFlag && !rootExplicit {
 		return UsageError("--ignore-session-pin requires an explicit --root")
 	}
+
+	// --fix-wake-locks implies the ops checks it runs inside.
+	opsRequested := *opsFlag || *fixWakeLocksFlag
 
 	result := doctorResult{}
 
@@ -231,39 +233,49 @@ func runDoctor(args []string) error {
 		result.Checks = append(result.Checks, check)
 	}
 
+	// Both output paths consume this one authorization decision. A refused
+	// session pin cannot be reconstructed as mutation permission below.
+	fixWakeLocks := *fixWakeLocksFlag
+	if fixWakeLocks && root != "" {
+		decision, mismatch, pinErr := doctorRepairSessionGuard(root, *ignoreSessionPinFlag)
+		switch decision.Row {
+		case sessionguard.RowR13DoctorInvalidErr:
+			result.Checks = append(result.Checks, doctorCheck{
+				Name:    "Wake lock repair",
+				Status:  "error",
+				Message: fmt.Sprintf("refusing to repair %s: invalid AMQ session context: %v", root, pinErr),
+			})
+			fixWakeLocks = false
+		case sessionguard.RowR12DoctorMismatchErr:
+			result.Checks = append(result.Checks, doctorCheck{
+				Name:    "Wake lock repair",
+				Status:  "error",
+				Message: fmt.Sprintf("refusing to repair %s because it does not match the pinned session context: %s", root, mismatch.Message),
+			})
+			fixWakeLocks = false
+		}
+	}
+
 	// Ops checks (runtime health)
-	if *opsFlag && root != "" {
+	if opsRequested && root != "" {
 		source := rootSourceFlag
 		if !rootExplicit {
 			source = amqrcSource
 		}
-		fixWakeLocks := *fixWakeLocksFlag
-		if fixWakeLocks {
-			decision, mismatch, pinErr := doctorRepairSessionGuard(root, *ignoreSessionPinFlag)
-			switch decision.Row {
-			case sessionguard.RowR13DoctorInvalidErr:
-				result.Checks = append(result.Checks, doctorCheck{
-					Name:    "Wake lock repair",
-					Status:  "error",
-					Message: fmt.Sprintf("refusing to repair %s: invalid AMQ session context: %v", root, pinErr),
-				})
-				fixWakeLocks = false
-			case sessionguard.RowR12DoctorMismatchErr:
-				result.Checks = append(result.Checks, doctorCheck{
-					Name:    "Wake lock repair",
-					Status:  "error",
-					Message: fmt.Sprintf("refusing to repair %s because it does not match the pinned session context: %s", root, mismatch.Message),
-				})
-				fixWakeLocks = false
-			}
+		result.Ops = runOpsChecksWithSchema(root, string(source), fixWakeLocks, *jsonSchemaFlag, baseRoot)
+	}
+
+	// Plain and ops consume the same guarded roots. Ops is the sole writer,
+	// and its mutation rows supply every exact remedy to the plain summary.
+	// The summary cannot initiate another removal.
+	if root != "" {
+		var opsLocks []opsWakeLock
+		if result.Ops != nil {
+			opsLocks = result.Ops.WakeLocks
 		}
-		result.Ops = runOpsChecksWithSchema(
-			root,
-			string(source),
-			fixWakeLocks,
-			*jsonSchemaFlag,
-			baseRoot,
-		)
+		check, projectLocks := checkProjectWakeLocks(root, baseRoot, opsLocks)
+		result.Checks = append(result.Checks, check)
+		result.WakeLockSummary = projectLocks
 	}
 
 	// Calculate summary
@@ -656,6 +668,192 @@ func checkRootDir(root string) doctorCheck {
 	check.Status = "ok"
 	check.Message = root
 	return check
+}
+
+// doctorWakeLockSummary is the plain-doctor view of the wake locks of one
+// root and every session under it: stale counts by state and session. Lock
+// files only; no process signals and no socket probe.
+type doctorWakeLockSummary struct {
+	Stale      int            `json:"stale"`
+	Unverified int            `json:"unverified,omitempty"`
+	BySession  map[string]int `json:"stale_by_session,omitempty"`
+	Fixes      []string       `json:"fixes,omitempty"`
+}
+
+// doctorWakeLockSessionsUnderBase returns the session roots under base plus
+// base itself, best effort. It reuses the sibling-session walk the backlog
+// hints use: every direct child directory of base whose name validates as a
+// session name.
+func doctorWakeLockSessionsUnderBase(base string) []string {
+	if strings.TrimSpace(base) == "" {
+		return nil
+	}
+	base = absPath(resolveRoot(base))
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return nil
+	}
+	var roots []string
+	for _, entry := range entries {
+		if !entry.IsDir() || validateSessionName(entry.Name()) != nil {
+			continue
+		}
+		// A child is a session root only when it holds a queue layout, the
+		// same agents/ evidence the sibling walk requires.
+		if !dirExists(filepath.Join(base, entry.Name(), "agents")) {
+			continue
+		}
+		roots = append(roots, absPath(filepath.Join(base, entry.Name())))
+	}
+	return roots
+}
+
+// inspectDoctorWakeLockSummary reads lock counts and retains exact generic
+// remedies generated by the single ops mutation traversal. It never writes.
+func inspectDoctorWakeLockSummary(root, baseRoot string, roots map[string]string, opsLocks []opsWakeLock) doctorWakeLockSummary {
+	var summary doctorWakeLockSummary
+	bySession := make(map[string]int)
+	if opsLocks != nil {
+		for _, lock := range opsLocks {
+			switch wakeLockStatus(lock.Status) {
+			case wakeLockStale:
+				summary.Stale++
+				if session, ok := roots[lock.Root]; ok && session != "" {
+					bySession[session]++
+				}
+			case wakeLockUnverified:
+				summary.Unverified++
+			}
+			if strings.HasPrefix(lock.Fix, "amq doctor ") && strings.Contains(lock.Fix, "--fix-wake-locks") {
+				summary.Fixes = append(summary.Fixes, lock.Fix)
+			}
+		}
+	} else {
+		// Counts and repairability use one read per lock. The plain invocation
+		// needs no second process probe; ops supplies exact remedies on fix.
+		foundRepairable := false
+		for root, session := range roots {
+			for _, handle := range discoveredWakeLockAgents(root, nil) {
+				inspection := inspectWakeLock(root, handle)
+				if !inspection.Exists {
+					continue
+				}
+				switch inspection.Status {
+				case wakeLockStale:
+					summary.Stale++
+					if session != "" {
+						bySession[session]++
+					}
+				case wakeLockUnverified:
+					summary.Unverified++
+				}
+				if fsq.ValidateHandle(handle) == nil &&
+					wakeLockStaleFromProcessExamination(inspection) &&
+					classifyWakeClaimForGenericTransition(inspection) != wakeClaimAuthoritative {
+					foundRepairable = true
+				}
+			}
+		}
+		if foundRepairable {
+			summary.Fixes = []string{doctorRootCommandForOS(root, baseRoot, runtime.GOOS, "--fix-wake-locks")}
+		}
+	}
+	if len(bySession) > 0 {
+		summary.BySession = bySession
+	}
+	slices.Sort(summary.Fixes)
+	summary.Fixes = slices.Compact(summary.Fixes)
+	return summary
+}
+
+// formatDoctorWakeLockSummary renders counts and only remedies whose
+// authoritative ops rows accept a generic repair. A structural or owner-bound
+// lock stays counted without offering another ineffective fix.
+func formatDoctorWakeLockSummary(summary doctorWakeLockSummary) doctorCheck {
+	check := doctorCheck{Name: "Wake locks"}
+	if summary.Stale == 0 && summary.Unverified == 0 {
+		check.Status = "ok"
+		check.Message = "none stale"
+		return check
+	}
+	var parts []string
+	if summary.Stale > 0 {
+		parts = append(parts, fmt.Sprintf("%d stale", summary.Stale))
+	}
+	if summary.Unverified > 0 {
+		parts = append(parts, fmt.Sprintf("%d unverified (kept; see amq doctor --ops)", summary.Unverified))
+	}
+	check.Status = "warn"
+	message := strings.Join(parts, "; ")
+	if len(summary.BySession) > 0 {
+		sessions := make([]string, 0, len(summary.BySession))
+		for session := range summary.BySession {
+			sessions = append(sessions, session)
+		}
+		slices.Sort(sessions)
+		counts := make([]string, 0, len(sessions))
+		for _, session := range sessions {
+			counts = append(counts, fmt.Sprintf("%s: %d", session, summary.BySession[session]))
+		}
+		message = fmt.Sprintf("%s (%s)", message, strings.Join(counts, ", "))
+	}
+	if len(summary.Fixes) > 0 {
+		message += "; fix: " + strings.Join(summary.Fixes, "; ")
+	}
+	check.Message = message
+	return check
+}
+
+// doctorWakeLockRoots is the one traversal policy shared by both output
+// paths. A selected base includes its sessions. An explicit session retains
+// its existing root scope; an explicit base includes that base's sessions.
+func doctorWakeLockRoots(root, baseRoot string) map[string]string {
+	resolvedRoot := absPath(resolveRoot(root))
+	base := baseRoot
+	if base != "" {
+		base = absPath(resolveRoot(base))
+		if base == resolvedRoot {
+			return map[string]string{resolvedRoot: ""}
+		}
+		return map[string]string{resolvedRoot: sessionName(resolvedRoot)}
+	}
+	base = baseRootOfForDisplay(resolvedRoot)
+	if base == resolvedRoot {
+		roots := map[string]string{base: ""}
+		for _, sessionRoot := range doctorWakeLockSessionsUnderBase(base) {
+			roots[sessionRoot] = sessionName(sessionRoot)
+		}
+		return roots
+	}
+	return map[string]string{resolvedRoot: ""}
+}
+
+// checkProjectWakeLocksOps emits the standard per-lock row from the same
+// guarded roots and fix authorization as the plain row.
+func checkProjectWakeLocksOps(root, baseRoot string, fix bool, jsonSchema int) ([]opsWakeLock, []opsHint) {
+	var locks []opsWakeLock
+	var hints []opsHint
+	for sessionRoot := range doctorWakeLockRoots(root, baseRoot) {
+		rootLocks, rootHints := checkWakeLocksWithHintsSchema(
+			sessionRoot,
+			discoveredWakeLockAgents(sessionRoot, nil),
+			fix,
+			jsonSchema,
+		)
+		locks = append(locks, rootLocks...)
+		hints = append(hints, rootHints...)
+	}
+	sort.Slice(locks, func(i, j int) bool { return locks[i].Lock < locks[j].Lock })
+	return locks, hints
+}
+
+// checkProjectWakeLocks reads the same guarded roots as ops. With repair set,
+// the plain row's helper and ops each use the existing exact removal and its
+// rechecks; no structural stale or unverified lock is removed.
+func checkProjectWakeLocks(root, baseRoot string, opsLocks []opsWakeLock) (doctorCheck, *doctorWakeLockSummary) {
+	summary := inspectDoctorWakeLockSummary(root, baseRoot, doctorWakeLockRoots(root, baseRoot), opsLocks)
+	check := formatDoctorWakeLockSummary(summary)
+	return check, &summary
 }
 
 func checkConfig(root string) doctorCheck {
