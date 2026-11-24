@@ -1,13 +1,14 @@
 package cli
 
 // The wake side of the pi bridge doorbell (bead agent-message-queue-e1gx).
-// The rows are the ratified P1–P4 decisions: a capable bridge takes the
-// attempt with no terminal write; a claim counts as a presented doorbell
-// for the cohort's cadence and caps but never sets the submit-only state;
-// a busy seat types nothing until the input_max_hold bound, then the
-// terminal path runs with a one-line fallback; the wake's deadline
-// withdraws the attempt; and a bridge claim followed by a terminal
-// fallback types the full fixed line, never a bare Enter.
+// The rows are the rulings after the live rows on real pi: one ask per wake
+// tick (D1); the busy bound starts at the cohort's first refusal and equals
+// input_max_hold, and the fallback line says why (D2); the exclusive create
+// of "withdrawn" is the only authority to type (D3); a decision is never
+// deleted or rewritten (D4); acceptance is evidence that arrives later, and
+// the ledger records it when the wake sees the result on a later tick (D5);
+// the request names the pi process it is for (D6); retained attempts are
+// bounded without a slot table (D7).
 
 import (
 	"encoding/json"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/notificationattempt"
 )
 
 type wakePiBridgeHarness struct {
@@ -29,6 +31,11 @@ type wakePiBridgeHarness struct {
 	sleeps   []time.Duration
 	proofErr error
 	live     *wakePiBridgeLiveness
+	// bridgeDecision is what the simulated bridge writes for each newly
+	// published request, during the wake's decision poll: "claimed",
+	// "refused", "garbage" (an unreadable decision file), or "" (no answer).
+	bridgeDecision string
+	sleepCount     int
 }
 
 func newWakePiBridgeHarness(t *testing.T) *wakePiBridgeHarness {
@@ -71,9 +78,60 @@ func newWakePiBridgeHarness(t *testing.T) *wakePiBridgeHarness {
 		piBridgeSleep: func(d time.Duration) {
 			h.sleeps = append(h.sleeps, d)
 			h.now = h.now.Add(d)
+			h.sleepCount++
+			h.respond()
 		},
 	}
 	return h
+}
+
+// respond is the simulated bridge: during the wake's decision poll it
+// writes the configured decision for the newest undecided request, exactly
+// as the extension would.
+func (h *wakePiBridgeHarness) respond() {
+	h.t.Helper()
+	if h.live == nil || h.bridgeDecision == "" {
+		return
+	}
+	dir := filepath.Join(h.root, "agents", "codex", "extensions", "pi-bridge", "doorbell")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	attemptID := ""
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".decision.json") || strings.HasSuffix(name, ".result.json") {
+			continue
+		}
+		candidate := strings.TrimSuffix(name, ".json")
+		if _, err := os.Stat(filepath.Join(dir, candidate+".decision.json")); err == nil {
+			continue
+		}
+		attemptID = candidate
+		break
+	}
+	if attemptID == "" {
+		return
+	}
+	if h.bridgeDecision == "garbage" {
+		if err := os.WriteFile(filepath.Join(dir, attemptID+".decision.json"), []byte("{not json"), 0o600); err != nil {
+			h.t.Fatal(err)
+		}
+		return
+	}
+	payload, err := json.Marshal(wakePiBridgeDecision{
+		Protocol: wakePiBridgeProtocol,
+		Attempt:  attemptID,
+		Decision: h.bridgeDecision,
+		Reason:   "pi is busy with other work",
+	})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, attemptID+".decision.json"), payload, 0o600); err != nil {
+		h.t.Fatal(err)
+	}
 }
 
 func (h *wakePiBridgeHarness) capableBridge() {
@@ -86,30 +144,7 @@ func (h *wakePiBridgeHarness) deliverPending() {
 	h.cfg.doorbell.arm(files)
 }
 
-// decide pre-places the bridge's decision for one attempt, as the extension
-// would have written it before the wake's poll reads it.
-func (h *wakePiBridgeHarness) decide(seq int, decision, reason string) {
-	h.t.Helper()
-	dir := filepath.Join(h.root, "agents", "codex", "extensions", "pi-bridge", "doorbell")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		h.t.Fatal(err)
-	}
-	attemptID := wakePiBridgeAttemptID(h.cfg.cohortIDs, seq)
-	payload, err := json.Marshal(wakePiBridgeDecision{
-		Protocol: wakePiBridgeProtocol,
-		Attempt:  attemptID,
-		Decision: decision,
-		Reason:   reason,
-	})
-	if err != nil {
-		h.t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, attemptID+".decision.json"), payload, 0o600); err != nil {
-		h.t.Fatal(err)
-	}
-}
-
-// publishedRequests lists the request files the wake wrote.
+// publishedRequests lists the request files under doorbell/.
 func (h *wakePiBridgeHarness) publishedRequests() []string {
 	h.t.Helper()
 	entries, err := os.ReadDir(filepath.Join(h.root, "agents", "codex", "extensions", "pi-bridge", "doorbell"))
@@ -121,11 +156,34 @@ func (h *wakePiBridgeHarness) publishedRequests() []string {
 	}
 	var names []string
 	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".json") && !strings.HasSuffix(e.Name(), ".decision.json") {
+		if strings.HasSuffix(e.Name(), ".json") && !strings.HasSuffix(e.Name(), ".decision.json") && !strings.HasSuffix(e.Name(), ".result.json") {
 			names = append(names, e.Name())
 		}
 	}
 	return names
+}
+
+// doorbellDirFileCount counts every file under doorbell/.
+func (h *wakePiBridgeHarness) doorbellDirFileCount() int {
+	h.t.Helper()
+	entries, err := os.ReadDir(filepath.Join(h.root, "agents", "codex", "extensions", "pi-bridge", "doorbell"))
+	if os.IsNotExist(err) {
+		return 0
+	}
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return len(entries)
+}
+
+// ledgerLog reads the notification attempt journal, "" when there is none.
+func (h *wakePiBridgeHarness) ledgerLog() string {
+	h.t.Helper()
+	data, err := os.ReadFile(filepath.Join(h.root, "agents", "codex", "receipts", notificationattempt.LogFilename))
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 // typedChunks returns the terminal chunks typed and clears the record.
@@ -144,6 +202,11 @@ func (h *wakePiBridgeHarness) deliver() {
 	if err := deliverNewMessageNotification(h.cfg, notice, false, current); err != nil {
 		h.t.Fatalf("deliverNewMessageNotification: %v", err)
 	}
+}
+
+func (h *wakePiBridgeHarness) fullLineTyped() bool {
+	got := h.typedChunks()
+	return len(got) == 2 && strings.Contains(got[0], coopWakeDoorbell)
 }
 
 // TestWakePiBridgeNoCapableBridgeTakesTodaysPath: no fresh live capable
@@ -169,8 +232,8 @@ func TestWakePiBridgeNoCapableBridgeTakesTodaysPath(t *testing.T) {
 			if names := h.publishedRequests(); len(names) != 0 {
 				t.Fatalf("bridge requests published: %v", names)
 			}
-			if got := h.typedChunks(); len(got) == 0 {
-				t.Fatal("terminal delivery did not run")
+			if !h.fullLineTyped() {
+				t.Fatal("terminal delivery did not run the full fixed line")
 			}
 		})
 	}
@@ -179,11 +242,12 @@ func TestWakePiBridgeNoCapableBridgeTakesTodaysPath(t *testing.T) {
 // TestWakePiBridgeClaimPresentsWithoutSubmitOnly: a claimed attempt types
 // nothing, records the presentation on the cohort's cadence (announced
 // phase, a retry deadline), and leaves presentationConfirmed false, so the
-// next reminder plans the full fixed line, never a bare Enter.
+// next reminder plans the full fixed line, never a bare Enter. The request
+// names the pi process it is for, not the wake's pid.
 func TestWakePiBridgeClaimPresentsWithoutSubmitOnly(t *testing.T) {
 	h := newWakePiBridgeHarness(t)
 	h.capableBridge()
-	h.decide(1, "claimed", "")
+	h.bridgeDecision = "claimed"
 	h.deliverPending()
 	h.deliver()
 
@@ -196,27 +260,46 @@ func TestWakePiBridgeClaimPresentsWithoutSubmitOnly(t *testing.T) {
 	if h.cfg.doorbell.phase != wakeDoorbellAnnounced {
 		t.Fatalf("phase = %v, want announced (presented)", h.cfg.doorbell.phase)
 	}
+	dir := filepath.Join(h.root, "agents", "codex", "extensions", "pi-bridge", "doorbell")
+	names := h.publishedRequests()
+	if len(names) != 1 {
+		t.Fatalf("published requests = %v, want one", names)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, names[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var req wakePiBridgeRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		t.Fatal(err)
+	}
+	if req.PID != 4242 {
+		t.Fatalf("request pid = %d, want the bridge's 4242", req.PID)
+	}
 }
 
-// TestWakePiBridgeBusyHoldsThenFallsBackWithFullLine: busy refusals type
-// nothing while the input_max_hold bound is open and retry; past the bound
-// the terminal path runs and its first write is the full fixed line.
-func TestWakePiBridgeBusyHoldsThenFallsBackWithFullLine(t *testing.T) {
+// TestWakePiBridgeBusyBoundHoldsAcrossTicksThenFallsBack is the live-row
+// regression: one ask per tick, so a busy seat types nothing while the
+// input_max_hold bound (measured from the cohort's first refusal) is open,
+// however many ticks it takes; past the bound the terminal path runs and
+// its first write is the full fixed line.
+func TestWakePiBridgeBusyBoundHoldsAcrossTicksThenFallsBack(t *testing.T) {
 	h := newWakePiBridgeHarness(t)
 	h.capableBridge()
-	h.cfg.settings.inputMaxHold = 5 * time.Second
-	for seq := 1; seq <= 6; seq++ {
-		h.decide(seq, "refused", "pi is busy")
-	}
+	h.cfg.settings.inputMaxHold = 15 * time.Second
+	h.bridgeDecision = "refused"
 	h.deliverPending()
-	h.deliver()
-
-	if len(h.sleeps) == 0 {
-		t.Fatal("a busy seat did not hold before the fallback")
+	for i := 0; i < 8; i++ {
+		h.deliver()
+		if got := h.typedChunks(); len(got) != 0 {
+			t.Fatalf("a busy hold typed at tick %d: %q", i, got)
+		}
+		h.advance(2 * time.Second)
 	}
-	got := h.typedChunks()
-	if len(got) != 2 || !strings.Contains(got[0], coopWakeDoorbell) {
-		t.Fatalf("fallback wrote %q, want the full fixed line then the submit", got)
+	// 16s after the first refusal the bound is over: the fallback runs.
+	h.deliver()
+	if !h.fullLineTyped() {
+		t.Fatal("the fallback did not write the full fixed line once the busy bound passed")
 	}
 }
 
@@ -226,31 +309,31 @@ func TestWakePiBridgeZeroHoldFallsBackAtOnce(t *testing.T) {
 	h := newWakePiBridgeHarness(t)
 	h.capableBridge()
 	h.cfg.settings.inputMaxHold = 0
-	h.decide(1, "refused", "pi is busy")
+	h.bridgeDecision = "refused"
 	h.deliverPending()
 	h.deliver()
 
-	got := h.typedChunks()
-	if len(got) != 2 || !strings.Contains(got[0], coopWakeDoorbell) {
-		t.Fatalf("fallback wrote %q, want the full fixed line then the submit", got)
+	if !h.fullLineTyped() {
+		t.Fatal("a zero hold did not fall back at once")
 	}
-	if len(h.sleeps) != 0 {
-		t.Fatalf("a zero hold slept %v", h.sleeps)
+	for _, d := range h.sleeps {
+		if d > wakePiBridgePollInterval {
+			t.Fatalf("a zero hold slept %v beyond the poll interval", d)
+		}
 	}
 }
 
 // TestWakePiBridgeDeadlineWithdrawsAndFallsBack: with no decision in time
-// the wake withdraws the attempt, and the terminal path types the full
-// fixed line.
+// the wake's exclusive create of withdrawn succeeds, and the terminal path
+// types the full fixed line.
 func TestWakePiBridgeDeadlineWithdrawsAndFallsBack(t *testing.T) {
 	h := newWakePiBridgeHarness(t)
 	h.capableBridge()
 	h.deliverPending()
 	h.deliver()
 
-	got := h.typedChunks()
-	if len(got) != 2 || !strings.Contains(got[0], coopWakeDoorbell) {
-		t.Fatalf("fallback wrote %q, want the full fixed line then the submit", got)
+	if !h.fullLineTyped() {
+		t.Fatal("fallback wrote something other than the full fixed line then the submit")
 	}
 	dir := filepath.Join(h.root, "agents", "codex", "extensions", "pi-bridge", "doorbell")
 	entries, err := os.ReadDir(dir)
@@ -279,14 +362,83 @@ func TestWakePiBridgeDeadlineWithdrawsAndFallsBack(t *testing.T) {
 	}
 }
 
-// TestWakePiBridgeClaimThenLaterReminderFallsBackWithFullLine is the
-// ratified addition row: a bridge claim presents the cohort; on a later
-// reminder the bridge is gone, and the fallback write is the full fixed
-// line, not a bare Enter — the claim alone never authorized submit-only.
+// TestWakePiBridgeUnreadableDecisionTypesNothing: when the withdrawal
+// create fails because a decision exists and that decision is unreadable,
+// no winner is proven, so the wake types nothing this pass and never
+// rewrites the decision.
+func TestWakePiBridgeUnreadableDecisionTypesNothing(t *testing.T) {
+	h := newWakePiBridgeHarness(t)
+	h.capableBridge()
+	h.bridgeDecision = "garbage"
+	h.deliverPending()
+	h.deliver()
+
+	if got := h.typedChunks(); len(got) != 0 {
+		t.Fatalf("an unreadable decision typed into the terminal: %q", got)
+	}
+	dir := filepath.Join(h.root, "agents", "codex", "extensions", "pi-bridge", "doorbell")
+	names := h.publishedRequests()
+	if len(names) != 1 {
+		t.Fatalf("published requests = %v, want one", names)
+	}
+	decision, err := os.ReadFile(filepath.Join(dir, strings.TrimSuffix(names[0], ".json")+".decision.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(decision) != "{not json" {
+		t.Fatalf("the decision file was rewritten: %q", decision)
+	}
+}
+
+// TestWakePiBridgeClaimReadBackAfterDeadlinePresents: the bridge writes its
+// claim in the window between the wake's deadline and the withdrawal
+// create; the existing decision decides, the create fails, the re-read
+// finds the claim, the claim presents, and nothing is typed.
+func TestWakePiBridgeClaimReadBackAfterDeadlinePresents(t *testing.T) {
+	h := newWakePiBridgeHarness(t)
+	h.capableBridge()
+	realCreate := piBridgeWithdrawCreate
+	t.Cleanup(func() { piBridgeWithdrawCreate = realCreate })
+	piBridgeWithdrawCreate = func(path string, data []byte, perm os.FileMode) (bool, error) {
+		// The bridge's late claim lands first; the wake's create then
+		// loses to the existing decision.
+		attemptID := strings.TrimSuffix(filepath.Base(path), ".decision.json")
+		claim, err := json.Marshal(wakePiBridgeDecision{Protocol: wakePiBridgeProtocol, Attempt: attemptID, Decision: "claimed"})
+		if err != nil {
+			return false, err
+		}
+		if err := os.WriteFile(path, claim, perm); err != nil {
+			return false, err
+		}
+		return realCreate(path, data, perm)
+	}
+	h.deliverPending()
+	h.deliver()
+
+	if got := h.typedChunks(); len(got) != 0 {
+		t.Fatalf("the claim typed into the terminal: %q", got)
+	}
+	if h.cfg.doorbell.phase != wakeDoorbellAnnounced {
+		t.Fatalf("phase = %v, want announced (presented)", h.cfg.doorbell.phase)
+	}
+	dir := filepath.Join(h.root, "agents", "codex", "extensions", "pi-bridge", "doorbell")
+	decision, err := os.ReadFile(filepath.Join(dir, strings.TrimSuffix(h.publishedRequests()[0], ".json")+".decision.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(decision) == "" || !strings.Contains(string(decision), "claimed") {
+		t.Fatalf("the wake rewrote the bridge's decision: %q", decision)
+	}
+}
+
+// TestWakePiBridgeClaimThenLaterReminderFallsBackWithFullLine: a bridge
+// claim presents the cohort; on a later reminder the bridge is gone, and
+// the fallback write is the full fixed line, not a bare Enter — the claim
+// alone never authorized submit-only.
 func TestWakePiBridgeClaimThenLaterReminderFallsBackWithFullLine(t *testing.T) {
 	h := newWakePiBridgeHarness(t)
 	h.capableBridge()
-	h.decide(1, "claimed", "")
+	h.bridgeDecision = "claimed"
 	h.deliverPending()
 	h.deliver()
 	if got := h.typedChunks(); len(got) != 0 {
@@ -297,10 +449,80 @@ func TestWakePiBridgeClaimThenLaterReminderFallsBackWithFullLine(t *testing.T) {
 	// plans an attempt; the delivery falls back to the terminal with the
 	// full line.
 	h.live = nil
+	h.bridgeDecision = ""
 	h.advance(10 * time.Minute)
 	h.deliver()
-	got := h.typedChunks()
-	if len(got) != 2 || !strings.Contains(got[0], coopWakeDoorbell) {
-		t.Fatalf("fallback wrote %q, want the full fixed line then the submit", got)
+	if !h.fullLineTyped() {
+		t.Fatal("fallback wrote something other than the full fixed line then the submit")
+	}
+}
+
+// TestWakePiBridgeAcceptanceRecordsOnLaterTick: the claim's ledger record
+// says presented, never accepted; when the acceptance result arrives, the
+// wake records it in the attempt ledger on a later tick.
+func TestWakePiBridgeAcceptanceRecordsOnLaterTick(t *testing.T) {
+	h := newWakePiBridgeHarness(t)
+	h.capableBridge()
+	h.bridgeDecision = "claimed"
+	h.deliverPending()
+	h.deliver()
+
+	if got := h.typedChunks(); len(got) != 0 {
+		t.Fatalf("the claim typed into the terminal: %q", got)
+	}
+	log := h.ledgerLog()
+	if !strings.Contains(log, "presented by the pi bridge") {
+		t.Fatalf("the ledger lost the presented record: %s", log)
+	}
+	if strings.Contains(log, "accepted") {
+		t.Fatalf("a claim was labeled accepted at claim time: %s", log)
+	}
+
+	// The bridge publishes the acceptance result; the next tick records it.
+	h.advance(10 * time.Minute)
+	attemptID := strings.TrimSuffix(h.publishedRequests()[0], ".json")
+	dir := filepath.Join(h.root, "agents", "codex", "extensions", "pi-bridge", "doorbell")
+	result := map[string]any{
+		"protocol": wakePiBridgeProtocol,
+		"accepted": true,
+		"attempt":  attemptID,
+		"at":       time.Now().UTC().Format(time.RFC3339),
+	}
+	payload, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, attemptID+".result.json"), payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.deliver()
+	log = h.ledgerLog()
+	if !strings.Contains(log, "accepted by pi (message_start)") {
+		t.Fatalf("the ledger lost the acceptance record: %s", log)
+	}
+}
+
+// TestWakePiBridgeRefusedAttemptsArePruned: the wake removes its own
+// finished refused attempts as it asks again, so the retained directory
+// stays at the current attempt plus what may still produce evidence.
+func TestWakePiBridgeRefusedAttemptsArePruned(t *testing.T) {
+	h := newWakePiBridgeHarness(t)
+	h.capableBridge()
+	h.bridgeDecision = "refused"
+	h.deliverPending()
+	for i := 0; i < 3; i++ {
+		h.deliver()
+		h.advance(2 * time.Second)
+	}
+	if got := h.doorbellDirFileCount(); got != 2 {
+		t.Fatalf("doorbell dir holds %d files after refused asks, want the current attempt's two", got)
+	}
+	h.bridgeDecision = "claimed"
+	h.deliver()
+	if got := h.doorbellDirFileCount(); got != 2 {
+		t.Fatalf("doorbell dir holds %d files after the claim, want the claimed attempt's two", got)
+	}
+	if names := h.publishedRequests(); len(names) != 1 {
+		t.Fatalf("published requests = %v, want one", names)
 	}
 }

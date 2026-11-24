@@ -2037,7 +2037,9 @@ function doorbell(h: ReturnType<typeof harness>, attempt: string, fields: Record
 		op: "doorbell",
 		attempt,
 		generation: h.generation(),
-		pid: 424242,
+	// The pid the wake names is the pi process this request is for; the
+// extension serves only its own.
+	pid: process.pid,
 		deadline: new Date(Date.now() + 30_000).toISOString(),
 		...fields,
 	};
@@ -2057,11 +2059,12 @@ function doorbellDecision(h: ReturnType<typeof harness>, attempt: string): Recor
 }
 
 // doorbellMessageStart is the message_start event pi emits for the custom
-// doorbell entry: a machine role carries the exact attempt and the fixed
-// line as display content.
-function doorbellMessageStart(attempt: string, generation: string, content = DOORBELL_LINE, role = "machine") {
+// doorbell entry: a machine role carries customType, content, display and
+// details at the top level of the message, the shape real pi builds for a
+// custom entry (pi core agent-session.ts, sendCustomMessage).
+function doorbellMessageStart(attempt: string, generation: string, content = DOORBELL_LINE, role = "custom") {
 	return {
-		message: { role, content: { customType: "amq-doorbell", content, display: true, details: { attempt, generation } } },
+		message: { role, customType: "amq-doorbell", content, display: true, details: { attempt, generation } },
 	};
 }
 
@@ -2132,6 +2135,37 @@ test("a doorbell addressed to an earlier generation is never served", async () =
 		doorbell(h, "attempt-4", { generation: "00000000-0000-4000-8000-000000000000" });
 		await new Promise((r) => setTimeout(r, 400));
 		assert.equal(doorbellDecision(h, "attempt-4"), null);
+		assert.deepEqual(h.customSent, []);
+	} finally {
+		await h.done();
+	}
+});
+
+test("a doorbell addressed to another pi process is never served", async () => {
+	const h = harness();
+	await h.start();
+	try {
+		doorbell(h, "attempt-6", { pid: process.pid + 1 });
+		await new Promise((r) => setTimeout(r, 400));
+		assert.equal(doorbellDecision(h, "attempt-6"), null);
+		assert.deepEqual(h.customSent, []);
+	} finally {
+		await h.done();
+	}
+});
+
+test("a send that throws after the claim keeps the claim and publishes a failed result", async () => {
+	const h = harness();
+	await h.start();
+	try {
+		h.state.throwSend = true;
+		doorbell(h, "attempt-7");
+		await h.waitFor(() => fs.existsSync(path.join(h.dir, "doorbell", "attempt-7.result.json")));
+		// D4: a decision is never deleted or rewritten; the claim stays.
+		assert.equal(doorbellDecision(h, "attempt-7")?.decision, "claimed");
+		const result = JSON.parse(fs.readFileSync(path.join(h.dir, "doorbell", "attempt-7.result.json"), "utf8"));
+		assert.equal(result.accepted, false);
+		assert.ok(String(result.reason).includes("sendMessage"));
 		assert.deepEqual(h.customSent, []);
 	} finally {
 		await h.done();

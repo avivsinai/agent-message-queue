@@ -688,24 +688,27 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 		if (b && b.doorbell.claimed.size > 0) {
 			const dm = (event.message ?? {}) as {
 				role?: unknown;
-				content?: { customType?: unknown; content?: unknown; details?: { attempt?: unknown; generation?: unknown } };
+				customType?: unknown;
+				content?: unknown;
+				details?: { attempt?: unknown; generation?: unknown };
 			};
+			// Real pi builds a custom message with customType, content, display
+			// and details at the top level of the message, with the custom role
+			// (pi core agent-session.ts, sendCustomMessage); only that shape is
+			// acceptance.
 			if (
-				dm.content &&
-				typeof dm.content === "object" &&
-				dm.content.customType === "amq-doorbell" &&
-				typeof dm.role === "string" &&
-				dm.role !== "user"
+				dm.customType === "amq-doorbell" &&
+				dm.role === "custom"
 			) {
 				for (const [attempt] of b.doorbell.claimed) {
 					if (
-						dm.content.details?.attempt === attempt &&
-						dm.content.details?.generation === b.generation &&
-						dm.content.content === DOORBELL_LINE
+						dm.details?.attempt === attempt &&
+						dm.details?.generation === b.generation &&
+						dm.content === DOORBELL_LINE
 					) {
 						b.doorbell.claimed.delete(attempt);
 						b.doorbell.done.add(attempt);
-						publishDoorbellResult(b.dir, attempt);
+						publishDoorbellResult(b.dir, attempt, { accepted: true });
 						return;
 					}
 				}
@@ -1075,6 +1078,12 @@ function scanDoorbell(pi: ExtensionAPI, b: Bridge): void {
 			continue; // a partial or foreign file is never evidence
 		}
 		if (rec.protocol !== PROTOCOL || rec.op !== "doorbell" || rec.attempt !== attempt) continue;
+		// The request names the pi process it is for; a request whose target
+		// pid is not this process is never served.
+		if (rec.pid !== GUARD_PID) {
+			b.doorbell.done.add(attempt);
+			continue;
+		}
 		const deadline = typeof rec.deadline === "string" ? Date.parse(rec.deadline) : NaN;
 		if (!Number.isFinite(deadline) || Date.now() > deadline || rec.generation !== b.generation) {
 			b.doorbell.done.add(attempt); // expired or not addressed to this generation; the wake owns the file
@@ -1105,15 +1114,14 @@ function scanDoorbell(pi: ExtensionAPI, b: Bridge): void {
 				{ triggerTurn: true, deliverAs: "followUp" },
 			);
 		} catch (err) {
-			// A synchronous throw is proven non-delivery: unclaim so the wake's
-		// deadline falls back, and record why, best-effort.
+			// A synchronous throw is proven non-delivery, but a decision is
+			// never deleted or rewritten: the claim stays, no message_start can
+			// match it, and the bridge publishes a result that says so. The
+			// wake keeps its presented view; the reminder cadence covers a
+			// doorbell that did not start a turn.
 			b.doorbell.claimed.delete(attempt);
-			try {
-				fs.rmSync(path.join(dir, `${attempt}.decision.json`), { force: true });
-			} catch {
-				// The wake's deadline owns the fallback either way.
-			}
-			writeDoorbellDecision(b, attempt, { decision: "failed", reason: `sendMessage: ${String(err)}` });
+			b.doorbell.done.add(attempt);
+			publishDoorbellResult(b.dir, attempt, { accepted: false, reason: `sendMessage: ${String(err)}` });
 		}
 	}
 }
@@ -1158,15 +1166,18 @@ function writeDoorbellDecision(b: Bridge, attempt: string, fields: { decision: s
 	}
 }
 
-// publishDoorbellResult records the acceptance evidence: the matching
-// message_start of the addressed generation arrived. The wake reads it for
-// its attempt ledger; control flow never waits for it.
-function publishDoorbellResult(dir: string, attempt: string): void {
+// publishDoorbellResult records the evidence for one attempt: accepted is
+// the matching message_start of the addressed generation (the flat custom
+// message real pi emits); accepted false with a reason records a send that
+// threw after the claim. The wake reads it for its attempt ledger; control
+// flow never waits for it.
+function publishDoorbellResult(dir: string, attempt: string, fields: { accepted: boolean; reason?: string }): void {
 	const out = path.join(dir, "doorbell");
 	const body = JSON.stringify({
 		protocol: PROTOCOL,
-		accepted: true,
+		accepted: fields.accepted,
 		attempt,
+		reason: fields.reason,
 		at: new Date().toISOString(),
 	});
 	try {
