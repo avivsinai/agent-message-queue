@@ -975,6 +975,9 @@ func (l *wakeLoop) promoteFollowUps() {
 
 func (l *wakeLoop) maintain() error {
 	l.promoteFollowUps()
+	// Doorbell results are evidence that arrives later; ordinary ticks
+	// record them, whether or not mail is being delivered.
+	l.cfg.collectPiBridgeResults()
 	if err := maintainWakeOutputBounds(l.maintenanceOutputs...); err != nil {
 		_ = writeWakeDiagnostic(
 			&l.cfg,

@@ -252,6 +252,9 @@ type livenessRecord struct {
 	// Gate is true when the extension asks the person at the terminal before
 	// a granted run's tool calls (protocol: bridge revision 6).
 	Gate bool `json:"gate,omitempty"`
+	// Doorbell is true when the extension serves the wake doorbell exchange
+	// (protocol: bridge revision 7).
+	Doorbell bool `json:"doorbell,omitempty"`
 }
 
 // heartbeat / freshness: the extension refreshes the heartbeat every 2s and
@@ -302,6 +305,7 @@ type livenessState struct {
 	activity  int    // the live bridge's activity version (0 = not published)
 	surface   string // the live bridge's pi run mode ("" = not published)
 	gate      bool   // the live bridge gates a granted run's tool calls
+	doorbell  bool   // the live bridge serves the wake doorbell exchange
 }
 
 // publishRequest publishes one request with create-new semantics: an
@@ -452,7 +456,7 @@ func (b bridgeDir) liveness(now time.Time) livenessState {
 	if !rec.Live || rec.PID <= 0 {
 		return livenessState{age: age, reason: "malformed"}
 	}
-	return livenessState{live: true, age: age, pid: rec.PID, gen: rec.SessionGeneration, revision: rec.BridgeRevision, sessionID: rec.SessionID, upgrade: rec.Upgrade, activity: rec.Activity, surface: rec.Surface, gate: rec.Gate}
+	return livenessState{live: true, age: age, pid: rec.PID, gen: rec.SessionGeneration, revision: rec.BridgeRevision, sessionID: rec.SessionID, upgrade: rec.Upgrade, activity: rec.Activity, surface: rec.Surface, gate: rec.Gate, doorbell: rec.Doorbell}
 }
 
 // sessionAsks is whether the live bridge asks the person at the terminal
