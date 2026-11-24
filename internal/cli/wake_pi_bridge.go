@@ -279,9 +279,6 @@ func (cfg *wakeConfig) runPiBridgeDoorbellAttempt() wakePiBridgeDoorbellResult {
 	if cfg.piBridgeAttemptsProcessed == nil {
 		cfg.piBridgeAttemptsProcessed = map[string]bool{}
 	}
-	if cfg.piBridgeAcceptedAt == nil {
-		cfg.piBridgeAcceptedAt = map[string]time.Time{}
-	}
 	if cfg.piBridgeCadenceDone == nil {
 		cfg.piBridgeCadenceDone = map[string]bool{}
 	}
@@ -292,14 +289,6 @@ func (cfg *wakeConfig) runPiBridgeDoorbellAttempt() wakePiBridgeDoorbellResult {
 	if found {
 		return cfg.reconcilePiBridgeAsk(dir, doorbellDir, pending, cohortKey, liveFresh, now)
 	}
-	// A recorded acceptance means pi took the mail and its turn is coming;
-	// re-asking now would only interrupt that turn.
-	if at, ok := cfg.piBridgeAcceptedAt[cohortKey]; ok {
-		if cfg.piBridgeLiveFresh(cohortKey, liveFresh, now) && now.Before(at.Add(wakePiBridgeAskHold)) {
-			return wakePiBridgeDoorbellResult{busyHold: true, reason: "pi accepted the doorbell"}
-		}
-		delete(cfg.piBridgeAcceptedAt, cohortKey)
-	}
 	if !liveFresh {
 		return wakePiBridgeDoorbellResult{}
 	}
@@ -308,6 +297,26 @@ func (cfg *wakeConfig) runPiBridgeDoorbellAttempt() wakePiBridgeDoorbellResult {
 	}
 	pruneWakePiBridgeAttempts(doorbellDir, cfg.piBridgeResultsSeen, cfg.piBridgeAttemptsProcessed)
 	attemptID := wakePiBridgeAttemptID(ids, now)
+	// Attribution is established before the ask is observable: a claim and
+	// its result must never exist without their message ids, so the cohort
+	// record lands first and a failed write publishes nothing. The physical
+	// ids are known here, before any claim exists — a result can arrive,
+	// and a drain can preempt the delivery tick, before the wake observes
+	// its own ask's claim.
+	rec := wakePiBridgeCohort{Protocol: wakePiBridgeProtocol, Attempt: attemptID, MessageIDs: ids}
+	payload, err := json.Marshal(rec)
+	if err != nil {
+		return engaged
+	}
+	if err := os.MkdirAll(doorbellDir, 0o700); err != nil {
+		return engaged
+	}
+	if _, err := fsq.CreateNewFile(
+		filepath.Join(doorbellDir, attemptID+".cohort.json"),
+		payload, 0o600,
+	); err != nil {
+		return engaged
+	}
 	req := wakePiBridgeRequest{
 		Protocol:   wakePiBridgeProtocol,
 		Op:         "doorbell",
@@ -319,21 +328,9 @@ func (cfg *wakeConfig) runPiBridgeDoorbellAttempt() wakePiBridgeDoorbellResult {
 	if err := publishWakePiBridgeRequest(dir, req); err != nil {
 		// A fresh id plus an error means the directory is unwritable or a
 		// raced peer took the id; nothing is proven, so nothing is typed.
+		// The cohort record alone retires on the next prune.
 		return engaged
 	}
-	// The cohort association is written at publish time, before any claim
-	// exists: a result can arrive — and a drain can preempt the delivery
-	// tick — before the wake observes its own ask's claim, so
-	// claim-observation time is too late to learn which mail the attempt
-	// presented. The physical ids are known here.
-	rec := wakePiBridgeCohort{Protocol: wakePiBridgeProtocol, Attempt: attemptID, MessageIDs: ids}
-	if payload, err := json.Marshal(rec); err == nil {
-		_, _ = fsq.CreateNewFile(
-			filepath.Join(doorbellDir, attemptID+".cohort.json"),
-			payload, 0o600,
-		)
-	}
-	delete(cfg.piBridgeAcceptedAt, cohortKey)
 	return engaged
 }
 
@@ -387,24 +384,16 @@ func (cfg *wakeConfig) reconcilePiBridgeAsk(dir, doorbellDir, pending, cohortKey
 // reconcilePiBridgeClaim holds a claimed ask until its result lands: the
 // claim, not the request deadline, is the ask's clock, because pi's turn
 // may take far longer than the decision deadline to reach its
-// message_start. The claim is proven lost only when it produced no result
-// within the ask hold, or when the bridge's liveness stays stale well past
-// one heartbeat; then the group is retired and the terminal fallback runs.
+// message_start. A claim is never converted to a terminal fallback: an
+// elapsed ask hold or a stale heartbeat proves no non-delivery. When the
+// hold passes or the liveness stays stale well past one heartbeat, the
+// unresolved claim's group is retired and the cohort's own cadence and
+// caps own the next independent reminder.
 func (cfg *wakeConfig) reconcilePiBridgeClaim(doorbellDir, attemptID, cohortKey string, liveFresh bool, now time.Time) wakePiBridgeDoorbellResult {
 	cfg.clearPiBridgeBusy(cohortKey)
-	if piBridgeClaimLost(doorbellDir, attemptID, now) {
+	if piBridgeClaimLost(doorbellDir, attemptID, now) || !cfg.piBridgeLiveFresh(cohortKey, liveFresh, now) {
 		removeWakePiBridgeGroup(doorbellDir, attemptID, cfg.piBridgeResultsSeen, cfg.piBridgeAttemptsProcessed)
-		return wakePiBridgeDoorbellResult{
-			fullLine: true,
-			reason:   "pi took the doorbell but never answered",
-		}
-	}
-	if !cfg.piBridgeLiveFresh(cohortKey, liveFresh, now) {
-		removeWakePiBridgeGroup(doorbellDir, attemptID, cfg.piBridgeResultsSeen, cfg.piBridgeAttemptsProcessed)
-		return wakePiBridgeDoorbellResult{
-			fullLine: true,
-			reason:   "pi took the doorbell but its session is gone",
-		}
+		return wakePiBridgeDoorbellResult{busyHold: true, reason: "pi's doorbell claim went unanswered"}
 	}
 	if cfg.piBridgeAttemptsProcessed[attemptID] && cfg.piBridgeCadenceDone[attemptID] {
 		// Presented, recorded, and on the cohort's cadence; hold until the
@@ -555,9 +544,12 @@ func (cfg *wakeConfig) clearPiBridgeBusy(cohortKey string) {
 // collectPiBridgeResults records the doorbell attempts whose evidence
 // arrived after the claim. It runs on ordinary wake ticks, not only when
 // mail is being delivered, and each result is attributed to the cohort its
-// own claim named — never to the mail a later delivery happens to carry. A
-// result is marked seen only after its ledger record landed, so a failed
-// recording is retried on a later tick. Control flow never waits.
+// own claim named — never to the mail a later delivery happens to carry.
+// The presentation is persisted first, and a result is recorded only after
+// its attempt's presentation landed and only when its protocol and attempt
+// name match the claim it answers. A result is marked seen only after its
+// ledger record landed, so a failed recording is retried on a later tick.
+// Control flow never waits.
 func (cfg *wakeConfig) collectPiBridgeResults() {
 	if cfg == nil {
 		return
@@ -570,58 +562,14 @@ func (cfg *wakeConfig) collectPiBridgeResults() {
 	if cfg.piBridgeResultsSeen == nil {
 		cfg.piBridgeResultsSeen = map[string]bool{}
 	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".result.json") || cfg.piBridgeResultsSeen[name] {
-			continue
-		}
-		attemptID := strings.TrimSuffix(name, ".result.json")
-		var res struct {
-			Protocol string `json:"protocol"`
-			Accepted bool   `json:"accepted"`
-			Attempt  string `json:"attempt"`
-			Reason   string `json:"reason"`
-		}
-		data, err := os.ReadFile(filepath.Join(dir, name))
-		if err == nil {
-			err = json.Unmarshal(data, &res)
-		}
-		ids, idsErr := readWakePiBridgeCohort(dir, attemptID)
-		if idsErr != nil || len(ids) == 0 {
-			// No cohort record names this result: it cannot be attributed,
-			// and attributing it to the current mail is exactly the defect.
-			// The file stays on disk unseen — a record written at publish
-			// time means only a crashed or foreign write lands here — and a
-			// later cohort write (a raced publisher finishing) is picked up.
-			continue
-		}
-		detail := ""
-		switch {
-		case err != nil:
-			detail = fmt.Sprintf("doorbell result %s is unreadable: %v", name, err)
-		case res.Accepted:
-			detail = fmt.Sprintf("doorbell attempt %s accepted by pi (message_start)", res.Attempt)
-		default:
-			detail = fmt.Sprintf("doorbell attempt %s not delivered: %s", res.Attempt, strings.TrimSpace(res.Reason))
-		}
-		writer := notificationattempt.NewWriter(cfg.root, cfg.me)
-		prepared, prepareErr := writer.Prepare(ids, wakePiBridgeAttemptMode)
-		if prepareErr != nil && !notificationattempt.IsRotationOnly(prepareErr) {
-			continue // stays unseen: recorded on a later tick
-		}
-		if resultErr := writer.Result(prepared, notificationattempt.OutcomeWritten, detail); resultErr != nil {
-			continue // stays unseen: recorded on a later tick
-		}
-		if cfg.piBridgeAcceptedAt != nil && res.Accepted {
-			cfg.piBridgeAcceptedAt[strings.Join(ids, "\x00")] = cfg.wakeDoorbellNow()
-		}
-		cfg.piBridgeResultsSeen[name] = true
+	if cfg.piBridgeAttemptsProcessed == nil {
+		cfg.piBridgeAttemptsProcessed = map[string]bool{}
 	}
-	// Reconcile claims the delivery path may have missed: a claimed decision
-	// whose presented row is not yet recorded, whatever the current mail is
-	// and whether the bridge still looks fresh. The row attributes through
-	// the attempt's own publish-time cohort record; the cohort's cadence
-	// still advances on the delivery path that plans the attempt.
+	// Presentation first: a claimed decision whose presented row is not yet
+	// recorded is reconciled here, whatever the current mail is and whether
+	// the bridge still looks fresh. The row attributes through the
+	// attempt's own publish-time cohort record; the cohort's cadence still
+	// advances on the delivery path that plans the attempt.
 	for _, entry := range entries {
 		name := entry.Name()
 		if !strings.HasSuffix(name, ".decision.json") {
@@ -639,6 +587,60 @@ func (cfg *wakeConfig) collectPiBridgeResults() {
 			continue // stays unprocessed: recorded on a later tick
 		}
 		cfg.recordPiBridgePresentedRow(dir, id, ids)
+	}
+	// Then the results, each validated against the claim it answers and
+	// recorded only after that claim's presentation row exists.
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".result.json") || cfg.piBridgeResultsSeen[name] {
+			continue
+		}
+		attemptID := strings.TrimSuffix(name, ".result.json")
+		var res struct {
+			Protocol string `json:"protocol"`
+			Accepted bool   `json:"accepted"`
+			Attempt  string `json:"attempt"`
+			Reason   string `json:"reason"`
+		}
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err == nil {
+			err = json.Unmarshal(data, &res)
+		}
+		if err != nil || res.Protocol != wakePiBridgeProtocol || res.Attempt != attemptID {
+			// Unreadable or not this attempt's result: nothing here is
+			// evidence yet, so nothing is recorded and the file stays on
+			// disk unseen.
+			continue
+		}
+		ids, idsErr := readWakePiBridgeCohort(dir, attemptID)
+		if idsErr != nil || len(ids) == 0 {
+			// No cohort record names this result: it cannot be attributed,
+			// and attributing it to the current mail is exactly the defect.
+			// The file stays on disk unseen — a record written before the
+			// ask was observable means only a crash window lands here — and
+			// a later cohort write (a raced publisher finishing) is picked
+			// up.
+			continue
+		}
+		if decision, _, _ := readWakePiBridgeDecisionState(dir, attemptID); decision != "claimed" || !cfg.piBridgeAttemptsProcessed[attemptID] {
+			// The presentation row must land first.
+			continue
+		}
+		detail := ""
+		if res.Accepted {
+			detail = fmt.Sprintf("doorbell attempt %s accepted by pi (message_start)", res.Attempt)
+		} else {
+			detail = fmt.Sprintf("doorbell attempt %s not delivered: %s", res.Attempt, strings.TrimSpace(res.Reason))
+		}
+		writer := notificationattempt.NewWriter(cfg.root, cfg.me)
+		prepared, prepareErr := writer.Prepare(ids, wakePiBridgeAttemptMode)
+		if prepareErr != nil && !notificationattempt.IsRotationOnly(prepareErr) {
+			continue // stays unseen: recorded on a later tick
+		}
+		if resultErr := writer.Result(prepared, notificationattempt.OutcomeWritten, detail); resultErr != nil {
+			continue // stays unseen: recorded on a later tick
+		}
+		cfg.piBridgeResultsSeen[name] = true
 	}
 	// The tracking maps stay bounded by what is on disk.
 	for name := range cfg.piBridgeResultsSeen {

@@ -483,12 +483,17 @@ func TestWakePiBridgeClaimThenLaterReminderFallsBackWithFullLine(t *testing.T) {
 		t.Fatalf("the claim typed into the terminal: %q", got)
 	}
 
-	// Later reminder: the bridge is gone. The cohort's retry ladder still
-	// plans an attempt; the delivery falls back to the terminal with the
-	// full line.
+	// Later reminder: the bridge is gone. The unresolved claim is not
+	// evidence of non-delivery, so this pass retires it and holds; the
+	// next pass finds no claim and no fresh bridge, and the terminal
+	// fallback owns the full line.
 	h.live = nil
 	h.bridgeDecision = ""
 	h.advance(10*time.Minute + 5*time.Second)
+	h.deliver()
+	if got := h.typedChunks(); len(got) != 0 {
+		t.Fatalf("the lost claim typed into the terminal itself: %q", got)
+	}
 	h.deliver()
 	if !h.fullLineTyped() {
 		t.Fatalf("fallback wrote something other than the full fixed line then the submit: %q", h.typedChunks())
@@ -776,6 +781,18 @@ func TestWakePiBridgeResultBeatsClaimProcessingAfterDrain(t *testing.T) {
 	if !strings.Contains(aDetails, "accepted by pi (message_start)") {
 		t.Fatalf("A's ledger lost the acceptance after the drain: %q", aDetails)
 	}
+	presentedIdx, acceptedIdx := -1, -1
+	for i, d := range h.ledgerDetailsFor("m1") {
+		if presentedIdx < 0 && strings.Contains(d, "presented by the pi bridge") {
+			presentedIdx = i
+		}
+		if acceptedIdx < 0 && strings.Contains(d, "accepted by pi (message_start)") {
+			acceptedIdx = i
+		}
+	}
+	if presentedIdx < 0 || acceptedIdx < 0 || presentedIdx > acceptedIdx {
+		t.Fatalf("the ledger did not persist the presentation before the acceptance: %q", h.ledgerDetailsFor("m1"))
+	}
 
 	// The next delivery is a different message: A's acceptance is not
 	// recorded again under anyone else's ledger.
@@ -786,6 +803,41 @@ func TestWakePiBridgeResultBeatsClaimProcessingAfterDrain(t *testing.T) {
 	h.cfg.collectPiBridgeResults()
 	if got := strings.Count(h.ledgerLog(), "accepted by pi (message_start)"); got != 1 {
 		t.Fatalf("the acceptance was recorded %d times, want once", got)
+	}
+}
+
+// TestWakePiBridgeAcceptedTurnLeavingMailUnreadReturnsToCadence: a
+// recorded acceptance is evidence, not a hold. When pi's turn ends
+// without draining — the mail is still new and pi sits idle — the next
+// attempt due asks again on the cohort's cadence instead of staying
+// silent, and the wake still types nothing.
+func TestWakePiBridgeAcceptedTurnLeavingMailUnreadReturnsToCadence(t *testing.T) {
+	h := newWakePiBridgeHarness(t)
+	h.capableBridge()
+	h.bridgeDecision = "claimed"
+	h.deliverPending()
+	h.deliver() // publish A
+	h.respond() // pi claims
+	h.deliver() // presented
+	attemptA := strings.TrimSuffix(h.publishedRequests()[0], ".json")
+
+	h.writeBridgeResult(attemptA, true)
+	h.cfg.collectPiBridgeResults() // the turn's acceptance lands; no drain followed
+	if got := strings.Count(h.ledgerLog(), "accepted by pi (message_start)"); got != 1 {
+		t.Fatalf("the acceptance was recorded %d times, want once", got)
+	}
+
+	// The next attempt due: the cadence owns the reminder, so the bridge
+	// is asked again; the wake still types nothing.
+	h.bridgeDecision = "refused"
+	h.advance(3 * time.Second)
+	h.deliver()
+	names := h.publishedRequests()
+	if len(names) != 1 || strings.TrimSuffix(names[0], ".json") == attemptA {
+		t.Fatalf("asks on disk %v, want one fresh re-ask after the acceptance", names)
+	}
+	if got := h.typedChunks(); len(got) != 0 {
+		t.Fatalf("the cadence re-ask typed into the terminal: %q", got)
 	}
 }
 
@@ -858,11 +910,18 @@ func TestWakePiBridgeStaleLivenessReleasesTheClaim(t *testing.T) {
 	}
 
 	h.advance(11 * time.Second)
-	h.deliver() // the staleness persisted: the claim is lost
-	if !h.fullLineTyped() {
-		t.Fatalf("the lost claim did not fall back to the full line: %q", h.typedChunks())
+	h.deliver() // the staleness persisted: the claim retires, the cadence owns the reminder
+	if got := h.typedChunks(); len(got) != 0 {
+		t.Fatalf("the retired claim typed into the terminal: %q", got)
 	}
 	if got := h.doorbellDirFileCount(); got != 0 {
 		t.Fatalf("the dead claim's group was not retired: %d files remain", got)
+	}
+
+	// The next pass finds no claim and no fresh bridge: the terminal
+	// fallback owns the doorbell again.
+	h.deliver()
+	if !h.fullLineTyped() {
+		t.Fatalf("the terminal fallback did not own the full line: %q", h.typedChunks())
 	}
 }
