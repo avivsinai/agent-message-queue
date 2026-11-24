@@ -897,7 +897,7 @@ func checkWakeLocksWithHintsSchema(
 				Root:   inspection.Root,
 				Lock:   inspection.LockPath,
 				Reason: inspection.Reason,
-				Fix:    doctorRootCommandForOS(root, "", runtime.GOOS, "--ops", "--fix-wake-locks"),
+				Fix:    doctorRootCommandForOS(root, "", runtime.GOOS, "--fix-wake-locks"),
 			}
 			if fix {
 				fixErr := fixWakeRestartResidueWithoutLock(root, agent)
@@ -978,7 +978,7 @@ func checkWakeLocksWithHintsSchema(
 				appendLock(agent, lock, inspection, staleBinary, stage)
 				continue
 			}
-			lock.Fix = doctorRootCommandForOS(root, "", runtime.GOOS, "--ops", "--fix-wake-locks")
+			lock.Fix = doctorRootCommandForOS(root, "", runtime.GOOS, "--fix-wake-locks")
 			lock.RepairAvailable = assessment.RepairAvailable
 			lock.RepairReason = assessment.RepairReason
 			lock.Repair = assessment.Repair

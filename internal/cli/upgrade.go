@@ -104,7 +104,7 @@ func runUpgrade(args []string, currentVersion string) error {
 		"When amq is installed via Homebrew or Scoop, amq upgrade delegates to the package manager instead of overwriting it; pass -y to run the delegate.",
 		"--all upgrades companion binaries in the raw or resolved executable directory of a direct-install amq, or in ~/.local/bin; a running amq-keepalive or amq-remote is never killed.",
 		"Retire live wakes started by the previous binary before its install directory is removed.",
-		"If wake check reports binary_dir_gone, run amq doctor --ops --fix-wake-locks.",
+		"If wake check reports binary_dir_gone, run amq doctor --fix-wake-locks.",
 	)
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err

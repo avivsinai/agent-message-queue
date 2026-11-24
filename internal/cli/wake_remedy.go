@@ -63,5 +63,5 @@ func wakeCheckRemedy(root, agent string) wakeRemedyArgv {
 }
 
 func wakeDoctorStaleWakeRemedy(root string) wakeRemedyArgv {
-	return newWakeRemedy("amq", "doctor", "--root", root, "--ops", "--fix-wake-locks")
+	return newWakeRemedy("amq", "doctor", "--root", root, "--fix-wake-locks")
 }

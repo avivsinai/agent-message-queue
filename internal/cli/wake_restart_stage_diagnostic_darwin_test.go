@@ -66,7 +66,7 @@ func TestDoctorReportsInvalidWakeRestartRecordWithoutLockReadOnly(t *testing.T) 
 				t.Fatalf("doctor wake diagnostics = %#v, want one restart residue", result.WakeLocks)
 			}
 			got := result.WakeLocks[0]
-			wantFix := doctorRootCommandForOS(root, "", "darwin", "--ops", "--fix-wake-locks")
+			wantFix := doctorRootCommandForOS(root, "", "darwin", "--fix-wake-locks")
 			if got.Status != string(wakeLockMissing) || got.RestartStageStatus != "record-invalid" ||
 				!strings.Contains(got.RestartStageReason, test.wantReason) || got.Fix != wantFix {
 				t.Fatalf("doctor restart residue = %#v", got)

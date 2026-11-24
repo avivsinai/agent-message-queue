@@ -1091,12 +1091,21 @@ conservative problem states:
 
 - `stale`: AMQ proves that the recorded process is gone, mismatched, or not the
   same `amq wake`. `--fix-wake-locks` rechecks and removes only this exact lock.
+  After a machine restart, `amq wake`, `amq coop exec`, and
+  `amq doctor --fix-wake-locks` each replace a proven-stale lock themselves; the
+  PID the lock records may name an unrelated process.
   When the lock's image or restart stage lives under a directory that no longer
   exists, `wake check --json` and `doctor --ops` report `reason_code=binary_dir_gone`
-  and name `amq doctor --ops --fix-wake-locks` as the next action instead of a
+  and name `amq doctor --fix-wake-locks` as the next action instead of a
   raw ENOENT.
 - `unverified`: AMQ cannot prove ownership or staleness. Startup fails closed
   and doctor preserves the lock for operator inspection.
+
+Run at a project (base root), plain `amq doctor` shows one `Wake locks` row for
+the base root and every session under it, with stale counts by session, and
+`amq doctor --fix-wake-locks` rechecks and removes the proven-stale locks of
+that whole project; a session whose repair is refused is reported with its
+reason and does not stop the others. Unverified locks stay preserved.
 
 Stale-lock removal and staged-executable deletion use independent identity
 checks. If a stage no longer matches its saved file identity (for example,
@@ -1193,7 +1202,7 @@ The lifecycle boundaries are:
 
 - `repair` replaces a proven-stale eligible inject-via wake.
 - `recover-owner` releases one cooperative owner claim.
-- `doctor --ops --fix-wake-locks` removes one proven-stale lock.
+- `doctor --fix-wake-locks` removes one proven-stale lock.
 - `retire` stops an identity-confirmed inject-via wake.
 - launchd, systemd, or the owning shell stops a raw wake.
 

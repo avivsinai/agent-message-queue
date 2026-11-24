@@ -247,7 +247,7 @@ func TestRunOpsChecks_ReportsStaleWakeLock(t *testing.T) {
 	if got.Reason != "pid not running" {
 		t.Fatalf("reason = %q, want pid not running", got.Reason)
 	}
-	wantFix := doctorRootCommandForOS(root, "", runtime.GOOS, "--ops", "--fix-wake-locks")
+	wantFix := doctorRootCommandForOS(root, "", runtime.GOOS, "--fix-wake-locks")
 	if got.Fix != wantFix {
 		t.Fatalf("fix = %q, want %q", got.Fix, wantFix)
 	}

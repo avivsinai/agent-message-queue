@@ -12,7 +12,7 @@ type upgradeStaleWake struct {
 	Hint opsHint
 }
 
-const upgradeLiveWakePreviousBinaryNote = "Live wakes started by the previous binary stay bound to that image; retire them first, or run amq doctor --ops --fix-wake-locks after the old install directory is gone."
+const upgradeLiveWakePreviousBinaryNote = "Live wakes started by the previous binary stay bound to that image; retire them first, or run amq doctor --fix-wake-locks after the old install directory is gone."
 
 func reportStaleWakesAfterUpgrade() error {
 	if err := writeStdoutLine(upgradeLiveWakePreviousBinaryNote); err != nil {

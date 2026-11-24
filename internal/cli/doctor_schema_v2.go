@@ -9,6 +9,7 @@ type doctorResultV2 struct {
 	ExtensionManifests   []doctorExtensionManifest   `json:"extension_manifests,omitempty"`
 	ExtensionDiagnostics []doctorExtensionDiagnostic `json:"extension_diagnostics,omitempty"`
 	Summary              doctorSummaryV2             `json:"summary"`
+	WakeLocks            *doctorWakeLockSummaryV2    `json:"wake_locks,omitempty"`
 	Ops                  *doctorOpsResultV2          `json:"ops,omitempty"`
 }
 
@@ -16,6 +17,13 @@ type doctorSummaryV2 struct {
 	OK    int `json:"ok"`
 	Warn  int `json:"warn"`
 	Error int `json:"error"`
+}
+
+type doctorWakeLockSummaryV2 struct {
+	Stale      int            `json:"stale"`
+	Unverified int            `json:"unverified,omitempty"`
+	BySession  map[string]int `json:"stale_by_session,omitempty"`
+	Refusals   []string       `json:"fix_refusals,omitempty"`
 }
 
 type doctorOpsResultV2 struct {
@@ -64,6 +72,14 @@ func renderDoctorResultV2(result doctorResult) doctorResultV2 {
 			Warn:  result.Summary.Warn,
 			Error: result.Summary.Error,
 		},
+	}
+	if result.WakeLockSummary != nil {
+		v2.WakeLocks = &doctorWakeLockSummaryV2{
+			Stale:      result.WakeLockSummary.Stale,
+			Unverified: result.WakeLockSummary.Unverified,
+			BySession:  result.WakeLockSummary.BySession,
+			Refusals:   result.WakeLockSummary.Refusals,
+		}
 	}
 	if result.Ops == nil {
 		return v2
