@@ -36,9 +36,12 @@ esac
 # Canonicalize an existing root, or create its closest existing parent first.
 # Untrusting an unresolved source path avoids writing through a lexical /tmp alias.
 requested_root=$scratch_root
-if ! scratch_root=$(cd "$scratch_root" 2>/dev/null && pwd -P); then
+if [ "$command" = list ] && [ ! -d "$scratch_root" ]; then
+    scratch_root=/
+elif ! scratch_root=$(cd "$scratch_root" 2>/dev/null && pwd -P); then
     scratch_root=$requested_root
     [ "$command" = add ] || { echo "error: worktree root is unavailable: $scratch_root" >&2; exit 1; }
+    scratch_root=$requested_root
     parent=$scratch_root
     while [ ! -d "$parent" ]; do
         [ "$parent" != / ] || {
@@ -126,8 +129,8 @@ case "$command" in
                         ! git -C "$repo_root" cat-file -e "$head^{commit}" 2>/dev/null; then
                         status=origin-main-or-head-unavailable
                     else
-                        git -C "$repo_root" merge-base --is-ancestor "$head" refs/remotes/origin/main 2>/dev/null
-                        rc=$?
+                        rc=0
+                        git -C "$repo_root" merge-base --is-ancestor "$head" refs/remotes/origin/main 2>/dev/null || rc=$?
                         case "$rc" in
                             0) status=ancestor-of-origin/main ;;
                             1) status=not-ancestor-of-origin/main ;;
