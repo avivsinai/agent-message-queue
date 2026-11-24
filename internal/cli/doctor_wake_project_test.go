@@ -115,6 +115,31 @@ func TestDoctorProjectWakeLockRowReportsSessionCounts(t *testing.T) {
 		t.Fatalf("ops wake lock roots = %#v, want the session1 and session2 rows", roots)
 	}
 
+	// Ops is the writer; a fresh summary recheck counts its results without
+	// applying a second fix traversal.
+	opsFixOutput, err := captureEnvStdout(t, func() error {
+		return runDoctor([]string{"--ops", "--root", base, "--fix-wake-locks", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("ops fix doctor: %v", err)
+	}
+	var opsFixResult doctorResult
+	if err := json.Unmarshal([]byte(opsFixOutput), &opsFixResult); err != nil {
+		t.Fatal(err)
+	}
+	if opsFixResult.WakeLockSummary == nil || opsFixResult.WakeLockSummary.Stale != 0 {
+		t.Fatalf("summary after single ops fix = %#v, want no stale", opsFixResult.WakeLockSummary)
+	}
+	removed := 0
+	for _, lock := range opsFixResult.Ops.WakeLocks {
+		if lock.Removed {
+			removed++
+		}
+	}
+	if removed != 2 {
+		t.Fatalf("ops removed = %d, want both stale locks", removed)
+	}
+
 	// An explicit session --root scopes the row to that session alone.
 	sessionOutput, err := captureEnvStdout(t, func() error {
 		return runDoctor([]string{"--json", "--root", filepath.Join(base, "session1")})
@@ -127,8 +152,7 @@ func TestDoctorProjectWakeLockRowReportsSessionCounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	sessionRow := findDoctorCheck(t, sessionResult.Checks, "Wake locks")
-	if sessionRow.Status != "warn" || !strings.Contains(sessionRow.Message, "1 stale") ||
-		strings.Contains(sessionRow.Message, "session2") {
+	if sessionRow.Status != "ok" || !strings.Contains(sessionRow.Message, "none stale") {
 		t.Fatalf("session-root Wake locks = %q (%q), want only session1's stale lock", sessionRow.Status, sessionRow.Message)
 	}
 }
@@ -184,5 +208,20 @@ func TestDoctorFixWakeLocksRemovesProjectStaleLocksAndKeepsUnverified(t *testing
 	}
 	if _, err := os.Stat(mismatchPath); err != nil {
 		t.Fatalf("root-mismatch lock was removed without process proof: %v", err)
+	}
+	structuralOutput, err := captureEnvStdout(t, func() error {
+		return runDoctor([]string{"--ops", "--fix-wake-locks", "--json"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var structuralResult doctorResult
+	if err := json.Unmarshal([]byte(structuralOutput), &structuralResult); err != nil {
+		t.Fatal(err)
+	}
+	for _, lock := range structuralResult.Ops.WakeLocks {
+		if lock.Agent == "foreign" && lock.Fix != "" {
+			t.Fatalf("structural stale lock offers an ineffective generic fix: %#v", lock)
+		}
 	}
 }

@@ -391,6 +391,12 @@ func readOpsNotificationAttempts(root, agent string) ([]opsNotificationAttempt, 
 func checkUnreadBacklogNoNotifierHints(root string, agents []opsAgent, wakeLocks []opsWakeLock) []opsHint {
 	notifierAbsent := make(map[string]bool, len(wakeLocks))
 	for _, lock := range wakeLocks {
+		// Project-wide ops contains sibling rows, but these agents and their
+		// remedies belong to the selected root. Another session's same handle
+		// must neither suppress nor relabel this root's backlog hint.
+		if absPath(resolveRoot(lock.Root)) != absPath(resolveRoot(root)) {
+			continue
+		}
 		notifierAbsent[lock.Agent] = wakeLockProvesNotifierAbsent(lock)
 	}
 
@@ -854,6 +860,16 @@ func checkWakeLocksWithHintsSchema(
 		lock.RestartStageStatus = stage.Status
 		lock.RestartStageReason = stage.Reason
 		applyWakeBinaryDirGoneOpsReason(&lock, inspection, stage)
+		// A structurally stale or owner-bound lock cannot be removed by the
+		// generic doctor command it was given above or by any shadow branch;
+		// do not direct a repeat of a refused fix. Authoritative claims retain
+		// recover-owner instead.
+		if inspection.Status == wakeLockStale &&
+			strings.HasPrefix(lock.Fix, "amq doctor ") &&
+			(!wakeLockStaleFromProcessExamination(inspection) ||
+				classifyWakeClaimForGenericTransition(inspection) == wakeClaimAuthoritative) {
+			lock.Fix = ""
+		}
 		if lock.HealthStatus == wakeHealthUnresponsive || lock.HealthStatus == wakeHealthDegraded {
 			hints = append(hints, opsHint{
 				Code:   "wake_loop_" + lock.HealthStatus,

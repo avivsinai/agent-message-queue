@@ -265,10 +265,15 @@ func runDoctor(args []string) error {
 		result.Ops = runOpsChecksWithSchema(root, string(source), fixWakeLocks, *jsonSchemaFlag, baseRoot)
 	}
 
-	// Plain and ops consume the same guarded session walk. Structural stale
-	// locks stay visible, but the removal helper refuses them because their
-	// process was not examined. Without the flag this walk is read-only.
-	if root != "" {
+	// Plain and ops consume the same guarded roots and repair authorization.
+	// Ops is the sole writer: a second fix traversal could remove a lock that
+	// replaced one the ops mutation recheck preserved.
+	if root != "" && opsRequested {
+		check, projectLocks := checkProjectWakeLocks(root, baseRoot, false)
+		result.Checks = append(result.Checks, check)
+		result.WakeLockSummary = projectLocks
+	}
+	if root != "" && !opsRequested {
 		check, projectLocks := checkProjectWakeLocks(root, baseRoot, fixWakeLocks)
 		result.Checks = append(result.Checks, check)
 		result.WakeLockSummary = projectLocks
