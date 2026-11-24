@@ -83,7 +83,7 @@ func TestDoctorProjectWakeLockRowReportsSessionCounts(t *testing.T) {
 	if row.Status != "warn" {
 		t.Fatalf("Wake locks status = %q (%q), want warn", row.Status, row.Message)
 	}
-	for _, want := range []string{"2 stale", "session1: 1", "session2: 1", "amq doctor --fix-wake-locks"} {
+	for _, want := range []string{"2 stale", "session1: 1", "session2: 1", "amq doctor --root "} {
 		if !strings.Contains(row.Message, want) {
 			t.Fatalf("Wake locks message %q missing %q", row.Message, want)
 		}
