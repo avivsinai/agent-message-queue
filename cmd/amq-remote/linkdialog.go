@@ -105,7 +105,7 @@ func (s *linkDialogSource) Select(rec *requests.Record) *protocol.Interaction {
 		return in
 	}
 	approvals, consent, ok := s.sharePolicy(rec)
-	if !ok || approvals != manifest.ApprovalsLink || !linkio.TakesGrant(consent) {
+	if !ok || !linkTakesAnswers(approvals, consent) {
 		return nil
 	}
 	reqs, err := dialog.Requests(dir)
@@ -134,7 +134,15 @@ func (s *linkDialogSource) Select(rec *requests.Record) *protocol.Interaction {
 // published remote_answer flag and the admission check can never diverge.
 func (s *linkDialogSource) takesAnswers(rec *requests.Record) bool {
 	approvals, consent, ok := s.sharePolicy(rec)
-	return ok && approvals == manifest.ApprovalsLink && linkio.TakesGrant(consent)
+	return ok && linkTakesAnswers(approvals, consent)
+}
+
+// linkTakesAnswers reports whether a share of this approvals policy and
+// consent takes answers over the link. Admission, the published
+// remote_answer flag, and the attach summary all judge by this one rule:
+// policy link and a consent that takes a signed grant.
+func linkTakesAnswers(approvals, consent string) bool {
+	return approvals == manifest.ApprovalsLink && linkio.TakesGrant(consent)
 }
 
 // render reads one dialog and builds its interaction when it is fully
