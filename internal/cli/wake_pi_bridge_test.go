@@ -488,10 +488,10 @@ func TestWakePiBridgeClaimThenLaterReminderFallsBackWithFullLine(t *testing.T) {
 	// full line.
 	h.live = nil
 	h.bridgeDecision = ""
-	h.advance(10 * time.Minute)
+	h.advance(10*time.Minute + 5*time.Second)
 	h.deliver()
 	if !h.fullLineTyped() {
-		t.Fatal("fallback wrote something other than the full fixed line then the submit")
+		t.Fatalf("fallback wrote something other than the full fixed line then the submit: %q", h.typedChunks())
 	}
 }
 
@@ -618,8 +618,10 @@ func TestWakePiBridgeRefusedAttemptsArePruned(t *testing.T) {
 	h.deliver() // read the refusal
 	h.advance(2 * time.Second)
 	h.deliver() // retire a1, publish a2
-	if got := h.doorbellDirFileCount(); got != 1 {
-		t.Fatalf("doorbell dir holds %d files after the retired refusal, want only a2's request", got)
+	// A published attempt is now request + cohort record: the cohort is
+	// written at publish time so a result can never miss it.
+	if got := h.doorbellDirFileCount(); got != 2 {
+		t.Fatalf("doorbell dir holds %d files after the retired refusal, want a2's request plus its cohort record", got)
 	}
 	h.respond()
 	h.advance(2 * time.Second)
@@ -718,5 +720,149 @@ func TestWakePiBridgePruneKeepsOutstandingGroups(t *testing.T) {
 	}
 	if seen["doorbell-claim-done.result.json"] {
 		t.Fatal("the tracking map kept an entry whose group was retired")
+	}
+}
+
+// deliverEmpty runs one delivery pass with an empty inbox: the drain case,
+// where the mail is gone before the wake's next tick.
+func (h *wakePiBridgeHarness) deliverEmpty() {
+	h.t.Helper()
+	if err := deliverNewMessageNotification(h.cfg, peerWakeNotification("drained"), false, map[string]os.FileInfo{}); err != nil {
+		h.t.Fatalf("deliverNewMessageNotification (empty inbox): %v", err)
+	}
+}
+
+func (h *wakePiBridgeHarness) writeBridgeResult(attemptID string, accepted bool) {
+	h.t.Helper()
+	dir := filepath.Join(h.root, "agents", "codex", "extensions", "pi-bridge", "doorbell")
+	payload, err := json.Marshal(map[string]any{
+		"protocol": wakePiBridgeProtocol,
+		"accepted": accepted,
+		"attempt":  attemptID,
+		"at":       time.Now().UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, attemptID+".result.json"), payload, 0o600); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+// TestWakePiBridgeResultBeatsClaimProcessingAfterDrain is the stock-pi live
+// finding: pi claims and writes its acceptance result before the wake's
+// next delivery tick, and a fast drain empties the inbox so no delivery
+// tick ever processes the claim. The acceptance still lands in A's own
+// ledger, attributed through the attempt's publish-time cohort record,
+// and a later message's delivery never re-attributes it.
+func TestWakePiBridgeResultBeatsClaimProcessingAfterDrain(t *testing.T) {
+	h := newWakePiBridgeHarness(t)
+	h.capableBridge()
+	h.bridgeDecision = "claimed"
+	h.deliverPending()
+	h.deliver() // publish A
+	h.respond() // pi claims, and its result arrives before the next tick
+	attemptA := strings.TrimSuffix(h.publishedRequests()[0], ".json")
+	h.writeBridgeResult(attemptA, true)
+
+	// The drain: the inbox empties, so no delivery tick observes the claim.
+	h.deliverEmpty()
+	h.cfg.collectPiBridgeResults()
+
+	aDetails := strings.Join(h.ledgerDetailsFor("m1"), "\n")
+	if !strings.Contains(aDetails, "presented by the pi bridge") {
+		t.Fatalf("A's ledger lost the presented record: %q", aDetails)
+	}
+	if !strings.Contains(aDetails, "accepted by pi (message_start)") {
+		t.Fatalf("A's ledger lost the acceptance after the drain: %q", aDetails)
+	}
+
+	// The next delivery is a different message: A's acceptance is not
+	// recorded again under anyone else's ledger.
+	h.cfg.cohortIDs = []string{"m2"}
+	files := wakeDoorbellTestFiles(h.t, "pending-b.md")
+	h.cfg.doorbell.arm(files)
+	h.deliver()
+	h.cfg.collectPiBridgeResults()
+	if got := strings.Count(h.ledgerLog(), "accepted by pi (message_start)"); got != 1 {
+		t.Fatalf("the acceptance was recorded %d times, want once", got)
+	}
+}
+
+// TestWakePiBridgeClaimedAskHoldsThroughASlowTurn is the stock-pi live
+// finding: pi claims the doorbell, its model turn takes tens of seconds
+// before message_start, and the bridge refuses new asks while that turn
+// runs. The wake holds the claim: it never re-asks, never types, and the
+// unsent draft stays untouched until the acceptance lands and the turn
+// drains the mail once.
+func TestWakePiBridgeClaimedAskHoldsThroughASlowTurn(t *testing.T) {
+	h := newWakePiBridgeHarness(t)
+	h.capableBridge()
+	h.bridgeDecision = "claimed"
+	h.deliverPending()
+	h.deliver() // publish A
+	h.respond() // pi claims
+	h.deliver() // the claim presents; the wake holds
+	attemptA := strings.TrimSuffix(h.publishedRequests()[0], ".json")
+
+	// The turn runs. Any ask in this window would be refused by the busy
+	// bridge; the wake must not issue one, and must not fall back.
+	h.bridgeDecision = "refused"
+	h.advance(26 * time.Second)
+	h.deliver()
+	if got := h.typedChunks(); len(got) != 0 {
+		t.Fatalf("a slow claimed turn got the terminal typed: %q", got)
+	}
+	if got := len(h.publishedRequests()); got != 1 {
+		t.Fatalf("the wake published %d asks while a claim was outstanding, want 1", got)
+	}
+
+	// message_start: the acceptance result lands; the wake still types
+	// nothing and lets the turn finish.
+	h.writeBridgeResult(attemptA, true)
+	h.advance(2 * time.Second)
+	h.deliver()
+	if got := h.typedChunks(); len(got) != 0 {
+		t.Fatalf("an accepted ask got the terminal typed: %q", got)
+	}
+	log := h.ledgerLog()
+	if !strings.Contains(log, "presented by the pi bridge") || !strings.Contains(log, "accepted by pi (message_start)") {
+		t.Fatalf("the ledger lost the presentation or the acceptance: %s", log)
+	}
+
+	// The turn drains the mail once; the doorbell never typed.
+	h.deliverEmpty()
+	if got := h.typedChunks(); len(got) != 0 {
+		t.Fatalf("the doorbell typed during the turn: %q", got)
+	}
+}
+
+// TestWakePiBridgeStaleLivenessReleasesTheClaim: a claim whose bridge goes
+// away holds through the heartbeat's noise, then releases to the terminal
+// fallback with the full line, and the dead claim's files are retired so
+// later mail can ask again.
+func TestWakePiBridgeStaleLivenessReleasesTheClaim(t *testing.T) {
+	h := newWakePiBridgeHarness(t)
+	h.capableBridge()
+	h.bridgeDecision = "claimed"
+	h.deliverPending()
+	h.deliver() // publish A
+	h.respond() // pi claims
+	h.deliver() // presented
+
+	h.advance(2 * time.Second)
+	h.live = nil
+	h.deliver() // one stale read is heartbeat noise: hold
+	if got := h.typedChunks(); len(got) != 0 {
+		t.Fatalf("a single stale heartbeat typed the terminal: %q", got)
+	}
+
+	h.advance(11 * time.Second)
+	h.deliver() // the staleness persisted: the claim is lost
+	if !h.fullLineTyped() {
+		t.Fatalf("the lost claim did not fall back to the full line: %q", h.typedChunks())
+	}
+	if got := h.doorbellDirFileCount(); got != 0 {
+		t.Fatalf("the dead claim's group was not retired: %d files remain", got)
 	}
 }

@@ -83,6 +83,9 @@ type wakeConfig struct {
 	piBridgeBusySince             map[string]time.Time                             // the first busy refusal per cohort, which starts the input_max_hold bound
 	piBridgeResultsSeen           map[string]bool                                  // doorbell result files the attempt ledger already recorded
 	piBridgeAttemptsProcessed     map[string]bool                                  // doorbell attempts whose decision this wake already acted on
+	piBridgeAcceptedAt            map[string]time.Time                             // the recorded acceptance per cohort, which holds re-asks while pi's turn runs
+	piBridgeLiveStaleSince        map[string]time.Time                             // the first stale liveness read per cohort, which releases an issued ask only after it persists
+	piBridgeCadenceDone           map[string]bool                                  // doorbell attempts whose presentation already advanced the cohort's cadence
 	commands                      *wakeCommands                                    // the owner command queue the wake types (wakecmd); nil = none
 	dialogHold                    wakeDialogState                                  // the state last held for, so each change logs once
 	dialogHoldBusy                bool                                             // the last hold was a busy harness turn, so a change of cause logs once
