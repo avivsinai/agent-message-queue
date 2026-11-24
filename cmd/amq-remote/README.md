@@ -584,8 +584,9 @@ Protocol: [`amq.remote.link/1`](../../docs/remote-link-protocol.md).
    `$TMPDIR` that neither hold nor lie inside the endpoint's state directory.
    Otherwise the server must ask for a signature per task. A Claude Code
    terminal session takes a grant when the owner has installed the
-   [prompt hook](#session-grants-and-the-prompt-hook) and its latest report
-   names an eligible permission mode.
+   [prompt hook](#session-grants-and-the-prompt-hook) with
+   `amq-remote claude install-prompt-hook` and its latest report names a mode
+   that asks or refuses before an action without prior permission.
    A pi terminal session takes a grant when its bridge advertises
    [the granted-task guard](../../docs/pi-bridge-protocol.md#bridge-revision-6-the-guard-of-granted-tasks).
    The guard asks the user to type `yes` before each tool call except
