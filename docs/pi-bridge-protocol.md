@@ -621,8 +621,8 @@ The adapter's epoch rules:
    session the request is for; it is not admission evidence and does not
    pin. A live record whose `session_generation` differs from the pin, or
    whose `pid` differs from the pinning receipt's `pid`, drops the pin. If two
-   processes report the same generation, it cannot address new work. A new
-   process mints a fresh generation.
+   processes report the same generation, the attachment refuses new work for
+   that address until the bridge publishes a fresh generation.
 3. **A hint for another generation is refused.** The extension delivers a
    request only when its `epoch_hint` equals the current generation. An
    absent, empty, or different hint gets a `refused` event with reason
