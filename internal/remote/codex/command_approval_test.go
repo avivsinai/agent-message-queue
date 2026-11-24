@@ -1,6 +1,11 @@
 package codex
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+
+	"github.com/avivsinai/agent-message-queue/internal/remote/dialog"
+)
 
 // Source: live run 2026-11-24, Codex CLI command dialog of a link task.
 // Codex proposed an exec-policy amendment for an ordinary command.
@@ -40,6 +45,31 @@ func TestPlainCommandTextRefusesUnmatchedAmendment(t *testing.T) {
 	} {
 		if got := plainCommandText([]byte(raw)); got != "" {
 			t.Errorf("%s: plainCommandText = %q, want empty", name, got)
+		}
+	}
+}
+
+// Source: three command-approval requests captured from a Codex 0.172.0
+// app-server on 2026-11-24 (thread, turn and item ids and the directory are
+// replaced, and the keys are sorted; every value is as sent). The 0.170.2 release
+// withheld each one from the link: environmentId is "local", not null.
+var capturedCommandApprovals = map[string]string{
+	"inferred amendment":         `{"availableDecisions":["accept",{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["/usr/bin/printf","X\\n"]}},"cancel"],"command":"/bin/zsh -lc \"/usr/bin/printf 'X\\\\n'\"","commandActions":[{"command":"/usr/bin/printf 'X\\n'","type":"unknown"}],"cwd":"/w","environmentId":"local","itemId":"i1","kind":"command","proposedExecpolicyAmendment":["/usr/bin/printf","X\\n"],"reason":"Do you approve running /usr/bin/printf 'X\\n' once?","startedAtMs":1795545048324,"threadId":"t1","turnId":"turn-1"}`,
+	"prefix rule amendment":      `{"availableDecisions":["accept",{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["/usr/bin/printf"]}},"cancel"],"command":"/bin/zsh -lc \"/usr/bin/printf 'X\\\\n'\"","commandActions":[{"command":"/usr/bin/printf 'X\\n'","type":"unknown"}],"cwd":"/w","environmentId":"local","itemId":"i1","kind":"command","proposedExecpolicyAmendment":["/usr/bin/printf"],"reason":"Do you want to allow this command to print X followed by a newline?","startedAtMs":1795545053297,"threadId":"t1","turnId":"turn-1"}`,
+	"ls with a listFiles action": `{"availableDecisions":["accept",{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["ls"]}},"cancel"],"command":"/bin/zsh -lc ls","commandActions":[{"command":"ls","path":null,"type":"listFiles"}],"cwd":"/w","environmentId":"local","itemId":"i1","kind":"command","proposedExecpolicyAmendment":["ls"],"reason":"Do you want to allow this single invocation of ls in the current directory?","startedAtMs":1795545058749,"threadId":"t1","turnId":"turn-1"}`,
+}
+
+func TestCapturedLocalCommandApprovalIsCompleteForTheLink(t *testing.T) {
+	for name, raw := range capturedCommandApprovals {
+		a := &Attachment{threadID: "t1"}
+		d := a.dialogFor(ServerRequest{ID: json.RawMessage(`"s"`), Method: methodCommandApproval, Params: json.RawMessage(raw)})
+		if d == nil || !d.req.Complete || d.req.Turn != "turn-1" {
+			t.Errorf("%s: dialog = %+v; want a complete dialog of turn-1", name, d)
+			continue
+		}
+		in, ok := dialog.RenderLinkInteraction(d.req)
+		if !ok || len(in.Options) != 1 || in.Options[0] != "Allow once" {
+			t.Errorf("%s: link interaction = %+v, %v; want the one choice Allow once", name, in, ok)
 		}
 	}
 }
