@@ -851,7 +851,10 @@ func RunName(turnID string) string { return turnRunPrefix + turnID }
 // for any other run name.
 func TurnOfRun(run string) (string, bool) {
 	turn, ok := strings.CutPrefix(run, turnRunPrefix)
-	return turn, ok && turn != ""
+	if !ok || turn == "" {
+		return "", false
+	}
+	return turn, true
 }
 
 // runIDLocked returns the run's correlation id. The caller MUST hold a.mu:

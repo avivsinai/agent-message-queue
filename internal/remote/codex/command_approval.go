@@ -29,26 +29,44 @@ type commandApproval struct {
 	approvalID, environmentID                     nullApprovalField
 	additionalPermissions, networkApprovalContext nullApprovalField
 	proposedNetworkPolicyAmendments               nullApprovalField
-	proposedExecpolicyAmendment                   *[]string
+	proposedExecpolicyAmendment                   execPrefix
+}
+
+// execPrefix is a proposed exec-policy prefix: JSON null, or a JSON array
+// whose every element is a JSON string.
+type execPrefix struct {
+	set  bool
+	args []string
+}
+
+func (e *execPrefix) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		return nil
+	}
+	var raws []json.RawMessage
+	if len(data) == 0 || data[0] != '[' || json.Unmarshal(data, &raws) != nil {
+		return errors.New("exec-policy prefix is not an array")
+	}
+	args := make([]string, len(raws))
+	for i, raw := range raws {
+		if len(raw) == 0 || raw[0] != '"' || json.Unmarshal(raw, &args[i]) != nil {
+			return errors.New("exec-policy prefix element is not a string")
+		}
+	}
+	e.set, e.args = true, args
+	return nil
 }
 
 // amendmentDecision reports whether raw is the one object decision Codex
 // offers with a proposed exec-policy amendment, naming exactly that prefix.
-func amendmentDecision(raw json.RawMessage, proposed *[]string) bool {
-	var outer map[string]json.RawMessage
-	if proposed == nil || json.Unmarshal(raw, &outer) != nil || len(outer) != 1 {
+func amendmentDecision(raw json.RawMessage, proposed execPrefix) bool {
+	var inner json.RawMessage
+	if !proposed.set || !decodeApprovalFields(raw, map[string]any{"acceptWithExecpolicyAmendment": &inner}) || inner == nil {
 		return false
 	}
-	inner, ok := outer["acceptWithExecpolicyAmendment"]
-	if !ok {
-		return false
-	}
-	var body map[string][]string
-	if json.Unmarshal(inner, &body) != nil || len(body) != 1 {
-		return false
-	}
-	prefix, ok := body["execpolicy_amendment"]
-	return ok && slices.Equal(prefix, *proposed)
+	var prefix execPrefix
+	return decodeApprovalFields(inner, map[string]any{"execpolicy_amendment": &prefix}) &&
+		prefix.set && slices.Equal(prefix.args, proposed.args)
 }
 
 // plainCommandText returns the complete decision text or an empty string.
@@ -104,7 +122,7 @@ func plainCommandText(params json.RawMessage) string {
 			return ""
 		}
 	}
-	if !once || (p.proposedExecpolicyAmendment != nil) != (amendments == 1) {
+	if !once || p.proposedExecpolicyAmendment.set != (amendments == 1) {
 		return ""
 	}
 	text := "$ " + p.command + "\nin " + p.cwd

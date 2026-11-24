@@ -26,7 +26,18 @@ func TestPlainCommandTextRefusesUnmatchedAmendment(t *testing.T) {
 	unoffered := `{"threadId":"t","turnId":"u","itemId":"i","startedAtMs":1,"kind":"command","command":"c","cwd":"/w","reason":"r","commandActions":[],
 "proposedExecpolicyAmendment":["a"],
 "availableDecisions":["accept","cancel"]}`
-	for name, raw := range map[string]string{"no proposal": noProposal, "differs": differs, "proposal with no decision": unoffered} {
+	base := func(proposal, decision string) string {
+		return `{"threadId":"t","turnId":"u","itemId":"i","startedAtMs":1,"kind":"command","command":"c","cwd":"/w","reason":"r","commandActions":[],
+"proposedExecpolicyAmendment":` + proposal + `,"availableDecisions":["accept",` + decision + `]}`
+	}
+	for name, raw := range map[string]string{
+		"no proposal": noProposal, "differs": differs, "proposal with no decision": unoffered,
+		"null element":  base(`["a",null]`, `{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["a",null]}}`),
+		"not an array":  base(`"a"`, `{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":"a"}}`),
+		"repeated key":  base(`["a"]`, `{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["b"],"execpolicy_amendment":["a"]}}`),
+		"extra key":     base(`["a"]`, `{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["a"]},"other":1}`),
+		"missing field": base(`["a"]`, `{"acceptWithExecpolicyAmendment":{}}`),
+	} {
 		if got := plainCommandText([]byte(raw)); got != "" {
 			t.Errorf("%s: plainCommandText = %q, want empty", name, got)
 		}
