@@ -582,8 +582,16 @@ Protocol: [`amq.remote.link/1`](../../docs/remote-link-protocol.md).
    `workspaceWrite` sandbox, and a working directory, writable roots, runtime
    workspace roots and (under `workspaceWrite`, unless excluded) `/tmp` and
    `$TMPDIR` that neither hold nor lie inside the endpoint's state directory.
-   Otherwise the server must ask for a signature per task. Claude Code and pi
-   sessions take no grant yet. A link in the machine root (the default) can
+   Otherwise the server must ask for a signature per task. A Claude Code
+   terminal session takes a grant when the owner has installed the
+   [prompt hook](#session-grants-and-the-prompt-hook) with
+   `amq-remote claude install-prompt-hook` and its latest report names a mode
+   that asks or refuses before an action without prior permission.
+   A pi terminal session takes a grant when its bridge advertises
+   [the granted-task guard](../../docs/pi-bridge-protocol.md#bridge-revision-6-the-guard-of-granted-tasks).
+   The guard asks the user to type `yes` before each tool call except
+   pi's built-in `read`, `grep`, `find` and `ls`.
+   A link in the machine root (the default) can
    grant; a link kept inside a project cannot grant to that project's
    sessions. A link's state is never moved: to grant there, `link remove` it
    and `link add` it again without `--root`, or keep a signature per task.
