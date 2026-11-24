@@ -8,6 +8,16 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.170.2](https://github.com/avivsinai/agent-message-queue/compare/v0.170.1...v0.170.2) (2026-11-24)
+
+
+### Bug Fixes
+
+* **pi:** a link session grant for a pi session survives the session's first task ([#1636](https://github.com/avivsinai/agent-message-queue/issues/1636)) ([2f40e96](https://github.com/avivsinai/agent-message-queue/commit/2f40e96247b157e40f984815b0f574670a66a2e4))
+* **remote:** a Codex permission dialog of a link task reaches the linked server ([#1634](https://github.com/avivsinai/agent-message-queue/issues/1634)) ([a0ece54](https://github.com/avivsinai/agent-message-queue/commit/a0ece54f289beffb8c5aa2feee1d694bf60e5cbd))
+* **remote:** stop up when the endpoint socket path is too long ([7d53adf](https://github.com/avivsinai/agent-message-queue/commit/7d53adff7e3e3dfb55f018d55b13edad2db66ec6))
+* **wake:** coop exec and doctor recover stale wake locks after a restart ([#1635](https://github.com/avivsinai/agent-message-queue/issues/1635)) ([afb0de4](https://github.com/avivsinai/agent-message-queue/commit/afb0de46e876801c71001059ab2d84f3e99306f0))
+
 ## [0.170.1](https://github.com/avivsinai/agent-message-queue/compare/v0.170.0...v0.170.1) (2026-11-24)
 
 
