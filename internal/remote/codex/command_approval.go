@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 )
 
@@ -18,16 +19,54 @@ func (*nullApprovalField) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// commandApproval is the closed Codex 0.171 command-approval envelope.
+// commandApproval is the closed Codex command-approval envelope.
 type commandApproval struct {
-	threadID, turnID, itemID                                     string
-	startedAtMs                                                  *int64
-	kind, command, cwd, reason                                   string
-	commandActions                                               []json.RawMessage
-	availableDecisions                                           []string
-	approvalID, environmentID                                    nullApprovalField
-	additionalPermissions, networkApprovalContext                nullApprovalField
-	proposedExecpolicyAmendment, proposedNetworkPolicyAmendments nullApprovalField
+	threadID, turnID, itemID                      string
+	startedAtMs                                   *int64
+	kind, command, cwd, reason                    string
+	commandActions                                []json.RawMessage
+	availableDecisions                            []json.RawMessage
+	approvalID, environmentID                     nullApprovalField
+	additionalPermissions, networkApprovalContext nullApprovalField
+	proposedNetworkPolicyAmendments               nullApprovalField
+	proposedExecpolicyAmendment                   execPrefix
+}
+
+// execPrefix is a proposed exec-policy prefix: JSON null, or a JSON array
+// whose every element is a JSON string.
+type execPrefix struct {
+	set  bool
+	args []string
+}
+
+func (e *execPrefix) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		return nil
+	}
+	var raws []json.RawMessage
+	if len(data) == 0 || data[0] != '[' || json.Unmarshal(data, &raws) != nil {
+		return errors.New("exec-policy prefix is not an array")
+	}
+	args := make([]string, len(raws))
+	for i, raw := range raws {
+		if len(raw) == 0 || raw[0] != '"' || json.Unmarshal(raw, &args[i]) != nil {
+			return errors.New("exec-policy prefix element is not a string")
+		}
+	}
+	e.set, e.args = true, args
+	return nil
+}
+
+// amendmentDecision reports whether raw is the one object decision Codex
+// offers with a proposed exec-policy amendment, naming exactly that prefix.
+func amendmentDecision(raw json.RawMessage, proposed execPrefix) bool {
+	var inner json.RawMessage
+	if !proposed.set || !decodeApprovalFields(raw, map[string]any{"acceptWithExecpolicyAmendment": &inner}) || inner == nil {
+		return false
+	}
+	var prefix execPrefix
+	return decodeApprovalFields(inner, map[string]any{"execpolicy_amendment": &prefix}) &&
+		prefix.set && slices.Equal(prefix.args, proposed.args)
 }
 
 // plainCommandText returns the complete decision text or an empty string.
@@ -58,7 +97,19 @@ func plainCommandText(params json.RawMessage) string {
 	// fallback choices when older servers omit their list.
 	once := false
 	seen := make(map[string]bool)
-	for _, decision := range p.availableDecisions {
+	// A proposed exec-policy amendment and its one decision come together
+	// or not at all. A one-time accept approves this command and applies no
+	// amendment, so the text omits it.
+	amendments := 0
+	for _, raw := range p.availableDecisions {
+		var decision string
+		if json.Unmarshal(raw, &decision) != nil {
+			amendments++
+			if amendments > 1 || !amendmentDecision(raw, p.proposedExecpolicyAmendment) {
+				return ""
+			}
+			continue
+		}
 		if seen[decision] {
 			return ""
 		}
@@ -71,7 +122,7 @@ func plainCommandText(params json.RawMessage) string {
 			return ""
 		}
 	}
-	if !once {
+	if !once || p.proposedExecpolicyAmendment.set != (amendments == 1) {
 		return ""
 	}
 	text := "$ " + p.command + "\nin " + p.cwd

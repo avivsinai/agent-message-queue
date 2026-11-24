@@ -842,12 +842,27 @@ func (r *run) historyEvidenceLocked() core.Evidence {
 	return ev
 }
 
+const turnRunPrefix = "turn:"
+
+// RunName is the native run of a confirmed Codex turn.
+func RunName(turnID string) string { return turnRunPrefix + turnID }
+
+// TurnOfRun is the Codex turn id of a native run named by RunName; false
+// for any other run name.
+func TurnOfRun(run string) (string, bool) {
+	turn, ok := strings.CutPrefix(run, turnRunPrefix)
+	if !ok || turn == "" {
+		return "", false
+	}
+	return turn, true
+}
+
 // runIDLocked returns the run's correlation id. The caller MUST hold a.mu:
 // r.turnID is written by confirmRun from the read-loop goroutine. Every
 // external caller goes through a.runID, which takes the lock.
 func (r *run) runIDLocked() string {
 	if r.turnID != "" {
-		return "turn:" + r.turnID
+		return RunName(r.turnID)
 	}
 	return "queued:" + r.key.RequestID
 }

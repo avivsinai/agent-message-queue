@@ -3,7 +3,6 @@ package activity
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"sync"
 	"time"
 
@@ -357,9 +356,6 @@ func codexTurn(ep *core.Endpoint, get *protocol.Command) string {
 	if err != nil || !ok || rep.Snapshot.NativeRun == nil {
 		return ""
 	}
-	turn, _ := strings.CutPrefix(*rep.Snapshot.NativeRun, "turn:")
-	if turn == *rep.Snapshot.NativeRun {
-		return ""
-	}
+	turn, _ := codex.TurnOfRun(*rep.Snapshot.NativeRun)
 	return turn
 }
