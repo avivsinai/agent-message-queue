@@ -75,19 +75,22 @@ type wakeConfig struct {
 	settingsLayers                wakeSettingsLayers // the last good docs cfg.settings is made of
 	settingsUnseeded              bool               // an unseeded resume runs argv settings until its seed lands
 	settingsTicks                 <-chan time.Time
-	holdPolicyChanged             bool                                         // consumed by the next inbox scan that builds holds
-	attendedChanged               bool                                         // an attended change reset the cohort: the next scan delivers what waits
-	dialogSource                  func(now time.Time) (wakeDialogState, error) // reads .wake.dialog; nil = no dialog guard (direct loop tests)
-	commands                      *wakeCommands                                // the owner command queue the wake types (wakecmd); nil = none
-	dialogHold                    wakeDialogState                              // the state last held for, so each change logs once
-	dialogHoldBusy                bool                                         // the last hold was a busy harness turn, so a change of cause logs once
-	dialogHoldGeneration          string                                       // the marker version the held notice ladder belongs to
-	dialogHoldReason              func() wakeDialogHoldCause                   // why the marker holds input; nil = a generic dialog
-	dialogHoldDetail              func(now time.Time) string                   // the marker's event, kind, harness, tool and age for the wake log; nil = none
-	desktopNotify                 func(title, body string) error               // the held-doorbell desktop notice; nil = none (direct loop tests)
-	startupTrustRelease           func() bool                                  // a Startup marker closed only by the harness's trust record; nil = never
-	startupReleaseAttempted       bool                                         // input reached the terminal after a trust release
-	startupInputProven            bool                                         // a drain followed a post-release attempt, so the harness accepts input
+	holdPolicyChanged             bool                                             // consumed by the next inbox scan that builds holds
+	attendedChanged               bool                                             // an attended change reset the cohort: the next scan delivers what waits
+	dialogSource                  func(now time.Time) (wakeDialogState, error)     // reads .wake.dialog; nil = no dialog guard (direct loop tests)
+	piBridgeLivenessRead          func(now time.Time) (wakePiBridgeLiveness, bool) // reads the pi bridge heartbeat; nil = the real file read
+	piBridgeOwnerProof            func(pid int) error                              // proves the bridge pid is the wake owner process; nil = the real proof
+	piBridgeSleep                 func(time.Duration)                              // the decision-poll sleep; nil = time.Sleep
+	commands                      *wakeCommands                                    // the owner command queue the wake types (wakecmd); nil = none
+	dialogHold                    wakeDialogState                                  // the state last held for, so each change logs once
+	dialogHoldBusy                bool                                             // the last hold was a busy harness turn, so a change of cause logs once
+	dialogHoldGeneration          string                                           // the marker version the held notice ladder belongs to
+	dialogHoldReason              func() wakeDialogHoldCause                       // why the marker holds input; nil = a generic dialog
+	dialogHoldDetail              func(now time.Time) string                       // the marker's event, kind, harness, tool and age for the wake log; nil = none
+	desktopNotify                 func(title, body string) error                   // the held-doorbell desktop notice; nil = none (direct loop tests)
+	startupTrustRelease           func() bool                                      // a Startup marker closed only by the harness's trust record; nil = never
+	startupReleaseAttempted       bool                                             // input reached the terminal after a trust release
+	startupInputProven            bool                                             // a drain followed a post-release attempt, so the harness accepts input
 	recordSettingsApplied         func(wakeSettingsAppliedStatus) error
 	pendingSettingsApplied        *wakeSettingsAppliedStatus
 	doorbellNow                   func() time.Time
@@ -1294,6 +1297,18 @@ func deliverNewMessageNotification(
 		persistWakeDoorbellStatusBestEffort(cfg)
 		return nil
 	}
+	// The pi bridge doorbell runs after the attended, native, dialog-hold and
+	// pre-attempt gates: it is one more delivery face for the same attempt
+	// decision, and it types nothing. A claim presents the cohort and returns
+	// without a terminal write; any other bridge outcome falls through to the
+	// terminal path, whose first write for that cohort is the full fixed line
+	// (a bridge claim never sets the submit-only state).
+	bridge := cfg.runPiBridgeDoorbellAttempt()
+	if bridge.presented {
+		cfg.recordPiBridgePresented(cfg.wakeDoorbellNow(), currentPending, bridge.attemptID)
+		return nil
+	}
+	forceFullLine := bridge.fullLine
 	guardedReminder := reminder && cfg.guardedInputEnabled() && !cfg.inputGuard.lastOwnRead.IsZero()
 	// A harness released from its trust dialog by its trust record alone
 	// may not accept input yet, so a write then does not confirm the
@@ -1315,7 +1330,7 @@ func deliverNewMessageNotification(
 				provenance: wakePayloadSystemFixed,
 			}
 		}
-		notice.submitOnly = plan.submitOnly
+		notice.submitOnly = plan.submitOnly && !forceFullLine
 		deliveryErr := deliverWakeNotification(cfg, notice, deferForInput)
 		if isWakeInputDemotionBlocked(deliveryErr) {
 			return enterWakeInputRecovery(cfg, currentPending, deliveryErr)
