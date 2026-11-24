@@ -63,7 +63,7 @@ func doctorWakeForeignBootIDForTest(t *testing.T) string {
 }
 
 func TestDoctorProjectWakeLockRowReportsSessionCounts(t *testing.T) {
-	base, _, _ := doctorWakeProjectFixture(t)
+	base, session1, session2 := doctorWakeProjectFixture(t)
 	t.Setenv(envRoot, base)
 
 	output, err := captureEnvStdout(t, func() error {
@@ -102,11 +102,17 @@ func TestDoctorProjectWakeLockRowReportsSessionCounts(t *testing.T) {
 	if err := json.Unmarshal([]byte(opsOutput), &opsResult); err != nil {
 		t.Fatal(err)
 	}
-	// The --ops Wake locks row inspects the same walk, so the plain row and
-	// the ops row cannot disagree.
+	// --ops emits the same per-lock detail for every session as the plain row.
 	opsRow := findDoctorCheck(t, opsResult.Checks, "Wake locks")
 	if opsRow.Status != "warn" || !strings.Contains(opsRow.Message, "2 stale") {
 		t.Fatalf("ops Wake locks = %q (%q), want the same 2 stale counts", opsRow.Status, opsRow.Message)
+	}
+	roots := map[string]bool{}
+	for _, lock := range opsResult.Ops.WakeLocks {
+		roots[filepath.Dir(filepath.Dir(filepath.Dir(lock.Lock)))] = true
+	}
+	if len(opsResult.Ops.WakeLocks) != 2 || !roots[session1] || !roots[session2] {
+		t.Fatalf("ops wake lock roots = %#v, want the session1 and session2 rows", roots)
 	}
 
 	// An explicit session --root scopes the row to that session alone.
@@ -162,5 +168,21 @@ func TestDoctorFixWakeLocksRemovesProjectStaleLocksAndKeepsUnverified(t *testing
 	}
 	if result.WakeLockSummary == nil || result.WakeLockSummary.Stale != 0 {
 		t.Fatalf("wake lock summary after fix = %#v, want zero stale", result.WakeLockSummary)
+	}
+
+	// Structural mismatch is a stale verdict before process examination, not
+	// proof that this lock is dead. The exact field-ruling boundary preserves it.
+	mismatchPath := filepath.Join(fsq.AgentBase(session2, "foreign"), ".wake.lock")
+	if err := os.MkdirAll(fsq.AgentBase(session2, "foreign"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeWakeLockForTest(t, session2, "foreign", wakeLock{PID: 4242, Root: session1})
+	if _, err := captureEnvStdout(t, func() error {
+		return runDoctor([]string{"--fix-wake-locks", "--json"})
+	}); err != nil {
+		t.Fatalf("doctor structural-mismatch fix: %v", err)
+	}
+	if _, err := os.Stat(mismatchPath); err != nil {
+		t.Fatalf("root-mismatch lock was removed without process proof: %v", err)
 	}
 }

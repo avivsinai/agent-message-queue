@@ -233,7 +233,6 @@ func runOpsChecksWithSchema(
 		agents = nil
 	}
 
-	validatedAgents := make([]string, 0, len(agents))
 	for _, handle := range agents {
 		// Configured handles are untrusted input. Validate before deriving any
 		// mailbox/presence paths so traversal-like values cannot escape root.
@@ -249,7 +248,6 @@ func runOpsChecksWithSchema(
 			result.Hints = append(result.Hints, opsHint{Code: "config_error", Status: "error", Message: fmt.Sprintf("Ignoring unsafe configured agent handle %q: %v", handle, err)})
 			continue
 		}
-		validatedAgents = append(validatedAgents, handle)
 	}
 
 	// Agent rows: every declared handle (with or without a mailbox) and every
@@ -338,12 +336,7 @@ func runOpsChecksWithSchema(
 	// retains legacy-safe on-disk handles for read-only wake diagnostics;
 	// checkWakeLocks repeats that inspection boundary for untrusted callers.
 	var wakeHints []opsHint
-	result.WakeLocks, wakeHints = checkWakeLocksWithHintsSchema(
-		root,
-		discoveredWakeLockAgents(root, validatedAgents),
-		fixWakeLocks,
-		jsonSchema,
-	)
+	result.WakeLocks, wakeHints = checkProjectWakeLocksOps(root, strings.Join(explicitBaseRoot, ""), fixWakeLocks, jsonSchema)
 
 	// Operational and integration hints
 	result.Hints = append(result.Hints, wakeHints...)
@@ -974,6 +967,11 @@ func checkWakeLocksWithHintsSchema(
 			lock.TargetPresent = true
 		}
 		if inspection.Status == wakeLockStale {
+			if !wakeLockStaleFromProcessExamination(inspection) {
+				lock.Reason = inspection.Reason + "; not repairable because the process was not examined"
+				appendLock(agent, lock, inspection, staleBinary, stage)
+				continue
+			}
 			if ownerBound {
 				appendLock(agent, lock, inspection, staleBinary, stage)
 				continue

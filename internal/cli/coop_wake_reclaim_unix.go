@@ -35,11 +35,11 @@ func prepareCoopWakeLock(root, agent string, yes bool, remedy string) (retErr er
 	if !inspection.Exists {
 		return nil
 	}
-	// A proven-stale lock belongs to no running process: its exact removal
-	// sends no signal. Decide that case first, whatever process the restart
-	// gave its PID to; a lock that is not proven stale is never removed while
-	// a foreign process holds its PID.
-	if inspection.Status == wakeLockStale {
+	// Only a stale verdict reached by examining the process proves the lock is
+	// dead. Its exact removal sends no signal, even when the restart gave its
+	// PID to another process. Structural stale verdicts keep the foreign-process
+	// refusal below: their recorded process was never examined.
+	if wakeLockStaleFromProcessExamination(inspection) {
 		if wakeLockHasOwnerMarkers(inspection) {
 			return coopWakeStartupConflictError(inspection, nil)
 		}

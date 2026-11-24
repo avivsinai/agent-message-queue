@@ -207,3 +207,29 @@ func TestPrepareCoopWakeLockRemovesProvenStaleLockWhosePIDIsALiveForeignProcess(
 		t.Fatalf("proven-stale lock remains after startup: %v", err)
 	}
 }
+
+// Boundary drawn by the 2026-11-24 Part A ruling: only a stale verdict that
+// came from examining the process may take the early exact removal. A stale
+// verdict set before the process is examined (here: root mismatch) must keep
+// the live-foreign-PID refusal of main.
+func TestPrepareCoopWakeLockRootMismatchLiveForeignPIDStillRefuses(t *testing.T) {
+	const foreignPID = 424242
+	root := secureTempDirForTest(t)
+	otherRoot := secureTempDirForTest(t)
+	lock := wakeLock{
+		PID:  foreignPID,
+		Root: canonicalWakeRoot(otherRoot),
+	}
+	lockPath := writeWakeLockForTest(t, root, "codex", lock)
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{PID: pid, Running: true, Executable: "go", Args: []string{"go", "test"}}
+	})
+
+	err := prepareCoopWakeLock(root, "codex", false, "unused")
+	if err == nil || !strings.Contains(err.Error(), "running process proven not to be this wake") {
+		t.Fatalf("prepare root-mismatch lock with live foreign PID = %v, want refusal", err)
+	}
+	if _, statErr := os.Stat(lockPath); statErr != nil {
+		t.Fatalf("root-mismatch lock removed by preflight: %v", statErr)
+	}
+}
