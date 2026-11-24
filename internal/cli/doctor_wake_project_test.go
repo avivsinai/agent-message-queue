@@ -236,4 +236,35 @@ func TestDoctorFixWakeLocksRemovesProjectStaleLocksAndKeepsUnverified(t *testing
 	if len(structuralResult.WakeLockSummary.Fixes) != 0 {
 		t.Fatalf("retained structural summary offers fixes = %#v", structuralResult.WakeLockSummary.Fixes)
 	}
+	// The legacy handle remains inspectable, but fsq.ValidateHandle refuses
+	// its mutation. A plain read must apply that same authority boundary.
+	legacyHandle := "-legacy"
+	if err := os.MkdirAll(fsq.AgentBase(session2, legacyHandle), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacyData, err := json.Marshal(wakeLock{
+		PID: 4242, Root: canonicalWakeRoot(session2), Agent: legacyHandle,
+		MachineID: testMachineUUID, BootID: doctorWakeForeignBootIDForTest(t),
+		Started: "2026-11-24T00:00:00Z",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyPath := filepath.Join(fsq.AgentBase(session2, legacyHandle), ".wake.lock")
+	if err := os.WriteFile(legacyPath, legacyData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacyOutput, err := captureEnvStdout(t, func() error {
+		return runDoctor([]string{"--json", "--root", session2})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacyResult doctorResult
+	if err := json.Unmarshal([]byte(legacyOutput), &legacyResult); err != nil {
+		t.Fatal(err)
+	}
+	if len(legacyResult.WakeLockSummary.Fixes) != 0 {
+		t.Fatalf("legacy lock without mutation authority offers fix = %#v", legacyResult.WakeLockSummary.Fixes)
+	}
 }

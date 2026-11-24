@@ -747,7 +747,8 @@ func inspectDoctorWakeLockSummary(root, baseRoot string, roots map[string]string
 				case wakeLockUnverified:
 					summary.Unverified++
 				}
-				if wakeLockStaleFromProcessExamination(inspection) &&
+				if fsq.ValidateHandle(handle) == nil &&
+					wakeLockStaleFromProcessExamination(inspection) &&
 					classifyWakeClaimForGenericTransition(inspection) != wakeClaimAuthoritative {
 					foundRepairable = true
 				}
