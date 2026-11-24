@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.170.3](https://github.com/avivsinai/agent-message-queue/compare/v0.170.2...v0.170.3) (2026-11-24)
+
+
+### Bug Fixes
+
+* **remote:** a Codex command dialog that names the local environment reaches the link ([#1639](https://github.com/avivsinai/agent-message-queue/issues/1639)) ([1a4ebae](https://github.com/avivsinai/agent-message-queue/commit/1a4ebae5d6d1a16acdce2cb90e6c58b23a91ab67))
+
 ## [0.170.2](https://github.com/avivsinai/agent-message-queue/compare/v0.170.1...v0.170.2) (2026-11-24)
 
 
