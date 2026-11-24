@@ -224,4 +224,16 @@ func TestDoctorFixWakeLocksRemovesProjectStaleLocksAndKeepsUnverified(t *testing
 			t.Fatalf("structural stale lock offers an ineffective generic fix: %#v", lock)
 		}
 	}
+	var structuralRow doctorCheck
+	for _, check := range structuralResult.Checks {
+		if check.Name == "Wake locks" {
+			structuralRow = check
+		}
+	}
+	if structuralRow.Message != "1 stale (session2: 1)" {
+		t.Fatalf("retained structural summary = %q, want no generic fix", structuralRow.Message)
+	}
+	if len(structuralResult.WakeLockSummary.Fixes) != 0 {
+		t.Fatalf("retained structural summary offers fixes = %#v", structuralResult.WakeLockSummary.Fixes)
+	}
 }

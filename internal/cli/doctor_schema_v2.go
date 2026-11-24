@@ -23,7 +23,7 @@ type doctorWakeLockSummaryV2 struct {
 	Stale      int            `json:"stale"`
 	Unverified int            `json:"unverified,omitempty"`
 	BySession  map[string]int `json:"stale_by_session,omitempty"`
-	Refusals   []string       `json:"fix_refusals,omitempty"`
+	Fixes      []string       `json:"fixes,omitempty"`
 }
 
 type doctorOpsResultV2 struct {
@@ -78,7 +78,7 @@ func renderDoctorResultV2(result doctorResult) doctorResultV2 {
 			Stale:      result.WakeLockSummary.Stale,
 			Unverified: result.WakeLockSummary.Unverified,
 			BySession:  result.WakeLockSummary.BySession,
-			Refusals:   result.WakeLockSummary.Refusals,
+			Fixes:      result.WakeLockSummary.Fixes,
 		}
 	}
 	if result.Ops == nil {
