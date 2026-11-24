@@ -19,6 +19,18 @@ func (*nullApprovalField) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// localEnvironment accepts the two ways Codex names a run on this machine:
+// JSON null and the reserved id "local". Any other environment id can name
+// a remote run, which the command and its directory do not describe.
+type localEnvironment struct{}
+
+func (*localEnvironment) UnmarshalJSON(data []byte) error {
+	if s := string(data); s != "null" && s != `"local"` {
+		return errors.New("command runs in another environment")
+	}
+	return nil
+}
+
 // commandApproval is the closed Codex command-approval envelope.
 type commandApproval struct {
 	threadID, turnID, itemID                      string
@@ -26,7 +38,8 @@ type commandApproval struct {
 	kind, command, cwd, reason                    string
 	commandActions                                []json.RawMessage
 	availableDecisions                            []json.RawMessage
-	approvalID, environmentID                     nullApprovalField
+	approvalID                                    nullApprovalField
+	environmentID                                 localEnvironment
 	additionalPermissions, networkApprovalContext nullApprovalField
 	proposedNetworkPolicyAmendments               nullApprovalField
 	proposedExecpolicyAmendment                   execPrefix
