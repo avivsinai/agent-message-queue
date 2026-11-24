@@ -80,9 +80,9 @@ type wakeConfig struct {
 	dialogSource                  func(now time.Time) (wakeDialogState, error)     // reads .wake.dialog; nil = no dialog guard (direct loop tests)
 	piBridgeLivenessRead          func(now time.Time) (wakePiBridgeLiveness, bool) // reads the pi bridge heartbeat; nil = the real file read
 	piBridgeOwnerProof            func(pid int) error                              // proves the bridge pid is the wake owner process; nil = the real proof
-	piBridgeSleep                 func(time.Duration)                              // the decision-poll sleep; nil = time.Sleep
 	piBridgeBusySince             map[string]time.Time                             // the first busy refusal per cohort, which starts the input_max_hold bound
 	piBridgeResultsSeen           map[string]bool                                  // doorbell result files the attempt ledger already recorded
+	piBridgeAttemptsProcessed     map[string]bool                                  // doorbell attempts whose decision this wake already acted on
 	commands                      *wakeCommands                                    // the owner command queue the wake types (wakecmd); nil = none
 	dialogHold                    wakeDialogState                                  // the state last held for, so each change logs once
 	dialogHoldBusy                bool                                             // the last hold was a busy harness turn, so a change of cause logs once
@@ -1223,6 +1223,10 @@ func deliverNewMessageNotification(
 	deferForInput bool,
 	currentPending map[string]os.FileInfo,
 ) error {
+	// Doorbell results are evidence that arrives later and is recorded on
+	// ordinary ticks; the delivery path collects too, before any early
+	// return, so a delivery tick never skips a result that already landed.
+	cfg.collectPiBridgeResults()
 	if cfg.inputRecoveryRequired {
 		if !dischargeWakeInputRecoveryAfterProgress(cfg, currentPending) {
 			return deliverWakeInputRecoveryAttention(cfg, currentPending)
@@ -1308,7 +1312,6 @@ func deliverNewMessageNotification(
 	// bridge was not engaged at all) reaches the terminal path, whose first
 	// write for that cohort is the full fixed line (a bridge claim never
 	// sets the submit-only state).
-	cfg.collectPiBridgeResults()
 	bridge := cfg.runPiBridgeDoorbellAttempt()
 	if bridge.presented {
 		cfg.recordPiBridgePresented(cfg.wakeDoorbellNow(), currentPending, bridge.attemptID)

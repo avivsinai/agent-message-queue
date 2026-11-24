@@ -1068,10 +1068,10 @@ function scanDoorbell(pi: ExtensionAPI, b: Bridge): void {
 	}
 	if (b.doorbell.done.size > DOORBELL_DONE_MAX) b.doorbell.done.clear();
 	for (const name of names.sort()) {
-		if (!name.endsWith(".json") || name.endsWith(".decision.json") || name.endsWith(".result.json")) continue;
+		if (!name.endsWith(".json") || name.endsWith(".decision.json") || name.endsWith(".result.json") || name.endsWith(".cohort.json")) continue;
 		const attempt = name.slice(0, -5);
 		if (!DOORBELL_ATTEMPT.test(attempt) || b.doorbell.claimed.has(attempt) || b.doorbell.done.has(attempt)) continue;
-		let rec: { protocol?: unknown; op?: unknown; attempt?: unknown; generation?: unknown; deadline?: unknown };
+		let rec: { protocol?: unknown; op?: unknown; attempt?: unknown; generation?: unknown; pid?: unknown; deadline?: unknown };
 		try {
 			rec = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8"));
 		} catch {
