@@ -31,7 +31,7 @@ func TestCoreAcknowledgmentReleasesPiResult(t *testing.T) {
 	ref := clientRef(key)
 	writeReceipt(t, dir, ref, "gen-1", fixedNow)
 	cmd := &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit,
-		RequestID: key.RequestID, TargetID: key.TargetID, Epoch: addressEpoch("gen-1"),
+		RequestID: key.RequestID, TargetID: key.TargetID, Epoch: "gen-1",
 		NotAfter: "2036-01-01T00:00:00Z", Input: &protocol.SubmitInput{Text: "hi"}}
 	if _, err := ep.Handle(cmd, core.Source{Host: "local"}); err != nil {
 		t.Fatalf("submit: %v", err)

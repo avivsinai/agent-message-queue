@@ -167,7 +167,7 @@ func TestForeignStreamRefusalSurvivesRotation(t *testing.T) {
 	// Step 3: a present, protocol-validated v1 stream lifts the refusal —
 	// the seam proved itself clean again.
 	appendEvents(t, dir, ref, fmt.Sprintf(`{"protocol":%q,"event":"started","ref":%q,"text":"go"}`, ProtocolV1, ref))
-	ev, err = a.Lookup(key, addressEpoch("gen-1"))
+	ev, err = a.Lookup(key, "gen-1")
 	if err != nil {
 		t.Fatalf("step 3: err = %v; want the refusal lifted by a validated v1 stream", err)
 	}
@@ -273,7 +273,7 @@ func TestReceiptDoesNotLiftForeignStreamRefusal(t *testing.T) {
 	if !refused {
 		t.Fatalf("step 1: protocol-string refusal not recorded on the unconfirmed run")
 	}
-	if _, err := a.Lookup(key, addressEpoch("gen-1")); err == nil || !errors.Is(err, ErrForeignEventStream) {
+	if _, err := a.Lookup(key, "gen-1"); err == nil || !errors.Is(err, ErrForeignEventStream) {
 		t.Fatalf("step 1: Lookup err = %v, want the refusal surfaced", err)
 	}
 	var ev core.Evidence
@@ -285,7 +285,7 @@ func TestReceiptDoesNotLiftForeignStreamRefusal(t *testing.T) {
 	if rmErr := os.Remove(filepath.Join(dir, "events", refSanitize(ref)+".jsonl")); rmErr != nil {
 		t.Fatalf("remove events log: %v", rmErr)
 	}
-	ev, err = a.Lookup(key, addressEpoch("gen-1"))
+	ev, err = a.Lookup(key, "gen-1")
 	if err == nil || !errors.Is(err, ErrForeignEventStream) {
 		t.Fatalf("P1: receipt lifted a proven event-stream refusal — err = %v, evidence = %+v; want the refusal to survive", err, ev)
 	}
@@ -295,7 +295,7 @@ func TestReceiptDoesNotLiftForeignStreamRefusal(t *testing.T) {
 
 	// Step 3: a present, validated v1 stream lifts the refusal (designed).
 	appendEvents(t, dir, ref, fmt.Sprintf(`{"protocol":%q,"event":"started","ref":%q,"text":"go"}`, ProtocolV1, ref))
-	ev, err = a.Lookup(key, addressEpoch("gen-1"))
+	ev, err = a.Lookup(key, "gen-1")
 	if err != nil {
 		t.Fatalf("step 3: err = %v; want the refusal lifted by a validated v1 stream", err)
 	}

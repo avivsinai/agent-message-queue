@@ -34,32 +34,10 @@ import (
 // under it is refused stale_epoch. Only receipts pin a real generation.
 const SentinelUnpinned = "unpinned"
 
-// addressPrefix starts an address epoch: `unpinned.<generation>` names the
-// live generation Inspect observed before the first receipt. It binds the
-// caller's submit to that generation without pinning it (protocol: session
-// generation and epoch).
-const addressPrefix = SentinelUnpinned + "."
-
-// addressEpoch returns the address epoch for a live generation, or "" when
-// the generation cannot form a protocol-valid epoch.
-func addressEpoch(gen string) string {
-	if !protocol.ValidEpoch(gen) {
-		return ""
-	}
-	e := addressPrefix + gen
-	if !protocol.ValidEpoch(e) {
-		return ""
-	}
-	return e
-}
-
-// addressedGeneration returns the generation an address epoch names.
-func addressedGeneration(epoch string) (string, bool) {
-	gen, ok := strings.CutPrefix(epoch, addressPrefix)
-	if !ok || addressEpoch(gen) != epoch {
-		return "", false
-	}
-	return gen, true
+// validGeneration reserves the no-address sentinel and the legacy spelling
+// of a first-contact epoch. Neither can identify a bridge runtime.
+func validGeneration(gen string) bool {
+	return protocol.ValidEpoch(gen) && gen != SentinelUnpinned && !strings.HasPrefix(gen, SentinelUnpinned+".")
 }
 
 // MinBridgeRevision is the lowest extension bridge_revision that implements
@@ -377,6 +355,9 @@ func (b bridgeDir) readReceipt(ref string) (*receipt, error) {
 	}
 	if rc.Protocol != "" && rc.Protocol != b.names.protocol {
 		return nil, fmt.Errorf("pi: receipt %s: unknown protocol %q (want %q)", ref, rc.Protocol, b.names.protocol)
+	}
+	if rc.SessionGeneration != "" && !validGeneration(rc.SessionGeneration) {
+		return nil, fmt.Errorf("pi: receipt %s names an invalid session generation", ref)
 	}
 	return &rc, nil
 }

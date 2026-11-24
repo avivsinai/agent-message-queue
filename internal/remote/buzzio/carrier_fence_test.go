@@ -27,7 +27,7 @@ func TestSessionSwitchBeforeEpochDispatchesNothing(t *testing.T) {
 		switch cmd.Op {
 		case protocol.OpSessionInspect:
 			session = "sess-2" // /new between the fence and the epoch
-			return protocol.Session{TargetID: "pi-1", Epoch: "unpinned.gen-2"}, nil
+			return protocol.Session{TargetID: "pi-1", Epoch: "gen-2"}, nil
 		case protocol.OpRequestSubmit:
 			submitted = true
 		}
