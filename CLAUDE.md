@@ -97,6 +97,8 @@ make vet            # go vet
 make lint           # golangci-lint
 make check          # static gates the pre-push hook runs (skills, CLI docs, board page, go.mod tidy, fmt, vet, lint)
 make ci             # check plus tests, smoke, and the contract and hook-env checks (CI runs this)
+scripts/worktree.sh add <name> [<base-ref>]  # create a detached worktree under ~/workspace/agent-message-queue-wt
+scripts/worktree.sh remove <name>            # remove it only when git reports no modified or untracked work
 make check-skills   # validate canonical and symlinked skill content
 ```
 

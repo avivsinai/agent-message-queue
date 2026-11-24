@@ -55,6 +55,8 @@ request_json() {
   local -a args
 
   response_file="$(mktemp "${TMPDIR:-/tmp}/amq-skild-response.XXXXXX")"
+  # A signal or later refusal must not leave this response file behind.
+  trap "rm -f '$response_file'" EXIT HUP INT TERM
   args=(
     --silent
     --show-error
@@ -254,6 +256,8 @@ for dir in "$SKILLS_DIR"/*/; do
     die "skill '$skill' cannot be used as a Skild alias"
   canonical="@$PUBLISHER/$skill"
   output_file="$(mktemp "${TMPDIR:-/tmp}/amq-skild-publish.XXXXXX")"
+  # Later verification failures exit the script, not its local success path.
+  trap "rm -f '$output_file'" EXIT HUP INT TERM
 
   echo "Publishing $canonical@$VERSION"
   if "$NPX_BIN" skild publish --dir "$dir" --skill-version "$VERSION" >"$output_file" 2>&1; then
@@ -267,6 +271,7 @@ for dir in "$SKILLS_DIR"/*/; do
     exit 1
   fi
   rm -f "$output_file"
+
 
   verify_version "$skill"
   reconcile_alias "$skill"
