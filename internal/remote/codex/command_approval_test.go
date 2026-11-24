@@ -51,7 +51,7 @@ func TestPlainCommandTextRefusesUnmatchedAmendment(t *testing.T) {
 
 // Source: three command-approval requests captured from a Codex 0.172.0
 // app-server on 2026-11-24 (thread, turn and item ids and the directory are
-// replaced; every other byte of the params is as sent). The 0.170.2 release
+// replaced, and the keys are sorted; every value is as sent). The 0.170.2 release
 // withheld each one from the link: environmentId is "local", not null.
 var capturedCommandApprovals = map[string]string{
 	"inferred amendment":         `{"availableDecisions":["accept",{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["/usr/bin/printf","X\\n"]}},"cancel"],"command":"/bin/zsh -lc \"/usr/bin/printf 'X\\\\n'\"","commandActions":[{"command":"/usr/bin/printf 'X\\n'","type":"unknown"}],"cwd":"/w","environmentId":"local","itemId":"i1","kind":"command","proposedExecpolicyAmendment":["/usr/bin/printf","X\\n"],"reason":"Do you approve running /usr/bin/printf 'X\\n' once?","startedAtMs":1795545048324,"threadId":"t1","turnId":"turn-1"}`,

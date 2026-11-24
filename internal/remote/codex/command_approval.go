@@ -19,9 +19,10 @@ func (*nullApprovalField) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// localEnvironment accepts the two ways Codex names a run on this machine:
-// JSON null and the reserved id "local". Any other environment id can name
-// a remote run, which the command and its directory do not describe.
+// localEnvironment accepts an approval that names no environment (JSON
+// null) or the id "local", which Codex reserves for this machine. Any
+// other environment id can name a remote run, which the command and its
+// directory do not describe.
 type localEnvironment struct{}
 
 func (*localEnvironment) UnmarshalJSON(data []byte) error {
