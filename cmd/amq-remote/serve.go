@@ -292,11 +292,16 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 // serveExitCode is serve's exit for an error it returned without one. Exit 6
 // stops up, so only another endpoint holding the root keeps it; every other
 // refusal the protocol maps to 6 (storage_full, store_closed, draining, ...)
-// may pass, so it exits 1 and up respawns serve.
+// may pass, so it exits 1 and up respawns serve. A socket path over the Unix
+// sun_path limit is a refused configuration like a bad manifest: it can never
+// pass, so it is 6 and up stops (README: serve and up).
 func serveExitCode(err error) int {
 	code := protocol.ExitCode(err)
 	if code == protocol.ExitActionRequired && protocol.RefusalCode(err) != protocol.CodeEndpointAlreadyRunning {
 		return protocol.ExitError
+	}
+	if errors.Is(err, ipc.ErrSocketPathTooLong) {
+		return protocol.ExitActionRequired
 	}
 	return code
 }
