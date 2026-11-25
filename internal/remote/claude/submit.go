@@ -467,6 +467,8 @@ func (a *Attachment) confirmLoop(ctx context.Context, cancel context.CancelFunc)
 // cursor is reset so the next run seeds it from its own submit-time offset
 // instead of replaying the idle gap.
 func (a *Attachment) idleStop() bool {
+	a.pollMu.Lock()
+	defer a.pollMu.Unlock()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.activitySink != nil {
@@ -478,7 +480,6 @@ func (a *Attachment) idleStop() bool {
 		}
 	}
 	a.confirmCancel = nil
-	a.curGen++
 	a.cur = transcriptCursor{}
 	a.owner = nil
 	a.turn = turnState{}
@@ -519,9 +520,9 @@ func (a *Attachment) pollConfirmations() {
 }
 
 // pollTranscript reads one bounded chunk. It returns true if another read
-// could advance the cursor. Concurrent readers may inspect the same bytes,
-// but only one may apply them to the turn and publish their events.
+// could advance the cursor. The ticker and the final lookup share one cursor.
 func (a *Attachment) pollTranscript(sessionID, path string) bool {
+	a.pollMu.Lock()
 	a.mu.Lock()
 	cur := a.cur
 	gen := a.curGen
@@ -537,6 +538,8 @@ func (a *Attachment) pollTranscript(sessionID, path string) bool {
 				cur.off = rec.fromOff
 			}
 		}
+		a.owner = nil
+		a.turn = turnState{}
 		// A granted stub is judged by its whole turn, which may begin
 		// before the cursor: read back to the turn's start once.
 		seed = a.grantedPendingLocked()
@@ -556,6 +559,7 @@ func (a *Attachment) pollTranscript(sessionID, path string) bool {
 		// discarding the partial first line.
 		size := transcriptSize(path)
 		if size < 0 {
+			a.pollMu.Unlock()
 			return false
 		}
 		cur.off, cur.skipping = transcriptStartOffset(size)
@@ -567,6 +571,7 @@ func (a *Attachment) pollTranscript(sessionID, path string) bool {
 	start := cur.off
 	rd, err := readTranscriptFrom(path, cur.off, cur.skipping)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		a.pollMu.Unlock()
 		return false
 	}
 	// A read that starts or ends inside a line it discards (one longer than
@@ -586,19 +591,7 @@ func (a *Attachment) pollTranscript(sessionID, path string) bool {
 	var events []core.NativeEvent
 	var notes []ActivityNote
 	a.mu.Lock()
-	if a.closed {
-		a.mu.Unlock()
-		return false
-	}
-	if a.curGen != gen {
-		a.mu.Unlock()
-		return true
-	}
-	if fresh {
-		a.owner = nil
-		a.turn = turnState{}
-	}
-	if seed {
+	if seed && a.curGen == gen {
 		a.turn = seeded
 	}
 	if truncated {
@@ -625,8 +618,9 @@ func (a *Attachment) pollTranscript(sessionID, path string) bool {
 		}
 		notes = append(notes, a.activityNoteLocked(e, sessionID))
 	}
-	a.cur = cur
-	a.curGen++
+	if a.curGen == gen {
+		a.cur = cur
+	}
 	if err == nil && (a.activityPath != path || rd.next > a.activityNext) {
 		a.activityPath = path
 		a.activityNext = rd.next
@@ -638,6 +632,7 @@ func (a *Attachment) pollTranscript(sessionID, path string) bool {
 	sink := a.eventSink
 	activity := a.activitySink
 	a.mu.Unlock()
+	a.pollMu.Unlock()
 
 	if sink != nil {
 		for _, ev := range events {

@@ -369,9 +369,12 @@ type Attachment struct {
 	home      string
 	configDir string
 
+	// pollMu serializes transcript reads and cursor advances. Take it before
+	// mu and release both before invoking an event or activity callback.
+	pollMu sync.Mutex
+
 	// Evidence path (submit.go): retained runs, cancel intent, the
-	// native-event sink, and the confirmation poller's cancel. ctx is the
-	// attachment lifetime; the poller is never on the request path.
+	// native-event sink, and the confirmation poller's cancel.
 	mu            sync.Mutex
 	runs          map[requests.Key]*runRecord
 	cancelIntent  map[requests.Key]bool
@@ -404,8 +407,9 @@ type Attachment struct {
 	// A truncated file resets activityNext. A recovery rewind does not.
 	activityPath string
 	activityNext int64
-	// curGen changes on each commit or rewind. A reader of an older cursor
-	// must discard its batch before applying entries or emitting events.
+	// curGen increments whenever the cursor is reset outside the poller (a
+	// recovered run needs a replay from its delivery offset); a poll that
+	// started under an older generation does not write its cursor back.
 	curGen uint64
 	// recoverFrom[key] is how far a restart-recovery scan has read for a
 	// key it has not found yet, so an uncertain record costs only the new
