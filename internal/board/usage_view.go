@@ -104,7 +104,6 @@ func WithUsage(m Model, r usage.Report, mapping usage.Mapping) Model {
 	trailing := trailingWindows(r.Now)
 	fleet := make([]usage.Counts, len(trailing))
 	fleetAsOf := make([]time.Time, len(trailing))
-	var fleetLast lastCounts
 	fleetSpend := spendState{}
 	fleetPartial := false
 	for _, a := range r.Accounts {
@@ -117,7 +116,6 @@ func WithUsage(m Model, r usage.Report, mapping usage.Mapping) Model {
 		other := make([]usage.Counts, len(windows))
 		otherAsOf := make([]time.Time, len(windows))
 		otherSpend := spendState{}
-		var otherLast lastCounts
 		workerSpend := map[usage.RosterKey]*spendState{}
 		workerCounts := map[usage.RosterKey][]usage.Counts{}
 		workerAsOf := map[usage.RosterKey][]time.Time{}
@@ -140,11 +138,9 @@ func WithUsage(m Model, r usage.Report, mapping usage.Mapping) Model {
 					workerLast[key].addCounts(last, at)
 				}
 			} else {
-				otherLast.add(s)
 				au.OtherSessions++
 				otherSpend.note(s)
 			}
-			fleetLast.add(s)
 			fleetSpend.note(s)
 			for i, win := range trailing {
 				c, asOf := s.Totals(win.from)
@@ -183,18 +179,12 @@ func WithUsage(m Model, r usage.Report, mapping usage.Mapping) Model {
 		for i, win := range windows {
 			au.Other = append(au.Other, makeUsage(win, other[i], otherAsOf[i], au.Partial, otherSpend.unknown()))
 		}
-		for i := range au.Other {
-			au.Other[i].LastContextTokens, au.Other[i].LastAt = otherLast.tokens, otherLast.at
-		}
 		fleetPartial = fleetPartial || au.Partial
 		view.Accounts = append(view.Accounts, au)
 	}
 	if len(r.Accounts) > 0 {
 		for i, win := range trailing {
 			view.Fleet = append(view.Fleet, makeUsage(win, fleet[i], fleetAsOf[i], fleetPartial, fleetSpend.unknown()))
-		}
-		for i := range view.Fleet {
-			view.Fleet[i].LastContextTokens, view.Fleet[i].LastAt = fleetLast.tokens, fleetLast.at
 		}
 	}
 	m.Usage = view
@@ -345,12 +335,6 @@ func makeUsage(w window, c usage.Counts, asOf time.Time, partial bool, unknown s
 type lastCounts struct {
 	tokens int64
 	at     time.Time
-}
-
-func (lc *lastCounts) add(s usage.Session) {
-	if last, at := s.Last(); !at.IsZero() {
-		lc.addCounts(last, at)
-	}
 }
 
 func (lc *lastCounts) addCounts(c usage.Counts, at time.Time) {
