@@ -418,9 +418,10 @@ func TestByteBudgetReadsTheMappedSessionAndTheProjectFirst(t *testing.T) {
 
 // The newest counted response's prompt size (input + cache reads + cache
 // writes) is the seat's context fact; the board shows it per worker. One
-// happy path per harness reader, from the factmap's measured seats
-// (context-size.md: Claude and pi record it per response; Codex's delta
-// between cumulative totals is the response).
+// happy path per harness reader, from measured seats. Origin: Field
+// observation, 2026-11-25: a seat's latest response carried an 888K-token
+// context and the board showed only window sums. (Claude and pi record it
+// per response; Codex's delta between cumulative totals is the response.)
 func TestLastResponseContextIsTheNewestCountedEvent(t *testing.T) {
 	const claudeID = "aaaaaaaa-0000-4000-8000-000000000001"
 	claudeRow := func(at, id string, in, read int) string {

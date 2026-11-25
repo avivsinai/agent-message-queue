@@ -216,7 +216,7 @@
   <div class="source-list">{{range .Roster}}
   <section class="crew"><h2>{{.Name}}</h2>{{if .Agents}}<ul class="crew-list">{{range .Agents}}
   <li class="agent"><div class="agent-heading"><strong>{{.Handle}}</strong><span>{{if .Human}}Owner{{else if eq .Liveness "live"}}Wake running{{else if eq .Liveness "recent"}}Recent presence{{else}}No recent presence{{end}}{{if .Invalid}} · invalid mailbox{{end}}</span></div>
-  {{if .Counts}}<p>{{.Counts}}</p>{{end}}{{if .Usage}}<details><summary{{if .Limited}} class="limit-reached"{{end}}>Usage{{if .Limited}}: limit reached{{end}}</summary><p>{{.Usage}}</p></details>{{end}}
+  {{if .Counts}}<p>{{.Counts}}</p>{{end}}{{if .Usage}}<details><summary{{if .Limited}} class="limit-reached"{{end}}>Usage{{if .Limited}}: limit reached{{end}}</summary><p>{{.Usage}}</p>{{if .Context}}<p>{{.Context}}</p>{{end}}</details>{{end}}
   {{if or .Action .Split}}<details><summary>Session details</summary>{{range .Split}}<p>{{.}}</p>{{end}}{{with .Action}}{{template "cmd" .}}{{end}}</details>{{end}}</li>
   {{end}}</ul>{{else}}<p class="muted">No live wake observed in this session.</p>{{end}}
   {{if .Quiet}}<details class="quiet"><summary>{{len .Quiet}} without recent presence</summary><ul>{{range .Quiet}}<li>{{.}}</li>{{end}}</ul></details>{{end}}</section>{{end}}</div>

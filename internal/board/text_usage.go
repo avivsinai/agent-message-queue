@@ -2,6 +2,7 @@ package board
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -46,7 +47,8 @@ func otherCount(a AccountUsage) string {
 // usageLine is a roster chip's spend line, or "" for a worker with no
 // mapped harness session. A reached account limit is named on the chip with
 // its reset time, a past one with its age; the account's other limits never
-// are.
+// are. The context line is not part of the chip: it prints as its own
+// indented line under the usage line.
 func usageLine(a RosterAgent, now time.Time) string {
 	var parts []string
 	if len(a.Usage) > 0 {
@@ -61,9 +63,6 @@ func usageLine(a RosterAgent, now time.Time) string {
 			p += " until " + l.ResetsAt.Local().Format("15:04")
 		}
 		parts = append(parts, p)
-	}
-	if line := contextLine(a, now); line != "" {
-		parts = append(parts, line)
 	}
 	return strings.Join(parts, " · ")
 }
@@ -83,9 +82,12 @@ func contextLine(a RosterAgent, now time.Time) string {
 	}
 	line := fmt.Sprintf("context %s at %s", si(last.LastContextTokens), age(now.Sub(last.LastAt))+" ago")
 	// The share needs cache reads: a harness that records none (pi) or a
-	// window with none shows no percentage.
+	// window with none shows no percentage. Truncated to one decimal, never
+	// rounded: a near-total share stays below 100 and only a genuinely zero
+	// fresh count prints 100.0.
 	if cached := last.CacheRead; cached > 0 {
-		line += fmt.Sprintf(" · cache reads %.1f%% of 5 h", 100*float64(cached)/float64(last.Fresh+cached))
+		share := math.Floor(1000*float64(cached)/float64(last.Fresh+cached)) / 10
+		line += fmt.Sprintf(" · cache reads %.1f%% of 5 h", share)
 	}
 	return line
 }
