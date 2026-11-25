@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -108,5 +109,37 @@ func TestOneShotSyncFailingAndGoodPass(t *testing.T) {
 	}
 	if got := log.String(); !strings.Contains(got, "published generation 1") {
 		t.Fatalf("good one-shot log = %q", got)
+	}
+}
+
+// floorStep with no recipients returns nil, and a watch loop with a nil
+// floor step runs its passes and waits without a floor notice.
+func TestFloorStepNilWithoutRecipientsAndWatchLoopProceeds(t *testing.T) {
+	if floorStep("", nil, io.Discard) != nil {
+		t.Fatal("floorStep with no recipients = non-nil, want nil")
+	}
+	var log bytes.Buffer
+	calls, waits := 0, 0
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	code := watchLoop(ctx, true, func(context.Context) (board.Snapshot, error) {
+		calls++
+		return board.Snapshot{Generation: uint64(calls)}, nil
+	}, nil, func(context.Context) bool {
+		waits++
+		if waits == 2 {
+			cancel()
+			return false
+		}
+		return true
+	}, &log)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if calls != 2 || waits != 2 {
+		t.Fatalf("passes = %d, waits = %d, want 2 and 2", calls, waits)
+	}
+	if n := strings.Count(log.String(), "published generation"); n != 2 {
+		t.Fatalf("published lines = %d, want 2: %q", n, log.String())
 	}
 }

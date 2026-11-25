@@ -159,13 +159,12 @@ func runSync(args []string) int {
 	memos := map[string]*providerMemo{}
 	limits := &serveLimits{}
 	run := &syncRun{dir: dir, env: env, store: store, loader: loader, token: token, memos: memos, limits: limits, watch: *watch, suggestions: *suggestions}
-	var floor *floorNotifier
-	if *watch && *notify != "" {
-		floor = &floorNotifier{report: func(ctx context.Context) (board.NotifyReport, error) {
-			return notifyFloor(ctx, *as, recipients)
-		}}
+	floor := floorStep(*as, recipients, os.Stderr)
+	var floorPass func(context.Context)
+	if floor != nil {
+		floorPass = floor.pass
 	}
-	return watchLoop(ctx, *watch, run.pass, func(c context.Context) { floor.pass(c) },
+	return watchLoop(ctx, *watch, run.pass, floorPass,
 		func(c context.Context) bool {
 			timer := time.NewTimer(time.Minute)
 			defer timer.Stop()

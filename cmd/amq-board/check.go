@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -105,11 +106,24 @@ func notifyFloor(ctx context.Context, observer string, recipients []string) (boa
 	return board.Notify(ctx, board.NotifyPlan{Sender: observer, Recipients: recipients, Roster: roster, Env: env, Session: session, Store: store, Config: cfg.Board}), nil
 }
 
+// floorStep builds the watch loop's floor step. With no recipients it
+// returns nil and the loop runs without floor notices.
+func floorStep(observer string, recipients []string, log io.Writer) *floorNotifier {
+	if len(recipients) == 0 {
+		return nil
+	}
+	return &floorNotifier{report: func(ctx context.Context) (board.NotifyReport, error) {
+		return notifyFloor(ctx, observer, recipients)
+	}, log: log}
+}
+
 // floorNotifier runs the floor check after each watch pass and reports one
 // line only when its outcome starts or changes. A notify error never ends
-// the watch loop; its state is separate from the pass error.
+// the watch loop; its state is separate from the pass error. Its log is the
+// watch loop's writer.
 type floorNotifier struct {
 	report func(context.Context) (board.NotifyReport, error)
+	log    io.Writer
 	last   string
 }
 
@@ -134,13 +148,13 @@ func (f *floorNotifier) pass(ctx context.Context) {
 	}
 	if text == "" {
 		if f.last != "" {
-			fmt.Fprintln(os.Stderr, "amq-board: floor notification works again")
+			_, _ = fmt.Fprintln(f.log, "amq-board: floor notification works again")
 		}
 		f.last = ""
 		return
 	}
 	if text != f.last {
-		fmt.Fprintln(os.Stderr, text)
+		_, _ = fmt.Fprintln(f.log, text)
 	}
 	f.last = text
 }
