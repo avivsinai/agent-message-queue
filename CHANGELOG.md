@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.170.5](https://github.com/avivsinai/agent-message-queue/compare/v0.170.4...v0.170.5) (2026-11-25)
+
+
+### Bug Fixes
+
+* **board:** an old snapshot, a failed source and an old note are shown as what they are ([#1645](https://github.com/avivsinai/agent-message-queue/issues/1645)) ([57db196](https://github.com/avivsinai/agent-message-queue/commit/57db196d0a97423515bb481427bf44a65f36da6a))
+* **remote:** a refused Claude Code turn ends its link task, and a continued one completes it ([#1644](https://github.com/avivsinai/agent-message-queue/issues/1644)) ([bae00a5](https://github.com/avivsinai/agent-message-queue/commit/bae00a51461d054a9107898eaad6d68e638e65cc))
+
 ## [0.170.4](https://github.com/avivsinai/agent-message-queue/compare/v0.170.3...v0.170.4) (2026-11-25)
 
 
