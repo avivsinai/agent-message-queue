@@ -708,7 +708,48 @@ func TestLinkGrantRevokeEndsTheStoredGrant(t *testing.T) {
 	if rec := grants["pi-demo"]; err != nil || rec.Generation == "" || rec.Generation == gen || rec.Grant != nil {
 		t.Fatalf("pi-demo after revoke = %+v, %v; want a new generation and no grant", rec, err)
 	}
-	if g := status(); len(g) != 0 {
-		t.Fatalf("link status grants = %+v after revoke; want none", g)
+}
+
+// In the live run of 2026-11-24 an ended attachment still read as a live
+// grant in text and JSON status. Unless its share is attached, it runs nothing.
+func TestLinkGrantStatusCallsAnEndedAttachmentNotServing(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	stateDir := filepath.Join(root, stateDirName)
+	if _, err := linkio.MintDeviceKey(stateDir, "example"); err != nil {
+		t.Fatal(err)
+	}
+	mf := manifest.File{SchemaVersion: manifest.RelaySchemaVersion, Layer: manifest.Layer,
+		Links: []manifest.Link{{Name: "example", URL: "wss://link.example.test/link",
+			Shares: []manifest.LinkShare{{Binding: "claude-68289", Consent: "passkey"}}}}}
+	if err := manifest.Write(manifest.DefaultPath(stateDir), mf); err != nil {
+		t.Fatal(err)
+	}
+	gen, err := linkio.EnsureGeneration(stateDir, "example", "claude-68289")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := linkio.StoreGrant(stateDir, "example", linkio.StoredGrant{
+		GrantID: "6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7", Binding: "claude-68289", Generation: gen, NotAfter: "2026-10-09T22:10:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := linkStatus([]string{"--root", root}, &jsonProbe{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := out.(linkStatusOut)
+	grant := st.Links[0].Grants[0]
+	if grant.Attached {
+		t.Fatalf("stored grant on an ended attachment = %+v", grant)
+	}
+	encoded, err := json.Marshal(grant)
+	if err != nil || !strings.Contains(string(encoded), `"attached":false`) {
+		t.Fatalf("JSON grant = %s, %v; want attached false", encoded, err)
+	}
+	var text strings.Builder
+	printLinkStatus(&text, st)
+	if !strings.Contains(text.String(), "(its session is not attached; it serves no task until the session is back)") {
+		t.Fatalf("status text = %s", text.String())
 	}
 }

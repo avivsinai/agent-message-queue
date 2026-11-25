@@ -238,6 +238,18 @@ func (c *Carrier) admitGranted(digest string, cmd *protocol.Command) (any, error
 	b, err := matchBinding(view, sg.Binding, sg.TargetID, sg.Epoch, sg.Labels, sg.NativeSessionID)
 	switch {
 	case err != nil:
+		var refusal *Refusal
+		if errors.As(err, &refusal) && (refusal.Code == string(protocol.CodeStaleEpoch) || refusal.Code == CodeSessionChanged) {
+			// Only the binding check may end a session grant: an absent
+			// binding (unshared) has no such evidence. No endpoint lock is
+			// held here; gmu orders exact-digest clear with the tick's reads.
+			c.markEnded(digest, CodeGrantRevoked, "the session behind binding "+sg.Binding+" changed")
+			c.gmu.Lock()
+			err := c.cfg.Grants.Clear(sg.Binding, digest)
+			c.logStore("clear the ended grant of "+sg.Binding, err)
+			c.refreshGrantsLocked()
+			c.gmu.Unlock()
+		}
 		return nil, err
 	case cmd.Epoch != sg.Epoch:
 		return nil, refuse(string(protocol.CodeStaleEpoch), "the binding changed since you signed; read it again and sign again")
@@ -503,6 +515,8 @@ func (c *Carrier) refreshGrantsLocked() Grants {
 		why := "revoked"
 		if e.code == CodeGrantExpired {
 			why = "expired"
+		} else if e.why == "the session behind binding "+sg.Binding+" changed" {
+			why = "session changed"
 		}
 		delete(c.grantSeen, d)
 		c.notify(fmt.Sprintf("the grant of link %s for session %s ended (%s)", c.cfg.Name, sg.Labels.Session, why))
