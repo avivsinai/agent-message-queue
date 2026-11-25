@@ -44,6 +44,13 @@ This is an explicit optional broadcast; plain check output is unchanged.
 Each line is one problem for the lead to act on: dispatch what is ready,
 ask the seat once, then replace it. It is not proof that a process stopped.
 
+Each roster seat carries one context line: the prompt size of the newest
+counted response of the worker's mapped sessions, with its age, and the 5 h
+cache-read share when the window holds cache reads. pi records no cache
+reads, so a pi seat shows no share. The line is a measured fact for judging
+how full a seat's context is; the board sets no threshold and gives no
+advice.
+
 `seat_stalled`, `seat_at_limit`, `account_near_cap`, `ready_not_started`,
 `in_progress_not_worked`, `reply_overdue` and `source_failed` are the kinds.
 `source_failed` means the source's `read_failed` fact: its read in this

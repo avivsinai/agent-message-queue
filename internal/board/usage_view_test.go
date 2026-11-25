@@ -110,3 +110,30 @@ func TestLimitsLineReadsPastAppServerLimitAsPast(t *testing.T) {
 		t.Fatalf("limitsLine = %q, want the past form", got)
 	}
 }
+
+// Each seat shows one context line: the latest response's prompt size with
+// its age, and the 5 h cache-read share when the window holds cache reads
+// (context-size.md: the lead's 887,765-token response was 99.7% reads; pi
+// records none). Measured facts, not advice; no threshold.
+func TestSeatShowsContextSizeAndCacheReadShare(t *testing.T) {
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	row := func(agent RosterAgent, want string) {
+		t.Helper()
+		if got := contextLine(agent, now); got != want {
+			t.Errorf("contextLine = %q, want %q", got, want)
+		}
+	}
+	// A Claude lead: the newest response carried 887,765 prompt tokens,
+	// 99.7% of them cache reads, one hour ago.
+	lead := RosterAgent{Usage: []Usage{
+		{Window: usage.Window5h, In: 1294337, CacheRead: 38630586, Fresh: 1394337, LastContextTokens: 887765, LastAt: now.Add(-time.Hour)},
+		{Window: usage.Window7d, LastContextTokens: 887765, LastAt: now.Add(-time.Hour)},
+	}}
+	row(lead, "context 887.8K at 1h ago · cache reads 96.5% of 5 h")
+	// A pi seat records no cache reads: the context shows, the share does not.
+	row(RosterAgent{Usage: []Usage{{Window: usage.Window5h, In: 86359, Fresh: 87182, LastContextTokens: 86359, LastAt: now.Add(-2 * time.Minute)}}},
+		"context 86.4K at 2m ago")
+	// No counted response (no mapped session, or a pure output turn): no line.
+	row(RosterAgent{}, "")
+	row(RosterAgent{Usage: []Usage{{Window: usage.Window5h, LastContextTokens: 0, LastAt: now.Add(-time.Hour)}}}, "")
+}

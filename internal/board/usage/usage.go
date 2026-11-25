@@ -543,6 +543,22 @@ func (s Session) Totals(from time.Time) (Counts, time.Time) {
 	return c, asOf
 }
 
+// Last is the newest counted event of the session: the prompt size of its
+// latest response, with its time. A session whose records were not counted
+// has none.
+func (s Session) Last() (Counts, time.Time) {
+	if len(s.events) == 0 {
+		return Counts{}, time.Time{}
+	}
+	last := s.events[0]
+	for _, e := range s.events[1:] {
+		if e.at.After(last.at) {
+			last = e
+		}
+	}
+	return last.Counts, last.at
+}
+
 func add(a, b Counts) Counts {
 	a.In += b.In
 	a.CacheRead += b.CacheRead

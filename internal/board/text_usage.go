@@ -62,7 +62,32 @@ func usageLine(a RosterAgent, now time.Time) string {
 		}
 		parts = append(parts, p)
 	}
+	if line := contextLine(a, now); line != "" {
+		parts = append(parts, line)
+	}
 	return strings.Join(parts, " · ")
+}
+
+// contextLine is the seat's context line: the latest response's prompt size
+// with its age, and the 5 h cache-read share when the account records cache
+// reads. A worker with no counted response shows neither.
+func contextLine(a RosterAgent, now time.Time) string {
+	if len(a.Usage) == 0 || a.Usage[0].LastAt.IsZero() {
+		return ""
+	}
+	last := a.Usage[0]
+	// A response with no prompt tokens (a pure output turn) says nothing
+	// about context size, so the line stays off.
+	if last.LastContextTokens == 0 {
+		return ""
+	}
+	line := fmt.Sprintf("context %s at %s", si(last.LastContextTokens), age(now.Sub(last.LastAt))+" ago")
+	// The share needs cache reads: a harness that records none (pi) or a
+	// window with none shows no percentage.
+	if cached := last.CacheRead; cached > 0 {
+		line += fmt.Sprintf(" · cache reads %.1f%% of 5 h", 100*float64(cached)/float64(last.Fresh+cached))
+	}
+	return line
 }
 
 // pastLimit names a reached limit the account spent tokens after.
