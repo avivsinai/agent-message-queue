@@ -73,8 +73,9 @@ of these states:
 | read failed | `read_failed` is true; the read of this source failed in this pass | yes, `source_failed` |
 | unavailable or disabled | The source has no home or is turned off; shown, not read | no |
 
-`account_near_cap` fires when an account's freshest cap reading, fresh by
-its own time inside the 15-minute bound, shows 90 percent or more used. The
+`account_near_cap` fires when an account's freshest cap reading shows 90
+percent or more used. A reading stays current until its future reset time;
+without one, its timestamp must be inside the 15-minute bound. The
 newest fact for a cap decides before the threshold, so an older 95-percent
 reading beside a newer half-used one raises nothing. It is
 the account's fact: no mapped worker or card is needed. Codex reports the

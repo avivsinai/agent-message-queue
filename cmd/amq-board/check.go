@@ -99,21 +99,35 @@ func notifyFloor(ctx context.Context, observer string, recipients []string) (boa
 	if err != nil {
 		return board.NotifyReport{}, err
 	}
+	return floorNotice(ctx, store, env, session, cfg.Board, observer, recipients), nil
+}
+
+// floorNotice evaluates and delivers after its caller resolves the command
+// context. A watch reuses its own store and configuration instead of reading
+// the project and user files a second time on every pass.
+func floorNotice(ctx context.Context, store board.Store, env board.Env, session string, cfg board.Config, observer string, recipients []string) board.NotifyReport {
 	roster, err := notifyRoster(ctx, env)
 	if err != nil {
-		return board.NotifyReport{}, fmt.Errorf("resolve floor handles: %w", err)
+		return board.NotifyReport{Err: fmt.Errorf("resolve floor handles: %w", err)}
 	}
-	return board.Notify(ctx, board.NotifyPlan{Sender: observer, Recipients: recipients, Roster: roster, Env: env, Session: session, Store: store, Config: cfg.Board}), nil
+	return board.Notify(ctx, board.NotifyPlan{Sender: observer, Recipients: recipients, Roster: roster, Env: env, Session: session, Store: store, Config: cfg})
 }
 
 // floorStep builds the watch loop's floor step. With no recipients it
 // returns nil and the loop runs without floor notices.
-func floorStep(observer string, recipients []string, log io.Writer) *floorNotifier {
+func floorStep(run *syncRun, observer string, recipients []string, log io.Writer) *floorNotifier {
 	if len(recipients) == 0 {
 		return nil
 	}
 	return &floorNotifier{report: func(ctx context.Context) (board.NotifyReport, error) {
-		return notifyFloor(ctx, observer, recipients)
+		if err := run.env.Run.(execRunner).amqValidate(ctx); err != nil {
+			return board.NotifyReport{}, err
+		}
+		bc, err := readBoardContext(ctx, run.env)
+		if err != nil {
+			return board.NotifyReport{}, err
+		}
+		return floorNotice(ctx, run.store, run.env, bc.Session, run.loader.ReloadConfig().Board, observer, recipients), nil
 	}, log: log}
 }
 

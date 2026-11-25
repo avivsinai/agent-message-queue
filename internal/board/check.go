@@ -29,11 +29,9 @@ func (p Problem) Incident() string {
 	case ProblemSeatStalled, ProblemSeatAtLimit:
 		parts = append(parts, p.Session, p.Handle)
 	case ProblemAccountNearCap:
-		resets := ""
-		if p.ResetsAt != nil {
-			resets = p.ResetsAt.UTC().Format(time.RFC3339)
-		}
-		parts = append(parts, p.Account, resets)
+		// A provider's reset timestamp can move by a second inside one
+		// period. A below-cap pass clears the delivered record instead.
+		parts = append(parts, p.Account)
 	case ProblemSourceFailed:
 		parts = append(parts, p.Source)
 	case ProblemReadyNotBegun, ProblemNotWorked:
