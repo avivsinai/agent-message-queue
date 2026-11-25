@@ -494,6 +494,41 @@ func TestReconcileSettlesRunningRequestWhenClaudeExits(t *testing.T) {
 	}
 }
 
+// PR #1642 review: exit between the Stop hook and the next poll must
+// preserve the completed turn, even after Claude removes its registry entry.
+func TestLookupAfterExitReadsTheFinalStop(t *testing.T) {
+	ft := newFakeTarget(t, 1<<30, nil) // no process holds this fixture pid
+	att := ft.attach(t)
+	var completed atomic.Int32
+	t.Cleanup(att.Subscribe(func(ev core.NativeEvent) {
+		if ev.Type == core.EventRunCompleted {
+			completed.Add(1)
+		}
+	}))
+	adm, err := att.Submit(pr2BoundRequest("finish"))
+	if err != nil || !adm.Admitted {
+		t.Fatalf("submit: %+v, %v", adm, err)
+	}
+	if err := os.Remove(filepath.Join(registryDir(defaultConfigDir(ft.home)), fmt.Sprintf("%d.json", ft.pid))); err != nil {
+		t.Fatal(err)
+	}
+	key := pr2Key()
+	appendTranscript(t, ft.home, deliveredLine(t, adm.RunID, frameEnvelope(t, ft)), transcriptLine(t, "assistant", "final answer"))
+	appendStopMarker(t, ft.home, time.Now().UnixMilli()+1)
+	ev, err := att.Lookup(key, "")
+	if err != nil || ev.State != protocol.StateCompleted || ev.Result == nil || ev.Result.Text != "final answer" {
+		t.Fatalf("lookup after exit = %+v, %v; want the final answer", ev, err)
+	}
+	att.pollConfirmations()
+	if n := completed.Load(); n != 1 {
+		t.Fatalf("published %d completions, want 1", n)
+	}
+	att.AcknowledgeResult(key, "", "")
+	if ev, _ := att.Lookup(key, ""); ev.Class != core.EvidenceUnknown {
+		t.Fatalf("lookup after ack = %+v", ev)
+	}
+}
+
 // An uncertain record held its Claude target busy for good. The owner's
 // release ends it failed released_by_owner, the target admits a new
 // request, and a late delivery of the released frame completes neither

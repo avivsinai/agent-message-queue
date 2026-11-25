@@ -404,9 +404,8 @@ type Attachment struct {
 	// A truncated file resets activityNext. A recovery rewind does not.
 	activityPath string
 	activityNext int64
-	// curGen increments whenever the cursor is reset outside the poller (a
-	// recovered run needs a replay from its delivery offset); a poll that
-	// started under an older generation does not write its cursor back.
+	// curGen changes on each commit or rewind. A reader of an older cursor
+	// must discard its batch before applying entries or emitting events.
 	curGen uint64
 	// recoverFrom[key] is how far a restart-recovery scan has read for a
 	// key it has not found yet, so an uncertain record costs only the new
