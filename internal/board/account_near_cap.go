@@ -2,6 +2,7 @@ package board
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -34,7 +35,8 @@ func accountNearCap(m Model, now time.Time) []Problem {
 		if l.ResetsAt != nil {
 			resets = ", resets " + resetTime(*l.ResetsAt, now)
 		}
-		p := nearCapUsedPercent(l)
+		// The threshold check already proved the cap has a usable reading.
+		p, _ := nearCapUsedPercent(l)
 		used, total := capAmount(l.Used), capAmount(l.Cap)
 		if used == "" {
 			used = percent(p)
@@ -72,7 +74,8 @@ func nearCapLimit(ls []usage.Limit, now time.Time) *usage.Limit {
 		if freshest[l.Name+"\x00"+l.Bucket] != l {
 			continue
 		}
-		if nearCapUsedPercent(l) < accountNearCapThreshold {
+		p, ok := nearCapUsedPercent(l)
+		if !ok || p < accountNearCapThreshold {
 			continue
 		}
 		if best == nil || l.AsOf.After(best.AsOf) {
@@ -92,34 +95,41 @@ func capFresh(l *usage.Limit, now time.Time) bool {
 	return now.Sub(l.AsOf) <= LimitsStaleAfter
 }
 
-// nearCapUsedPercent is the cap's used share: used over cap when both parse
-// and the cap is positive, else the reported used percent, else 100 minus
-// the reported remaining percent.
-func nearCapUsedPercent(l *usage.Limit) float64 {
-	if u, err := strconv.ParseFloat(l.Used, 64); err == nil {
-		if c, err := strconv.ParseFloat(l.Cap, 64); err == nil && c > 0 {
-			return u / c * 100
+// capUnits parses a cap's exact units as finite decimals.
+func capUnits(s string) (float64, bool) {
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0, false
+	}
+	return f, true
+}
+
+// nearCapUsedPercent is the cap's used share: used over cap when both exact
+// unit strings parse as finite decimals and the cap is positive, else the
+// reported used percent, else 100 minus the reported remaining percent. A
+// cap with no usable reading of any kind has no used share.
+func nearCapUsedPercent(l *usage.Limit) (float64, bool) {
+	if u, ok := capUnits(l.Used); ok {
+		if c, ok := capUnits(l.Cap); ok && c > 0 {
+			return u / c * 100, true
 		}
 	}
 	if l.UsedPercent != nil {
-		return *l.UsedPercent
+		return *l.UsedPercent, true
 	}
 	if l.RemainingPercent != nil {
-		return 100 - *l.RemainingPercent
+		return 100 - *l.RemainingPercent, true
 	}
-	return 0
+	return 0, false
 }
 
 // capAmount prints a cap's figure exactly as the source wrote it when it
-// parses as a decimal; an empty figure stays empty.
+// parses as a finite decimal; an empty or invalid figure stays empty.
 func capAmount(s string) string {
-	if s == "" {
+	if _, ok := capUnits(s); !ok {
 		return ""
 	}
-	if _, err := strconv.ParseFloat(s, 64); err == nil {
-		return s
-	}
-	return clean(s)
+	return s
 }
 
 // nearCapLeftText prints what is left of the cap: never negative and
