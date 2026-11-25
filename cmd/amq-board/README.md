@@ -57,7 +57,7 @@ scan mailboxes itself or fall back to a different source.
 
 - `seat_stalled`: a seat has unread mail and shows no activity since it arrived.
 - `seat_at_limit`: a seat is at its plan limit and owns current work.
-- `account_near_cap`: a harness account's freshest plan-limit reading (not older than the 15-minute limit bound) shows 90 percent or more of a cap or window used. It needs no mapped worker and no card. Codex reports the pre-limit figures; Claude Code and pi report nothing before the limit, so they give no line.
+- `account_near_cap`: a harness account's freshest plan-limit reading (not older than the 15-minute limit bound) shows 90 percent or more of a cap used. It needs no mapped worker and no card. Codex reports the pre-limit figures; Claude Code and pi report nothing before the limit, so they give no line.
 - `ready_not_started`: a seat with nothing in progress is idle or off and has ready work assigned.
 - `in_progress_not_worked`: a card is in progress longer than the liveness window, and its owner's last observed activity is older than that window. A seat with no observed activity is not listed.
 - `reply_overdue` covers overdue agent replies, owner questions and owner rulings. For owner questions and rulings the sender reads the thread before taking the default or closing the ruling. Owner todos and review requests stay under Needs you.
