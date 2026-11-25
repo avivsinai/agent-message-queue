@@ -41,6 +41,12 @@ Failed pairs retry; a stale board tells of `board_stale` and retains the set.
 Never use a working seat as the sender because its unread notice affects
 later stall analysis. Every distinct handle resolves live before sending.
 This is an explicit optional broadcast; plain check output is unchanged.
+
+For a continuously published board, run `amq-board sync --watch --notify lead,alt
+--as floor`. The watch goes on after a failed pass, tries again each minute, and
+ends on Ctrl-C or TERM, or when the project was replaced. Each new floor problem
+is sent once after every pass; a board that stops being published is reported by
+the existing stale notice after the liveness window.
 Each line is one problem for the lead to act on: dispatch what is ready,
 ask the seat once, then replace it. It is not proof that a process stopped.
 

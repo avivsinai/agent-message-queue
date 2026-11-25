@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -69,17 +70,11 @@ func runCheckContext(ctx context.Context, args []string) int {
 		}
 		recipients = append(recipients, handle)
 	}
-	store, env, cfg, session, err := checkNotifyContext(ctx)
+	report, err := notifyFloor(ctx, *as, recipients)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "amq-board check:", err)
 		return exitGeneral
 	}
-	roster, err := notifyRoster(ctx, env)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "amq-board check: resolve floor handles:", err)
-		return exitGeneral
-	}
-	report := board.Notify(ctx, board.NotifyPlan{Sender: *as, Recipients: recipients, Roster: roster, Env: env, Session: session, Store: store, Config: cfg.Board})
 	if !report.Evaluated {
 		for _, err := range []error{report.Err, report.NoticeErr} {
 			if err != nil {
@@ -94,6 +89,74 @@ func runCheckContext(ctx context.Context, args []string) int {
 		return exitGeneral
 	}
 	return code
+}
+
+// notifyFloor runs the floor check on the published board and sends each new
+// problem once, as observer to recipients. The returned error is the context
+// or roster error that runCheck prints today.
+func notifyFloor(ctx context.Context, observer string, recipients []string) (board.NotifyReport, error) {
+	store, env, cfg, session, err := checkNotifyContext(ctx)
+	if err != nil {
+		return board.NotifyReport{}, err
+	}
+	roster, err := notifyRoster(ctx, env)
+	if err != nil {
+		return board.NotifyReport{}, fmt.Errorf("resolve floor handles: %w", err)
+	}
+	return board.Notify(ctx, board.NotifyPlan{Sender: observer, Recipients: recipients, Roster: roster, Env: env, Session: session, Store: store, Config: cfg.Board}), nil
+}
+
+// floorStep builds the watch loop's floor step. With no recipients it
+// returns nil and the loop runs without floor notices.
+func floorStep(observer string, recipients []string, log io.Writer) *floorNotifier {
+	if len(recipients) == 0 {
+		return nil
+	}
+	return &floorNotifier{report: func(ctx context.Context) (board.NotifyReport, error) {
+		return notifyFloor(ctx, observer, recipients)
+	}, log: log}
+}
+
+// floorNotifier runs the floor check after each watch pass and reports one
+// line only when its outcome starts or changes. A notify error never ends
+// the watch loop; its state is separate from the pass error. Its log is the
+// watch loop's writer.
+type floorNotifier struct {
+	report func(context.Context) (board.NotifyReport, error)
+	log    io.Writer
+	last   string
+}
+
+func (f *floorNotifier) pass(ctx context.Context) {
+	report, err := f.report(ctx)
+	var text string
+	prefix := "amq-board: floor notification: "
+	switch {
+	case err != nil:
+		text = prefix + err.Error()
+	case !report.Evaluated:
+		parts := make([]string, 0, 2)
+		if report.Err != nil {
+			parts = append(parts, report.Err.Error())
+		}
+		if report.NoticeErr != nil {
+			parts = append(parts, report.NoticeErr.Error())
+		}
+		text = prefix + strings.Join(parts, "; ")
+	case report.NoticeErr != nil:
+		text = prefix + report.NoticeErr.Error()
+	}
+	if text == "" {
+		if f.last != "" {
+			_, _ = fmt.Fprintln(f.log, "amq-board: floor notification works again")
+		}
+		f.last = ""
+		return
+	}
+	if text != f.last {
+		_, _ = fmt.Fprintln(f.log, text)
+	}
+	f.last = text
 }
 
 func writeCheck(asJSON bool, now time.Time, model board.Model, problems []board.Problem, err error) int {
