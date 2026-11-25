@@ -121,12 +121,14 @@ func (f *floorNotifier) pass(ctx context.Context) {
 	case err != nil:
 		text = prefix + err.Error()
 	case !report.Evaluated:
+		parts := make([]string, 0, 2)
 		if report.Err != nil {
-			text = prefix + report.Err.Error()
+			parts = append(parts, report.Err.Error())
 		}
 		if report.NoticeErr != nil {
-			text = prefix + report.NoticeErr.Error()
+			parts = append(parts, report.NoticeErr.Error())
 		}
+		text = prefix + strings.Join(parts, "; ")
 	case report.NoticeErr != nil:
 		text = prefix + report.NoticeErr.Error()
 	}
