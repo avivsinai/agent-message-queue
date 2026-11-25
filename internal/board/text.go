@@ -88,10 +88,9 @@ func WriteText(w io.Writer, m Model) error {
 	var b strings.Builder
 	now := m.GeneratedAt
 	// One stale predicate: the model computes Stale and the age once, and
-	// every face prints from those two fields. A second decision here could
-	// disagree with the gate and print a blank first line.
-	if line := StalenessText(m); m.Stale && line != "" {
-		b.WriteString(line + "\n")
+	// every face prints from those two fields.
+	if m.Stale {
+		b.WriteString(StalenessText(m) + "\n")
 	}
 
 	project := m.Project

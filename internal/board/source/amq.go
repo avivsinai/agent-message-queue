@@ -157,7 +157,7 @@ func BuildAMQ(c AMQCapture) (res board.Result) {
 				}
 				// doctor --ops carries no presence note; who does.
 				w := who[[2]string{s.Name, e.Handle}]
-				e.Note = w.Note
+				e.Note, e.NoteAt = w.Note, w.NoteAt
 				if e.Harness == "" && w.Identity != nil {
 					e.Harness = w.Identity.Harness
 				}
@@ -186,6 +186,7 @@ func BuildAMQ(c AMQCapture) (res board.Result) {
 				NotifierMode:   w.NotifierMode,
 				NotifierReason: w.NotifierReason,
 				Note:           w.Note,
+				NoteAt:         w.NoteAt,
 				PresenceStatus: "unknown",
 			}
 			if w.Identity != nil {

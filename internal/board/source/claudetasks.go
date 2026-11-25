@@ -317,9 +317,19 @@ func claudeDefaultList(ctx context.Context, home, list string, worktrees map[str
 func (source ClaudeTasks) Read(ctx context.Context, env board.Env) board.Result {
 	budget := &claudeReadBudget{remaining: claudeAcquisitionByteLimit}
 	result := source.readHome(ctx, env, budget)
-	// A whole-source failure needs every attempted home to fail. A different
-	// home that yields a list downgrades the result to healthy partial.
-	anyList := !result.ReadFailed
+	// Only a home whose read succeeded makes the aggregate ok; an absent
+	// home has no failed read but also no list. One failed read degrades
+	// the whole source. The primary home's absence is a gap, not a failure
+	// reason, so its detail moves to coverage and the final verdict below
+	// restores it when no home read at all.
+	readOK := !result.ReadFailed && result.Status == board.StatusOK
+	readFailed := result.ReadFailed
+	absentDetail := ""
+	if result.Status == board.StatusUnavailable {
+		absentDetail = result.Detail
+		result.Coverage.Detail = strings.TrimPrefix(result.Coverage.Detail+"; "+result.Detail, "; ")
+		result.Detail = ""
+	}
 	result.ReadFailed = false
 	seen := map[string]bool{result.Namespace: true}
 	var homes []string
@@ -349,23 +359,34 @@ func (source ClaudeTasks) Read(ctx context.Context, env board.Env) board.Result 
 		result.Coverage.Skipped += next.Coverage.Skipped
 		result.Coverage.Unresolved += next.Coverage.Unresolved
 		result.Coverage.Truncated += next.Coverage.Truncated
+		if next.Status == board.StatusUnavailable {
+			// An absent home is not a failed read: readHome already counted
+			// its absence as the coverage gap, so an available home keeps
+			// the aggregate ok.
+			result.Coverage.Detail = strings.TrimPrefix(result.Coverage.Detail+"; "+next.Detail, "; ")
+			continue
+		}
+		readFailed = readFailed || next.ReadFailed
+		readOK = readOK || (!next.ReadFailed && next.Status == board.StatusOK)
 		if next.Status != board.StatusOK {
-			// An absent home keeps the source unavailable: it is not a read
-			// that failed, and it must not downgrade an available home's
-			// status to degraded.
-			if next.Status == board.StatusUnavailable && result.Status == board.StatusOK {
-				result.Status = board.StatusUnavailable
-			} else {
-				result.Status = board.StatusDegraded
-			}
 			result.Detail = strings.TrimPrefix(result.Detail+"; "+next.Detail, "; ")
 		}
-		anyList = anyList || !next.ReadFailed
 		if next.Coverage.Detail != "" {
 			result.Coverage.Detail = strings.TrimPrefix(result.Coverage.Detail+"; "+next.Coverage.Detail, "; ")
 		}
 	}
-	result.ReadFailed = !anyList
+	// One read that failed degrades the source; otherwise one read that
+	// succeeded keeps it ok; an all-absent source is unavailable, and the
+	// absence detail comes back from coverage.
+	if readFailed {
+		result.Status = board.StatusDegraded
+	} else if readOK {
+		result.Status = board.StatusOK
+	} else {
+		result.Status = board.StatusUnavailable
+		result.Detail = absentDetail
+	}
+	result.ReadFailed = readFailed
 	return result
 }
 

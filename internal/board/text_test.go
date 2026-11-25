@@ -110,6 +110,25 @@ func TestTextStartsWithSnapshotAge(t *testing.T) {
 	if first, _, _ := strings.Cut(out.String(), "\n"); first != "STALE: published 2h ago (2026-11-25T10:00:00Z). Every number below is from then. Run amq-board sync." {
 		t.Fatalf("the text view's first line is not the staleness line: %q", first)
 	}
+	// The formatter prints what the model decided: an injected stale verdict
+	// prints even where the freshness bound alone would call it fresh, and a
+	// false verdict never prints.
+	injected := Model{GeneratedAt: now, Config: DefaultConfig(), PublishedAt: now.Add(-2 * time.Minute), Stale: true}
+	out.Reset()
+	if err := WriteText(&out, injected); err != nil {
+		t.Fatal(err)
+	}
+	if first, _, _ := strings.Cut(out.String(), "\n"); !strings.HasPrefix(first, "STALE: published 2m ago") {
+		t.Fatalf("injected stale verdict lost its line: %q", first)
+	}
+	m.Stale = false
+	out.Reset()
+	if err := WriteText(&out, m); err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasPrefix(out.String(), "STALE") {
+		t.Fatalf("false verdict printed a line: %q", out.String())
+	}
 	if err := CheckFreshness(Snapshot{PublishedAt: now}, DefaultConfig(), now); err != nil {
 		t.Fatal(err)
 	}

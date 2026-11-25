@@ -384,6 +384,16 @@ func TestBoardSourceDefects(t *testing.T) {
 			},
 		},
 		{
+			// Review finding 2026-11-25: who's presence note carries its own
+			// note_at, and the roster must keep the pair together.
+			name: "who note keeps its note_at on the roster",
+			check: func(t *testing.T, m board.Model) {
+				if a, ok := rosterAgent(m, "s1", "alpha"); !ok || a.Note != "waiting on review" || a.NoteAt != "2026-10-22T09:30:00Z" {
+					t.Errorf("s1/alpha note=%q noteAt=%q found=%v", a.Note, a.NoteAt, ok)
+				}
+			},
+		},
+		{
 			// A failed provider read is a degradation, not a healthy partial.
 			name: "a mailbox obligation read that did not happen is not healthy partial",
 			fail: map[string]error{"amq thread open --all-sessions --json": errors.New("read failed")},

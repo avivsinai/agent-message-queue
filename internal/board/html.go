@@ -150,6 +150,13 @@ type pageTask struct {
 	Historical bool   `json:"historical"`
 }
 
+func staleText(m Model) string {
+	if !m.Stale {
+		return ""
+	}
+	return StalenessText(m)
+}
+
 func buildPageModel(m Model) pageModel {
 	pm := pageModel{Dir: m.Dir, GeneratedAt: m.GeneratedAt, PublishedAt: m.PublishedAt, Generation: m.Generation, Redirects: m.Redirects, Catalogue: []pageTask{}}
 	seen := map[string]bool{}
@@ -328,9 +335,11 @@ func buildPage(m Model, regenerate string) pageData {
 		project = m.Dir
 	}
 	p := pageData{
-		Model:           buildPageModel(m),
-		Stale:           m.Stale,
-		StaleText:       StalenessText(m),
+		Model: buildPageModel(m),
+		Stale: m.Stale,
+		// The banner prints only when the model says stale; StalenessText
+		// formats the fields it is given.
+		StaleText:       staleText(m),
 		FreshnessWindow: int64(FreshnessWindow(m.Config) / time.Second),
 		CSS:             template.CSS(pageCSS),
 		JS:              template.JS(pageJS),

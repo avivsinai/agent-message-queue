@@ -54,12 +54,15 @@ func (source CodexGoals) Read(ctx context.Context, env board.Env) board.Result {
 	if err != nil {
 		return fail(err)
 	}
+	// Absence reports the absolute path the operator configured, before a
+	// symlink resolution can point the message elsewhere.
+	absolute := home
 	home, err = filepath.EvalSymlinks(home)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			// No Codex home on this machine: the source is not present,
 			// not a failed read. Any other home error stays a failed read.
-			res.Status, res.Detail = board.StatusUnavailable, "codex home "+home+" is absent"
+			res.Status, res.Detail = board.StatusUnavailable, "codex home "+absolute+" is absent"
 			res.Coverage.Unresolved++
 			return res
 		}

@@ -27,12 +27,10 @@ func CheckFreshness(s Snapshot, cfg Config, now time.Time) error {
 	return nil
 }
 
-// StalenessText is the prominent old-fact marker for text and HTML views.
-// Sources might remain healthy; only this publication is old.
+// StalenessText formats the model's stale verdict and publication age. The
+// model computes both once; every face prints from those fields. The caller
+// gates on m.Stale: a fresh publication prints no marker.
 func StalenessText(m Model) string {
-	if CheckFreshness(Snapshot{PublishedAt: m.PublishedAt}, m.Config, m.GeneratedAt) == nil {
-		return ""
-	}
 	published := nowAge(m)
 	if m.PublishedAt.IsZero() {
 		return "STALE: published at an unknown time. Every number below is from then. Run amq-board sync."
@@ -58,5 +56,5 @@ func MarkStale(m *Model) {
 		return
 	}
 	m.PublishedAgeSeconds = max(0, int64(nowAge(*m)/time.Second))
-	m.Stale = StalenessText(*m) != ""
+	m.Stale = CheckFreshness(Snapshot{PublishedAt: m.PublishedAt}, m.Config, m.GeneratedAt) != nil
 }

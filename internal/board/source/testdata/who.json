@@ -1,6 +1,6 @@
 [
   {"name": "s1", "agents": [
-    {"handle": "alpha", "kind": "agent", "presence_applicable": true, "active": true, "presence_source": "notifier_live", "notifier_status": "attached"},
+    {"handle": "alpha", "kind": "agent", "presence_applicable": true, "active": true, "presence_source": "notifier_live", "notifier_status": "attached", "note": "waiting on review", "note_at": "2026-10-22T09:30:00Z"},
     {"handle": "beta", "kind": "agent", "presence_applicable": true, "active": false},
     {"handle": "user", "kind": "human", "presence_applicable": false, "active": false}
   ]},
