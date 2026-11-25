@@ -1229,6 +1229,15 @@ behind. The hook command itself always exits 0, so a broken bridge never
 blocks Claude Code. After an endpoint restart, a request that was in flight
 reads `uncertain`.
 
+When the API refuses a turn of a link task (a usage limit, for example), the
+task stays `running` while Claude Code can still continue that turn itself.
+A command typed at the prompt, such as `/rate-limit-options`, does not end
+it. When Claude Code continues the turn, the task completes with that
+answer. When a person's prompt or another delivery starts a new turn first,
+the task ends `failed` with code `native_error` and the reason "the turn
+ended in an API error and the session moved on", and the session takes link
+tasks again.
+
 ### Session grants and the prompt hook
 
 A Claude Code session shows its permission mode only in a hook's input, at

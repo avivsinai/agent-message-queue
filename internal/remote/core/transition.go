@@ -40,7 +40,7 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 	forget, forgetAt := false, time.Time{}
 	switch ev.Type {
 	case EventRunCompleted, EventRunFailed, EventRunCancelled:
-		nev := nativeEvidence{runID: ev.RunID, result: ev.Result, grantedDigest: ev.GrantedTextDigest}
+		nev := nativeEvidence{runID: ev.RunID, result: ev.Result, grantedDigest: ev.GrantedTextDigest, reason: ev.Reason}
 		// The duplicate guard must compare EVIDENCE, not just presence.
 		// A late FINAL result F for the same run is NOT a duplicate of partial P
 		// — the digests differ. Dropping F keeps P, memoed AckDigest(P), while
