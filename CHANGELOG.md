@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.170.4](https://github.com/avivsinai/agent-message-queue/compare/v0.170.3...v0.170.4) (2026-11-25)
+
+
+### Bug Fixes
+
+* **remote:** a link task settles when its Claude Code process is gone ([#1642](https://github.com/avivsinai/agent-message-queue/issues/1642)) ([23ea864](https://github.com/avivsinai/agent-message-queue/commit/23ea864a62e3bb86ea4aaca64e92711c4340f209))
+* **remote:** a session grant ends when its session changed, and link status says when it serves no task ([#1641](https://github.com/avivsinai/agent-message-queue/issues/1641)) ([f9195c2](https://github.com/avivsinai/agent-message-queue/commit/f9195c220be273e92bf70bb4d9a865ca648bb590))
+
 ## [0.170.3](https://github.com/avivsinai/agent-message-queue/compare/v0.170.2...v0.170.3) (2026-11-24)
 
 
