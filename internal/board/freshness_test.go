@@ -78,4 +78,9 @@ func TestSnapshotAgingReachesTextJSONPaneAndHTML(t *testing.T) {
 	if !strings.Contains(page.String(), wanted) {
 		t.Fatalf("no old publication banner")
 	}
+	// The stopped-watch page also needs seconds, not Go's nanosecond duration,
+	// for its existing timer to cross the configured bound in real time.
+	if !strings.Contains(page.String(), `id="freshness-window"> 1800 </script>`) {
+		t.Fatalf("the browser freshness bound is not seconds")
+	}
 }

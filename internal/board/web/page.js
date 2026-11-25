@@ -240,15 +240,8 @@
     if (!staleNode) { return; }
     // An explicit pane verdict always wins over the browser's clock. Until
     // a pane arrives, the one timer advances or clears the one banner.
-    if (observedStale === false || observedStale === true) {
-      staleNode.hidden = !old;
-      if (old) {
-        staleNode.textContent = "STALE: published " + ageText(seconds * 1000) + " ago (" + timeNode.dateTime + "). Every number below is from then. Run amq-board sync.";
-      } else { staleNode.textContent = ""; }
-    } else {
-      staleNode.hidden = !old;
-      staleNode.textContent = old ? "STALE: published " + ageText(seconds * 1000) + " ago (" + timeNode.dateTime + "). Every number below is from then. Run amq-board sync." : "";
-    }
+    staleNode.hidden = !old;
+    staleNode.textContent = old ? "STALE: published " + ageText(seconds * 1000) + " ago (" + timeNode.dateTime + "). Every number below is from then. Run amq-board sync." : "";
   }
   tick(); window.setInterval(tick, 30000);
   if (!live) { return; }

@@ -86,7 +86,7 @@ func runPresenceSet(args []string) error {
 func runPresenceList(args []string) error {
 	fs := flag.NewFlagSet("presence list", flag.ContinueOnError)
 	common := addCommonFlags(fs)
-	usage := usageWithFlags(fs, "amq presence list [options]")
+	usage := usageWithFlags(fs, "amq presence list [options]\n\nText output includes every stored note and its own note_at age, or (age unknown) for a legacy record without one. JSON includes note_at. Only the board Floor hides notes older than liveness_window; presence list does not drop old records.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
