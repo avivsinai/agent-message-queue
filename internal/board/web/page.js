@@ -259,6 +259,9 @@
       generated = Date.parse(model.published_at);
     }
     shownStale = model.stale;
+    // The shown snapshot changed, so its banner and age recompute now, not
+    // on the next 30-second tick.
+    tick();
   }
   function applyFreshPane(model) {
     // pane.json is a bounded freshness face, not the whole board model.

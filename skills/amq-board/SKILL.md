@@ -57,9 +57,11 @@ of these states:
 | ok | The read supplied a current list | no |
 | ok with limits | Partial or capacity-limited; the coverage names the limit | no |
 | read failed | `read_failed` is true; the read supplied no list | yes, `source_failed` |
-| unavailable or disabled | The source has no home or is turned off; shown, not read | no | `reply_overdue`
-covers overdue agent replies, owner questions and owner rulings. The sender
-reads the thread before taking a default or closing a ruling. The command exits 0 on an empty list, 6
+| unavailable or disabled | The source has no home or is turned off; shown, not read | no |
+
+`reply_overdue` covers overdue agent replies, owner questions and owner
+rulings. The sender reads the thread before taking a default or closing a
+ruling. The command exits 0 on an empty list, 6
 on problems, and 1 on a stale or absent snapshot. A seat whose harness records
 no activity cannot produce `in_progress_not_worked` without that evidence.
 
