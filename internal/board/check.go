@@ -10,14 +10,15 @@ import (
 type ProblemKind string
 
 const (
-	ProblemSeatStalled   ProblemKind = "seat_stalled"
-	ProblemSeatAtLimit   ProblemKind = "seat_at_limit"
-	ProblemReadyNotBegun ProblemKind = "ready_not_started"
-	ProblemNotWorked     ProblemKind = "in_progress_not_worked"
-	ProblemReplyOverdue  ProblemKind = "reply_overdue"
-	ProblemNewsOverdue   ProblemKind = "news_overdue"
-	ProblemBoardStale    ProblemKind = "board_stale"
-	ProblemSourceFailed  ProblemKind = "source_failed"
+	ProblemSeatStalled    ProblemKind = "seat_stalled"
+	ProblemSeatAtLimit    ProblemKind = "seat_at_limit"
+	ProblemAccountNearCap ProblemKind = "account_near_cap"
+	ProblemReadyNotBegun  ProblemKind = "ready_not_started"
+	ProblemNotWorked      ProblemKind = "in_progress_not_worked"
+	ProblemReplyOverdue   ProblemKind = "reply_overdue"
+	ProblemNewsOverdue    ProblemKind = "news_overdue"
+	ProblemBoardStale     ProblemKind = "board_stale"
+	ProblemSourceFailed   ProblemKind = "source_failed"
 )
 
 // Incident identifies one delivered observation. Changing rendered prose,
@@ -27,6 +28,12 @@ func (p Problem) Incident() string {
 	switch p.Kind {
 	case ProblemSeatStalled, ProblemSeatAtLimit:
 		parts = append(parts, p.Session, p.Handle)
+	case ProblemAccountNearCap:
+		resets := ""
+		if p.ResetsAt != nil {
+			resets = p.ResetsAt.UTC().Format(time.RFC3339)
+		}
+		parts = append(parts, p.Account, resets)
 	case ProblemSourceFailed:
 		parts = append(parts, p.Source)
 	case ProblemReadyNotBegun, ProblemNotWorked:
@@ -44,7 +51,8 @@ func (p Problem) Incident() string {
 	return string(raw)
 }
 
-// Problem is one floor problem: a seat or a card that does not move.
+// Problem is one floor problem: a seat or a card that does not move, or
+// an account condition that needs a decision.
 type Problem struct {
 	Kind    ProblemKind `json:"kind"`
 	Session string      `json:"session,omitempty"`
@@ -52,7 +60,11 @@ type Problem struct {
 	CardID  string      `json:"card_id,omitempty"`
 	Request string      `json:"request,omitempty"`
 	Source  string      `json:"source,omitempty"`
-	Text    string      `json:"text"`
+	// Account and ResetsAt carry an account problem's identity: one
+	// notice per account per reset period.
+	Account  string     `json:"account,omitempty"`
+	ResetsAt *time.Time `json:"resets_at,omitempty"`
+	Text     string     `json:"text"`
 }
 
 // Check lists the floor problems of a projected model. It is pure.
@@ -78,6 +90,7 @@ func Check(m Model, cfg Config, now time.Time) ([]Problem, error) {
 		text := fmt.Sprintf("source %s did not read: %s; the board may miss its cards", src.Name, clean(sourceGap(src).Gap))
 		problems = append(problems, Problem{Kind: ProblemSourceFailed, Source: src.Name, Text: text})
 	}
+	problems = append(problems, accountNearCap(m, now)...)
 	seen := map[string]bool{}
 	add := func(st Station, kind ProblemKind, id string, text string) {
 		key := string(kind) + "\x00" + st.Handle + "\x00" + id
