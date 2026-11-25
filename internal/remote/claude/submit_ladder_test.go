@@ -156,7 +156,7 @@ func harnessUserText(envelope string) string {
 // (completed, result = the assistant text) → ack releases the record.
 // Regression for codex #855 r1 items 2 and 7.
 func TestConfirmationLadderOnValidJSONL(t *testing.T) {
-	ft := newFakeTarget(t, 4242, nil)
+	ft := newFakeTarget(t, os.Getpid(), nil)
 	att := ft.attach(t)
 	var got []core.NativeEvent
 	att.Subscribe(func(ev core.NativeEvent) { got = append(got, ev) })
@@ -214,7 +214,7 @@ func TestConfirmationLadderOnValidJSONL(t *testing.T) {
 // observed while the transcript has not yet shown admission is preserved
 // and completes the run once admission is observed.
 func TestStopMarkerBindsToRunNotToSize(t *testing.T) {
-	ft := newFakeTarget(t, 4242, nil)
+	ft := newFakeTarget(t, os.Getpid(), nil)
 	att := ft.attach(t)
 
 	// Stale marker from a turn that ended before we ever submitted.
@@ -252,7 +252,7 @@ func TestStopMarkerBindsToRunNotToSize(t *testing.T) {
 // reached it, and the run completed with an empty result that the Buzz DM
 // never showed. The hook's last_assistant_message is the result.
 func TestStopHookFinalTextCompletesBeforeTheTranscriptHasIt(t *testing.T) {
-	ft := newFakeTarget(t, 4242, nil)
+	ft := newFakeTarget(t, os.Getpid(), nil)
 	att := ft.attach(t)
 	admission, err := att.Submit(pr2BoundRequest("final-text-probe"))
 	if err != nil || !admission.Admitted {
@@ -276,7 +276,7 @@ func TestStopHookFinalTextCompletesBeforeTheTranscriptHasIt(t *testing.T) {
 // callback (core onNative AcknowledgeResult path), which takes a.mu.
 // Emitting under a.mu deadlocked exactly when confirmation worked.
 func TestCompletionCallbackMayReacquireMutex(t *testing.T) {
-	ft := newFakeTarget(t, 4242, nil)
+	ft := newFakeTarget(t, os.Getpid(), nil)
 	att := ft.attach(t)
 	key := pr2Key()
 	att.Subscribe(func(ev core.NativeEvent) {
@@ -324,7 +324,7 @@ func frameEnvelope(t *testing.T, ft *fakeTarget) string {
 // poller stayed at tentative. The attachment's origin.msg_id must grade
 // the run submitted, then admitted on the following assistant entry.
 func TestAbsorbedMidTurnFrameClimbsTheLadder(t *testing.T) {
-	ft := newFakeTarget(t, 4242, nil)
+	ft := newFakeTarget(t, os.Getpid(), nil)
 	att := ft.attach(t)
 	admission, err := att.Submit(pr2BoundRequest("absorbed-probe"))
 	if err != nil || !admission.Admitted {
@@ -348,7 +348,7 @@ func TestAbsorbedMidTurnFrameClimbsTheLadder(t *testing.T) {
 // follows the file from the submit-time offset, so the delivery is seen
 // once and remembered.
 func TestAdmissionSurvivesLargeEntryAfterDelivery(t *testing.T) {
-	ft := newFakeTarget(t, 4242, nil)
+	ft := newFakeTarget(t, os.Getpid(), nil)
 	att := ft.attach(t)
 	admission, err := att.Submit(pr2BoundRequest("rollover-probe"))
 	if err != nil || !admission.Admitted {
@@ -372,7 +372,7 @@ func TestAdmissionSurvivesLargeEntryAfterDelivery(t *testing.T) {
 // unrelated local prompt, then its answer. The answer must not admit our
 // run, and a Stop after that prompt must not complete it.
 func TestUnrelatedLaterPromptNeverAdmitsOrCompletes(t *testing.T) {
-	ft := newFakeTarget(t, 4242, nil)
+	ft := newFakeTarget(t, os.Getpid(), nil)
 	att := ft.attach(t)
 	admission, err := att.Submit(pr2BoundRequest("turn-probe"))
 	if err != nil || !admission.Admitted {
@@ -400,7 +400,7 @@ func TestUnrelatedLaterPromptNeverAdmitsOrCompletes(t *testing.T) {
 func TestInterruptedTurnCancelsItsRun(t *testing.T) {
 	for _, interruptPrompt := range []string{"p-1", "p-2"} {
 		t.Run(interruptPrompt, func(t *testing.T) {
-			ft := newFakeTarget(t, 4242, nil)
+			ft := newFakeTarget(t, os.Getpid(), nil)
 			att := ft.attach(t)
 			got := make(chan core.NativeEvent, 32)
 			att.Subscribe(func(ev core.NativeEvent) { got <- ev })

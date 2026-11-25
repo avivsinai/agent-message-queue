@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
@@ -340,6 +341,18 @@ func evidenceFor(rec *runRecord) core.Evidence {
 // submit and a never-submitted key are indistinguishable and must never
 // read as EvidenceNone.
 func (a *Attachment) Lookup(key requests.Key, _ string) (core.Evidence, error) {
+	ev := a.lookupRun(key)
+	// Admission can outlive the process that owned the turn. A recorded
+	// terminal outcome still stands after that process exits.
+	if ev.State == protocol.StateRunning {
+		if state, _ := launch.InspectHolder(a.holder); state == launch.LeaseStale {
+			return core.Evidence{Known: true, Class: core.EvidenceUnknown, RunID: ev.RunID}, nil
+		}
+	}
+	return ev, nil
+}
+
+func (a *Attachment) lookupRun(key requests.Key) core.Evidence {
 	a.mu.Lock()
 	if rec, ok := a.runs[key]; ok {
 		ev := evidenceFor(rec)
@@ -351,20 +364,20 @@ func (a *Attachment) Lookup(key requests.Key, _ string) (core.Evidence, error) {
 			ev = core.Evidence{Known: true, Class: core.EvidenceUnknown, RunID: rec.msgID}
 		}
 		a.mu.Unlock()
-		return ev, nil
+		return ev
 	}
 	if _, sending := a.submitting[key]; sending {
 		a.mu.Unlock()
-		return core.Evidence{Known: true, Class: core.EvidenceTentative, RunID: frameMsgID(key), State: protocol.StateRunning}, nil
+		return core.Evidence{Known: true, Class: core.EvidenceTentative, RunID: frameMsgID(key), State: protocol.StateRunning}
 	}
 	_, released := a.released[key]
 	a.mu.Unlock()
 	if released {
 		// Acknowledged: the endpoint holds the outcome and nothing is
 		// retained here. Never recover it from the transcript.
-		return core.Evidence{Known: true, Class: core.EvidenceUnknown}, nil
+		return core.Evidence{Known: true, Class: core.EvidenceUnknown}
 	}
-	return a.recoverRun(key), nil
+	return a.recoverRun(key)
 }
 
 // unstarted reports a run whose turn did not start before its admission

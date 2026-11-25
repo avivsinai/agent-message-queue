@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -23,6 +24,7 @@ import (
 // minted the way the harness mints it, and a capture channel for the
 // bytes the adapter writes.
 type fakeTarget struct {
+	pid      int
 	home     string
 	sockPath string
 	ln       net.Listener
@@ -51,7 +53,7 @@ func newFakeTarget(t *testing.T, pid int, features []string) *fakeTarget {
 	// Keep the socket file after Close so the dead-target test dials a
 	// stale socket (connection refused), not a missing path.
 	ln.SetUnlinkOnClose(false)
-	ft := &fakeTarget{home: home, sockPath: sockPath, ln: ln, received: make(chan []byte, 4)}
+	ft := &fakeTarget{pid: pid, home: home, sockPath: sockPath, ln: ln, received: make(chan []byte, 4)}
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -106,7 +108,7 @@ func (ft *fakeTarget) stopListener() error { return ft.ln.Close() }
 
 func (ft *fakeTarget) attach(t *testing.T) *Attachment {
 	t.Helper()
-	att, err := Attach(config{Pid: 4242, Home: ft.home, Target: "cc-1"})
+	att, err := Attach(config{Pid: ft.pid, Home: ft.home, Target: "cc-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +141,7 @@ func waitRecv(t *testing.T, ft *fakeTarget) []byte {
 }
 
 func TestSubmitDeliversPinnedWireOverSocket(t *testing.T) {
-	ft := newFakeTarget(t, 4242, nil)
+	ft := newFakeTarget(t, os.Getpid(), nil)
 	att := ft.attach(t)
 	admission, err := att.Submit(pr2BoundRequest("hello from amq"))
 	if err != nil {
@@ -190,10 +192,10 @@ func TestSubmitDeliversPinnedWireOverSocket(t *testing.T) {
 }
 
 func TestSubmitRefusesWhenKeyFileMissing(t *testing.T) {
-	ft := newFakeTarget(t, 4242, nil)
+	ft := newFakeTarget(t, os.Getpid(), nil)
 	// Remove the minted key: the inbound precondition is not met even
 	// though the socket listens.
-	kf, err := peerKeyFile(defaultConfigDir(ft.home), 4242, ft.sockPath)
+	kf, err := peerKeyFile(defaultConfigDir(ft.home), ft.pid, ft.sockPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +218,7 @@ func TestSubmitRefusesWhenKeyFileMissing(t *testing.T) {
 }
 
 func TestSubmitDialFailureIsDefinitiveNotSent(t *testing.T) {
-	ft := newFakeTarget(t, 4242, nil)
+	ft := newFakeTarget(t, os.Getpid(), nil)
 	// A dead target: stop the listener but leave the socket file in place
 	// (a crashed/stuck Claude Code process), so the dial is refused.
 	_ = ft.stopListener()
@@ -234,7 +236,7 @@ func TestSubmitDialFailureIsDefinitiveNotSent(t *testing.T) {
 }
 
 func TestLookupUnknownForNeverSubmittedKey(t *testing.T) {
-	ft := newFakeTarget(t, 4242, nil)
+	ft := newFakeTarget(t, os.Getpid(), nil)
 	att := ft.attach(t)
 	ev, err := att.Lookup(requests.Key{CreatorHost: "local", TargetID: "cc-1", RequestID: "33333333-3333-4333-8333-333333333333"}, "")
 	if err != nil {
@@ -332,7 +334,7 @@ func TestSessionChangedBeforeDispatchSendsNothingAfterRestart(t *testing.T) {
 // A request whose not_after passed is never written to Claude
 // (agent-message-queue-611.70: the adapter wrote it anyway).
 func TestSubmitWritesNothingAfterNotAfter(t *testing.T) {
-	ft := newFakeTarget(t, 4242, nil)
+	ft := newFakeTarget(t, os.Getpid(), nil)
 	att := ft.attach(t)
 	req := pr2BoundRequest("expired prompt")
 	req.NotAfter = "2000-01-01T00:00:00Z"
@@ -351,7 +353,7 @@ func TestSubmitWritesNothingAfterNotAfter(t *testing.T) {
 // tentative, never as a lost run that core would record as uncertain
 // (audit 2026-11-10).
 func TestLookupDuringSocketWriteIsTentative(t *testing.T) {
-	ft := newFakeTarget(t, 4242, nil)
+	ft := newFakeTarget(t, os.Getpid(), nil)
 	att := ft.attach(t)
 	// Replace the listener with one that looks the key up before it reads a
 	// byte. The frame is larger than any socket buffer, so the write cannot
@@ -389,7 +391,7 @@ func TestLookupDuringSocketWriteIsTentative(t *testing.T) {
 // run's admission unknown once its window closes, instead of running for
 // ever (audit 2026-11-10).
 func TestLookupOfAnUndeliveredFrameIsUnknownAfterItsWindow(t *testing.T) {
-	ft := newFakeTarget(t, 4242, nil)
+	ft := newFakeTarget(t, os.Getpid(), nil)
 	att := ft.attach(t)
 	start := time.Now()
 	var skew atomic.Int64 // the poller reads the clock too
@@ -411,9 +413,8 @@ func TestLookupOfAnUndeliveredFrameIsUnknownAfterItsWindow(t *testing.T) {
 
 // releaseFixture is an endpoint over one attached Claude target whose
 // adapter clock the test moves.
-func releaseFixture(t *testing.T) (*core.Endpoint, *requests.Store, *Attachment, *fakeTarget, *atomic.Int64) {
+func releaseFixture(t *testing.T, pid int) (*core.Endpoint, *requests.Store, *Attachment, *fakeTarget, *atomic.Int64) {
 	t.Helper()
-	pid := os.Getpid() // a live pid, so the target reads attached
 	ft := newFakeTarget(t, pid, nil)
 	store, err := requests.Open(t.TempDir())
 	if err != nil {
@@ -421,10 +422,7 @@ func releaseFixture(t *testing.T) (*core.Endpoint, *requests.Store, *Attachment,
 	}
 	ep := core.New(core.Config{Store: store})
 	t.Cleanup(func() { _ = ep.Close(); _ = store.Close() })
-	att, err := Attach(config{Pid: pid, Home: ft.home, Target: "cc-1"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	att := ft.attach(t)
 	start := time.Now()
 	skew := new(atomic.Int64) // the poller reads the clock too
 	att.clock = func() time.Time { return start.Add(time.Duration(skew.Load())) }
@@ -445,12 +443,63 @@ func releaseSubmit(t *testing.T, ep *core.Endpoint, id string, window time.Durat
 	return out.(protocol.Reply)
 }
 
+// The live run of 2026-11-24 stayed running after its Claude process exited.
+func TestReconcileSettlesRunningRequestWhenClaudeExits(t *testing.T) {
+	proc := exec.Command("cat")
+	input, err := proc.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := proc.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if proc.ProcessState == nil {
+			_ = input.Close()
+			_ = proc.Wait()
+		}
+	})
+	ep, store, att, ft, _ := releaseFixture(t, proc.Process.Pid)
+	rep := releaseSubmit(t, ep, pr2Key().RequestID, time.Minute)
+	key := requests.Key{CreatorHost: core.LocalHost, TargetID: "cc-1", RequestID: rep.Snapshot.RequestID}
+	appendTranscript(t, ft.home, deliveredLine(t, frameMsgID(key), frameEnvelope(t, ft)), transcriptLine(t, "assistant", "working"))
+	att.pollConfirmations()
+	reconcile := func() *requests.Record {
+		t.Helper()
+		if err := ep.Reconcile(); err != nil {
+			t.Fatal(err)
+		}
+		rec, ok, err := store.Get(key)
+		if err != nil || !ok {
+			t.Fatalf("read record: found %v, error %v", ok, err)
+		}
+		return rec
+	}
+	live := reconcile()
+	if live.State != protocol.StateRunning || live.NativeRun == nil {
+		t.Fatalf("live process: got %s, native run %v", live.State, live.NativeRun)
+	}
+	if err := input.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := proc.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	gone := reconcile()
+	if gone.State != protocol.StateUncertain || gone.Code != protocol.CodeAttachmentLost || gone.Revision != live.Revision+1 || gone.PublishedRevision != gone.Revision {
+		t.Fatalf("after process exit: got %s/%s rev %d published %d, want uncertain/attachment_lost rev %d published", gone.State, gone.Code, gone.Revision, gone.PublishedRevision, live.Revision+1)
+	}
+	if next := reconcile(); next.Revision != gone.Revision {
+		t.Fatalf("next reconcile published revision %d again as %d", gone.Revision, next.Revision)
+	}
+}
+
 // An uncertain record held its Claude target busy for good. The owner's
 // release ends it failed released_by_owner, the target admits a new
 // request, and a late delivery of the released frame completes neither
 // request (audit 2026-11-10).
 func TestReleaseUncertainFreesTheTargetAndDisownsTheLateFrame(t *testing.T) {
-	ep, store, att, ft, skew := releaseFixture(t)
+	ep, store, att, ft, skew := releaseFixture(t, os.Getpid())
 	old := releaseSubmit(t, ep, "44444444-4444-4444-8444-444444444444", time.Minute)
 	oldEnv := frameEnvelope(t, ft)
 	skew.Store(int64(2 * time.Minute)) // the window closes with no delivery
@@ -495,7 +544,7 @@ func TestReleaseUncertainFreesTheTargetAndDisownsTheLateFrame(t *testing.T) {
 // Release acts only on an uncertain record: a running one is refused and
 // stays as it was (audit 2026-11-10).
 func TestReleaseRefusesARunningRecord(t *testing.T) {
-	ep, store, _, ft, _ := releaseFixture(t)
+	ep, store, _, ft, _ := releaseFixture(t, os.Getpid())
 	rep := releaseSubmit(t, ep, "77777777-7777-4777-8777-777777777777", time.Minute)
 	waitRecv(t, ft)
 	_, err := ep.Release(rep.Snapshot.RequestRef)
@@ -514,7 +563,7 @@ func TestReleaseRefusesARunningRecord(t *testing.T) {
 // Past its window it reads uncertain, and a release disowns it so a turn of
 // it that starts later completes nothing (audit 2026-11-10).
 func TestReleaseCoversADeliveredFrameWhoseTurnNeverStarted(t *testing.T) {
-	ep, store, att, ft, skew := releaseFixture(t)
+	ep, store, att, ft, skew := releaseFixture(t, os.Getpid())
 	old := releaseSubmit(t, ep, "88888888-8888-4888-8888-888888888888", time.Minute)
 	oldKey := requests.Key{CreatorHost: core.LocalHost, TargetID: "cc-1", RequestID: old.Snapshot.RequestID}
 	appendTranscript(t, ft.home, deliveredLine(t, frameMsgID(oldKey), frameEnvelope(t, ft)))

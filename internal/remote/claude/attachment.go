@@ -33,6 +33,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
@@ -216,6 +217,11 @@ func Attach(cfg config, opts ...Option) (*Attachment, error) {
 	if err != nil {
 		return nil, fmt.Errorf("claude adapter: %w", err)
 	}
+	holder, err := launch.HolderOf(cfg.Pid)
+	if err != nil {
+		// Without a start token, only the disappearance of this pid proves an exit.
+		holder = launch.LocalHolder(cfg.Pid, "", "")
+	}
 	reg, err := readSessionRegistry(configDir, cfg.Pid)
 	if err != nil {
 		return nil, fmt.Errorf("claude adapter: %w", err)
@@ -243,6 +249,7 @@ func Attach(cfg config, opts ...Option) (*Attachment, error) {
 	}
 	att := &Attachment{
 		target:       target,
+		holder:       holder,
 		cfg:          cfg,
 		home:         home,
 		configDir:    configDir,
@@ -354,6 +361,7 @@ func decodeSessionRegistry(path string) (*sessionRegistry, error) {
 // reads the session registry file only (a spawn under the endpoint
 // mutex would freeze every target for the life of a hung child).
 type Attachment struct {
+	holder launch.HolderIdentity
 	target string
 	cfg    config
 	// home roots AMQ's markers; configDir roots Claude's own data (the
