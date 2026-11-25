@@ -199,7 +199,9 @@ func TestCheckReportsAccountNearCap(t *testing.T) {
 			limits: []usage.Limit{func() usage.Limit {
 				l := capAt("spend cap", "fresh", now.Add(-time.Minute))
 				l.Used, l.Cap = "993", "1000"
-				resets := now.Add(3 * 24 * time.Hour)
+				// resetTime prints the local clock; fix the reset at 14:00
+				// local so the expected line holds in every zone.
+				resets := time.Date(2026, 12, 1, 14, 0, 0, 0, time.Local)
 				l.ResetsAt = &resets
 				return l
 			}()},
