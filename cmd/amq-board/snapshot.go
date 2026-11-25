@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -101,6 +102,8 @@ func runSync(args []string) int {
 	init := flags.Bool("init", false, "initialize the project store for the first time")
 	suggestions := flags.Bool("suggestions", false, "opt in to provisional suggestions with user-configured provider pins")
 	watch := flags.Bool("watch", false, "acquire and publish once per minute")
+	notify := flags.String("notify", "", "send new floor problems to these comma-separated handles after each pass (with --watch)")
+	as := flags.String("as", "", "dedicated observer handle for floor notices (with --watch)")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -109,6 +112,21 @@ func runSync(args []string) int {
 	}
 	if flags.NArg() != 0 {
 		return exitUsage
+	}
+	var recipients []string
+	if (*notify == "") != (*as == "") || (*notify != "" && !*watch) {
+		fmt.Fprintln(os.Stderr, "amq-board sync: --notify and --as are required together, and only with --watch")
+		return exitUsage
+	}
+	if *notify != "" {
+		for handle := range strings.SplitSeq(*notify, ",") {
+			handle = strings.TrimSpace(handle)
+			if fsq.ValidateHandle(handle) != nil {
+				fmt.Fprintf(os.Stderr, "amq-board sync: invalid recipient %q\n", handle)
+				return exitUsage
+			}
+			recipients = append(recipients, handle)
+		}
 	}
 	dir, err := os.Getwd()
 	if err != nil {
@@ -137,80 +155,137 @@ func runSync(args []string) int {
 	store.ProjectID = initial.ProjectID
 	// Reuse the view's last-good configuration rule, without running a view.
 	loader := &board.Live{Load: func() (board.FileConfig, []string) { return loadConfig(dir) }, Now: time.Now, Logf: func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) }}
-	var token ghToken
+	token := &ghToken{}
 	memos := map[string]*providerMemo{}
 	limits := &serveLimits{}
+	run := &syncRun{dir: dir, env: env, store: store, loader: loader, token: token, memos: memos, limits: limits, watch: *watch, suggestions: *suggestions}
+	var floor *floorNotifier
+	if *watch && *notify != "" {
+		floor = &floorNotifier{report: func(ctx context.Context) (board.NotifyReport, error) {
+			return notifyFloor(ctx, *as, recipients)
+		}}
+	}
+	return watchLoop(ctx, *watch, run.pass, func(c context.Context) { floor.pass(c) },
+		func(c context.Context) bool {
+			timer := time.NewTimer(time.Minute)
+			defer timer.Stop()
+			select {
+			case <-c.Done():
+				return false
+			case <-timer.C:
+				return true
+			}
+		}, os.Stderr)
+}
+
+// syncRun holds what one sync process keeps between passes.
+type syncRun struct {
+	dir         string
+	env         board.Env
+	store       board.Store
+	loader      *board.Live
+	token       *ghToken
+	memos       map[string]*providerMemo
+	limits      *serveLimits
+	watch       bool
+	suggestions bool
+}
+
+// pass acquires and publishes one generation and returns the published state.
+func (r *syncRun) pass(ctx context.Context) (board.Snapshot, error) {
+	env := r.env
+	dir := r.dir
+	store := r.store
+	var err error
+	if err = env.Run.(execRunner).amqValidate(ctx); err != nil {
+		return board.Snapshot{}, err
+	}
+	cfg := r.loader.ReloadConfig()
+	runner := env.Run.(execRunner)
+	state, readErr := store.ReadContext(ctx)
+	if readErr != nil {
+		return board.Snapshot{}, readErr
+	}
+	opt := sourceOptions{githubTimeout: oneShotGitHubTimeout, limits: oneShotLimits, claudeLists: state.ClaudeLists}
+	if r.watch {
+		opt.limits = r.limits.run
+	}
+	if cfg.SourceGitHub && cfg.TokenOnce {
+		runner.ghToken, opt.ghAccount = r.token.get(ctx, newEnv(dir, runner), r.loader.Logf)
+	}
+	opt.provider = func(e source.External) board.Source {
+		memo := r.memos[e.Provider.Name]
+		if memo == nil {
+			memo = &providerMemo{}
+			r.memos[e.Provider.Name] = memo
+		}
+		return memoProvider{External: e, memo: memo}
+	}
+	projectID := state.ProjectID
+	acquisition := acquireBoard(ctx, newEnv(dir, runner), cfg, opt)
+	acquisition.ProjectID = projectID
+	history, messages, evidence := source.ReadHistory(ctx, env, store.BaseRoot, state.Pruned, func(id string) (board.Message, bool) {
+		m, ok := state.Messages[store.BaseRoot+"#"+id]
+		return m, ok
+	})
+	acquisition.Input.Results = append(acquisition.Input.Results, board.NamedResult{Name: "amq-history", Result: history})
+	acquisition.Messages, acquisition.Evidence = messages, evidence
+	if ctx.Err() == nil {
+		if err = runner.amqValidate(ctx); err != nil {
+			return board.Snapshot{}, err
+		}
+		err = store.Commit(ctx, acquisition)
+	}
+	if ctx.Err() != nil {
+		return board.Snapshot{}, ctx.Err()
+	}
+	if err != nil {
+		return board.Snapshot{}, fmt.Errorf("amq-board sync: %w", err)
+	}
+	if r.suggestions {
+		cfg = r.loader.ReloadConfig()
+		if suggestErr := store.Suggest(ctx, cfg.Suggestions, "", false, func() decision.Config { return r.loader.ReloadConfig().Suggestions }); suggestErr != nil && ctx.Err() == nil {
+			fmt.Fprintln(os.Stderr, "amq-board suggestions:", suggestErr)
+		}
+	}
+	state, readErr = store.ReadContext(ctx)
+	if readErr != nil {
+		return board.Snapshot{}, readErr
+	}
+	return state, nil
+}
+
+// watchLoop drives sync passes until the context ends, a failed pass in
+// one-shot mode, or board.ErrProjectChanged in watch mode. Every other pass
+// failure prints one line and the loop tries again after wait allows it.
+// floor runs after every pass when set; its failures never end the loop.
+func watchLoop(ctx context.Context, watch bool, pass func(context.Context) (board.Snapshot, error), floor func(context.Context), wait func(context.Context) bool, log io.Writer) int {
+	var lastErr string
 	for {
-		if err = env.Run.(execRunner).amqValidate(ctx); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return exitGeneral
-		}
-		cfg := loader.ReloadConfig()
-		runner := env.Run.(execRunner)
-		state, readErr := store.ReadContext(ctx)
-		if readErr != nil {
-			fmt.Fprintln(os.Stderr, readErr)
-			return exitGeneral
-		}
-		opt := sourceOptions{githubTimeout: oneShotGitHubTimeout, limits: oneShotLimits, claudeLists: state.ClaudeLists}
-		if *watch {
-			opt.limits = limits.run
-		}
-		if cfg.SourceGitHub && cfg.TokenOnce {
-			runner.ghToken, opt.ghAccount = token.get(ctx, newEnv(dir, runner), loader.Logf)
-		}
-		opt.provider = func(e source.External) board.Source {
-			memo := memos[e.Provider.Name]
-			if memo == nil {
-				memo = &providerMemo{}
-				memos[e.Provider.Name] = memo
-			}
-			return memoProvider{External: e, memo: memo}
-		}
-		projectID := state.ProjectID
-		acquisition := acquireBoard(ctx, newEnv(dir, runner), cfg, opt)
-		acquisition.ProjectID = projectID
-		history, messages, evidence := source.ReadHistory(ctx, env, store.BaseRoot, state.Pruned, func(id string) (board.Message, bool) {
-			m, ok := state.Messages[store.BaseRoot+"#"+id]
-			return m, ok
-		})
-		acquisition.Input.Results = append(acquisition.Input.Results, board.NamedResult{Name: "amq-history", Result: history})
-		acquisition.Messages, acquisition.Evidence = messages, evidence
-		if ctx.Err() == nil {
-			if err = runner.amqValidate(ctx); err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				return exitGeneral
-			}
-			err = store.Commit(ctx, acquisition)
-		}
+		state, err := pass(ctx)
 		if ctx.Err() != nil {
 			return 0
 		}
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "amq-board sync:", err)
+		switch {
+		case err == nil:
+			lastErr = ""
+			_, _ = fmt.Fprintf(log, "amq-board: published generation %d, %d tasks\n", state.Generation, len(state.Tasks))
+		case !watch || errors.Is(err, board.ErrProjectChanged):
+			_, _ = fmt.Fprintln(log, err)
 			return exitGeneral
+		case err.Error() != lastErr:
+			// One line when a failure starts or changes; the loop goes on.
+			lastErr = err.Error()
+			_, _ = fmt.Fprintf(log, "%v; the next pass tries again\n", err)
 		}
-		if *suggestions {
-			cfg = loader.ReloadConfig()
-			if suggestErr := store.Suggest(ctx, cfg.Suggestions, "", false, func() decision.Config { return loader.ReloadConfig().Suggestions }); suggestErr != nil && ctx.Err() == nil {
-				fmt.Fprintln(os.Stderr, "amq-board suggestions:", suggestErr)
-			}
-		}
-		state, readErr = store.ReadContext(ctx)
-		if readErr != nil {
-			fmt.Fprintln(os.Stderr, readErr)
-			return exitGeneral
-		}
-		fmt.Fprintf(os.Stderr, "amq-board: published generation %d, %d tasks\n", state.Generation, len(state.Tasks))
-		if !*watch {
+		if !watch {
 			return 0
 		}
-		timer := time.NewTimer(time.Minute)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
+		if floor != nil {
+			floor(ctx)
+		}
+		if !wait(ctx) {
 			return 0
-		case <-timer.C:
 		}
 	}
 }

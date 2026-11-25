@@ -531,3 +531,9 @@ controls freshness, and recorded progress does not mean observed execution.
 Both pane transports retain a 4 MiB encoded JSON limit. An unexpected overflow
 fails visibly instead of clipping JSON. The panel starts no source acquisition,
 initialization, or worker. Run `amq-board sync --watch` separately for updates.
+
+`sync --watch` goes on after a failed pass: it prints the failure once and tries
+again each minute. It ends on Ctrl-C or TERM, or when the project it serves was
+replaced. With `--notify <handles> --as <observer>` it sends each new floor
+problem once after every pass; a board that stops being published is reported
+by the existing stale notice after the liveness window.
