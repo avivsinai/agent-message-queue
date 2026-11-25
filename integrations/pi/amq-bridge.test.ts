@@ -2205,6 +2205,38 @@ test("a send that throws after the claim keeps the claim and publishes a failed 
 	}
 });
 
+test("PROBE real pi custom message shape is accepted", async () => {
+	const h = harness();
+	await h.start();
+	try {
+		doorbell(h, "attempt-p1");
+		await h.waitFor(() => h.customSent.length === 1);
+		// pi b4afdddf4 core/agent-session.ts sendCustomMessage: flat CustomMessage.
+		await h.emit("message_start", {
+			message: { role: "custom", customType: "amq-doorbell", content: DOORBELL_LINE, display: true, details: { attempt: "attempt-p1", generation: h.generation() }, timestamp: 1 },
+		});
+		assert.equal(fs.existsSync(path.join(h.dir, "doorbell", "attempt-p1.result.json")), true, "acceptance recorded for the real pi shape");
+	} finally {
+		await h.done();
+	}
+});
+
+test("PROBE session_shutdown clears a claim without sending", async () => {
+	const h = harness();
+	await h.start();
+	try {
+		doorbell(h, "attempt-p2");
+		await h.waitFor(() => h.customSent.length === 1);
+		await h.emit("session_shutdown", { reason: "quit" });
+		await h.emit("message_start", doorbellMessageStart("attempt-p2", h.generation()));
+		assert.equal(fs.existsSync(path.join(h.dir, "doorbell", "attempt-p2.result.json")), false);
+		assert.equal(h.customSent.length, 1);
+		assert.deepEqual(h.sent, []);
+	} finally {
+		await h.done();
+	}
+});
+
 test("a mismatched doorbell message_start is not acceptance", async () => {
 	const h = harness();
 	await h.start();

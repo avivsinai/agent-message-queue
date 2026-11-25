@@ -3,6 +3,8 @@ package board
 import (
 	"testing"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/board/usage"
 )
 
 func TestCheck(t *testing.T) {
@@ -118,3 +120,94 @@ func TestCheckReportsFailedSources(t *testing.T) {
 		})
 	}
 }
+
+// account_near_cap, from the 2026-11-25 tear-down: the Codex account went
+// from 761 to 993 of a 1,000-unit cap with no floor problem, because only a
+// reached limit on a mapped worker with a card could report. A fresh cap or
+// window reading at 90 percent or more is itself the floor problem.
+func TestCheckReportsAccountNearCap(t *testing.T) {
+	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	pct := func(p float64) *float64 { return &p }
+	for _, row := range []struct {
+		name       string
+		kind       string
+		status     string
+		used, left *float64
+		want       bool
+	}{
+		{name: "a cap 93 percent used is the problem", kind: "cap", status: "fresh", used: pct(93), want: true},
+		{name: "a window 91 percent used is the problem", kind: "window", status: "fresh", used: pct(91), want: true},
+		{name: "exactly 90 percent used is the problem", kind: "cap", status: "fresh", used: pct(90), want: true},
+		{name: "a cap 80 percent used stays quiet", kind: "cap", status: "fresh", used: pct(80)},
+		{name: "a stale cap fact stays quiet", kind: "cap", status: "stale", used: pct(93)},
+		{name: "a reading with no status stays quiet", kind: "cap", used: pct(93)},
+		{name: "a limit kind that is neither cap nor window stays quiet", kind: "credits", status: "fresh", used: pct(93)},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			l := usage.Limit{Kind: row.kind, Name: "spend cap", Status: row.status, AsOf: now.Add(-time.Minute)}
+			if row.used != nil {
+				l.UsedPercent = row.used
+			}
+			if row.left != nil {
+				l.RemainingPercent = row.left
+			}
+			m := Model{PublishedAt: now.Add(-time.Minute), Usage: &UsageView{Accounts: []AccountUsage{{
+				Key: usage.Codex + ":~/workspace/.home/codex", Harness: usage.Codex, Limits: []usage.Limit{l},
+			}}}}
+			problems, err := Check(m, DefaultConfig(), now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !row.want {
+				if len(problems) != 0 {
+					t.Fatalf("false near-cap problem: %+v", problems)
+				}
+				return
+			}
+			if len(problems) != 1 || problems[0].Kind != ProblemAccountNearCap {
+				t.Fatalf("problems = %+v, want one %s", problems, ProblemAccountNearCap)
+			}
+		})
+	}
+}
+
+// One notice per account per reset period: the incident identity carries the
+// account and its reset, not the prose or the numbers, so 991 of 1,000 and
+// 993 of 1,000 are one incident and a new reset period sends again.
+func TestAccountNearCapIncidentKeysOnAccountAndReset(t *testing.T) {
+	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	resets := now.Add(3 * 24 * time.Hour)
+	p := func(used string, reset *time.Time) Problem {
+		l := usage.Limit{Kind: "cap", Name: "spend cap", Status: "fresh", Used: used, Cap: "1000",
+			RemainingPercent: ptrFloat(7), ResetsAt: reset, AsOf: now.Add(-time.Minute)}
+		m := Model{PublishedAt: now.Add(-time.Minute), Usage: &UsageView{Accounts: []AccountUsage{{
+			Key: usage.Codex + ":~/workspace/.home/codex", Harness: usage.Codex, Limits: []usage.Limit{l},
+		}}}}
+		problems, err := Check(m, DefaultConfig(), now)
+		if err != nil || len(problems) != 1 {
+			t.Fatalf("problems = %+v err = %v", problems, err)
+		}
+		return problems[0]
+	}
+	first := p("991", &resets)
+	if first.Text != "account Codex ~/workspace/.home/codex: 991.00 of 1000.00 used (7% left), resets Dec 1 14:00" {
+		t.Fatalf("text = %q", first.Text)
+	}
+	if first.Incident() != first.Incident() {
+		t.Fatal("incident identity is not stable")
+	}
+	again := p("993", &resets)
+	if again.Incident() != first.Incident() {
+		t.Fatalf("a new reading of the same period re-notified: %q vs %q", again.Incident(), first.Incident())
+	}
+	next := resets.Add(7 * 24 * time.Hour)
+	if p("991", &next).Incident() == first.Incident() {
+		t.Fatal("a new reset period kept the old incident identity")
+	}
+	noReset := p("991", nil)
+	if noReset.Incident() == first.Incident() {
+		t.Fatal("a reading with no reset kept the old incident identity")
+	}
+}
+
+func ptrFloat(f float64) *float64 { return &f }

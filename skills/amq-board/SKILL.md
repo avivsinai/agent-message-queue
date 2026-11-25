@@ -44,7 +44,7 @@ This is an explicit optional broadcast; plain check output is unchanged.
 Each line is one problem for the lead to act on: dispatch what is ready,
 ask the seat once, then replace it. It is not proof that a process stopped.
 
-`seat_stalled`, `seat_at_limit`, `ready_not_started`,
+`seat_stalled`, `seat_at_limit`, `account_near_cap`, `ready_not_started`,
 `in_progress_not_worked`, `reply_overdue` and `source_failed` are the kinds.
 `source_failed` means the source's `read_failed` fact: its read in this
 pass failed (for several homes, at least one home read failed). The
@@ -60,6 +60,11 @@ of these states:
 | read failed | `read_failed` is true; the read of this source failed in this pass | yes, `source_failed` |
 | unavailable or disabled | The source has no home or is turned off; shown, not read | no |
 
+`account_near_cap` fires when an account's freshest plan-limit reading inside
+the 15-minute bound shows 90 percent or more of a cap or window used. It is
+the account's fact: no mapped worker or card is needed. Codex reports the
+pre-limit figures; Claude Code and pi publish nothing before the limit, so
+they give no line.
 `reply_overdue` covers overdue agent replies, owner questions and owner
 rulings. The sender reads the thread before taking a default or closing a
 ruling. The command exits 0 on an empty list, 6
