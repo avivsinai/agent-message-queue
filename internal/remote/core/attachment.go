@@ -146,6 +146,10 @@ type NativeEvent struct {
 	Option  string
 	// GrantedTextDigest is Evidence.GrantedTextDigest for a run event.
 	GrantedTextDigest string
+	// Reason describes only a failed native run: one line, with no user
+	// text or secrets. Core bounds it for the terminal record; empty reason
+	// keeps the prior failure handling.
+	Reason string
 }
 
 // Attachment is the native seam contract from the design. Implementations

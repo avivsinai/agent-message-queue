@@ -266,6 +266,9 @@ type transcriptEntry struct {
 	// APIError is isApiErrorMessage: a synthetic assistant line for a
 	// failed API call.
 	APIError bool
+	// HarnessCommand is Claude Code's structural local-row marker. Text alone
+	// never changes a turn boundary: a prompt can contain any command XML.
+	HarnessCommand bool
 	// Model is message.model; "<synthetic>" on a line Claude Code writes
 	// itself.
 	Model string
@@ -328,6 +331,7 @@ func parseTranscriptLine(line string) (transcriptEntry, bool) {
 		Timestamp     string      `json:"timestamp"`
 		PromptID      string      `json:"promptId"`
 		TurnOrigin    string      `json:"turnOrigin"`
+		RowSource     string      `json:"rowSource"`
 		Origin        *peerOrigin `json:"origin"`
 		Attachment    *struct {
 			Type      string          `json:"type"`
@@ -359,7 +363,7 @@ func parseTranscriptLine(line string) (transcriptEntry, bool) {
 	e := transcriptEntry{Type: raw.Type, Meta: raw.IsMeta, Text: text, Blocks: blocks, SessionID: raw.SessionID, UUID: raw.UUID, PromptID: raw.PromptID, ToolUses: uses,
 		TurnOrigin: raw.TurnOrigin, Sidechain: raw.IsSidechain, CompactSummary: raw.IsCompact, VisibleOnly: raw.IsVisibleOnly,
 		MessageID: raw.Message.ID, StopReason: raw.Message.StopReason, APIError: raw.IsAPIError, Model: raw.Message.Model,
-		Content: shape, CarriesInput: len(raw.Message.Content) > 0 || raw.Attachment != nil}
+		Content: shape, CarriesInput: len(raw.Message.Content) > 0 || raw.Attachment != nil, HarnessCommand: raw.RowSource == "local"}
 	for _, b := range blocks {
 		if b.Type == "tool_result" && b.ID != "" {
 			e.ToolResults = append(e.ToolResults, b.ID)

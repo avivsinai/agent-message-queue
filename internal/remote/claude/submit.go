@@ -78,9 +78,14 @@ type runRecord struct {
 	notAfter time.Time
 	// lastText is the newest non-empty assistant text of this run's turn,
 	// or the final text its Stop marker carried; lastCut marks it cut.
-	lastText  string
-	lastCut   bool
-	createdAt time.Time
+	lastText string
+	lastCut  bool
+	// refused: the newest assistant entry of this run's turn is an API-error
+	// entry. A normal assistant entry of the turn clears it.
+	refused bool
+	// failReason is the one-line reason of a run that ended failed.
+	failReason string
+	createdAt  time.Time
 	grantedRun
 }
 
@@ -682,13 +687,19 @@ func (a *Attachment) applyEntryLocked(e transcriptEntry, events []core.NativeEve
 			if !rec.submitted {
 				rec.submitted, rec.userTS = true, e.TS
 			}
-			if !e.Absorbed && a.owner != nil && a.owner != rec {
+			if !e.Absorbed && a.owner != nil && a.owner != rec && !e.HarnessCommand {
 				a.owner.endTurn(e.TS)
+				events = a.failRefusedOwnerLocked(events)
 			}
 			a.owner = rec
 			return events
 		}
 		if !e.Absorbed {
+			if a.owner != nil && a.owner.refused && e.HarnessCommand {
+				// A harness command row is not a prompt: the refused turn stays
+				// open for the harness's own continuation.
+				return events
+			}
 			if rec := a.owner; rec != nil && !rec.terminal && strings.HasPrefix(e.Text, interruptPrefix) {
 				// The harness took the run's prompt and closed its turn.
 				rec.admitted = true
@@ -696,6 +707,7 @@ func (a *Attachment) applyEntryLocked(e transcriptEntry, events []core.NativeEve
 				events = append(events, core.NativeEvent{Type: core.EventLocalIntervention, Key: rec.key, RunID: rec.msgID})
 				return a.settleRunLocked(rec, protocol.StateCancelled, core.EventRunCancelled, events)
 			}
+			events = a.failRefusedOwnerLocked(events)
 			if a.owner != nil {
 				a.owner.endTurn(e.TS)
 			}
@@ -703,6 +715,7 @@ func (a *Attachment) applyEntryLocked(e transcriptEntry, events []core.NativeEve
 		}
 	case e.Type == "assistant" && a.owner != nil && !a.owner.terminal:
 		rec := a.owner
+		rec.refused = e.APIError
 		if !rec.admitted {
 			rec.admitted = true
 			rec.state = protocol.StateRunning
@@ -843,7 +856,24 @@ func (a *Attachment) settleRunLocked(rec *runRecord, state protocol.State, typ c
 	if a.owner == rec {
 		a.owner = nil
 	}
-	return append(events, core.NativeEvent{Type: typ, Key: rec.key, RunID: rec.msgID, Result: rec.result, GrantedTextDigest: rec.grantedDigest()})
+	rec.result = nil
+	if state == protocol.StateCompleted || state == protocol.StateCancelled {
+		rec.result = &protocol.Result{Text: rec.lastText, Truncated: rec.lastCut, NativeRef: rec.msgID}
+	}
+	return append(events, core.NativeEvent{Type: typ, Key: rec.key, RunID: rec.msgID, Result: rec.result, GrantedTextDigest: rec.grantedDigest(), Reason: rec.failReason})
+}
+
+// failRefusedOwnerLocked ends the owner when its turn's newest assistant
+// entry is an API error and another prompt now starts a new turn: nothing
+// will continue that turn. A run that is not refused is left to the caller.
+// Caller holds a.mu.
+func (a *Attachment) failRefusedOwnerLocked(events []core.NativeEvent) []core.NativeEvent {
+	rec := a.owner
+	if rec == nil || rec.terminal || !rec.refused {
+		return events
+	}
+	rec.failReason = "the turn ended in an API error and the session moved on"
+	return a.settleRunLocked(rec, protocol.StateFailed, core.EventRunFailed, events)
 }
 
 // stopObs is one decoded Stop-marker line: the receiver's wall-clock
