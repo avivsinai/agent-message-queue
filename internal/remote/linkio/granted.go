@@ -242,11 +242,9 @@ func (c *Carrier) admitGranted(digest string, cmd *protocol.Command) (any, error
 		if errors.As(err, &refusal) && (refusal.Code == string(protocol.CodeStaleEpoch) || refusal.Code == CodeSessionChanged) {
 			// Only the binding check may end a session grant: an absent
 			// binding (unshared) has no such evidence. No endpoint lock is
-			// held here; gmu orders exact-digest clear with the tick's reads.
-			c.markEnded(digest, CodeGrantRevoked, "the session behind binding "+sg.Binding+" changed")
+			// held here; gmu orders refresh's exact-digest clear with tick reads.
+			c.markEnded(digest, CodeGrantRevoked, sessionGrantChangedReason(sg.Binding))
 			c.gmu.Lock()
-			err := c.cfg.Grants.Clear(sg.Binding, digest)
-			c.logStore("clear the ended grant of "+sg.Binding, err)
 			c.refreshGrantsLocked()
 			c.gmu.Unlock()
 		}
@@ -515,7 +513,7 @@ func (c *Carrier) refreshGrantsLocked() Grants {
 		why := "revoked"
 		if e.code == CodeGrantExpired {
 			why = "expired"
-		} else if e.why == "the session behind binding "+sg.Binding+" changed" {
+		} else if e.why == sessionGrantChangedReason(sg.Binding) {
 			why = "session changed"
 		}
 		delete(c.grantSeen, d)
@@ -644,6 +642,12 @@ func (c *Carrier) markEnded(digest, code, why string) {
 	}
 	next[digest] = grantEndRec{code: code, why: why}
 	c.ended.Store(&next)
+}
+
+// sessionGrantChangedReason is the recorded reason of an end proven by
+// matchBinding, and the same reason the owner notice identifies.
+func sessionGrantChangedReason(binding string) string {
+	return "the session behind binding " + binding + " changed"
 }
 
 // grantExpired reports whether sg has expired: the wall clock is at or

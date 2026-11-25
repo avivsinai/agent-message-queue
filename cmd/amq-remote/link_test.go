@@ -708,6 +708,9 @@ func TestLinkGrantRevokeEndsTheStoredGrant(t *testing.T) {
 	if rec := grants["pi-demo"]; err != nil || rec.Generation == "" || rec.Generation == gen || rec.Grant != nil {
 		t.Fatalf("pi-demo after revoke = %+v, %v; want a new generation and no grant", rec, err)
 	}
+	if g := status(); len(g) != 0 {
+		t.Fatalf("link status grants = %+v after revoke; want none", g)
+	}
 }
 
 // In the live run of 2026-11-24 an ended attachment still read as a live

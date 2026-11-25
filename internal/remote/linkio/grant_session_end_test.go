@@ -29,7 +29,7 @@ func TestGrantSessionChangeEndsStoredGrantButAbsenceDoesNot(t *testing.T) {
 			gen := "g_3jx7k2m4qv5w6y7zab2cd3ef4g"
 			digest := goldenGrantDigest(t)
 			store := &memGrants{g: Grants{b.Binding: {Generation: gen, Grant: goldenGrant(t, b, key, gen, "2026-10-09T15:10:00Z", key)}}}
-			c := *newCarrierForTest(t, cfgWithGrant(t, store))
+			c := newCarrierForTest(t, cfgWithGrant(t, store))
 			notices := make(chan string, 1)
 			c.cfg.Notify = func(_, body string) { notices <- body }
 			current := b
