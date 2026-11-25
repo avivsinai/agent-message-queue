@@ -104,6 +104,9 @@ observed on Claude Code 2.1.278. The adapter is `internal/remote/claude`.
 | Inspect/roster | `claude agents --json` (`status`, `waitingFor`, `state`, `kind`, `pid`) | delivered, session-level polling only | `claude agents --help` |
 | Observation | Transcript JSONL tail (`~/.claude/projects/<slug>/<uuid>.jsonl`) plus `~/.claude/sessions/<pid>.json` process metadata (`messagingSocketPath`, `peerProtocol`, `peerFeatures`) | delivered | Capture §1, §3.2; `transcriptPath` |
 
+A link task whose turn ends without a Stop hook or a transcript interrupt stays
+running until the session next reports a turn ending or its process exits.
+
 A request bound to one session (a Buzz share or a link) is refused with
 `session_changed` when the registry names another session for the pid,
 checked at dispatch and again right before the socket write. A frame names no

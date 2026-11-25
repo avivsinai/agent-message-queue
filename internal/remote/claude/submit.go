@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
@@ -46,6 +47,10 @@ type runRecord struct {
 	epoch string
 	msgID string
 	state protocol.State
+	// Claude removes its registry entry on exit. Keep the source of this
+	// run's final transcript and Stop evidence with its delivery offset.
+	sessionID  string
+	transcript string
 	// submitted: the transcript user line was observed (harness accepted
 	// the payload into the transcript). Still not native ownership.
 	submitted bool
@@ -176,7 +181,8 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		return refusal(fmt.Errorf("%w: %v", ErrNotSent, err)), nil
 	}
 
-	fromOff := transcriptSize(transcriptPath(a.configDir, reg.Cwd, reg.SessionID))
+	path := transcriptPath(a.configDir, reg.Cwd, reg.SessionID)
+	fromOff := transcriptSize(path)
 	if err := a.sendFrame(reg.MessagingSocketPath, wire, notAfter, req.NativeSession); err != nil {
 		switch {
 		case errors.Is(err, errPartialWrite):
@@ -195,6 +201,8 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		msgID:      frame.MsgID,
 		state:      protocol.StateRunning,
 		fromOff:    fromOff,
+		sessionID:  reg.SessionID,
+		transcript: path,
 		notAfter:   notAfter,
 		createdAt:  a.now(),
 		grantedRun: grantedRun{granted: req.Granted},
@@ -340,6 +348,46 @@ func evidenceFor(rec *runRecord) core.Evidence {
 // submit and a never-submitted key are indistinguishable and must never
 // read as EvidenceNone.
 func (a *Attachment) Lookup(key requests.Key, _ string) (core.Evidence, error) {
+	ev := a.lookupRun(key)
+	// Admission can outlive the process that owned the turn. A recorded
+	// terminal outcome still stands after that process exits.
+	if ev.RunID != "" && !ev.State.Terminal() {
+		if state, _ := launch.InspectHolder(a.holder); state == launch.LeaseStale {
+			return a.finalEvidence(key, ev.RunID), nil
+		}
+	}
+	return ev, nil
+}
+
+// Once the holder has exited it writes no more evidence. Consume its final
+// complete transcript entries and Stop markers before declaring the run lost.
+func (a *Attachment) finalEvidence(key requests.Key, runID string) core.Evidence {
+	unknown := core.Evidence{Known: true, Class: core.EvidenceUnknown, RunID: runID}
+	a.mu.Lock()
+	rec := a.runs[key]
+	a.mu.Unlock()
+	if rec == nil {
+		return unknown
+	}
+	for a.pollTranscript(rec.sessionID, rec.transcript) {
+		// A busy final turn may span several bounded reads.
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.runs[key] == rec {
+		if rec.terminal {
+			return evidenceFor(rec)
+		}
+		if a.owner == rec {
+			a.owner = nil
+		}
+		a.forgetLocked(key)
+	}
+	return unknown
+}
+
+func (a *Attachment) lookupRun(key requests.Key) core.Evidence {
 	a.mu.Lock()
 	if rec, ok := a.runs[key]; ok {
 		ev := evidenceFor(rec)
@@ -351,20 +399,20 @@ func (a *Attachment) Lookup(key requests.Key, _ string) (core.Evidence, error) {
 			ev = core.Evidence{Known: true, Class: core.EvidenceUnknown, RunID: rec.msgID}
 		}
 		a.mu.Unlock()
-		return ev, nil
+		return ev
 	}
 	if _, sending := a.submitting[key]; sending {
 		a.mu.Unlock()
-		return core.Evidence{Known: true, Class: core.EvidenceTentative, RunID: frameMsgID(key), State: protocol.StateRunning}, nil
+		return core.Evidence{Known: true, Class: core.EvidenceTentative, RunID: frameMsgID(key), State: protocol.StateRunning}
 	}
 	_, released := a.released[key]
 	a.mu.Unlock()
 	if released {
 		// Acknowledged: the endpoint holds the outcome and nothing is
 		// retained here. Never recover it from the transcript.
-		return core.Evidence{Known: true, Class: core.EvidenceUnknown}, nil
+		return core.Evidence{Known: true, Class: core.EvidenceUnknown}
 	}
-	return a.recoverRun(key), nil
+	return a.recoverRun(key)
 }
 
 // unstarted reports a run whose turn did not start before its admission
@@ -419,6 +467,8 @@ func (a *Attachment) confirmLoop(ctx context.Context, cancel context.CancelFunc)
 // cursor is reset so the next run seeds it from its own submit-time offset
 // instead of replaying the idle gap.
 func (a *Attachment) idleStop() bool {
+	a.pollMu.Lock()
+	defer a.pollMu.Unlock()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.activitySink != nil {
@@ -458,18 +508,21 @@ func transcriptSize(path string) int64 {
 
 // pollConfirmations advances the cursor over the transcript lines appended
 // since the last tick, applies them in file order to the turn state
-// machine, then binds Stop markers to turns. File I/O happens outside a.mu
-// (the poller is the only writer of the cursor), and every native event is
-// emitted after a.mu is released: the endpoint's completion handler calls
-// AcknowledgeResult synchronously, which takes a.mu.
+// machine, then binds Stop markers to turns. The transcript read and native
+// callbacks run outside a.mu. The endpoint may acknowledge a result inline.
 func (a *Attachment) pollConfirmations() {
 	reg, err := readSessionRegistry(a.configDir, a.cfg.Pid)
 	if err != nil || reg == nil || reg.SessionID == "" {
 		return
 	}
 	a.trackBoundSession(reg.SessionID)
-	path := transcriptPath(a.configDir, reg.Cwd, reg.SessionID)
+	a.pollTranscript(reg.SessionID, transcriptPath(a.configDir, reg.Cwd, reg.SessionID))
+}
 
+// pollTranscript reads one bounded chunk. It returns true if another read
+// could advance the cursor. The ticker and the final lookup share one cursor.
+func (a *Attachment) pollTranscript(sessionID, path string) bool {
+	a.pollMu.Lock()
 	a.mu.Lock()
 	cur := a.cur
 	gen := a.curGen
@@ -499,14 +552,15 @@ func (a *Attachment) pollConfirmations() {
 	// cursor lags would miss a later turn boundary. The harness writes the
 	// transcript asynchronously, so the turn's final text can reach it only
 	// after the hook ran; the marker carries that text.
-	stops := readStopMarkers(stopMarkerPath(a.home, reg.SessionID), from)
+	stops := readStopMarkers(stopMarkerPath(a.home, sessionID), from)
 
 	if cur.off < 0 {
 		// No run knows where its delivery starts: begin at the last chunk,
 		// discarding the partial first line.
 		size := transcriptSize(path)
 		if size < 0 {
-			return
+			a.pollMu.Unlock()
+			return false
 		}
 		cur.off, cur.skipping = transcriptStartOffset(size)
 	}
@@ -514,9 +568,11 @@ func (a *Attachment) pollConfirmations() {
 	if seed {
 		seeded = turnBefore(path, cur.off)
 	}
+	start := cur.off
 	rd, err := readTranscriptFrom(path, cur.off, cur.skipping)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return
+		a.pollMu.Unlock()
+		return false
 	}
 	// A read that starts or ends inside a line it discards (one longer than
 	// a chunk, or the partial first line of a cursor that starts mid-file)
@@ -560,7 +616,7 @@ func (a *Attachment) pollConfirmations() {
 		if actPath == path && i < len(rd.starts) && rd.starts[i] < actNext {
 			continue
 		}
-		notes = append(notes, a.activityNoteLocked(e, reg.SessionID))
+		notes = append(notes, a.activityNoteLocked(e, sessionID))
 	}
 	if a.curGen == gen {
 		a.cur = cur
@@ -572,9 +628,11 @@ func (a *Attachment) pollConfirmations() {
 	if caughtUp {
 		events = a.bindStopsLocked(stops, events)
 	}
+	more := truncated || (rd.next > start && rd.next < rd.size) || a.stopConsumed != from
 	sink := a.eventSink
 	activity := a.activitySink
 	a.mu.Unlock()
+	a.pollMu.Unlock()
 
 	if sink != nil {
 		for _, ev := range events {
@@ -586,6 +644,7 @@ func (a *Attachment) pollConfirmations() {
 			activity(note)
 		}
 	}
+	return more
 }
 
 // applyEntryLocked feeds one transcript entry to the turn state machine.
@@ -918,6 +977,10 @@ func (a *Attachment) recoverRun(key requests.Key) core.Evidence {
 	found, off, ts, next, nextSkipping, granted := scanForDelivery(path, scan.off, scan.skipping, msgID)
 
 	a.mu.Lock()
+	if _, released := a.released[key]; released { // acknowledged or released during the scan
+		a.mu.Unlock()
+		return unknown
+	}
 	if rec, ok := a.runs[key]; ok { // a concurrent Lookup won the race
 		ev := evidenceFor(rec)
 		a.mu.Unlock()
@@ -934,14 +997,16 @@ func (a *Attachment) recoverRun(key requests.Key) core.Evidence {
 	}
 	delete(a.recoverFrom, key)
 	rec := &runRecord{
-		key:       key,
-		msgID:     msgID,
-		state:     protocol.StateRunning,
-		submitted: true,
-		userTS:    ts,
-		fromOff:   off,
-		notAfter:  a.now().Add(recoveredStartWindow),
-		createdAt: a.now(),
+		key:        key,
+		msgID:      msgID,
+		state:      protocol.StateRunning,
+		submitted:  true,
+		userTS:     ts,
+		fromOff:    off,
+		sessionID:  reg.SessionID,
+		transcript: path,
+		notAfter:   a.now().Add(recoveredStartWindow),
+		createdAt:  a.now(),
 		// A recovered granted stub is judged like a live one: the poller
 		// replays from its line and reads back to its turn's start.
 		grantedRun: grantedRun{granted: granted},
