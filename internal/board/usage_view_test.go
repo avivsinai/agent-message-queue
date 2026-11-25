@@ -115,7 +115,9 @@ func TestLimitsLineReadsPastAppServerLimitAsPast(t *testing.T) {
 // its age, and the 5 h cache-read share when the window holds cache reads
 // (pi records none). Origin: Field observation, 2026-11-25: a seat's latest
 // response carried an 888K-token context and the board showed only window
-// sums. Measured facts, not advice; no threshold.
+// sums. Measured facts, not advice; no threshold. The text face renders it
+// as its own indented line under the seat's usage line, the HTML face as
+// its own paragraph in the Usage details.
 func TestSeatShowsContextSizeAndCacheReadShare(t *testing.T) {
 	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
 	row := func(agent RosterAgent, want string) {
@@ -145,6 +147,26 @@ func TestSeatShowsContextSizeAndCacheReadShare(t *testing.T) {
 	// No counted response (no mapped session, or a pure output turn): no line.
 	row(RosterAgent{}, "")
 	row(RosterAgent{Usage: []Usage{{Window: usage.Window5h, LastContextTokens: 0, LastAt: now.Add(-time.Hour)}}}, "")
+
+	// Rendered text: the near-total share truncates to 99.9 on its own
+	// indented line after the seat's usage line.
+	m := Build(Input{Results: []NamedResult{{Name: "amq", Result: Result{Status: StatusOK, ObservedAt: now, Feeds: []Column{ColumnWaiting}}}}, Config: DefaultConfig(), Now: now})
+	m.Roster = []RosterSession{{Session: "s1", Agents: []RosterAgent{{RosterEntry: RosterEntry{Session: "s1", Handle: "w", ValidHandle: true},
+		Usage: []Usage{{Window: usage.Window5h, CacheRead: 9996, Fresh: 4, LastContextTokens: 887765, LastAt: now.Add(-time.Hour)}}}}}}
+	var out strings.Builder
+	if err := WriteText(&out, m); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(out.String(), "\n")
+	for i, l := range lines {
+		if strings.Contains(l, "cache reads") && i > 0 && strings.Contains(lines[i-1], "5 h ") {
+			if l != "      context 887.8K at 1h ago · cache reads 99.9% of 5 h" {
+				t.Errorf("context line = %q, want its own indented line with the truncated 99.9 share", l)
+			}
+			return
+		}
+	}
+	t.Errorf("text has no context line under the usage line:\n%s", out.String())
 }
 
 // The HTML seat renders the context line as its own paragraph inside the

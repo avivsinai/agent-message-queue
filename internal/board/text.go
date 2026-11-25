@@ -214,6 +214,9 @@ func WriteText(w io.Writer, m Model) error {
 			if u := usageLine(a, now); u != "" {
 				fmt.Fprintf(&b, "      %s\n", u)
 			}
+			if line := contextLine(a, now); line != "" {
+				fmt.Fprintf(&b, "      %s\n", clean(line))
+			}
 		}
 		if len(rs.Quiet) > 0 {
 			uncounted := 0
