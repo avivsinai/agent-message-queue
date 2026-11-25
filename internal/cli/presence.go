@@ -2,8 +2,10 @@ package cli
 
 import (
 	"flag"
+	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/presence"
 	"github.com/avivsinai/agent-message-queue/internal/roster"
@@ -15,6 +17,7 @@ type presenceListItem struct {
 	Status             string `json:"status"`
 	LastSeen           string `json:"last_seen,omitempty"`
 	Note               string `json:"note,omitempty"`
+	NoteAt             string `json:"note_at,omitempty"`
 	Kind               string `json:"kind"`
 	PresenceApplicable bool   `json:"presence_applicable"`
 	// PresenceError is set when presence.json exists but cannot be read;
@@ -83,7 +86,7 @@ func runPresenceSet(args []string) error {
 func runPresenceList(args []string) error {
 	fs := flag.NewFlagSet("presence list", flag.ContinueOnError)
 	common := addCommonFlags(fs)
-	usage := usageWithFlags(fs, "amq presence list [options]")
+	usage := usageWithFlags(fs, "amq presence list [options]\n\nText output includes every stored note and its own note_at age, or (age unknown) for a legacy record without one. JSON includes note_at. Only the board Floor hides notes older than liveness_window; presence list does not drop old records.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
@@ -162,8 +165,15 @@ func runPresenceList(args []string) error {
 		if err := writeStdoutLine(line); err != nil {
 			return err
 		}
-		if item.Note != "" {
-			if err := writeStdout("  %s\n", item.Note); err != nil {
+		note, since, hasAge := presence.NoteDisplay(item.Note, item.NoteAt, time.Now(), 0)
+		if note != "" {
+			// The line shape stays main's so a reader or a script keeps
+			// parsing it; the age appends to the note, with no prefix.
+			text := note + " (age unknown)"
+			if hasAge {
+				text = fmt.Sprintf("%s (%s ago)", note, since.Round(time.Minute))
+			}
+			if err := writeStdout("  %s\n", text); err != nil {
 				return err
 			}
 		}
@@ -182,6 +192,7 @@ func presenceListItemFromPresence(p presence.Presence, kind string, presenceAppl
 		Status:             status,
 		LastSeen:           p.LastSeen,
 		Note:               p.Note,
+		NoteAt:             p.NoteAt,
 		Kind:               kind,
 		PresenceApplicable: presenceApplicable,
 	}

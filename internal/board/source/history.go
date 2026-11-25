@@ -36,6 +36,7 @@ func ReadHistory(ctx context.Context, env board.Env, base string, pruned func(id
 	}
 	raw, err := env.Run.RunLimited(ctx, env.Dir, []string{"amq", "thread", "list", "--all-sessions", "--json"}, 64<<20)
 	if err != nil {
+		result.ReadFailed = true
 		gap("history enumeration failed: " + errLine(err))
 		return result, nil, nil
 	}
@@ -58,6 +59,7 @@ func ReadHistory(ctx context.Context, env board.Env, base string, pruned func(id
 		} `json:"coverage"`
 	}
 	if err = json.Unmarshal(raw, &index); err != nil || index.Schema != "amq/thread-list/v1" || filepath.Clean(index.BaseRoot) != base {
+		result.ReadFailed = true
 		gap("history enumeration schema or root not accepted")
 		return result, nil, nil
 	}

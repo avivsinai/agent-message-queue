@@ -38,6 +38,15 @@ func Acquire(ctx context.Context, env Env, sources []Source, cfg Config, version
 		}(i, s)
 	}
 	wg.Wait()
+	// Every result of a pass carries the time of that pass, so a pass can
+	// always replace an older result in the store. A disabled, unavailable,
+	// or panic-recovered source would otherwise keep a zero ObservedAt and
+	// hold its last failure or its cards for ever.
+	for i := range results {
+		if results[i].Result.ObservedAt.IsZero() {
+			results[i].Result.ObservedAt = env.Now()
+		}
+	}
 
 	known := map[string]string{}
 	var resolver BeadResolver
@@ -93,7 +102,7 @@ func readIsolated(ctx context.Context, env Env, s Source) (res Result) {
 	defer cancel()
 	defer func() {
 		if p := recover(); p != nil {
-			res = Result{Status: StatusDegraded, Detail: fmt.Sprintf("source failed: %v", p)}
+			res = Result{Status: StatusDegraded, ReadFailed: true, Detail: fmt.Sprintf("source failed: %v", p)}
 		}
 	}()
 	return s.Read(ctx, env)

@@ -74,6 +74,8 @@ func WriteHTML(w io.Writer, m Model, regenerate string) error {
 // WriteLiveHTML renders the page `amq-board serve` serves: the same page,
 // which also reads pane.json from its own origin and reloads when a newer
 // model exists, and offers refresh instead of a regenerate command.
+// The live page follows pane.json's stale flag and local publication age on
+// polls; its local clock keeps applying liveness_window between those polls.
 func WriteLiveHTML(w io.Writer, m Model) error {
 	p := buildPage(m, "")
 	p.Live, p.CSP = true, liveCSP
@@ -82,6 +84,9 @@ func WriteLiveHTML(w io.Writer, m Model) error {
 
 type pageData struct {
 	Model                pageModel
+	Stale                bool
+	StaleText            string
+	FreshnessWindow      int64
 	CSS                  template.CSS
 	JS                   template.JS
 	CSP                  string
@@ -143,6 +148,13 @@ type pageTask struct {
 	State      State  `json:"recorded_state,omitempty"`
 	Cancelled  bool   `json:"cancelled"`
 	Historical bool   `json:"historical"`
+}
+
+func staleText(m Model) string {
+	if !m.Stale {
+		return ""
+	}
+	return StalenessText(m)
 }
 
 func buildPageModel(m Model) pageModel {
@@ -323,18 +335,23 @@ func buildPage(m Model, regenerate string) pageData {
 		project = m.Dir
 	}
 	p := pageData{
-		Model:      buildPageModel(m),
-		CSS:        template.CSS(pageCSS),
-		JS:         template.JS(pageJS),
-		CSP:        pageCSP,
-		Project:    clean(project),
-		Generated:  published.Format(time.RFC3339),
-		Clock:      published.Local().Format("Jan 2, 15:04 MST"),
-		Sessions:   pluralize(len(m.Sessions), "session"),
-		RosterNote: clean(m.RosterNote),
-		Regenerate: regenerate,
-		Version:    clean(m.Version),
-		Dir:        clean(m.Dir),
+		Model: buildPageModel(m),
+		Stale: m.Stale,
+		// The banner prints only when the model says stale; StalenessText
+		// formats the fields it is given.
+		StaleText:       staleText(m),
+		FreshnessWindow: int64(FreshnessWindow(m.Config) / time.Second),
+		CSS:             template.CSS(pageCSS),
+		JS:              template.JS(pageJS),
+		CSP:             pageCSP,
+		Project:         clean(project),
+		Generated:       published.Format(time.RFC3339),
+		Clock:           published.Local().Format("Jan 2, 15:04 MST"),
+		Sessions:        pluralize(len(m.Sessions), "session"),
+		RosterNote:      clean(m.RosterNote),
+		Regenerate:      regenerate,
+		Version:         clean(m.Version),
+		Dir:             clean(m.Dir),
 	}
 	if hasControl(regenerate) {
 		// A line with a control character would not paste as one command.

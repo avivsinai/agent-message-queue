@@ -87,6 +87,11 @@ func needsYou(m Model) ownerAttention {
 func WriteText(w io.Writer, m Model) error {
 	var b strings.Builder
 	now := m.GeneratedAt
+	// One stale predicate: the model computes Stale and the age once, and
+	// every face prints from those two fields.
+	if m.Stale {
+		b.WriteString(StalenessText(m) + "\n")
+	}
 
 	project := m.Project
 	if project == "" {

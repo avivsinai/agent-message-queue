@@ -917,6 +917,7 @@ func (s Store) commit(ctx context.Context, a Acquisition) error {
 				if state.Input.Results[i].Name == "amq-history" {
 					r := &state.Input.Results[i].Result
 					r.Status = StatusDegraded
+					r.ReadFailed = true
 					r.ObservedAt = time.Now().UTC()
 					r.Detail = err.Error()
 					r.Coverage.Unresolved++
@@ -925,7 +926,7 @@ func (s Store) commit(ctx context.Context, a Acquisition) error {
 				}
 			}
 			if !found {
-				state.Input.Results = append(state.Input.Results, NamedResult{Name: "amq-history", Result: Result{Status: StatusDegraded, ObservedAt: time.Now().UTC(), Detail: err.Error(), Coverage: Coverage{Unresolved: 1, Detail: err.Error()}}})
+				state.Input.Results = append(state.Input.Results, NamedResult{Name: "amq-history", Result: Result{Status: StatusDegraded, ReadFailed: true, ObservedAt: time.Now().UTC(), Detail: err.Error(), Coverage: Coverage{Unresolved: 1, Detail: err.Error()}}})
 			}
 			return nil
 		}
@@ -1315,6 +1316,8 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 	attachUsage(&m)
 	m.Generation = s.Generation
 	m.PublishedAt = s.PublishedAt
+	m.Config = cfg
+	MarkStale(&m)
 	for i := range m.Columns {
 		m.Columns[i].Cards = []Card{}
 	}

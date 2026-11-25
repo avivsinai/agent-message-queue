@@ -36,6 +36,7 @@ var codexGoalsFeeds = []board.Column{board.ColumnInFlight, board.ColumnBlocked}
 func (source CodexGoals) Read(ctx context.Context, env board.Env) board.Result {
 	res := board.Result{Status: board.StatusDegraded, ObservedAt: env.Now(), Version: "goals_1.sqlite", Feeds: codexGoalsFeeds}
 	fail := func(err error) board.Result {
+		res.ReadFailed = true
 		res.Status = board.StatusDegraded
 		res.Detail = err.Error()
 		res.Coverage.Unresolved++
@@ -53,8 +54,18 @@ func (source CodexGoals) Read(ctx context.Context, env board.Env) board.Result {
 	if err != nil {
 		return fail(err)
 	}
+	// Absence reports the absolute path the operator configured, before a
+	// symlink resolution can point the message elsewhere.
+	absolute := home
 	home, err = filepath.EvalSymlinks(home)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			// No Codex home on this machine: the source is not present,
+			// not a failed read. Any other home error stays a failed read.
+			res.Status, res.Detail = board.StatusUnavailable, "codex home "+absolute+" is absent"
+			res.Coverage.Unresolved++
+			return res
+		}
 		return fail(err)
 	}
 	res.Namespace = home
@@ -70,6 +81,7 @@ func (source CodexGoals) Read(ctx context.Context, env board.Env) board.Result {
 		res.Status, res.Detail = board.StatusUnavailable, "goals_1.sqlite not found"
 		res.Coverage.Unresolved++
 		if versions, _ := filepath.Glob(filepath.Join(home, "goals_*.sqlite")); len(versions) > 0 {
+			res.ReadFailed = true
 			res.Status, res.Detail = board.StatusDegraded, "format "+filepath.Base(versions[0])+" not supported"
 		}
 		return res

@@ -21,7 +21,7 @@ Read the source ages and coverage for this project. On first initialization run
 `amq-board sync --init`. When a fresh view is requested, or the last source read
 is over ten minutes old, run `amq-board sync` in this project and read the
 published view again. Name any stale, unavailable or incomplete source that
-affects the answer.
+affects the answer. A STALE first line means sync before acting.
 
 The Requests section lists questions, review requests, and todos. Each
 recipient has an observation: a direct reply (a message whose last ref is
@@ -45,15 +45,40 @@ Each line is one problem for the lead to act on: dispatch what is ready,
 ask the seat once, then replace it. It is not proof that a process stopped.
 
 `seat_stalled`, `seat_at_limit`, `ready_not_started`,
-`in_progress_not_worked` and `reply_overdue` are the kinds. `reply_overdue`
-covers overdue agent replies, owner questions and owner rulings. The sender
-reads the thread before taking a default or closing a ruling. The command exits 0 on an empty list, 6
+`in_progress_not_worked`, `reply_overdue` and `source_failed` are the kinds.
+`source_failed` means the source's `read_failed` fact: its read in this
+pass failed (for several homes, at least one home read failed). The
+problem's `source` field names the failing
+provider, and its incident identity ignores error prose. A retained card does
+not change a failed current read to a successful one. Each source reports one
+of these states:
+
+| State | Meaning | Floor problem |
+| --- | --- | --- |
+| ok | The read supplied a current list | no |
+| ok with limits | Partial or capacity-limited; the coverage names the limit | no |
+| read failed | `read_failed` is true; the read of this source failed in this pass | yes, `source_failed` |
+| unavailable or disabled | The source has no home or is turned off; shown, not read | no |
+
+`reply_overdue` covers overdue agent replies, owner questions and owner
+rulings. The sender reads the thread before taking a default or closing a
+ruling. The command exits 0 on an empty list, 6
 on problems, and 1 on a stale or absent snapshot. A seat whose harness records
 no activity cannot produce `in_progress_not_worked` without that evidence.
+
+`amq presence list` shows all stored notes with their `note_at` age or
+`(age unknown)`. An old Note timestamp does not remove a roster record there.
+The Floor alone hides notes older than `liveness_window`, and `note_at` tracks
+text changes rather than activity. All read-only board faces label stale
+published input instead of reading sources or refreshing. Text/HTML explicitly
+say every number is old; JSON/pane carry `stale` (also `false` when fresh) and
+`published_age_seconds`; retro refuses over-age input.
 
 An unclosed request older than `obligation_max_age` (14 days by default) expires, as in `amq thread open`. It leaves Needs you and the overdue check. Set `obligation_max_age` to `0` to disable expiry.
 
 ## Retro
+
+Old history is refused: sync before acting on the report.
 
 Run `amq-board retro` every two weeks, or after a bad day.
 The lead takes the worst number and assigns one fix to an owner.

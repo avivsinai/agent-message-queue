@@ -125,3 +125,20 @@ func TestAccountLimitIsRebuttedOnlyByItsOwnAccount(t *testing.T) {
 		t.Errorf("limit %+v, account active at %v; want the codex seven_day limit with no activity after it", a.LimitReached, a.AccountActiveAt)
 	}
 }
+
+// Field, 2026-11-25: the board showed a 40-hour-old snapshot as current; a fresh wake does not make the note fresh.
+func TestStationNoteUsesItsOwnTimestamp(t *testing.T) {
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	for _, row := range []struct{ name, at, want string }{
+		{"old note", now.Add(-2 * time.Hour).Format(time.RFC3339), ""},
+		{"young note", now.Add(-5 * time.Minute).Format(time.RFC3339), "waiting (5m ago)"},
+		{"legacy record", "", "waiting (age unknown)"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			a := RosterAgent{RosterEntry: RosterEntry{Session: "s1", Handle: "alpha", ValidHandle: true, Counted: true, PresenceSource: "notifier_live", PresenceStatus: "active", Note: "waiting", NoteAt: row.at}}
+			if got := newStation(a, false, now.Add(-time.Hour), DefaultConfig(), now).Says; got != row.want {
+				t.Fatalf("note=%q want %q", got, row.want)
+			}
+		})
+	}
+}

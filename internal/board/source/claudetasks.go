@@ -37,6 +37,7 @@ func (source ClaudeTasks) readHome(ctx context.Context, env board.Env, budget *c
 	// says why. gap is a record or list the read could not assess.
 	fail := func(text string) {
 		result.Status = board.StatusDegraded
+		result.ReadFailed = true
 		result.Detail = text
 		result.Coverage.Unresolved++
 	}
@@ -65,6 +66,14 @@ func (source ClaudeTasks) readHome(ctx context.Context, env board.Env, budget *c
 	}
 	real, err := filepath.EvalSymlinks(absolute)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			// No Claude home on this machine: the source is not present,
+			// not a failed read. Any other home error stays a failed read.
+			result.Status = board.StatusUnavailable
+			result.Detail = "Claude home " + absolute + " is absent"
+			result.Coverage.Unresolved++
+			return result
+		}
 		fail("Claude home " + absolute + " unavailable")
 		return result
 	}
@@ -308,6 +317,20 @@ func claudeDefaultList(ctx context.Context, home, list string, worktrees map[str
 func (source ClaudeTasks) Read(ctx context.Context, env board.Env) board.Result {
 	budget := &claudeReadBudget{remaining: claudeAcquisitionByteLimit}
 	result := source.readHome(ctx, env, budget)
+	// Only a home whose read succeeded makes the aggregate ok; an absent
+	// home has no failed read but also no list. One failed read degrades
+	// the whole source. The primary home's absence is a gap, not a failure
+	// reason, so its detail moves to coverage and the final verdict below
+	// restores it when no home read at all.
+	readOK := !result.ReadFailed && result.Status == board.StatusOK
+	readFailed := result.ReadFailed
+	absentDetail := ""
+	if result.Status == board.StatusUnavailable {
+		absentDetail = result.Detail
+		result.Coverage.Detail = strings.TrimPrefix(result.Coverage.Detail+"; "+result.Detail, "; ")
+		result.Detail = ""
+	}
+	result.ReadFailed = false
 	seen := map[string]bool{result.Namespace: true}
 	var homes []string
 	for _, binding := range source.Bindings {
@@ -336,14 +359,34 @@ func (source ClaudeTasks) Read(ctx context.Context, env board.Env) board.Result 
 		result.Coverage.Skipped += next.Coverage.Skipped
 		result.Coverage.Unresolved += next.Coverage.Unresolved
 		result.Coverage.Truncated += next.Coverage.Truncated
+		if next.Status == board.StatusUnavailable {
+			// An absent home is not a failed read: readHome already counted
+			// its absence as the coverage gap, so an available home keeps
+			// the aggregate ok.
+			result.Coverage.Detail = strings.TrimPrefix(result.Coverage.Detail+"; "+next.Detail, "; ")
+			continue
+		}
+		readFailed = readFailed || next.ReadFailed
+		readOK = readOK || (!next.ReadFailed && next.Status == board.StatusOK)
 		if next.Status != board.StatusOK {
-			result.Status = board.StatusDegraded
 			result.Detail = strings.TrimPrefix(result.Detail+"; "+next.Detail, "; ")
 		}
 		if next.Coverage.Detail != "" {
 			result.Coverage.Detail = strings.TrimPrefix(result.Coverage.Detail+"; "+next.Coverage.Detail, "; ")
 		}
 	}
+	// One read that failed degrades the source; otherwise one read that
+	// succeeded keeps it ok; an all-absent source is unavailable, and the
+	// absence detail comes back from coverage.
+	if readFailed {
+		result.Status = board.StatusDegraded
+	} else if readOK {
+		result.Status = board.StatusOK
+	} else {
+		result.Status = board.StatusUnavailable
+		result.Detail = absentDetail
+	}
+	result.ReadFailed = readFailed
 	return result
 }
 

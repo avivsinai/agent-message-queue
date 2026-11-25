@@ -217,14 +217,45 @@
   var timeNode = document.querySelector(".mast-gen time");
   var ageNode = document.getElementById("page-age");
   var generated = timeNode ? Date.parse(timeNode.dateTime) : NaN;
+  var staleNode = document.querySelector(".snapshot-stale");
+  var freshnessNode = document.getElementById("freshness-window");
+  // No bound from the server means no client timer: the page must not guess one.
+  var freshnessWindow = freshnessNode ? Number(freshnessNode.textContent) : Infinity;
+  function ageText(milliseconds) {
+    var seconds = Math.floor(milliseconds / 1000);
+    if (seconds < 60) { return seconds + "s"; }
+    var minutes = Math.floor(seconds / 60);
+    if (minutes < 60) { return minutes + "m"; }
+    var hours = Math.floor(minutes / 60);
+    if (hours < 48) { return hours + "h"; }
+    return Math.floor(hours / 24) + "d";
+  }
   function tick() {
     if (!ageNode || isNaN(generated)) { return; }
-    var minutes = Math.max(0, Math.floor((Date.now() - generated) / 60000));
+    var seconds = Math.max(0, Date.now() - generated) / 1000;
+    var minutes = Math.floor(seconds / 60);
+    var old = seconds > freshnessWindow;
+    // The timer alone moves the banner of the shown snapshot: the header
+    // time and the banner describe the cards the page SHOWS, never a pane
+    // that is only available.
     ageNode.textContent = minutes < 1 ? "(just now)" : "(" + minutes + " min ago)";
-    ageNode.classList.toggle("is-stale", minutes > 5);
+    ageNode.classList.toggle("is-stale", old);
+    if (!staleNode) { return; }
+    // The one timer advances or clears the one banner of the shown
+    // snapshot; it does not render or dismiss a pending pane.
+    staleNode.hidden = !old;
+    staleNode.textContent = old ? "STALE: published " + ageText(seconds * 1000) + " ago (" + timeNode.dateTime + "). Every number below is from then. Run amq-board sync." : "";
   }
   tick(); window.setInterval(tick, 30000);
   if (!live) { return; }
+  function applyFreshPane(model) {
+    // pane.json is a bounded freshness face, not the whole board model.
+    // A newer pane that is only available changes the Update affordance
+    // and the command data, and nothing else: the header time and the
+    // banner still describe the shown cards until Update replaces them.
+    if (model.dir) { snapshot.dir = model.dir; }
+    if (model.generation) { snapshot.generation = model.generation; }
+  }
   var state = document.getElementById("live-state");
   var refresh = document.getElementById("refresh");
   var update = document.getElementById("apply-update");
@@ -245,18 +276,22 @@
         return;
       }
       if (state.classList.contains("is-error")) { state.classList.remove("is-error"); state.textContent = "Published snapshot is available."; }
-      var publication = model.published_at || model.generated_at;
+      if (typeof model.stale !== "boolean" || !Number.isFinite(model.published_age_seconds)) { throw new Error("invalid freshness"); }
       var previousPublication = snapshot.published_at || snapshot.generated_at;
-      if (model.generation !== snapshot.generation || publication !== previousPublication) {
+      var newer = model.generation !== snapshot.generation || (model.published_at || model.generated_at) !== previousPublication;
+      if (newer) {
         pending = true; update.hidden = false;
         state.classList.remove("is-error"); state.textContent = "New snapshot available. Update when you are ready.";
+        applyFreshPane(model);
       }
     }).catch(function () {
       pending = false; update.hidden = true;
       state.classList.add("is-error"); state.textContent = "Refresh failed. Showing the existing snapshot.";
     }).finally(function () { checking = false; });
   }
-  function applyUpdate() { save(); window.location.reload(); }
+  function applyUpdate() {
+    save(); window.location.reload();
+  }
   update.addEventListener("click", applyUpdate);
   refresh.addEventListener("click", function () {
     if (pending) { applyUpdate(); return; }

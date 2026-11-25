@@ -25,7 +25,8 @@ type PaneSource struct {
 	Partial bool   `json:"partial"`
 	// Detail explains a degraded source, so the live page can show a
 	// publication error without reading the whole model.
-	Detail string `json:"detail,omitempty"`
+	Detail     string `json:"detail,omitempty"`
+	ReadFailed bool   `json:"read_failed,omitempty"`
 }
 type PaneStrip struct {
 	TaskID  string    `json:"task_id"`
@@ -39,19 +40,21 @@ type PaneStrip struct {
 
 // PaneModel is a bounded presentation of current tasks, never an evidence export.
 type PaneModel struct {
-	Schema         string       `json:"schema"`
-	Generation     uint64       `json:"generation"`
-	GeneratedAt    time.Time    `json:"generated_at"`
-	PublishedAt    time.Time    `json:"published_at"`
-	Dir            string       `json:"dir"`
-	Project        string       `json:"project"`
-	Columns        []PaneColumn `json:"columns"`
-	CurrentTotal   int          `json:"current_total"`
-	Waiting        []PaneStrip  `json:"waiting"`
-	WaitingTotal   int          `json:"waiting_total"`
-	WaitingOmitted int          `json:"waiting_omitted"`
-	Sources        []PaneSource `json:"sources"`
-	SourcesOmitted int          `json:"sources_omitted"`
+	Schema              string       `json:"schema"`
+	Generation          uint64       `json:"generation"`
+	GeneratedAt         time.Time    `json:"generated_at"`
+	PublishedAt         time.Time    `json:"published_at"`
+	Stale               bool         `json:"stale"`
+	PublishedAgeSeconds int64        `json:"published_age_seconds"`
+	Dir                 string       `json:"dir"`
+	Project             string       `json:"project"`
+	Columns             []PaneColumn `json:"columns"`
+	CurrentTotal        int          `json:"current_total"`
+	Waiting             []PaneStrip  `json:"waiting"`
+	WaitingTotal        int          `json:"waiting_total"`
+	WaitingOmitted      int          `json:"waiting_omitted"`
+	Sources             []PaneSource `json:"sources"`
+	SourcesOmitted      int          `json:"sources_omitted"`
 }
 
 func paneText(text string, limit int) string {
@@ -86,7 +89,7 @@ func paneCommand(command string) bool {
 
 // ProjectPane retains complete current counts while bounding display rows.
 func ProjectPane(model Model) PaneModel {
-	p := PaneModel{Schema: PaneSchema, Generation: model.Generation, GeneratedAt: model.GeneratedAt, PublishedAt: model.PublishedAt, Dir: model.Dir, Project: paneText(model.Project, 160), Columns: []PaneColumn{}, Waiting: []PaneStrip{}, Sources: []PaneSource{}}
+	p := PaneModel{Schema: PaneSchema, Generation: model.Generation, GeneratedAt: model.GeneratedAt, PublishedAt: model.PublishedAt, Stale: model.Stale, PublishedAgeSeconds: model.PublishedAgeSeconds, Dir: model.Dir, Project: paneText(model.Project, 160), Columns: []PaneColumn{}, Waiting: []PaneStrip{}, Sources: []PaneSource{}}
 	for _, column := range model.Columns {
 		total := len(column.Cards)
 		p.Columns = append(p.Columns, PaneColumn{ID: column.ID, Total: total})
@@ -130,7 +133,7 @@ func ProjectPane(model Model) PaneModel {
 		if len(p.Sources) == paneSourceLimit {
 			break
 		}
-		entry := PaneSource{Name: paneText(source.Name, 40), Status: paneText(string(source.Status), 20), Partial: source.Partial}
+		entry := PaneSource{Name: paneText(source.Name, 40), Status: paneText(string(source.Status), 20), Partial: source.Partial, ReadFailed: source.ReadFailed}
 		if source.Status == StatusDegraded {
 			entry.Detail = paneText(source.Detail, 200)
 		}

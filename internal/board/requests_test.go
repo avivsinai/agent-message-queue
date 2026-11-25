@@ -420,6 +420,8 @@ func renderedOwnerPanels(t *testing.T, m Model) []string {
 func TestExpiredOwnerQuestionLeavesNeedsYouAndHeadline(t *testing.T) {
 	q := requestMessage("expired", "question", "work", "lead", []string{reservedHuman}, "s1", requestNow.Add(-60*24*time.Hour))
 	m := requestSnapshot(q).Project(DefaultConfig(), requestNow, "test")
+	m.PublishedAt = requestNow
+	m.Stale = false
 	for _, panel := range renderedOwnerPanels(t, m) {
 		if strings.Contains(panel, q.Subject) {
 			t.Errorf("expired owner question visible: %s", panel)

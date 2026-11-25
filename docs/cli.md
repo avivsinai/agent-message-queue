@@ -1416,6 +1416,8 @@ $ amq presence list --help
 Usage:
   amq presence list [options]
 
+Text output includes every stored note and its own note_at age, or (age unknown) for a legacy record without one. JSON includes note_at. Only the board Floor hides notes older than liveness_window; presence list does not drop old records.
+
 Options:
   -json
         Emit JSON output

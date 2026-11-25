@@ -83,7 +83,7 @@ func (g GitHub) Read(ctx context.Context, env board.Env) board.Result {
 		return board.Result{Status: board.StatusUnavailable, Detail: "no github.com origin remote and no forges.github.repos"}
 	}
 	if len(repos) > maxGitHubRepos {
-		return board.Result{Status: board.StatusDegraded, Detail: fmt.Sprintf("%d repos configured; at most %d", len(repos), maxGitHubRepos), ObservedAt: env.Now(), Feeds: githubFeeds}
+		return board.Result{Status: board.StatusDegraded, ReadFailed: true, Detail: fmt.Sprintf("%d repos configured; at most %d", len(repos), maxGitHubRepos), ObservedAt: env.Now(), Feeds: githubFeeds}
 	}
 	key := CacheKey{Host: "github.com", Repos: repos, Schema: GitHubQuerySchema}
 	if g.Cache == nil {
@@ -224,12 +224,13 @@ func (g GitHub) lastAs(login CacheKey, repos []string, now time.Time, detail str
 		if resp, fetchedAt, ok := g.Cache.Last(key); ok {
 			res := g.Build(resp, repos, fetchedAt, nil)
 			if res.Status == board.StatusOK {
+				res.ReadFailed = true
 				res.Status, res.Detail = board.StatusDegraded, detail+"; showing data from "+fetchedAt.UTC().Format(time.RFC3339)
 				return res
 			}
 		}
 	}
-	return board.Result{Status: board.StatusDegraded, Detail: detail + "; no cached data", ObservedAt: now, Feeds: githubFeeds, Version: GitHubQuerySchema}
+	return board.Result{Status: board.StatusDegraded, ReadFailed: true, Detail: detail + "; no cached data", ObservedAt: now, Feeds: githubFeeds, Version: GitHubQuerySchema}
 }
 
 // refresh calls gh and stores an OK response under the viewer login it
@@ -576,20 +577,24 @@ func githubViewer(resp []byte) string {
 func (g GitHub) Build(resp []byte, repos []string, fetchedAt time.Time, runErr error) board.Result {
 	res := board.Result{Status: board.StatusOK, ObservedAt: fetchedAt, Feeds: githubFeeds, Version: GitHubQuerySchema}
 	if runErr != nil {
+		res.ReadFailed = true
 		res.Status, res.Detail = board.StatusDegraded, "gh api graphql failed: "+errLine(runErr)
 		return res
 	}
 	var r ghResponse
 	if err := json.Unmarshal(resp, &r); err != nil {
+		res.ReadFailed = true
 		res.Status, res.Detail = board.StatusDegraded, "GraphQL response unreadable: "+err.Error()
 		return res
 	}
 	if len(r.Errors) > 0 {
+		res.ReadFailed = true
 		res.Status, res.Detail = board.StatusDegraded, "GraphQL error: "+r.Errors[0].Message
 		return res
 	}
 	results, err := githubRepos(resp, repos)
 	if err != nil {
+		res.ReadFailed = true
 		res.Status, res.Detail = board.StatusDegraded, "GraphQL response unreadable: "+err.Error()
 		return res
 	}

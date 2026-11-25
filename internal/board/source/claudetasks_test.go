@@ -169,3 +169,30 @@ func (r claudePermRunner) Run(_ context.Context, _ string, argv []string) ([]byt
 func (r claudePermRunner) RunLimited(_ context.Context, _ string, argv []string, _ int) ([]byte, error) {
 	return r(argv)
 }
+
+// A machine with no Claude home at all is a source that is not present, not
+// a failed read: check must not report `source_failed` for it. A permission
+// error on an existing home stays a failed read.
+func TestClaudeAbsentHomeIsUnavailableNotFailed(t *testing.T) {
+	project, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := board.Env{Dir: project, Now: time.Now, Run: captureRunner{"git worktree list --porcelain -z": []byte("worktree " + project + "\x00\x00"), "amq session list --json": []byte(`{"sessions":[]}`)}}
+	result := (ClaudeTasks{Home: filepath.Join(project, "no-such-claude-home")}).Read(context.Background(), env)
+	if result.Status != board.StatusUnavailable || result.ReadFailed {
+		t.Fatalf("absent home: status=%s readFailed=%v detail=%q", result.Status, result.ReadFailed, result.Detail)
+	}
+	locked, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	result = (ClaudeTasks{Home: locked}).Read(context.Background(), env)
+	if result.Status == board.StatusUnavailable || !result.ReadFailed {
+		t.Fatalf("unreadable home: status=%s readFailed=%v", result.Status, result.ReadFailed)
+	}
+}

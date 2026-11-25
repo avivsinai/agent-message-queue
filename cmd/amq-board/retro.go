@@ -31,14 +31,25 @@ func runRetro(args []string) int {
 		fmt.Fprintf(os.Stderr, "amq-board retro: --since needs a positive duration, got %q\n", *since)
 		return exitUsage
 	}
-	state, _, err := readPublishedSnapshot()
+	state, cfg, err := readPublishedSnapshot()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "amq-board retro:", err)
 		return exitGeneral
 	}
-	now := time.Now()
+	return retroPublished(state, cfg, *since, *asJSON, time.Now())
+}
+
+func retroPublished(state board.Snapshot, cfg board.FileConfig, since string, asJSON bool, now time.Time) int {
+	period, _ := board.ParseDuration(since)
+	// Retro reports measured history, not a deliberately historical view:
+	// over-age input refuses through check's binding.
+	if err := board.CheckFreshness(state, cfg.Board, now); err != nil {
+		fmt.Fprintln(os.Stderr, "amq-board retro:", err)
+		return exitGeneral
+	}
 	view := state.Retro(now.Add(-period))
-	if *asJSON {
+	var err error
+	if asJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		err = enc.Encode(struct {
@@ -48,7 +59,7 @@ func runRetro(args []string) int {
 			board.RetroView
 		}{board.RetroSchema, now, state.PublishedAt, view})
 	} else {
-		err = state.WriteRetroText(os.Stdout, view, *since)
+		err = state.WriteRetroText(os.Stdout, view, since)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "amq-board retro:", err)

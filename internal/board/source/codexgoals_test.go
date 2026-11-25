@@ -223,3 +223,32 @@ func TestCodexGoalSessionsSkipUnreadableRollout(t *testing.T) {
 		t.Fatalf("eligible %v, coverage %+v, err %v", eligible, coverage, err)
 	}
 }
+
+// A machine with no Codex home at all is a source that is not present, not
+// a failed read: check must not report `source_failed` for it. A permission
+// error on an existing home stays a failed read.
+func TestCodexAbsentHomeIsUnavailableNotFailed(t *testing.T) {
+	now := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
+	env := board.Env{Dir: t.TempDir(), Now: func() time.Time { return now }, LookPath: func(string) (string, error) { return "", nil }}
+	missing := filepath.Join(t.TempDir(), "no-such-codex-home")
+	result := (CodexGoals{Home: missing}).Read(context.Background(), env)
+	if result.Status != board.StatusUnavailable || result.ReadFailed {
+		t.Fatalf("absent home: status=%s readFailed=%v detail=%q", result.Status, result.ReadFailed, result.Detail)
+	}
+	// The absence names the configured absolute path, not a symlink target.
+	if !strings.Contains(result.Detail, missing) {
+		t.Fatalf("absence detail %q does not name the configured path %q", result.Detail, missing)
+	}
+	locked, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	result = (CodexGoals{Home: locked}).Read(context.Background(), env)
+	if result.Status == board.StatusUnavailable || !result.ReadFailed {
+		t.Fatalf("unreadable home: status=%s readFailed=%v detail=%q", result.Status, result.ReadFailed, result.Detail)
+	}
+}

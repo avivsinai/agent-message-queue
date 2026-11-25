@@ -91,6 +91,7 @@ type extDoc struct {
 func (e External) Build(out []byte, runErr error, now time.Time) board.Result {
 	res := board.Result{Status: board.StatusOK, ObservedAt: now, Feeds: externalFeeds}
 	fail := func(detail string) board.Result {
+		res.ReadFailed = true
 		res.Status, res.Detail = board.StatusDegraded, detail
 		return res
 	}

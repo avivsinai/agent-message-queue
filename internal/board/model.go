@@ -55,6 +55,11 @@ type Model struct {
 	Schema               string               `json:"schema"`
 	Generation           uint64               `json:"generation,omitempty"`
 	PublishedAt          time.Time            `json:"published_at,omitempty"`
+	// Stale says the published facts are older than Config.LivenessWindow.
+	// They remain a valid historical view, not facts about the floor now.
+	Stale               bool   `json:"stale"`
+	PublishedAgeSeconds int64  `json:"published_age_seconds"`
+	Config              Config `json:"-"`
 	// Asks are the open human obligations and timed agent obligations.
 	Asks []Ask `json:"asks"`
 	// Requests are the recorded request messages with their observations
@@ -92,14 +97,18 @@ type Model struct {
 
 // SourceView is one token of the sources strip.
 type SourceView struct {
-	Name       string       `json:"name"`
-	Feeds      []Column     `json:"feeds,omitempty"`
-	Status     SourceStatus `json:"status"`
-	Detail     string       `json:"detail,omitempty"`
-	Partial    bool         `json:"partial"`
-	Coverage   Coverage     `json:"coverage"`
-	ObservedAt time.Time    `json:"observed_at"`
-	Version    string       `json:"version,omitempty"`
+	Name   string       `json:"name"`
+	Feeds  []Column     `json:"feeds,omitempty"`
+	Status SourceStatus `json:"status"`
+	// ReadFailed says the read of this source failed in this pass (for
+	// several homes, at least one home read failed); its cards may be from
+	// an earlier pass or absent.
+	ReadFailed bool      `json:"read_failed,omitempty"`
+	Detail     string    `json:"detail,omitempty"`
+	Partial    bool      `json:"partial"`
+	Coverage   Coverage  `json:"coverage"`
+	ObservedAt time.Time `json:"observed_at"`
+	Version    string    `json:"version,omitempty"`
 }
 
 // ColumnView is one attention column.
@@ -197,7 +206,7 @@ func Build(in Input) Model {
 	for _, nr := range in.Results {
 		r := nr.Result
 		m.Sources = append(m.Sources, SourceView{
-			Name: nr.Name, Feeds: r.Feeds, Status: r.Status, Detail: r.Detail, Partial: r.Coverage.Partial(),
+			Name: nr.Name, Feeds: r.Feeds, Status: r.Status, ReadFailed: r.ReadFailed, Detail: r.Detail, Partial: r.Coverage.Partial(),
 			Coverage: r.Coverage, ObservedAt: r.ObservedAt, Version: r.Version,
 		})
 		observed[nr.Name] = r.ObservedAt

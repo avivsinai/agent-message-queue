@@ -18,6 +18,35 @@ amq-board classify --classifier NAME --next 8 --json  # export requests to label
 amq-board classify --file labels.json                 # import labels
 ```
 
+Views keep old publications readable as history. A publication past
+`liveness_window` or with no publication time starts text and HTML with the
+STALE sentence `Every number below is from then.` The specific publication age
+follows it when known. `--json` and `--pane-json` always include a boolean
+`stale` and `published_age_seconds`. A view reads no source and performs no
+refresh.
+
+`amq-board serve` follows `pane.json` on its existing polls. The page has one
+STALE banner. Its local clock marks the current publication old after
+`liveness_window`, including between polls. An old loaded page still becomes
+old if the bound is shorter than its refresh interval. Reception of an
+explicitly stale or over-age publication shows the banner; a fresh observed
+publication hides it. No poll reads a source or retries a failed provider.
+
+`retro` refuses old input and exits 1, like `check`: sync before acting.
+`check`'s `source_failed` kind means the applicable source's `read_failed` fact
+is true: the source supplied no current list for a read it attempted. Retained
+cards do not turn that failure into success. Healthy partial, capacity-limited,
+unavailable and disabled sources are not source failures; a source's coverage
+names those other limits. Machine-readable source coverage includes
+`read_failed` where applicable. A `source_failed` problem carries the source
+under `source`, not `session`, so that source name is also its incident
+identity. Floor-problem text still uses the source's existing coverage gap.
+
+`amq presence list` prints every stored note with its age, or `(age unknown)`
+for a missing or invalid `note_at`. A note older than `liveness_window` still
+prints here; only the board Floor hides it. `note_at` changes when the note
+text changes, not on a liveness Touch.
+
 The installed `amq` must support `amq thread list --all-sessions --json`.
 An unavailable command is reported as incomplete history. The board does not
 scan mailboxes itself or fall back to a different source.
@@ -437,7 +466,9 @@ names the fact it used. The board cannot see processes and never says a
 worker is running or has stopped. A seat lists the current cards that name
 it, In progress first, then In review, Ready, and Blocked; a card that names a
 handle without a session is listed under each seat of that handle with
-"handle in N sessions". The agent's presence note (Says) and free-text status
+"handle in N sessions". The Floor ages a presence note from its own `note_at`, not wake activity. It prints the age, removes the note at the liveness bound, and reports `age unknown` if the original record has no timestamp. `amq presence list` preserves the old note and labels the same age.
+
+The agent's presence note (Says) and free-text status
 are quoted, never treated as facts. A limit read before later activity shows
 as "limit reported N ago; active since" (or "the account was active since");
 a limit with no reset time shows when it was read. Claude Code error turns

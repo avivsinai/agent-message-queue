@@ -39,7 +39,7 @@ func (Beads) Discover(env board.Env) (bool, string) {
 func (b Beads) Read(ctx context.Context, env board.Env) board.Result {
 	namespace, err := beadsNamespace(ctx, env)
 	if err != nil {
-		return board.Result{Status: board.StatusDegraded, ObservedAt: env.Now(), Detail: "beads backend identity unavailable: " + err.Error(), Coverage: board.Coverage{Unresolved: 1}, Feeds: beadsFeeds}
+		return board.Result{Status: board.StatusDegraded, ObservedAt: env.Now(), ReadFailed: true, Detail: "beads backend identity unavailable: " + err.Error(), Coverage: board.Coverage{Unresolved: 1}, Feeds: beadsFeeds}
 	}
 	out, err := env.Run.Run(ctx, env.Dir, []string{"bd", "--readonly", "--sandbox", "list", "--json", "--all", "--limit", "0"})
 	result := b.Build(out, err, env.Now())
@@ -48,6 +48,7 @@ func (b Beads) Read(ctx context.Context, env board.Env) board.Result {
 		if err != nil || after != namespace {
 			result.Status = board.StatusDegraded
 			result.Detail = "beads backend changed during acquisition"
+			result.ReadFailed = true
 			result.Items = nil
 			result.Coverage.Unresolved++
 			return result
@@ -133,11 +134,13 @@ func parseBeadRows(data []byte) ([]beadRow, error) {
 func (b Beads) Build(out []byte, runErr error, now time.Time) board.Result {
 	res := board.Result{Status: board.StatusOK, ObservedAt: now, Feeds: beadsFeeds}
 	if runErr != nil {
+		res.ReadFailed = true
 		res.Status, res.Detail = board.StatusDegraded, "bd list failed: "+errLine(runErr)
 		return res
 	}
 	rows, err := parseBeadRows(out)
 	if err != nil {
+		res.ReadFailed = true
 		res.Status, res.Detail = board.StatusDegraded, "bd list output unreadable: "+err.Error()
 		return res
 	}

@@ -2,7 +2,6 @@ package board
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"time"
 )
@@ -18,6 +17,7 @@ const (
 	ProblemReplyOverdue  ProblemKind = "reply_overdue"
 	ProblemNewsOverdue   ProblemKind = "news_overdue"
 	ProblemBoardStale    ProblemKind = "board_stale"
+	ProblemSourceFailed  ProblemKind = "source_failed"
 )
 
 // Incident identifies one delivered observation. Changing rendered prose,
@@ -27,6 +27,8 @@ func (p Problem) Incident() string {
 	switch p.Kind {
 	case ProblemSeatStalled, ProblemSeatAtLimit:
 		parts = append(parts, p.Session, p.Handle)
+	case ProblemSourceFailed:
+		parts = append(parts, p.Source)
 	case ProblemReadyNotBegun, ProblemNotWorked:
 		parts = append(parts, p.Session, p.Handle, p.CardID)
 	case ProblemReplyOverdue, ProblemNewsOverdue:
@@ -49,17 +51,14 @@ type Problem struct {
 	Handle  string      `json:"handle,omitempty"`
 	CardID  string      `json:"card_id,omitempty"`
 	Request string      `json:"request,omitempty"`
+	Source  string      `json:"source,omitempty"`
 	Text    string      `json:"text"`
 }
 
 // Check lists the floor problems of a projected model. It is pure.
 func Check(m Model, cfg Config, now time.Time) ([]Problem, error) {
-	if m.PublishedAt.IsZero() {
-		return nil, errors.New("the board has no published snapshot; run amq-board sync --init")
-	}
-	elapsed := now.Sub(m.PublishedAt)
-	if elapsed > cfg.LivenessWindow {
-		return nil, fmt.Errorf("the board snapshot is %s old; run amq-board sync first", age(elapsed))
+	if err := CheckFreshness(Snapshot{PublishedAt: m.PublishedAt}, cfg, now); err != nil {
+		return nil, err
 	}
 	type cardAt struct{ card *Card }
 	cards := map[string]cardAt{}
@@ -70,6 +69,15 @@ func Check(m Model, cfg Config, now time.Time) ([]Problem, error) {
 		}
 	}
 	problems := []Problem{}
+	for _, src := range m.Sources {
+		if !src.ReadFailed {
+			// Partial coverage is a successful read with named limits;
+			// disabled has no source error of its own.
+			continue
+		}
+		text := fmt.Sprintf("source %s did not read: %s; the board may miss its cards", src.Name, clean(sourceGap(src).Gap))
+		problems = append(problems, Problem{Kind: ProblemSourceFailed, Source: src.Name, Text: text})
+	}
 	seen := map[string]bool{}
 	add := func(st Station, kind ProblemKind, id string, text string) {
 		key := string(kind) + "\x00" + st.Handle + "\x00" + id

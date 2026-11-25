@@ -12,11 +12,14 @@ import (
 
 // Presence captures the current presence for an agent handle.
 type Presence struct {
-	Schema           int    `json:"schema"`
-	Handle           string `json:"handle"`
-	Status           string `json:"status"`
-	LastSeen         string `json:"last_seen"`
-	Note             string `json:"note,omitempty"`
+	Schema   int    `json:"schema"`
+	Handle   string `json:"handle"`
+	Status   string `json:"status"`
+	LastSeen string `json:"last_seen"`
+	Note     string `json:"note,omitempty"`
+	// NoteAt is the note text's last change, not a wake's liveness Touch.
+	// Absence means its age is unknown, not recently written.
+	NoteAt           string `json:"note_at,omitempty"`
 	NotifierStatus   string `json:"notifier_status,omitempty"`
 	NotifierMode     string `json:"notifier_mode,omitempty"`
 	NotifierReason   string `json:"notifier_reason,omitempty"`
@@ -31,6 +34,7 @@ func New(handle, status, note string, now time.Time) Presence {
 		Status:   status,
 		LastSeen: now.UTC().Format(time.RFC3339Nano),
 		Note:     note,
+		NoteAt:   noteAtNow(note, now),
 	}
 }
 
@@ -134,8 +138,18 @@ func SetStatusDeliveryRoot(root *fsq.DeliveryRoot, handle, status, note string) 
 	return UpdateDeliveryRoot(root, handle, statusChange(status, note))
 }
 
+func noteAtNow(note string, now time.Time) string {
+	if note == "" {
+		return ""
+	}
+	return now.UTC().Format(time.RFC3339Nano)
+}
+
 func statusChange(status, note string) func(*Presence) {
 	return func(p *Presence) {
+		if p.Note != note {
+			p.NoteAt = noteAtNow(note, time.Now())
+		}
 		p.Status = status
 		p.Note = note
 	}
