@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"math"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/board/usage"
@@ -14,9 +13,10 @@ import (
 // becomes a floor problem: 90 percent used, 10 percent left.
 const accountNearCapThreshold = 90.0
 
-// accountNearCap reports one problem per account whose freshest cap reading,
-// fresh by its own time within the plan-limits 15-minute rule, shows 90
-// percent or more used. The newest fact for a cap decides before the
+// accountNearCap reports one problem per account whose newest cap reading
+// shows 90 percent or more used. A future reset keeps that reading current:
+// cap usage cannot decrease inside its reset period. A reading without a
+// reset uses the plan-limits 15-minute rule. The newest fact for a cap decides before the
 // threshold: an older 95-percent reading beside a newer 50-percent one
 // raises nothing. It needs no mapped worker and no card: the fact is the
 // account's. Harnesses that report nothing before the limit (Claude Code,
@@ -37,9 +37,10 @@ func accountNearCap(m Model, now time.Time) []Problem {
 		}
 		// The threshold check already proved the cap has a usable reading.
 		p, _ := nearCapUsedPercent(l)
+		left := nearCapLeftPercent(l, p)
 		used, total := capAmount(l.Used), capAmount(l.Cap)
 		if used == "" {
-			used = percent(p)
+			used = shortNumber(p) + "%"
 		}
 		if total == "" {
 			total = "100%"
@@ -48,7 +49,7 @@ func accountNearCap(m Model, now time.Time) []Problem {
 			Kind: ProblemAccountNearCap, Account: a.Key,
 			ResetsAt: l.ResetsAt,
 			Text: fmt.Sprintf("account %s: %s of %s used (%s left)%s",
-				accountName(a.Key), used, total, nearCapLeftText(p), resets),
+				accountName(a.Key), used, total, nearCapLeftText(left), resets),
 		})
 	}
 	return out
@@ -85,12 +86,15 @@ func nearCapLimit(ls []usage.Limit, now time.Time) *usage.Limit {
 	return best
 }
 
-// capFresh says whether a cap's own reading time is current: set, not in the
-// future, and within the plan-limits freshness bound. The limit's status
-// field and the account's other readings play no part.
+// capFresh keeps a reading current until a known reset: cap usage cannot
+// decrease inside its reset period. With no reset, its own time must be
+// within the plan-limits bound. A past reset needs a new reading.
 func capFresh(l *usage.Limit, now time.Time) bool {
 	if l.AsOf.IsZero() || l.AsOf.After(now) {
 		return false
+	}
+	if l.ResetsAt != nil {
+		return l.ResetsAt.After(now)
 	}
 	return now.Sub(l.AsOf) <= LimitsStaleAfter
 }
@@ -123,25 +127,38 @@ func nearCapUsedPercent(l *usage.Limit) (float64, bool) {
 	return 0, false
 }
 
-// capAmount prints a cap's figure exactly as the source wrote it when it
-// parses as a finite decimal; an empty or invalid figure stays empty.
+// capAmount prints a finite cap figure with at most one decimal, truncated
+// rather than rounded. An empty or invalid figure stays empty.
 func capAmount(s string) string {
-	if _, ok := capUnits(s); !ok {
+	value, ok := capUnits(s)
+	if !ok {
 		return ""
 	}
-	return s
+	return shortNumber(value)
 }
 
-// nearCapLeftText prints what is left of the cap: never negative and
-// truncated to at most one decimal.
-func nearCapLeftText(usedPercent float64) string {
-	left := 100 - usedPercent
-	if left < 0 {
-		left = 0
+func shortNumber(value float64) string {
+	return strconv.FormatFloat(math.Trunc(value*10)/10, 'f', -1, 64)
+}
+
+// nearCapLeftPercent computes the remainder from the same source as the used
+// share. In particular 999 of 1000 is exactly 0.1 percent left, rather
+// than a subtraction of two rounded floating-point shares.
+func nearCapLeftPercent(l *usage.Limit, usedPercent float64) float64 {
+	if used, ok := capUnits(l.Used); ok {
+		if cap, ok := capUnits(l.Cap); ok && cap > 0 {
+			return (cap - used) / cap * 100
+		}
 	}
-	s := strconv.FormatFloat(left, 'f', -1, 64)
-	if i := strings.IndexByte(s, '.'); i >= 0 && len(s) > i+2 {
-		s = s[:i+2]
+	return 100 - usedPercent
+}
+
+func nearCapLeftText(left float64) string {
+	if left <= 0 {
+		return "0%"
 	}
-	return s + "%"
+	if left < 0.1 {
+		return "under 0.1%"
+	}
+	return shortNumber(left) + "%"
 }

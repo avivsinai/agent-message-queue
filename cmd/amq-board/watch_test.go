@@ -115,7 +115,7 @@ func TestOneShotSyncFailingAndGoodPass(t *testing.T) {
 // floorStep with no recipients returns nil, and a watch loop with a nil
 // floor step runs its passes and waits without a floor notice.
 func TestFloorStepNilWithoutRecipientsAndWatchLoopProceeds(t *testing.T) {
-	if floorStep("", nil, io.Discard) != nil {
+	if floorStep(&syncRun{}, "", nil, io.Discard) != nil {
 		t.Fatal("floorStep with no recipients = non-nil, want nil")
 	}
 	var log bytes.Buffer

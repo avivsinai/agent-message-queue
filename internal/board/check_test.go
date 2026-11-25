@@ -126,7 +126,7 @@ func TestCheckReportsFailedSources(t *testing.T) {
 // reached limit on a mapped worker with a card could report. The freshest
 // fresh cap reading at 90 percent or more is itself the floor problem.
 func TestCheckReportsAccountNearCap(t *testing.T) {
-	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.Local)
 	codex := usage.Codex + ":~/workspace/.home/codex"
 	capAt := func(name, status string, asOf time.Time) usage.Limit {
 		return usage.Limit{Kind: "cap", Name: name, Status: status, AsOf: asOf}
@@ -187,7 +187,36 @@ func TestCheckReportsAccountNearCap(t *testing.T) {
 			},
 		},
 		{
-			name: "a cap whose own reading is 16 minutes old stays quiet",
+			name: "exact cap figures are short and keep a small remainder visible",
+			limits: []usage.Limit{func() usage.Limit {
+				l := capAt("spend cap", "fresh", now.Add(-time.Minute))
+				l.Used, l.Cap = "999.468299984932", "1000"
+				return l
+			}()},
+			want: "account Codex ~/workspace/.home/codex: 999.4 of 1000 used (under 0.1% left)",
+		},
+		{
+			name: "exactly one tenth of one percent left is not below one tenth",
+			limits: []usage.Limit{func() usage.Limit {
+				l := capAt("spend cap", "fresh", now.Add(-time.Minute))
+				l.Used, l.Cap = "999", "1000"
+				return l
+			}()},
+			want: "account Codex ~/workspace/.home/codex: 999 of 1000 used (0.1% left)",
+		},
+		{
+			name: "an old reading inside its reset period is still the cap fact",
+			limits: []usage.Limit{func() usage.Limit {
+				l := capAt("spend cap", "fresh", now.Add(-3*time.Hour))
+				l.Used, l.Cap = "993", "1000"
+				resets := time.Date(2026, 11, 28, 14, 0, 0, 0, time.Local)
+				l.ResetsAt = &resets
+				return l
+			}()},
+			want: "account Codex ~/workspace/.home/codex: 993 of 1000 used (0.7% left), resets 14:00",
+		},
+		{
+			name: "a cap without a reset whose own reading is 16 minutes old stays quiet",
 			limits: []usage.Limit{func() usage.Limit {
 				l := capAt("spend cap", "fresh", now.Add(-16*time.Minute))
 				l.UsedPercent = ptrFloat(93)
@@ -223,9 +252,9 @@ func TestCheckReportsAccountNearCap(t *testing.T) {
 	}
 }
 
-// One notice per account per reset period: the incident identity carries the
-// account and its reset, not the prose or the numbers, so 991 of 1,000 and
-// 993 of 1,000 are one incident and a new reset period sends again.
+// One notice per account while it is near cap. Neither verbose figures nor
+// a one-second provider reset timestamp change its identity; use dropping
+// below the threshold clears the delivered record for a later occurrence.
 func TestAccountNearCapIncidentKeysOnAccountAndReset(t *testing.T) {
 	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
 	resets := now.Add(3 * 24 * time.Hour)
@@ -246,9 +275,16 @@ func TestAccountNearCapIncidentKeysOnAccountAndReset(t *testing.T) {
 	if again.Incident() != first.Incident() || first.Incident() == "" {
 		t.Fatalf("the same period changed incident identity: %q vs %q", again.Incident(), first.Incident())
 	}
-	next := resets.Add(7 * 24 * time.Hour)
-	if p(&next).Incident() == first.Incident() {
-		t.Fatal("a new reset period kept the old incident identity")
+	next := resets.Add(time.Second)
+	// Codex has moved resets_at by one second between readings; that is
+	// not a new account condition and must not repeat the notice.
+	if other := p(&next).Incident(); other != first.Incident() {
+		t.Fatalf("a one-second reset change made another incident: %q vs %q", other, first.Incident())
+	}
+	otherAccount := p(&resets)
+	otherAccount.Account = "codex:~/other-home"
+	if otherAccount.Incident() == first.Incident() {
+		t.Fatal("two accounts share a near-cap incident identity")
 	}
 }
 

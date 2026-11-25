@@ -159,7 +159,7 @@ func runSync(args []string) int {
 	memos := map[string]*providerMemo{}
 	limits := &serveLimits{}
 	run := &syncRun{dir: dir, env: env, store: store, loader: loader, token: token, memos: memos, limits: limits, watch: *watch, suggestions: *suggestions}
-	floor := floorStep(*as, recipients, os.Stderr)
+	floor := floorStep(run, *as, recipients, os.Stderr)
 	var floorPass func(context.Context)
 	if floor != nil {
 		floorPass = floor.pass
