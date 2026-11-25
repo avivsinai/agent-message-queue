@@ -665,6 +665,12 @@ func (a *Attachment) pollTranscript(sessionID, path string) bool {
 //   - The interrupt line of the owner's prompt cancels the owner: Claude
 //     Code runs no Stop hook when the user interrupts a turn.
 //
+// Two invariants keep a turn that ended in an API error from leaking a
+// foreign answer or hanging:
+//   - A harness command row (`rowSource: "local"`) does not end a turn
+//     whose newest assistant entry is an API error.
+//   - A new turn after such a turn ends its run failed.
+//
 // Caller holds a.mu.
 func (a *Attachment) applyEntryLocked(e transcriptEntry, events []core.NativeEvent) []core.NativeEvent {
 	a.trackTurnLocked(e, classifyTurnEntry(e, true))
@@ -687,7 +693,7 @@ func (a *Attachment) applyEntryLocked(e transcriptEntry, events []core.NativeEve
 			if !rec.submitted {
 				rec.submitted, rec.userTS = true, e.TS
 			}
-			if !e.Absorbed && a.owner != nil && a.owner != rec && !e.HarnessCommand {
+			if !e.Absorbed && a.owner != nil && a.owner != rec {
 				a.owner.endTurn(e.TS)
 				events = a.failRefusedOwnerLocked(events)
 			}
@@ -847,12 +853,12 @@ func (a *Attachment) bindStopsLocked(stops stopMarkers, events []core.NativeEven
 	return events
 }
 
-// settleRunLocked ends rec in state with its turn's newest assistant text as
-// the result and emits typ. Caller holds a.mu.
+// settleRunLocked ends rec in state and emits typ. A completed or
+// cancelled run carries its turn's newest assistant text as the result; a
+// failed run carries none and gives its reason. Caller holds a.mu.
 func (a *Attachment) settleRunLocked(rec *runRecord, state protocol.State, typ core.NativeEventType, events []core.NativeEvent) []core.NativeEvent {
 	rec.terminal = true
 	rec.state = state
-	rec.result = &protocol.Result{Text: rec.lastText, Truncated: rec.lastCut, NativeRef: rec.msgID}
 	if a.owner == rec {
 		a.owner = nil
 	}

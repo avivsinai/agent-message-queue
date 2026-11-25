@@ -18,8 +18,8 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
-// refusedTurnReason is the one failure reason this adapter emits; the string
-// lives once, here, beside the behavior that produces it.
+// refusedTurnReason is the failure reason the adapter gives; the test
+// constant asserts the exact string.
 const refusedTurnReason = "the turn ended in an API error and the session moved on"
 
 // refusedEvents captures the native events the attachment emits, and checks
@@ -270,7 +270,7 @@ func TestRefusedTurnTypedPromptClosesAndAllowsAnotherRequest(t *testing.T) {
 }
 
 // A second delivery ends only the genuinely left-behind refused owner; the
-// new run owns the turn and completes. A not-refused owner is never failed.
+// new run owns the turn and completes.
 func TestRefusedTurnOtherDeliveryFailsOnlyRefusedRun(t *testing.T) {
 	ft := newFakeTarget(t, os.Getpid(), nil)
 	att := ft.attach(t)
@@ -295,6 +295,7 @@ func TestRefusedTurnOtherDeliveryFailsOnlyRefusedRun(t *testing.T) {
 
 // Command-like wrapper text inside a person's own prompt is not structural
 // harness evidence: rowSource is the only command-row discriminator.
+// Review finding, 2026-11-25: was a text test for command rows, red on main.
 func TestRefusedTurnCommandLookingTextEndsAsFailed(t *testing.T) {
 	ft := newFakeTarget(t, os.Getpid(), nil)
 	att := ft.attach(t)
@@ -312,10 +313,11 @@ func TestRefusedTurnCommandLookingTextEndsAsFailed(t *testing.T) {
 // A later prompt in the same poll cannot take the turn from an answered run
 // whose own Stop was already preserved: the marker is bound in timestamp order
 // before the next user boundary is applied.
+// Review finding, 2026-11-25: the old boundary failed any run, not only a refused one.
 func TestAnswerStopAndLaterPromptCompletesOriginalRun(t *testing.T) {
 	ft := newFakeTarget(t, os.Getpid(), nil)
 	att := ft.attach(t)
-	subm := submitTurnRun(t, att, ft)
+	submitTurnRun(t, att, ft)
 	base := time.Now()
 	answer := refusedLine(t, map[string]any{"type": "assistant", "message": map[string]any{"role": "assistant", "content": "the answer"}, "timestamp": base.Add(10 * time.Millisecond).UTC().Format(time.RFC3339Nano)})
 	prompt := refusedLine(t, map[string]any{"type": "user", "origin": map[string]any{"kind": "human"}, "message": map[string]any{"role": "user", "content": "another task"}, "timestamp": base.Add(30 * time.Millisecond).UTC().Format(time.RFC3339Nano)})
@@ -325,12 +327,12 @@ func TestAnswerStopAndLaterPromptCompletesOriginalRun(t *testing.T) {
 	appendStopMarker(t, ft.home, base.Add(20*time.Millisecond).UnixMilli())
 	att.pollConfirmations()
 	wantRefusedCompletion(t, refusedRecord(t, att, pr2Key()), "the answer")
-	_ = subm
 }
 
 // A normal assistant entry replaces API-error text, and a continuation row
 // does not end a healthy turn. An API-error line mid-turn never supplies the
 // result and never fails the run while a later answer or continuation exists.
+// Review finding, 2026-11-25: an early return skipped the failure path and widened the user case.
 func TestHealthyAssistantAndContinuationRemainUndisturbed(t *testing.T) {
 	for _, row := range []struct {
 		name  string
