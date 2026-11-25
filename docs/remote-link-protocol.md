@@ -378,7 +378,13 @@ nothing.
   list that later returns to its earlier value does not bring the grant
   back. The generation does not change; the owner signs a new grant.
 - A newer grant accepted for the same binding.
-- A new epoch or another native session behind the binding.
+- A new epoch or another native session behind the binding, at the first
+  granted task that meets the change and whose otherwise valid signed grant
+  names the old binding. The machine clears that grant and shows an end
+  notice with the reason "session changed". A binding that is temporarily
+  absent ends nothing. Until that task, `amq-remote link status` shows the
+  stored grant with whether its session is attached; if it is not, it serves
+  no task until the session is back.
 - The session can write the machine's state directory with no dialog: the
   binding then takes no grant (`state_in_workspace`). A link in the machine
   root (the default) can grant; a link kept inside a project cannot grant to
@@ -406,7 +412,7 @@ An end by a new generation (a share write, a detach, a revoke) is not in
 this limit: the generation is written before the answer.
 
 The machine shows a desktop notice when it accepts a grant and when a grant
-ends by revoke or expiry; `amq-remote link status` lists the stored grants.
+ends by revoke, expiry or their session changing; `amq-remote link status` lists the stored grants.
 A restore of the machine's state from a backup can bring back a grant that
 has not expired.
 

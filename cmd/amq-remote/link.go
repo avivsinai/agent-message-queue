@@ -1291,7 +1291,7 @@ func printLinkStatus(w io.Writer, v linkStatusOut) {
 			say(w, "  %s: %s", b, nonEmpty(l.ShareStates[b], "unknown"))
 		}
 		for _, g := range l.Grants {
-			say(w, "  grant %s on %s until %s", g.GrantID, g.Binding, g.NotAfter)
+			say(w, "  grant %s on %s until %s%s", g.GrantID, g.Binding, g.NotAfter, g.unattachedDetail())
 		}
 		if l.GrantsError != "" {
 			say(w, "  grants: %s", l.GrantsError)
@@ -1323,6 +1323,14 @@ type linkGrantRow struct {
 	Binding  string `json:"binding"`
 	GrantID  string `json:"grant_id"`
 	NotAfter string `json:"not_after"`
+	Attached bool   `json:"attached"`
+}
+
+func (g linkGrantRow) unattachedDetail() string {
+	if g.Attached {
+		return ""
+	}
+	return " (its session is not attached; it serves no task until the session is back)"
 }
 
 // dropShares removes from l the shares of the bindings in names and
@@ -1525,6 +1533,9 @@ func linkStatus(args []string, probe *jsonProbe) (any, int, error) {
 					_ = json.Unmarshal(data, &row.Status)
 				}
 				row.Grants, row.GrantsError = linkGrantRows(stateDir, l.Name)
+				for i := range row.Grants {
+					row.Grants[i].Attached = row.ShareStates[row.Grants[i].Binding] == "shared"
+				}
 			} else if host := retiredHostOf(retiredNames, l.Name); host != "" {
 				row.Sink, row.Status.State = host, "retired"
 			} else {

@@ -576,7 +576,10 @@ Protocol: [`amq.remote.link/1`](../../docs/remote-link-protocol.md).
    binding, or of every binding of the link, at once; it needs no running
    endpoint. A grant also ends at its expiry, at `attach --self --link` again,
    at `detach`, when a consent key is added or removed, and when the server
-   revokes it. A granted task runs only while the harness reports that the
+   revokes it. A granted task that meets its binding with a different epoch
+   or native session also ends the grant with the notice "session changed";
+   before then `link status` says when an unattached session can serve no
+   task. A granted task runs only while the harness reports that the
    session asks before a tool acts: on Codex, an approval policy of
    `untrusted` or `on-request` with the user as reviewer and a `readOnly` or
    `workspaceWrite` sandbox, and a working directory, writable roots, runtime
