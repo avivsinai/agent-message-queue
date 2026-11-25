@@ -126,7 +126,7 @@ func TestCheckReportsFailedSources(t *testing.T) {
 // reached limit on a mapped worker with a card could report. The freshest
 // fresh cap reading at 90 percent or more is itself the floor problem.
 func TestCheckReportsAccountNearCap(t *testing.T) {
-	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.Local)
 	codex := usage.Codex + ":~/workspace/.home/codex"
 	capAt := func(name, status string, asOf time.Time) usage.Limit {
 		return usage.Limit{Kind: "cap", Name: name, Status: status, AsOf: asOf}
