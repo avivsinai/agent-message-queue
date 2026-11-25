@@ -318,10 +318,10 @@ type pageSession struct {
 }
 
 type pageAgent struct {
-	Handle, Liveness, Counts, Usage string
-	Human, Invalid, Limited         bool
-	Action                          *Action
-	Split                           []string
+	Handle, Liveness, Counts, Usage, Context string
+	Human, Invalid, Limited                  bool
+	Action                                   *Action
+	Split                                    []string
 }
 
 func buildPage(m Model, regenerate string) pageData {
@@ -783,6 +783,7 @@ func buildSession(rs RosterSession, now time.Time) pageSession {
 		}
 		pa.Counts = clean(strings.Join(counts, " · "))
 		pa.Usage = clean(usageLine(a, now))
+		pa.Context = clean(contextLine(a, now))
 		for _, u := range a.Usage {
 			if u.Unknown != "" {
 				continue

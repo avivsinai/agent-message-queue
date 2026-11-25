@@ -415,3 +415,75 @@ func TestByteBudgetReadsTheMappedSessionAndTheProjectFirst(t *testing.T) {
 		}
 	})
 }
+
+// The newest counted response's prompt size (input + cache reads + cache
+// writes) is the seat's context fact; the board shows it per worker. One
+// happy path per harness reader, from measured seats. Origin: Field
+// observation, 2026-11-25: a seat's latest response carried an 888K-token
+// context and the board showed only window sums. (Claude and pi record it
+// per response; Codex's delta between cumulative totals is the response.)
+func TestLastResponseContextIsTheNewestCountedEvent(t *testing.T) {
+	const claudeID = "aaaaaaaa-0000-4000-8000-000000000001"
+	claudeRow := func(at, id string, in, read int) string {
+		return `{"type":"assistant","timestamp":"2026-10-22T` + at + `.000Z","sessionId":"` + claudeID + `","cwd":"/work/demo","version":"2.1.300","message":{"id":"` + id + `","usage":{"input_tokens":` + fmt.Sprint(in) + `,"cache_creation_input_tokens":0,"cache_read_input_tokens":` + fmt.Sprint(read) + `,"output_tokens":10}}}`
+	}
+	codexMeta := `{"timestamp":"2026-10-22T11:00:00.000Z","type":"session_meta","payload":{"id":"cccccccc-0000-4000-8000-000000000003","cwd":"/work/demo","cli_version":"0.163.0","source":"cli"}}`
+	codexTotal := func(at string, in, cached int) string {
+		return `{"timestamp":"2026-10-22T` + at + `.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":` + fmt.Sprint(in) + `,"cached_input_tokens":` + fmt.Sprint(cached) + `,"output_tokens":0,"total_tokens":` + fmt.Sprint(in+cached) + `}}}}`
+	}
+	piLine := func(at, id string, in int) string {
+		return `{"type":"message","id":"` + id + `","timestamp":"2026-10-22T` + at + `.000Z","message":{"role":"assistant","usage":{"input":` + fmt.Sprint(in) + `,"output":5,"cacheRead":0,"cacheWrite":0}}}`
+	}
+	piHeader := `{"type":"session","version":3,"id":"eeeeeeee-0000-4000-8000-000000000005","timestamp":"2026-10-22T10:00:00.000Z","cwd":"/work/demo"}`
+	for _, tc := range []struct {
+		name       string
+		harness    string
+		files      map[string][]string
+		wantTokens int64
+		wantAt     string
+	}{
+		{"claude", Claude, map[string][]string{
+			"projects/-work-demo/" + claudeID + ".jsonl": {
+				claudeRow("10:00:00", "msg_a", 100, 1000),
+				// The newest message's full prompt is the context, not a
+				// window sum of both messages.
+				claudeRow("11:00:00", "msg_b", 2, 886312),
+			},
+		}, 2 + 886312, "2026-10-22T11:00:00Z"},
+		{"codex", Codex, map[string][]string{
+			"sessions/2026/10/22/rollout-2026-10-22T11-00-00-cccccccc-0000-4000-8000-000000000003.jsonl": {
+				codexMeta,
+				codexTotal("11:00:01", 1000, 800),
+				codexTotal("11:00:02", 1000, 800),    // repeated total: no spend
+				codexTotal("11:00:03", 1000, 800),    // repeated total: no spend
+				codexTotal("11:00:05", 109435, 1000), // the delta is the response
+			},
+		}, 108235 + 200, "2026-10-22T11:00:05Z"},
+		{"pi", Pi, map[string][]string{
+			"agent/sessions/--work-demo--/2026-10-22T10-00-00-000Z_eeeeeeee-0000-4000-8000-000000000005.jsonl": {
+				piHeader,
+				piLine("10:00:05", "a1b2c3d4", 100),
+				piLine("11:00:00", "b5c6d7e8", 86359),
+			},
+		}, 86359, "2026-10-22T11:00:00Z"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			for path, lines := range tc.files {
+				writeFile(t, filepath.Join(home, filepath.FromSlash(path)), lines...)
+			}
+			a := Read(Config{Homes: map[string][]string{tc.harness: {home}}}, testNow, demoRoots, nil).Accounts[0]
+			if len(a.Sessions) != 1 {
+				t.Fatalf("sessions = %d, want 1", len(a.Sessions))
+			}
+			got, at := a.Sessions[0].Last()
+			if got.In+got.CacheRead+got.CacheWrite != tc.wantTokens {
+				t.Errorf("last response = %d in + %d cached + %d written, want %d context tokens", got.In, got.CacheRead, got.CacheWrite, tc.wantTokens)
+			}
+			wantAt, _ := time.Parse(time.RFC3339, tc.wantAt)
+			if !at.Equal(wantAt) {
+				t.Errorf("last response at %v, want %v", at, wantAt)
+			}
+		})
+	}
+}

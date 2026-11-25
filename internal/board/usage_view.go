@@ -31,6 +31,11 @@ type Usage struct {
 	// has records of an unverified version; the figures are then not a
 	// measurement, not even a lower bound.
 	Unknown string `json:"unknown,omitempty"`
+	// LastContextTokens is the newest counted response's prompt size: its
+	// input, cache reads and cache writes, with LastAt its time. It is one
+	// response, never a window sum.
+	LastContextTokens int64     `json:"last_context_tokens,omitzero"`
+	LastAt            time.Time `json:"last_at,omitzero"`
 }
 
 // UsageView is the usage part of the board: the fleet total and, per
@@ -114,6 +119,7 @@ func WithUsage(m Model, r usage.Report, mapping usage.Mapping) Model {
 		workerSpend := map[usage.RosterKey]*spendState{}
 		workerCounts := map[usage.RosterKey][]usage.Counts{}
 		workerAsOf := map[usage.RosterKey][]time.Time{}
+		workerLast := map[usage.RosterKey]*lastCounts{}
 		for _, s := range a.Sessions {
 			key, mapped := mapping[usage.SessionRef{Harness: s.Harness, ID: s.ID}]
 			if mapped {
@@ -124,9 +130,13 @@ func WithUsage(m Model, r usage.Report, mapping usage.Mapping) Model {
 					workerCounts[key] = make([]usage.Counts, len(windows))
 					workerAsOf[key] = make([]time.Time, len(windows))
 					workerSpend[key] = &spendState{}
+					workerLast[key] = &lastCounts{}
 				}
 				w.Sessions = append(w.Sessions, s.ID)
 				workerSpend[key].note(s)
+				if last, at := s.Last(); !at.IsZero() {
+					workerLast[key].addCounts(last, at)
+				}
 			} else {
 				au.OtherSessions++
 				otherSpend.note(s)
@@ -151,6 +161,12 @@ func WithUsage(m Model, r usage.Report, mapping usage.Mapping) Model {
 		for key, w := range workers {
 			for i, win := range windows {
 				w.Usage = append(w.Usage, makeUsage(win, workerCounts[key][i], workerAsOf[key][i], au.Partial, workerSpend[key].unknown()))
+			}
+			// The worker's latest response is the newest counted response of
+			// its sessions, whatever window it falls in; every window row
+			// carries it, so a per-window row stays self-describing.
+			for i := range w.Usage {
+				w.Usage[i].LastContextTokens, w.Usage[i].LastAt = workerLast[key].tokens, workerLast[key].at
 			}
 			au.Workers = append(au.Workers, *w)
 		}
@@ -314,6 +330,19 @@ func makeUsage(w window, c usage.Counts, asOf time.Time, partial bool, unknown s
 	}
 }
 
+// lastCounts keeps the newest counted response across sessions: the one
+// fact a sum cannot carry.
+type lastCounts struct {
+	tokens int64
+	at     time.Time
+}
+
+func (lc *lastCounts) addCounts(c usage.Counts, at time.Time) {
+	if at.After(lc.at) {
+		lc.tokens, lc.at = c.In+c.CacheRead+c.CacheWrite, at
+	}
+}
+
 // sumUsage adds b into a window by window. The first operand's labels win;
 // a sum of differently aligned windows says so and starts at the earlier.
 func sumUsage(a, b []Usage) []Usage {
@@ -352,6 +381,10 @@ func sumUsage(a, b []Usage) []Usage {
 		}
 		x.AsOf = later(x.AsOf, y.AsOf)
 		x.Partial = x.Partial || y.Partial
+		// The latest response is the newer one, whatever account spent it.
+		if y.LastAt.After(x.LastAt) {
+			x.LastContextTokens, x.LastAt = y.LastContextTokens, y.LastAt
+		}
 		if !x.WindowFrom.Equal(y.WindowFrom) {
 			x.Label = windowName(x.Window) + ", windows differ by account"
 			x.WindowFrom = earlier(x.WindowFrom, y.WindowFrom)

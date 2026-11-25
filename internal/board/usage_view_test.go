@@ -110,3 +110,79 @@ func TestLimitsLineReadsPastAppServerLimitAsPast(t *testing.T) {
 		t.Fatalf("limitsLine = %q, want the past form", got)
 	}
 }
+
+// Each seat shows one context line: the latest response's prompt size with
+// its age, and the 5 h cache-read share when the window holds cache reads
+// (pi records none). Origin: Field observation, 2026-11-25: a seat's latest
+// response carried an 888K-token context and the board showed only window
+// sums. Measured facts, not advice; no threshold. The text face renders it
+// as its own indented line under the seat's usage line, the HTML face as
+// its own paragraph in the Usage details.
+func TestSeatShowsContextSizeAndCacheReadShare(t *testing.T) {
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	row := func(agent RosterAgent, want string) {
+		t.Helper()
+		if got := contextLine(agent, now); got != want {
+			t.Errorf("contextLine = %q, want %q", got, want)
+		}
+	}
+	// A Claude lead: the newest response carried 887,765 prompt tokens,
+	// 99.7% of them cache reads, one hour ago.
+	lead := RosterAgent{Usage: []Usage{
+		{Window: usage.Window5h, In: 1294337, CacheRead: 38630586, Fresh: 1394337, LastContextTokens: 887765, LastAt: now.Add(-time.Hour)},
+		{Window: usage.Window7d, LastContextTokens: 887765, LastAt: now.Add(-time.Hour)},
+	}}
+	row(lead, "context 887.8K at 1h ago · cache reads 96.5% of 5 h")
+	// A pi seat records no cache reads: the context shows, the share does not.
+	row(RosterAgent{Usage: []Usage{{Window: usage.Window5h, In: 86359, Fresh: 87182, LastContextTokens: 86359, LastAt: now.Add(-2 * time.Minute)}}},
+		"context 86.4K at 2m ago")
+	// A near-total share truncates to one decimal instead of rounding up:
+	// only a genuinely zero fresh count prints 100.0 (field observation
+	// 2026-11-25: 99.96% rounded to 100.0 would overstate the share).
+	row(RosterAgent{Usage: []Usage{{Window: usage.Window5h, CacheRead: 9996, Fresh: 4, LastContextTokens: 887765, LastAt: now.Add(-time.Hour)}}},
+		"context 887.8K at 1h ago · cache reads 99.9% of 5 h")
+	// Zero fresh with cache reads is genuinely 100.0.
+	row(RosterAgent{Usage: []Usage{{Window: usage.Window5h, CacheRead: 1000, Fresh: 0, LastContextTokens: 887765, LastAt: now.Add(-time.Hour)}}},
+		"context 887.8K at 1h ago · cache reads 100.0% of 5 h")
+	// No counted response (no mapped session, or a pure output turn): no line.
+	row(RosterAgent{}, "")
+	row(RosterAgent{Usage: []Usage{{Window: usage.Window5h, LastContextTokens: 0, LastAt: now.Add(-time.Hour)}}}, "")
+
+	// Rendered text: the near-total share truncates to 99.9 on its own
+	// indented line after the seat's usage line.
+	m := Build(Input{Results: []NamedResult{{Name: "amq", Result: Result{Status: StatusOK, ObservedAt: now, Feeds: []Column{ColumnWaiting}}}}, Config: DefaultConfig(), Now: now})
+	m.Roster = []RosterSession{{Session: "s1", Agents: []RosterAgent{{RosterEntry: RosterEntry{Session: "s1", Handle: "w", ValidHandle: true},
+		Usage: []Usage{{Window: usage.Window5h, CacheRead: 9996, Fresh: 4, LastContextTokens: 887765, LastAt: now.Add(-time.Hour)}}}}}}
+	var out strings.Builder
+	if err := WriteText(&out, m); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(out.String(), "\n")
+	for i, l := range lines {
+		if strings.Contains(l, "cache reads") && i > 0 && strings.Contains(lines[i-1], "5 h ") {
+			if l != "      context 887.8K at 1h ago · cache reads 99.9% of 5 h" {
+				t.Errorf("context line = %q, want its own indented line with the truncated 99.9 share", l)
+			}
+			return
+		}
+	}
+	t.Errorf("text has no context line under the usage line:\n%s", out.String())
+}
+
+// The HTML seat renders the context line as its own paragraph inside the
+// Usage details, after the spend line — not appended to it.
+func TestHTMLSeatContextIsItsOwnParagraph(t *testing.T) {
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	m := Build(Input{Results: []NamedResult{{Name: "amq", Result: Result{Status: StatusOK, ObservedAt: now, Feeds: []Column{ColumnWaiting}}}}, Config: DefaultConfig(), Now: now})
+	m.Roster = []RosterSession{{Session: "s1", Agents: []RosterAgent{{RosterEntry: RosterEntry{Session: "s1", Handle: "w", ValidHandle: true},
+		Usage: []Usage{{Window: usage.Window5h, Fresh: 1394337, CacheRead: 38630586, LastContextTokens: 887765, LastAt: now.Add(-time.Hour)}}}}}}
+	var page strings.Builder
+	if err := WriteHTML(&page, m, "amq-board --html"); err != nil {
+		t.Fatal(err)
+	}
+	html := page.String()
+	const spend = "5 h 1.4M fresh, 38.6M cached"
+	if !strings.Contains(html, "<p>"+spend+"</p><p>context 887.8K at 1h ago · cache reads 96.5% of 5 h</p>") {
+		t.Errorf("the context line is not its own paragraph after the spend line:\n%s", html)
+	}
+}
