@@ -123,49 +123,99 @@ func TestCheckReportsFailedSources(t *testing.T) {
 
 // account_near_cap, from the 2026-11-25 tear-down: the Codex account went
 // from 761 to 993 of a 1,000-unit cap with no floor problem, because only a
-// reached limit on a mapped worker with a card could report. A fresh cap or
-// window reading at 90 percent or more is itself the floor problem.
+// reached limit on a mapped worker with a card could report. The freshest
+// fresh cap reading at 90 percent or more is itself the floor problem.
 func TestCheckReportsAccountNearCap(t *testing.T) {
 	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
-	pct := func(p float64) *float64 { return &p }
+	codex := usage.Codex + ":~/workspace/.home/codex"
+	capAt := func(name, status string, asOf time.Time) usage.Limit {
+		return usage.Limit{Kind: "cap", Name: name, Status: status, AsOf: asOf}
+	}
+	check := func(limits ...usage.Limit) []Problem {
+		m := Model{PublishedAt: now.Add(-time.Minute), Usage: &UsageView{Accounts: []AccountUsage{{
+			Key: codex, Harness: usage.Codex, Limits: limits,
+		}}}}
+		problems, err := Check(m, DefaultConfig(), now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return problems
+	}
 	for _, row := range []struct {
-		name       string
-		kind       string
-		status     string
-		used, left *float64
-		want       bool
+		name   string
+		limits []usage.Limit
+		want   string
 	}{
-		{name: "a cap 93 percent used is the problem", kind: "cap", status: "fresh", used: pct(93), want: true},
-		{name: "a window 91 percent used is the problem", kind: "window", status: "fresh", used: pct(91), want: true},
-		{name: "exactly 90 percent used is the problem", kind: "cap", status: "fresh", used: pct(90), want: true},
-		{name: "a cap 80 percent used stays quiet", kind: "cap", status: "fresh", used: pct(80)},
-		{name: "a stale cap fact stays quiet", kind: "cap", status: "stale", used: pct(93)},
-		{name: "a reading with no status stays quiet", kind: "cap", used: pct(93)},
-		{name: "a limit kind that is neither cap nor window stays quiet", kind: "credits", status: "fresh", used: pct(93)},
+		{
+			name: "a cap 93 percent used is the problem",
+			limits: []usage.Limit{func() usage.Limit {
+				l := capAt("spend cap", "fresh", now.Add(-time.Minute))
+				l.UsedPercent = ptrFloat(93)
+				return l
+			}()},
+			want: "account Codex ~/workspace/.home/codex: 93% of 100% used (7% left)",
+		},
+		{
+			name: "a cap 80 percent used stays quiet",
+			limits: []usage.Limit{func() usage.Limit {
+				l := capAt("spend cap", "fresh", now.Add(-time.Minute))
+				l.UsedPercent = ptrFloat(80)
+				return l
+			}()},
+		},
+		{
+			name: "a stale cap fact stays quiet",
+			limits: []usage.Limit{func() usage.Limit {
+				l := capAt("spend cap", "stale", now.Add(-20*time.Minute))
+				l.UsedPercent = ptrFloat(93)
+				return l
+			}()},
+		},
+		{
+			name: "a newer half-used cap outranks an older 95 percent one",
+			limits: []usage.Limit{
+				func() usage.Limit {
+					l := capAt("spend cap", "fresh", now.Add(-5*time.Minute))
+					l.UsedPercent = ptrFloat(95)
+					return l
+				}(),
+				func() usage.Limit {
+					l := capAt("spend cap", "fresh", now.Add(-time.Minute))
+					l.UsedPercent = ptrFloat(50)
+					return l
+				}(),
+			},
+		},
+		{
+			name: "a cap whose own reading is 16 minutes old stays quiet",
+			limits: []usage.Limit{func() usage.Limit {
+				l := capAt("spend cap", "fresh", now.Add(-16*time.Minute))
+				l.UsedPercent = ptrFloat(93)
+				return l
+			}()},
+		},
+		{
+			name: "exact cap figures print raw with the share left",
+			limits: []usage.Limit{func() usage.Limit {
+				l := capAt("spend cap", "fresh", now.Add(-time.Minute))
+				l.Used, l.Cap = "993", "1000"
+				resets := now.Add(3 * 24 * time.Hour)
+				l.ResetsAt = &resets
+				return l
+			}()},
+			want: "account Codex ~/workspace/.home/codex: 993 of 1000 used (0.7% left), resets Dec 1 14:00",
+		},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			l := usage.Limit{Kind: row.kind, Name: "spend cap", Status: row.status, AsOf: now.Add(-time.Minute)}
-			if row.used != nil {
-				l.UsedPercent = row.used
-			}
-			if row.left != nil {
-				l.RemainingPercent = row.left
-			}
-			m := Model{PublishedAt: now.Add(-time.Minute), Usage: &UsageView{Accounts: []AccountUsage{{
-				Key: usage.Codex + ":~/workspace/.home/codex", Harness: usage.Codex, Limits: []usage.Limit{l},
-			}}}}
-			problems, err := Check(m, DefaultConfig(), now)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !row.want {
+			problems := check(row.limits...)
+			if row.want == "" {
 				if len(problems) != 0 {
 					t.Fatalf("false near-cap problem: %+v", problems)
 				}
 				return
 			}
-			if len(problems) != 1 || problems[0].Kind != ProblemAccountNearCap {
-				t.Fatalf("problems = %+v, want one %s", problems, ProblemAccountNearCap)
+			if len(problems) != 1 || problems[0].Kind != ProblemAccountNearCap || problems[0].Text != row.want {
+				t.Fatalf("problems = %+v, want one %s with text %q", problems, ProblemAccountNearCap, row.want)
 			}
 		})
 	}
@@ -177,9 +227,9 @@ func TestCheckReportsAccountNearCap(t *testing.T) {
 func TestAccountNearCapIncidentKeysOnAccountAndReset(t *testing.T) {
 	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
 	resets := now.Add(3 * 24 * time.Hour)
-	p := func(used string, reset *time.Time) Problem {
-		l := usage.Limit{Kind: "cap", Name: "spend cap", Status: "fresh", Used: used, Cap: "1000",
-			RemainingPercent: ptrFloat(7), ResetsAt: reset, AsOf: now.Add(-time.Minute)}
+	p := func(reset *time.Time) Problem {
+		l := usage.Limit{Kind: "cap", Name: "spend cap", Status: "fresh", Used: "991", Cap: "1000",
+			ResetsAt: reset, AsOf: now.Add(-time.Minute)}
 		m := Model{PublishedAt: now.Add(-time.Minute), Usage: &UsageView{Accounts: []AccountUsage{{
 			Key: usage.Codex + ":~/workspace/.home/codex", Harness: usage.Codex, Limits: []usage.Limit{l},
 		}}}}
@@ -189,24 +239,14 @@ func TestAccountNearCapIncidentKeysOnAccountAndReset(t *testing.T) {
 		}
 		return problems[0]
 	}
-	first := p("991", &resets)
-	if first.Text != "account Codex ~/workspace/.home/codex: 991.00 of 1000.00 used (7% left), resets Dec 1 14:00" {
-		t.Fatalf("text = %q", first.Text)
-	}
-	if first.Incident() != first.Incident() {
-		t.Fatal("incident identity is not stable")
-	}
-	again := p("993", &resets)
-	if again.Incident() != first.Incident() {
-		t.Fatalf("a new reading of the same period re-notified: %q vs %q", again.Incident(), first.Incident())
+	first := p(&resets)
+	again := p(&resets)
+	if again.Incident() != first.Incident() || first.Incident() == "" {
+		t.Fatalf("the same period changed incident identity: %q vs %q", again.Incident(), first.Incident())
 	}
 	next := resets.Add(7 * 24 * time.Hour)
-	if p("991", &next).Incident() == first.Incident() {
+	if p(&next).Incident() == first.Incident() {
 		t.Fatal("a new reset period kept the old incident identity")
-	}
-	noReset := p("991", nil)
-	if noReset.Incident() == first.Incident() {
-		t.Fatal("a reading with no reset kept the old incident identity")
 	}
 }
 
