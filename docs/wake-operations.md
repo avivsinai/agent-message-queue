@@ -60,6 +60,13 @@ check inspects it, the check reports wake status `unverified` with
 check does not prove that a harness received or consumed a doorbell. Use a
 drained receipt for consumption proof.
 
+A presence note has its own `note_at` timestamp. `presence set` changes it
+only when the note text changes; wake and mailbox activity update
+`last_seen`, not `note_at`. `presence list --json` and `who --json` include
+the note timestamp. Board shows the note with its own age, removes it at the
+configured liveness bound, and labels it age unknown when a legacy record
+has no valid timestamp. A fresh wake never makes an old note fresh.
+
 `doctor --ops` probes advertised loop health in both JSON schemas and text output. Schema 1 adds
 `health_status` and `health_detail` to the wake row; schema 2 uses `wake_check.health`.
 A degraded or unresponsive loop also produces a warning hint. A valid process lock alone does not prove loop health.

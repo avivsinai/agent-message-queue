@@ -55,6 +55,11 @@ type Model struct {
 	Schema               string               `json:"schema"`
 	Generation           uint64               `json:"generation,omitempty"`
 	PublishedAt          time.Time            `json:"published_at,omitempty"`
+	// Stale says the published facts are older than Config.LivenessWindow.
+	// They remain a valid historical view, not facts about the floor now.
+	Stale               bool   `json:"stale,omitempty"`
+	PublishedAgeSeconds int64  `json:"published_age_seconds"`
+	Config              Config `json:"-"`
 	// Asks are the open human obligations and timed agent obligations.
 	Asks []Ask `json:"asks"`
 	// Requests are the recorded request messages with their observations

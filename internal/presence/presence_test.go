@@ -63,3 +63,32 @@ func TestTouchPreservesExisting(t *testing.T) {
 		t.Fatalf("LastSeen not updated: %s", got.LastSeen)
 	}
 }
+
+func TestNoteAtExistsIndependentlyOfWakeTouches(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	if err := Write(root, New("amit", "busy", "waiting", old)); err != nil {
+		t.Fatal(err)
+	}
+	if err := Touch(root, "amit"); err != nil {
+		t.Fatal(err)
+	}
+	oldPresence, _ := Read(root, "amit")
+	if oldPresence.NoteAt == "" || oldPresence.NoteAt == oldPresence.LastSeen {
+		t.Fatalf("note timestamp=%q last_seen=%q", oldPresence.NoteAt, oldPresence.LastSeen)
+	}
+	if _, err := SetStatus(root, "amit", "off", "waiting"); err != nil {
+		t.Fatal(err)
+	}
+	same, _ := Read(root, "amit")
+	if same.NoteAt != oldPresence.NoteAt {
+		t.Fatalf("same note refreshed: %q -> %q", oldPresence.NoteAt, same.NoteAt)
+	}
+	if _, err := SetStatus(root, "amit", "off", "done"); err != nil {
+		t.Fatal(err)
+	}
+	next, _ := Read(root, "amit")
+	if next.NoteAt == same.NoteAt {
+		t.Fatal("changed note did not get its new timestamp")
+	}
+}

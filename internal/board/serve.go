@@ -135,6 +135,8 @@ func (l *Live) run(ctx context.Context, force bool) {
 		// The view is ending; a model of cancelled reads is not kept.
 		return
 	}
+	// Stale reflects it on the live view's own clock.
+	MarkStale(&m)
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		l.Logf("refresh: model not encoded: %v", err)

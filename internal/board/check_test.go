@@ -80,3 +80,38 @@ func TestCheck(t *testing.T) {
 		t.Fatal("an old snapshot was accepted instead of being refused")
 	}
 }
+
+// Regression for wow-teardown B2: a fresh snapshot with a failed source
+// reported a clean Floor. Successful partial reads and disabled sources do not.
+func TestCheckReportsFailedSources(t *testing.T) {
+	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	for _, row := range []struct {
+		status          SourceStatus
+		wantSourceError bool
+	}{
+		{status: StatusDegraded, wantSourceError: true},
+		{status: StatusUnavailable, wantSourceError: true},
+		{status: StatusDisabled},
+		{status: StatusOK},
+	} {
+		t.Run(string(row.status), func(t *testing.T) {
+			m := Model{PublishedAt: now.Add(-time.Minute), Sources: []SourceView{{Name: "github", Status: row.status, Detail: "read failed"}}}
+			problems, err := Check(m, DefaultConfig(), now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if row.wantSourceError {
+				if len(problems) != 1 || problems[0].Kind != ProblemSourceFailed || problems[0].Text != "source github did not read: read failed; the board may miss its cards" {
+					t.Fatalf("problems = %+v", problems)
+				}
+			} else if len(problems) != 0 {
+				t.Fatalf("this source is not failed: %+v", problems)
+			}
+		})
+	}
+	// Partial coverage stays separate from a failed read.
+	problems, err := Check(Model{PublishedAt: now.Add(-time.Minute), Sources: []SourceView{{Name: "github", Status: StatusOK, Partial: true}}}, DefaultConfig(), now)
+	if err != nil || len(problems) != 0 {
+		t.Fatalf("partial success is not a source failure: %+v, %v", problems, err)
+	}
+}

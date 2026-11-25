@@ -81,3 +81,42 @@ func TestTextShowsCardSummaryUnderTitle(t *testing.T) {
 		t.Fatalf("summary not under the title: %q", out.String())
 	}
 }
+
+// wow-teardown B2: a published read can be minutes old without being trusted
+// as the current Floor. Text names the facts' age before anything else.
+func TestTextStartsWithSnapshotAge(t *testing.T) {
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	m := Model{GeneratedAt: now, Config: DefaultConfig(), PublishedAt: now.Add(-2 * time.Minute)}
+	MarkStale(&m)
+	if m.Stale || m.PublishedAgeSeconds != 120 {
+		t.Fatalf("recent view: stale=%v age=%d", m.Stale, m.PublishedAgeSeconds)
+	}
+	var out strings.Builder
+	if err := WriteText(&out, m); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(out.String(), "Published 2m ago (2026-11-25T11:58:00Z).\n") || strings.HasPrefix(out.String(), "STALE") {
+		t.Fatalf("recent facts not dated as recent: %q", out.String())
+	}
+	m.PublishedAt = now.Add(-2 * time.Hour)
+	MarkStale(&m)
+	if !m.Stale || m.PublishedAgeSeconds != 7200 {
+		t.Fatalf("old view: stale=%v age=%d", m.Stale, m.PublishedAgeSeconds)
+	}
+	out.Reset()
+	if err := WriteText(&out, m); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(out.String(), "STALE: published 2h ago (2026-11-25T10:00:00Z). Every number below is from then. Run amq-board sync.\n") {
+		t.Fatalf("old facts not refused visibly: %q", out.String())
+	}
+	if err := CheckFreshness(Snapshot{PublishedAt: m.PublishedAt}, DefaultConfig(), now); err == nil {
+		t.Fatal("old snapshot's retro was not refused")
+	}
+	if err := CheckFreshness(Snapshot{PublishedAt: now}, DefaultConfig(), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckFreshness(Snapshot{PublishedAt: now}, DefaultConfig(), now.Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -205,6 +205,8 @@ type RosterEntry struct {
 	// Note is the agent's own presence note: a self-report, never a fact
 	// about its work.
 	Note string `json:"note,omitempty"`
+	// NoteAt dates the note itself, never the wake's LastSeen update.
+	NoteAt string `json:"note_at,omitempty"`
 }
 
 // SessionInfo is one AMQ session of the project.

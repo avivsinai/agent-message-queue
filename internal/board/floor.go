@@ -229,7 +229,7 @@ func buildFloor(m *Model, observed time.Time, cfg Config, now time.Time) {
 func newStation(a RosterAgent, ownsWork bool, observed time.Time, cfg Config, now time.Time) Station {
 	st := Station{
 		Session: a.Session, Handle: a.Handle, Harness: a.Harness, Now: []string{},
-		Says: a.Note, Counted: a.Counted, CountError: a.CountError,
+		Says: modelPresenceNote(a, now, cfg), Counted: a.Counted, CountError: a.CountError,
 		Unread: a.UnreadCount,
 		Wake:   StationWake{Live: a.PresenceSource == "notifier_live", Mode: a.NotifierMode, Reason: a.NotifierReason, Parked: a.DoorbellParked},
 	}

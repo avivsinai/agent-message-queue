@@ -82,6 +82,8 @@ func WriteLiveHTML(w io.Writer, m Model) error {
 
 type pageData struct {
 	Model                pageModel
+	Stale                bool
+	StaleText            string
 	CSS                  template.CSS
 	JS                   template.JS
 	CSP                  string
@@ -324,6 +326,8 @@ func buildPage(m Model, regenerate string) pageData {
 	}
 	p := pageData{
 		Model:      buildPageModel(m),
+		Stale:      m.Stale,
+		StaleText:  StalenessText(m),
 		CSS:        template.CSS(pageCSS),
 		JS:         template.JS(pageJS),
 		CSP:        pageCSP,

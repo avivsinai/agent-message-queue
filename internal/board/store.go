@@ -1315,6 +1315,8 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 	attachUsage(&m)
 	m.Generation = s.Generation
 	m.PublishedAt = s.PublishedAt
+	m.Config = cfg
+	MarkStale(&m)
 	for i := range m.Columns {
 		m.Columns[i].Cards = []Card{}
 	}

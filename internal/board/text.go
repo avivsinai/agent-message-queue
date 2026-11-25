@@ -87,6 +87,11 @@ func needsYou(m Model) ownerAttention {
 func WriteText(w io.Writer, m Model) error {
 	var b strings.Builder
 	now := m.GeneratedAt
+	if m.Stale {
+		b.WriteString(StalenessText(m) + "\n")
+	} else if !m.PublishedAt.IsZero() {
+		fmt.Fprintf(&b, "Published %s ago (%s).\n", age(now.Sub(m.PublishedAt)), m.PublishedAt.UTC().Format(time.RFC3339))
+	}
 
 	project := m.Project
 	if project == "" {
@@ -99,6 +104,9 @@ func WriteText(w io.Writer, m Model) error {
 		counts = append(counts, fmt.Sprintf("%s %d", strings.ToLower(c.Title), count))
 	}
 	fmt.Fprintf(&b, "%s · %d session%s · %s · generated %s\n", clean(project), len(m.Sessions), plural(len(m.Sessions)), strings.Join(counts, " · "), now.Format(time.RFC3339))
+	if !m.Stale && m.PublishedAt.IsZero() {
+		b.WriteString("Publication age unknown\n")
+	}
 
 	var strip []string
 	for _, s := range m.Sources {

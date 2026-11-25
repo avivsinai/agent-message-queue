@@ -2,8 +2,10 @@ package cli
 
 import (
 	"flag"
+	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/presence"
 	"github.com/avivsinai/agent-message-queue/internal/roster"
@@ -15,6 +17,7 @@ type presenceListItem struct {
 	Status             string `json:"status"`
 	LastSeen           string `json:"last_seen,omitempty"`
 	Note               string `json:"note,omitempty"`
+	NoteAt             string `json:"note_at,omitempty"`
 	Kind               string `json:"kind"`
 	PresenceApplicable bool   `json:"presence_applicable"`
 	// PresenceError is set when presence.json exists but cannot be read;
@@ -162,8 +165,13 @@ func runPresenceList(args []string) error {
 		if err := writeStdoutLine(line); err != nil {
 			return err
 		}
-		if item.Note != "" {
-			if err := writeStdout("  %s\n", item.Note); err != nil {
+		note, since, hasAge := presence.NoteDisplay(item.Note, item.NoteAt, time.Now(), 30*time.Minute)
+		if note != "" {
+			text := "Says: " + note + " (age unknown)"
+			if hasAge {
+				text = fmt.Sprintf("Says: %s (%s ago)", note, since.Round(time.Minute))
+			}
+			if err := writeStdout("  %s\n", text); err != nil {
 				return err
 			}
 		}
@@ -182,6 +190,7 @@ func presenceListItemFromPresence(p presence.Presence, kind string, presenceAppl
 		Status:             status,
 		LastSeen:           p.LastSeen,
 		Note:               p.Note,
+		NoteAt:             p.NoteAt,
 		Kind:               kind,
 		PresenceApplicable: presenceApplicable,
 	}

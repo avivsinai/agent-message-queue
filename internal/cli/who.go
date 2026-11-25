@@ -51,6 +51,7 @@ func runWho(args []string) error {
 		PresenceApplicable bool   `json:"presence_applicable"`
 		Active             bool   `json:"active"`
 		PresenceSource     string `json:"presence_source,omitempty"`
+		NoteAt             string `json:"note_at,omitempty"`
 		NotifierStatus     string `json:"notifier_status,omitempty"`
 		NotifierMode       string `json:"notifier_mode,omitempty"`
 		NotifierReason     string `json:"notifier_reason,omitempty"`
@@ -87,6 +88,7 @@ func runWho(args []string) error {
 				ai.PresenceApplicable = false
 				if row.Presence != nil {
 					ai.Note = row.Presence.Note
+					ai.NoteAt = row.Presence.NoteAt
 				}
 				agents = append(agents, ai)
 				continue
@@ -100,6 +102,7 @@ func runWho(args []string) error {
 					recentActivity = time.Since(t) < 10*time.Minute
 				}
 				ai.Note = p.Note
+				ai.NoteAt = p.NoteAt
 				ai.NotifierStatus = p.NotifierStatus
 				ai.NotifierMode = p.NotifierMode
 				ai.NotifierReason = p.NotifierReason
