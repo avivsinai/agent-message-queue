@@ -18,6 +18,16 @@ amq-board classify --classifier NAME --next 8 --json  # export requests to label
 amq-board classify --file labels.json                 # import labels
 ```
 
+Views keep old publications readable as history. A publication past
+`liveness_window` starts text and HTML with a STALE publication age; `--json`
+and `--pane-json` add `stale` and `published_age_seconds`. The age applies to
+every fact. A view reads no source and performs no refresh. `retro` instead
+refuses old input and exits 1, like `check`: sync before acting. `check`'s
+`source_failed` kind means a source was `degraded` or `unavailable`; `ok`
+(partial) and `disabled` sources are not source failures. The field set is
+`internal/board/item.go:147-163`; `internal/board/check.go:71-80` uses the
+same source gap the view prints.
+
 The installed `amq` must support `amq thread list --all-sessions --json`.
 An unavailable command is reported as incomplete history. The board does not
 scan mailboxes itself or fall back to a different source.
@@ -437,7 +447,9 @@ names the fact it used. The board cannot see processes and never says a
 worker is running or has stopped. A seat lists the current cards that name
 it, In progress first, then In review, Ready, and Blocked; a card that names a
 handle without a session is listed under each seat of that handle with
-"handle in N sessions". The agent's presence note (Says) and free-text status
+"handle in N sessions". The Floor ages a presence note from its own `note_at`, not wake activity. It prints the age, removes the note at the liveness bound, and reports `age unknown` if the original record has no timestamp. `amq presence list` uses the same rule.
+
+The agent's presence note (Says) and free-text status
 are quoted, never treated as facts. A limit read before later activity shows
 as "limit reported N ago; active since" (or "the account was active since");
 a limit with no reset time shows when it was read. Claude Code error turns

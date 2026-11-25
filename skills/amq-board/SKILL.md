@@ -21,7 +21,7 @@ Read the source ages and coverage for this project. On first initialization run
 `amq-board sync --init`. When a fresh view is requested, or the last source read
 is over ten minutes old, run `amq-board sync` in this project and read the
 published view again. Name any stale, unavailable or incomplete source that
-affects the answer.
+affects the answer. A STALE first line means sync before acting.
 
 The Requests section lists questions, review requests, and todos. Each
 recipient has an observation: a direct reply (a message whose last ref is
@@ -45,7 +45,7 @@ Each line is one problem for the lead to act on: dispatch what is ready,
 ask the seat once, then replace it. It is not proof that a process stopped.
 
 `seat_stalled`, `seat_at_limit`, `ready_not_started`,
-`in_progress_not_worked` and `reply_overdue` are the kinds. `reply_overdue`
+`in_progress_not_worked`, `reply_overdue` and `source_failed` (degraded or unavailable source reads) are the kinds. `reply_overdue`
 covers overdue agent replies, owner questions and owner rulings. The sender
 reads the thread before taking a default or closing a ruling. The command exits 0 on an empty list, 6
 on problems, and 1 on a stale or absent snapshot. A seat whose harness records
@@ -54,6 +54,8 @@ no activity cannot produce `in_progress_not_worked` without that evidence.
 An unclosed request older than `obligation_max_age` (14 days by default) expires, as in `amq thread open`. It leaves Needs you and the overdue check. Set `obligation_max_age` to `0` to disable expiry.
 
 ## Retro
+
+Old history is refused: sync before acting on the report.
 
 Run `amq-board retro` every two weeks, or after a bad day.
 The lead takes the worst number and assigns one fix to an owner.
