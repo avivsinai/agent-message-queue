@@ -122,11 +122,13 @@ func BuildAMQ(c AMQCapture) (res board.Result) {
 
 	if c.SessionErr != nil {
 		fail("session list failed: %s", errLine(c.SessionErr))
+		res.ReadFailed = true
 		return res
 	}
 	sessions, err := parseSessionList(c.SessionList)
 	if err != nil {
 		fail("session list unreadable: %v", err)
+		res.ReadFailed = true
 		return res
 	}
 	for _, s := range sessions {
@@ -199,11 +201,13 @@ func BuildAMQ(c AMQCapture) (res board.Result) {
 
 	if c.ThreadErr != nil {
 		fail("thread open failed: %s", errLine(c.ThreadErr))
+		res.ReadFailed = true
 		return res
 	}
 	items, cov, version, err := parseThreadOpen(c.ThreadOpen)
 	if err != nil {
 		fail("thread open output not accepted: %v", err)
+		res.ReadFailed = true
 		return res
 	}
 	res.Items, res.Coverage, res.Version = items, cov, version

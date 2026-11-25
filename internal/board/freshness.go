@@ -30,10 +30,13 @@ func CheckFreshness(s Snapshot, cfg Config, now time.Time) error {
 // StalenessText is the prominent old-fact marker for text and HTML views.
 // Sources might remain healthy; only this publication is old.
 func StalenessText(m Model) string {
-	if m.PublishedAt.IsZero() || nowAge(m) <= FreshnessWindow(m.Config) {
+	if CheckFreshness(Snapshot{PublishedAt: m.PublishedAt}, m.Config, m.GeneratedAt) == nil {
 		return ""
 	}
 	published := nowAge(m)
+	if m.PublishedAt.IsZero() {
+		return "STALE: published at an unknown time. Every number below is from then. Run amq-board sync."
+	}
 	age := age(published)
 	if published >= time.Hour && published < 48*time.Hour {
 		age = fmt.Sprintf("%dh", int(published.Hours()))

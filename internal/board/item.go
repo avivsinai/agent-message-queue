@@ -257,10 +257,13 @@ type Result struct {
 	Roster       []RosterEntry
 	AMQ          *AMQContext
 	Status       SourceStatus
-	Detail       string
-	Coverage     Coverage
-	ObservedAt   time.Time
-	Version      string
+	// ReadFailed is true only when an existing source supplied no list this pass.
+	// Retained cards may remain. A healthy partial or unavailable source is false.
+	ReadFailed bool `json:"read_failed,omitempty"`
+	Detail     string
+	Coverage   Coverage
+	ObservedAt time.Time
+	Version    string
 	// BeadIDs is the bead vocabulary (beads source only): every non-closed
 	// bead id -> its stored status.
 	BeadIDs map[string]string

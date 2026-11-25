@@ -45,11 +45,25 @@ Each line is one problem for the lead to act on: dispatch what is ready,
 ask the seat once, then replace it. It is not proof that a process stopped.
 
 `seat_stalled`, `seat_at_limit`, `ready_not_started`,
-`in_progress_not_worked`, `reply_overdue` and `source_failed` (degraded or unavailable source reads) are the kinds. `reply_overdue`
+`in_progress_not_worked`, `reply_overdue` and `source_failed` are the kinds.
+`source_failed` means the source's `read_failed` fact: its applicable current
+read supplied no list. Healthy partial reads, capacity-limited reads,
+unavailable sources and disabled sources are not source failures. Quality can
+be separately healthy yet partial. The problem's `source` field names the
+failing provider, and its incident identity ignores error prose. A retained
+card does not change a failed current read to a successful one. `reply_overdue`
 covers overdue agent replies, owner questions and owner rulings. The sender
 reads the thread before taking a default or closing a ruling. The command exits 0 on an empty list, 6
 on problems, and 1 on a stale or absent snapshot. A seat whose harness records
 no activity cannot produce `in_progress_not_worked` without that evidence.
+
+`amq presence list` shows all stored notes with their `note_at` age or
+`(age unknown)`. An old Note timestamp does not remove a roster record there.
+The Floor alone hides notes older than `liveness_window`, and `note_at` tracks
+text changes rather than activity. All read-only board faces label stale
+published input instead of reading sources or refreshing. Text/HTML explicitly
+say every number is old; JSON/pane carry `stale` (also `false` when fresh) and
+`published_age_seconds`; retro refuses over-age input.
 
 An unclosed request older than `obligation_max_age` (14 days by default) expires, as in `amq thread open`. It leaves Needs you and the overdue check. Set `obligation_max_age` to `0` to disable expiry.
 

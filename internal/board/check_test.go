@@ -81,37 +81,40 @@ func TestCheck(t *testing.T) {
 	}
 }
 
-// Regression for wow-teardown B2: a fresh snapshot with a failed source
+// Fleet audit, 2026-11-25, agent-message-queue-6cxr: a fresh snapshot with a failed source
 // reported a clean Floor. Successful partial reads and disabled sources do not.
 func TestCheckReportsFailedSources(t *testing.T) {
 	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
 	for _, row := range []struct {
-		status          SourceStatus
-		wantSourceError bool
+		name   string
+		source SourceView
+		want   bool
 	}{
-		{status: StatusDegraded, wantSourceError: true},
-		{status: StatusUnavailable, wantSourceError: true},
-		{status: StatusDisabled},
-		{status: StatusOK},
+		{name: "bd list failed", source: SourceView{Status: StatusDegraded, ReadFailed: true}, want: true},
+		{name: "identity unavailable with a coverage note", source: SourceView{Status: StatusDegraded, ReadFailed: true, Partial: true}, want: true},
+		{name: "capacity keeps healthy partial facts", source: SourceView{Status: StatusDegraded, Partial: true}},
+		{name: "unavailable", source: SourceView{Status: StatusUnavailable}},
+		{name: "healthy partial", source: SourceView{Status: StatusOK, Partial: true}},
+		{name: "disabled", source: SourceView{Status: StatusDisabled}},
 	} {
-		t.Run(string(row.status), func(t *testing.T) {
-			m := Model{PublishedAt: now.Add(-time.Minute), Sources: []SourceView{{Name: "github", Status: row.status, Detail: "read failed"}}}
+		t.Run(row.name, func(t *testing.T) {
+			row.source.Name = "beads"
+			row.source.Detail = "read failed"
+			m := Model{PublishedAt: now.Add(-time.Minute), Sources: []SourceView{row.source}}
 			problems, err := Check(m, DefaultConfig(), now)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if row.wantSourceError {
-				if len(problems) != 1 || problems[0].Kind != ProblemSourceFailed || problems[0].Text != "source github did not read: read failed; the board may miss its cards" {
-					t.Fatalf("problems = %+v", problems)
+			if !row.want {
+				if len(problems) != 0 {
+					t.Fatalf("false source failure: %+v", problems)
 				}
-			} else if len(problems) != 0 {
-				t.Fatalf("this source is not failed: %+v", problems)
+				return
+			}
+			wantIncident := `["source_failed","beads"]`
+			if len(problems) != 1 || problems[0].Kind != ProblemSourceFailed || problems[0].Source != "beads" || problems[0].Session != "" || problems[0].Text != "source beads did not read: read failed; the board may miss its cards" || problems[0].Incident() != wantIncident {
+				t.Fatalf("problems = %+v incident=%q", problems, problems[0].Incident())
 			}
 		})
-	}
-	// Partial coverage stays separate from a failed read.
-	problems, err := Check(Model{PublishedAt: now.Add(-time.Minute), Sources: []SourceView{{Name: "github", Status: StatusOK, Partial: true}}}, DefaultConfig(), now)
-	if err != nil || len(problems) != 0 {
-		t.Fatalf("partial success is not a source failure: %+v, %v", problems, err)
 	}
 }

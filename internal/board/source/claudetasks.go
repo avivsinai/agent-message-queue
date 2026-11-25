@@ -37,6 +37,7 @@ func (source ClaudeTasks) readHome(ctx context.Context, env board.Env, budget *c
 	// says why. gap is a record or list the read could not assess.
 	fail := func(text string) {
 		result.Status = board.StatusDegraded
+		result.ReadFailed = true
 		result.Detail = text
 		result.Coverage.Unresolved++
 	}
@@ -308,6 +309,13 @@ func claudeDefaultList(ctx context.Context, home, list string, worktrees map[str
 func (source ClaudeTasks) Read(ctx context.Context, env board.Env) board.Result {
 	budget := &claudeReadBudget{remaining: claudeAcquisitionByteLimit}
 	result := source.readHome(ctx, env, budget)
+	// A whole-source failure needs every attempted home to fail. A different
+	// home that yields a list downgrades the result to healthy partial.
+	anyList := !result.ReadFailed
+	result.ReadFailed = false
+	if result.Coverage.Detail == "" && result.Detail != "" {
+		result.Coverage.Detail = result.Detail
+	}
 	seen := map[string]bool{result.Namespace: true}
 	var homes []string
 	for _, binding := range source.Bindings {
@@ -340,10 +348,12 @@ func (source ClaudeTasks) Read(ctx context.Context, env board.Env) board.Result 
 			result.Status = board.StatusDegraded
 			result.Detail = strings.TrimPrefix(result.Detail+"; "+next.Detail, "; ")
 		}
+		anyList = anyList || !next.ReadFailed
 		if next.Coverage.Detail != "" {
 			result.Coverage.Detail = strings.TrimPrefix(result.Coverage.Detail+"; "+next.Coverage.Detail, "; ")
 		}
 	}
+	result.ReadFailed = !anyList
 	return result
 }
 

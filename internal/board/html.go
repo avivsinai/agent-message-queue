@@ -74,6 +74,8 @@ func WriteHTML(w io.Writer, m Model, regenerate string) error {
 // WriteLiveHTML renders the page `amq-board serve` serves: the same page,
 // which also reads pane.json from its own origin and reloads when a newer
 // model exists, and offers refresh instead of a regenerate command.
+// The live page follows pane.json's stale flag and local publication age on
+// polls; its local clock keeps applying liveness_window between those polls.
 func WriteLiveHTML(w io.Writer, m Model) error {
 	p := buildPage(m, "")
 	p.Live, p.CSP = true, liveCSP
@@ -84,6 +86,7 @@ type pageData struct {
 	Model                pageModel
 	Stale                bool
 	StaleText            string
+	FreshnessWindow      int64
 	CSS                  template.CSS
 	JS                   template.JS
 	CSP                  string
@@ -325,20 +328,21 @@ func buildPage(m Model, regenerate string) pageData {
 		project = m.Dir
 	}
 	p := pageData{
-		Model:      buildPageModel(m),
-		Stale:      m.Stale,
-		StaleText:  StalenessText(m),
-		CSS:        template.CSS(pageCSS),
-		JS:         template.JS(pageJS),
-		CSP:        pageCSP,
-		Project:    clean(project),
-		Generated:  published.Format(time.RFC3339),
-		Clock:      published.Local().Format("Jan 2, 15:04 MST"),
-		Sessions:   pluralize(len(m.Sessions), "session"),
-		RosterNote: clean(m.RosterNote),
-		Regenerate: regenerate,
-		Version:    clean(m.Version),
-		Dir:        clean(m.Dir),
+		Model:           buildPageModel(m),
+		Stale:           m.Stale,
+		StaleText:       StalenessText(m),
+		FreshnessWindow: int64(FreshnessWindow(m.Config) / time.Second),
+		CSS:             template.CSS(pageCSS),
+		JS:              template.JS(pageJS),
+		CSP:             pageCSP,
+		Project:         clean(project),
+		Generated:       published.Format(time.RFC3339),
+		Clock:           published.Local().Format("Jan 2, 15:04 MST"),
+		Sessions:        pluralize(len(m.Sessions), "session"),
+		RosterNote:      clean(m.RosterNote),
+		Regenerate:      regenerate,
+		Version:         clean(m.Version),
+		Dir:             clean(m.Dir),
 	}
 	if hasControl(regenerate) {
 		// A line with a control character would not paste as one command.

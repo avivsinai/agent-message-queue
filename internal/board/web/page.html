@@ -11,7 +11,8 @@
 <style>{{.CSS}}</style>
 </head>
 <body>
-{{if .Stale}}<p class="snapshot-stale is-stale" role="alert">{{.StaleText}}</p>{{end}}
+<p class="snapshot-stale is-stale" role="alert"{{if not .Stale}} hidden{{end}}>{{.StaleText}}</p>
+<script type="application/json" id="freshness-window">{{.FreshnessWindow}}</script>
 <a class="skip-link" href="#content">Skip to work</a>
 <div class="shell">
 <header class="mast">

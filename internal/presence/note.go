@@ -16,7 +16,9 @@ func NoteDisplay(note, noteAt string, now time.Time, window time.Duration) (text
 		return note, 0, false
 	}
 	since := now.Sub(t)
-	if since >= window {
+	// A zero window is the raw-list contract: old notes remain records.
+	// The Floor alone applies its configured display window.
+	if window > 0 && since > window {
 		return "", 0, false
 	}
 	return note, max(0, since), true

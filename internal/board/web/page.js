@@ -217,14 +217,58 @@
   var timeNode = document.querySelector(".mast-gen time");
   var ageNode = document.getElementById("page-age");
   var generated = timeNode ? Date.parse(timeNode.dateTime) : NaN;
+  var staleNode = document.querySelector(".snapshot-stale");
+  var freshnessNode = document.getElementById("freshness-window");
+  var freshnessWindow = freshnessNode ? Number(freshnessNode.textContent) : 1800;
+  var observedStale = null;
+  function ageText(milliseconds) {
+    var seconds = Math.floor(milliseconds / 1000);
+    if (seconds < 60) { return seconds + "s"; }
+    var minutes = Math.floor(seconds / 60);
+    if (minutes < 60) { return minutes + "m"; }
+    var hours = Math.floor(minutes / 60);
+    if (hours < 48) { return hours + "h"; }
+    return Math.floor(hours / 24) + "d";
+  }
   function tick() {
     if (!ageNode || isNaN(generated)) { return; }
-    var minutes = Math.max(0, Math.floor((Date.now() - generated) / 60000));
+    var seconds = Math.max(0, Date.now() - generated) / 1000;
+    var minutes = Math.floor(seconds / 60);
     ageNode.textContent = minutes < 1 ? "(just now)" : "(" + minutes + " min ago)";
-    ageNode.classList.toggle("is-stale", minutes > 5);
+    var old = seconds > freshnessWindow || observedStale === true;
+    ageNode.classList.toggle("is-stale", old);
+    if (!staleNode) { return; }
+    // An explicit pane verdict always wins over the browser's clock. Until
+    // a pane arrives, the one timer advances or clears the one banner.
+    if (observedStale === false || observedStale === true) {
+      staleNode.hidden = !old;
+      if (old) {
+        staleNode.textContent = "STALE: published " + ageText(seconds * 1000) + " ago (" + timeNode.dateTime + "). Every number below is from then. Run amq-board sync.";
+      } else { staleNode.textContent = ""; }
+    } else {
+      staleNode.hidden = !old;
+      staleNode.textContent = old ? "STALE: published " + ageText(seconds * 1000) + " ago (" + timeNode.dateTime + "). Every number below is from then. Run amq-board sync." : "";
+    }
   }
   tick(); window.setInterval(tick, 30000);
   if (!live) { return; }
+  function applyFreshPane(model) {
+    // pane.json is a bounded freshness face, not the whole board model.
+    // Cards are replaced only by explicit Update. Data needed for the
+    // existing page's freshness and commands is updated here, so an old
+    // publication's banner and age cannot survive a newer pane.
+    if (typeof model.published_at === "string" && timeNode) {
+      timeNode.dateTime = model.published_at;
+      timeNode.textContent = model.published_at;
+      generated = Date.parse(model.published_at);
+      var minutes = Math.max(0, Math.floor((Date.now() - generated) / 60000));
+      if (ageNode) { ageNode.textContent = minutes < 1 ? "(just now)" : "(" + minutes + " min ago)"; }
+    }
+    if (model.dir) { snapshot.dir = model.dir; }
+    if (model.generation) { snapshot.generation = model.generation; }
+    observedStale = model.stale;
+    tick();
+  }
   var state = document.getElementById("live-state");
   var refresh = document.getElementById("refresh");
   var update = document.getElementById("apply-update");
@@ -245,11 +289,13 @@
         return;
       }
       if (state.classList.contains("is-error")) { state.classList.remove("is-error"); state.textContent = "Published snapshot is available."; }
-      var publication = model.published_at || model.generated_at;
+      if (typeof model.stale !== "boolean" || !Number.isFinite(model.published_age_seconds)) { throw new Error("invalid freshness"); }
       var previousPublication = snapshot.published_at || snapshot.generated_at;
-      if (model.generation !== snapshot.generation || publication !== previousPublication) {
+      var newer = model.generation !== snapshot.generation || (model.published_at || model.generated_at) !== previousPublication;
+      if (newer) {
         pending = true; update.hidden = false;
         state.classList.remove("is-error"); state.textContent = "New snapshot available. Update when you are ready.";
+        applyFreshPane(model);
       }
     }).catch(function () {
       pending = false; update.hidden = true;

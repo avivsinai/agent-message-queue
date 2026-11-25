@@ -28,7 +28,7 @@ func (p Problem) Incident() string {
 	case ProblemSeatStalled, ProblemSeatAtLimit:
 		parts = append(parts, p.Session, p.Handle)
 	case ProblemSourceFailed:
-		parts = append(parts, p.Session)
+		parts = append(parts, p.Source)
 	case ProblemReadyNotBegun, ProblemNotWorked:
 		parts = append(parts, p.Session, p.Handle, p.CardID)
 	case ProblemReplyOverdue, ProblemNewsOverdue:
@@ -51,6 +51,7 @@ type Problem struct {
 	Handle  string      `json:"handle,omitempty"`
 	CardID  string      `json:"card_id,omitempty"`
 	Request string      `json:"request,omitempty"`
+	Source  string      `json:"source,omitempty"`
 	Text    string      `json:"text"`
 }
 
@@ -69,13 +70,13 @@ func Check(m Model, cfg Config, now time.Time) ([]Problem, error) {
 	}
 	problems := []Problem{}
 	for _, src := range m.Sources {
-		if src.Status != StatusDegraded && src.Status != StatusUnavailable {
+		if !src.ReadFailed {
 			// Partial coverage is a successful read with named limits;
 			// disabled has no source error of its own.
 			continue
 		}
 		text := fmt.Sprintf("source %s did not read: %s; the board may miss its cards", src.Name, clean(sourceGap(src).Gap))
-		problems = append(problems, Problem{Kind: ProblemSourceFailed, Session: src.Name, Text: text})
+		problems = append(problems, Problem{Kind: ProblemSourceFailed, Source: src.Name, Text: text})
 	}
 	seen := map[string]bool{}
 	add := func(st Station, kind ProblemKind, id string, text string) {

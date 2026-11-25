@@ -25,7 +25,8 @@ type PaneSource struct {
 	Partial bool   `json:"partial"`
 	// Detail explains a degraded source, so the live page can show a
 	// publication error without reading the whole model.
-	Detail string `json:"detail,omitempty"`
+	Detail     string `json:"detail,omitempty"`
+	ReadFailed bool   `json:"read_failed,omitempty"`
 }
 type PaneStrip struct {
 	TaskID  string    `json:"task_id"`
@@ -43,7 +44,7 @@ type PaneModel struct {
 	Generation          uint64       `json:"generation"`
 	GeneratedAt         time.Time    `json:"generated_at"`
 	PublishedAt         time.Time    `json:"published_at"`
-	Stale               bool         `json:"stale,omitempty"`
+	Stale               bool         `json:"stale"`
 	PublishedAgeSeconds int64        `json:"published_age_seconds"`
 	Dir                 string       `json:"dir"`
 	Project             string       `json:"project"`
@@ -132,7 +133,7 @@ func ProjectPane(model Model) PaneModel {
 		if len(p.Sources) == paneSourceLimit {
 			break
 		}
-		entry := PaneSource{Name: paneText(source.Name, 40), Status: paneText(string(source.Status), 20), Partial: source.Partial}
+		entry := PaneSource{Name: paneText(source.Name, 40), Status: paneText(string(source.Status), 20), Partial: source.Partial, ReadFailed: source.ReadFailed}
 		if source.Status == StatusDegraded {
 			entry.Detail = paneText(source.Detail, 200)
 		}

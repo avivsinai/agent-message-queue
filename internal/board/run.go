@@ -93,7 +93,7 @@ func readIsolated(ctx context.Context, env Env, s Source) (res Result) {
 	defer cancel()
 	defer func() {
 		if p := recover(); p != nil {
-			res = Result{Status: StatusDegraded, Detail: fmt.Sprintf("source failed: %v", p)}
+			res = Result{Status: StatusDegraded, ReadFailed: true, Detail: fmt.Sprintf("source failed: %v", p)}
 		}
 	}()
 	return s.Read(ctx, env)

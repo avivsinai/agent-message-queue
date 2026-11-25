@@ -165,7 +165,7 @@ func runPresenceList(args []string) error {
 		if err := writeStdoutLine(line); err != nil {
 			return err
 		}
-		note, since, hasAge := presence.NoteDisplay(item.Note, item.NoteAt, time.Now(), 30*time.Minute)
+		note, since, hasAge := presence.NoteDisplay(item.Note, item.NoteAt, time.Now(), 0)
 		if note != "" {
 			text := "Says: " + note + " (age unknown)"
 			if hasAge {

@@ -57,7 +57,7 @@ type Model struct {
 	PublishedAt          time.Time            `json:"published_at,omitempty"`
 	// Stale says the published facts are older than Config.LivenessWindow.
 	// They remain a valid historical view, not facts about the floor now.
-	Stale               bool   `json:"stale,omitempty"`
+	Stale               bool   `json:"stale"`
 	PublishedAgeSeconds int64  `json:"published_age_seconds"`
 	Config              Config `json:"-"`
 	// Asks are the open human obligations and timed agent obligations.
@@ -100,6 +100,7 @@ type SourceView struct {
 	Name       string       `json:"name"`
 	Feeds      []Column     `json:"feeds,omitempty"`
 	Status     SourceStatus `json:"status"`
+	ReadFailed bool         `json:"read_failed,omitempty"`
 	Detail     string       `json:"detail,omitempty"`
 	Partial    bool         `json:"partial"`
 	Coverage   Coverage     `json:"coverage"`
@@ -202,7 +203,7 @@ func Build(in Input) Model {
 	for _, nr := range in.Results {
 		r := nr.Result
 		m.Sources = append(m.Sources, SourceView{
-			Name: nr.Name, Feeds: r.Feeds, Status: r.Status, Detail: r.Detail, Partial: r.Coverage.Partial(),
+			Name: nr.Name, Feeds: r.Feeds, Status: r.Status, ReadFailed: r.ReadFailed, Detail: r.Detail, Partial: r.Coverage.Partial(),
 			Coverage: r.Coverage, ObservedAt: r.ObservedAt, Version: r.Version,
 		})
 		observed[nr.Name] = r.ObservedAt

@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// wow-teardown 2026-11-25: a stopped watch left 40-hour-old cap and seat facts
+// A stopped watch left 40-hour-old cap and seat facts
 // looking current. All read-only faces age that same publication, without a
 // source read or a new synchronous status check.
 func TestSnapshotAgingReachesTextJSONPaneAndHTML(t *testing.T) {
@@ -25,6 +25,7 @@ func TestSnapshotAgingReachesTextJSONPaneAndHTML(t *testing.T) {
 	}
 	s.BaseRoot, s.BaseRootID, s.ProjectID = dir, identity, "copy"
 	s.Tasks, s.Anchors, s.Aliases, s.Messages = map[string]Task{}, map[string]string{}, map[string]string{}, map[string]Message{}
+	s.Input.Results = []NamedResult{{Name: "github", Result: Result{Status: StatusDegraded, ReadFailed: true, Detail: "read failed"}}}
 	s.Dismissed, s.ActionCancelled, s.Withdrawals, s.Facts = map[string]bool{}, map[string]bool{}, map[string]string{}, map[string]AliasFact{}
 	raw, err := json.Marshal(s)
 	if err != nil {
@@ -40,6 +41,9 @@ func TestSnapshotAgingReachesTextJSONPaneAndHTML(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !stored.Input.Results[0].Result.ReadFailed {
+		t.Fatal("the serialized source result lost its read failure")
+	}
 	m := stored.Project(DefaultConfig(), now, "test")
 	if !m.Stale || m.PublishedAgeSeconds != 40*60*60 {
 		t.Fatalf("stale=%v age=%d", m.Stale, m.PublishedAgeSeconds)
@@ -54,6 +58,17 @@ func TestSnapshotAgingReachesTextJSONPaneAndHTML(t *testing.T) {
 	}
 	if err := json.Unmarshal(pane, &doc); err != nil || !doc.Stale || doc.Age != 40*60*60 {
 		t.Fatalf("pane=%s", pane)
+	}
+	for _, want := range []string{`"stale":true`, `"read_failed":true`} {
+		if !bytes.Contains(pane, []byte(want)) {
+			t.Fatalf("pane lacks %s: %s", want, pane)
+		}
+	}
+	fresh := m
+	fresh.Stale, fresh.PublishedAt, fresh.GeneratedAt, fresh.PublishedAgeSeconds = false, now, now, 0
+	freshJSON, err := json.Marshal(fresh)
+	if err != nil || !bytes.Contains(freshJSON, []byte(`"stale":false`)) {
+		t.Fatalf("fresh JSON lacks its explicit verdict: %s", freshJSON)
 	}
 	var page bytes.Buffer
 	if err := WriteHTML(&page, m, "regenerate"); err != nil {

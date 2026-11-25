@@ -36,6 +36,7 @@ var codexGoalsFeeds = []board.Column{board.ColumnInFlight, board.ColumnBlocked}
 func (source CodexGoals) Read(ctx context.Context, env board.Env) board.Result {
 	res := board.Result{Status: board.StatusDegraded, ObservedAt: env.Now(), Version: "goals_1.sqlite", Feeds: codexGoalsFeeds}
 	fail := func(err error) board.Result {
+		res.ReadFailed = true
 		res.Status = board.StatusDegraded
 		res.Detail = err.Error()
 		res.Coverage.Unresolved++
@@ -70,6 +71,7 @@ func (source CodexGoals) Read(ctx context.Context, env board.Env) board.Result {
 		res.Status, res.Detail = board.StatusUnavailable, "goals_1.sqlite not found"
 		res.Coverage.Unresolved++
 		if versions, _ := filepath.Glob(filepath.Join(home, "goals_*.sqlite")); len(versions) > 0 {
+			res.ReadFailed = true
 			res.Status, res.Detail = board.StatusDegraded, "format "+filepath.Base(versions[0])+" not supported"
 		}
 		return res

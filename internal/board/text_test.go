@@ -82,7 +82,7 @@ func TestTextShowsCardSummaryUnderTitle(t *testing.T) {
 	}
 }
 
-// wow-teardown B2: a published read can be minutes old without being trusted
+// A published read can be minutes old without being trusted
 // as the current Floor. Text names the facts' age before anything else.
 func TestTextStartsWithSnapshotAge(t *testing.T) {
 	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
@@ -95,8 +95,8 @@ func TestTextStartsWithSnapshotAge(t *testing.T) {
 	if err := WriteText(&out, m); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(out.String(), "Published 2m ago (2026-11-25T11:58:00Z).\n") || strings.HasPrefix(out.String(), "STALE") {
-		t.Fatalf("recent facts not dated as recent: %q", out.String())
+	if strings.HasPrefix(out.String(), "Published ") || strings.HasPrefix(out.String(), "STALE") {
+		t.Fatalf("fresh text changed by the freshness marker: %q", out.String())
 	}
 	m.PublishedAt = now.Add(-2 * time.Hour)
 	MarkStale(&m)

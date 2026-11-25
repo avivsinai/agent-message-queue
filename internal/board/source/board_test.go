@@ -275,8 +275,8 @@ func TestBoardPageShowsBeadDescriptionAndNotes(t *testing.T) {
 // says why it is missing.
 func TestBoardKeepsBeadsCardsWhenAMQFails(t *testing.T) {
 	m := runBoard(t, fakeRunner{t: t, outputs: outputs("thread-open.json"), failAMQ: true}, true)
-	if s := source_(m, "amq"); s.Status != board.StatusDegraded {
-		t.Errorf("amq status = %s", s.Status)
+	if s := source_(m, "amq"); s.Status != board.StatusDegraded || !s.ReadFailed {
+		t.Errorf("amq status = %s readFailed=%v", s.Status, s.ReadFailed)
 	}
 	if card, ok := cardsByRef(m)["bead:demo-b5"]; !ok || card.Column != board.ColumnUnclaimed {
 		t.Errorf("demo-b5 not in Unclaimed: %+v", card)
@@ -329,7 +329,7 @@ func TestBoardSourceDefects(t *testing.T) {
 				`{"handle": "alpha", "unread_count": 0,`,
 				`{"handle": "alpha", "unread_count": 0, "unread_count_error": "open inbox/new: permission denied",`)},
 			check: func(t *testing.T, m board.Model) {
-				if s := source_(m, "amq"); s.Status != board.StatusOK || !s.Partial || !strings.Contains(s.Coverage.Detail, "1 mailbox not counted: s1/alpha") {
+				if s := source_(m, "amq"); s.Status != board.StatusOK || !s.Partial || s.ReadFailed || !strings.Contains(s.Coverage.Detail, "1 mailbox not counted: s1/alpha") {
 					t.Errorf("amq source = %s partial=%v %q", s.Status, s.Partial, s.Coverage.Detail)
 				}
 				if a, ok := rosterAgent(m, "s1", "alpha"); !ok || a.Counted {
@@ -349,7 +349,7 @@ func TestBoardSourceDefects(t *testing.T) {
 			name: "failed env degrades the source and keeps its data",
 			fail: map[string]error{"amq env --json": errors.New("amq env: config unreadable")},
 			check: func(t *testing.T, m board.Model) {
-				if s := source_(m, "amq"); s.Status != board.StatusDegraded || !strings.Contains(s.Detail, "config unreadable") {
+				if s := source_(m, "amq"); s.Status != board.StatusDegraded || s.ReadFailed || !strings.Contains(s.Detail, "config unreadable") {
 					t.Errorf("amq source = %s %q", s.Status, s.Detail)
 				}
 				if _, ok := cardsByRef(m)[refT5]; !ok {
@@ -378,8 +378,18 @@ func TestBoardSourceDefects(t *testing.T) {
 			edit: map[string]func(string) string{"amq thread open --all-sessions --json": replace(
 				`"key": "s1/2026-10-22T10-30-00.000Z_pid104_a1b2c3d4/beta"`, `"key": ""`)},
 			check: func(t *testing.T, m board.Model) {
-				if s := source_(m, "amq"); !s.Partial || !strings.Contains(s.Coverage.Detail, "1 obligations with an invalid key or handle") {
+				if s := source_(m, "amq"); !s.Partial || s.ReadFailed || !strings.Contains(s.Coverage.Detail, "1 obligations with an invalid key or handle") {
 					t.Errorf("amq source partial=%v %q", s.Partial, s.Coverage.Detail)
+				}
+			},
+		},
+		{
+			// A failed provider read is a degradation, not a healthy partial.
+			name: "a mailbox obligation read that did not happen is not healthy partial",
+			fail: map[string]error{"amq thread open --all-sessions --json": errors.New("read failed")},
+			check: func(t *testing.T, m board.Model) {
+				if s := source_(m, "amq"); !s.ReadFailed {
+					t.Errorf("amq source readFailed=%v status=%s", s.ReadFailed, s.Status)
 				}
 			},
 		},

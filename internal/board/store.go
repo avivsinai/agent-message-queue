@@ -917,6 +917,7 @@ func (s Store) commit(ctx context.Context, a Acquisition) error {
 				if state.Input.Results[i].Name == "amq-history" {
 					r := &state.Input.Results[i].Result
 					r.Status = StatusDegraded
+					r.ReadFailed = true
 					r.ObservedAt = time.Now().UTC()
 					r.Detail = err.Error()
 					r.Coverage.Unresolved++
