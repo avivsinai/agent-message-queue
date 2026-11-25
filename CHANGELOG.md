@@ -8,6 +8,19 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.171.0](https://github.com/avivsinai/agent-message-queue/compare/v0.170.5...v0.171.0) (2026-11-25)
+
+
+### Features
+
+* **board:** an account near its spending cap is a floor problem ([#1647](https://github.com/avivsinai/agent-message-queue/issues/1647)) ([a3c6a05](https://github.com/avivsinai/agent-message-queue/commit/a3c6a055f7b0dff687035db9ab53abd44685c06a))
+* **board:** each seat shows the context size of its latest response and its cache-read share ([#1648](https://github.com/avivsinai/agent-message-queue/issues/1648)) ([e464653](https://github.com/avivsinai/agent-message-queue/commit/e464653dd28430ce917199d68035622a32c66144))
+
+
+### Bug Fixes
+
+* **board:** sync --watch survives a failed pass and sends floor notices ([#1649](https://github.com/avivsinai/agent-message-queue/issues/1649)) ([390e981](https://github.com/avivsinai/agent-message-queue/commit/390e9817e1f4ca9ab154df2978824064d4dcd52f))
+
 ## [0.170.5](https://github.com/avivsinai/agent-message-queue/compare/v0.170.4...v0.170.5) (2026-11-25)
 
 
