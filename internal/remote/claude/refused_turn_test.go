@@ -310,9 +310,8 @@ func TestRefusedTurnCommandLookingTextEndsAsFailed(t *testing.T) {
 	wantRefusedFailure(t, refusedRecord(t, att, pr2Key()), events.terminals(admission.RunID))
 }
 
-// A later prompt in the same poll cannot take the turn from an answered run
-// whose own Stop was already preserved: the marker is bound in timestamp order
-// before the next user boundary is applied.
+// A Stop whose time is before a later prompt still binds to the earlier run,
+// also when both arrive in one poll.
 // Review finding, 2026-11-25: the old boundary failed any run, not only a refused one.
 func TestAnswerStopAndLaterPromptCompletesOriginalRun(t *testing.T) {
 	ft := newFakeTarget(t, os.Getpid(), nil)
