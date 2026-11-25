@@ -257,8 +257,10 @@ type Result struct {
 	Roster       []RosterEntry
 	AMQ          *AMQContext
 	Status       SourceStatus
-	// ReadFailed is true only when an existing source supplied no list this pass.
-	// Retained cards may remain. A healthy partial or unavailable source is false.
+	// ReadFailed is true when the read of this source failed in this pass
+	// (for several homes, at least one home read failed); its cards may be
+	// from an earlier pass or absent. A healthy partial or unavailable
+	// source is false.
 	ReadFailed bool `json:"read_failed,omitempty"`
 	Detail     string
 	Coverage   Coverage

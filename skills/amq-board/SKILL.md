@@ -46,8 +46,9 @@ ask the seat once, then replace it. It is not proof that a process stopped.
 
 `seat_stalled`, `seat_at_limit`, `ready_not_started`,
 `in_progress_not_worked`, `reply_overdue` and `source_failed` are the kinds.
-`source_failed` means the source's `read_failed` fact: its applicable current
-read supplied no list. The problem's `source` field names the failing
+`source_failed` means the source's `read_failed` fact: its read in this
+pass failed (for several homes, at least one home read failed). The
+problem's `source` field names the failing
 provider, and its incident identity ignores error prose. A retained card does
 not change a failed current read to a successful one. Each source reports one
 of these states:
@@ -56,7 +57,7 @@ of these states:
 | --- | --- | --- |
 | ok | The read supplied a current list | no |
 | ok with limits | Partial or capacity-limited; the coverage names the limit | no |
-| read failed | `read_failed` is true; the read supplied no list | yes, `source_failed` |
+| read failed | `read_failed` is true; the read of this source failed in this pass | yes, `source_failed` |
 | unavailable or disabled | The source has no home or is turned off; shown, not read | no |
 
 `reply_overdue` covers overdue agent replies, owner questions and owner

@@ -221,7 +221,6 @@
   var freshnessNode = document.getElementById("freshness-window");
   // No bound from the server means no client timer: the page must not guess one.
   var freshnessWindow = freshnessNode ? Number(freshnessNode.textContent) : Infinity;
-  var shownStale = null;
   function ageText(milliseconds) {
     var seconds = Math.floor(milliseconds / 1000);
     if (seconds < 60) { return seconds + "s"; }
@@ -235,31 +234,20 @@
     if (!ageNode || isNaN(generated)) { return; }
     var seconds = Math.max(0, Date.now() - generated) / 1000;
     var minutes = Math.floor(seconds / 60);
-    var old = seconds > freshnessWindow || shownStale === true;
-    // The header time and the stale banner describe the cards the page
-    // SHOWS. They move only when Update replaces those cards, never on a
-    // pane that is only available.
+    var old = seconds > freshnessWindow;
+    // The timer alone moves the banner of the shown snapshot: the header
+    // time and the banner describe the cards the page SHOWS, never a pane
+    // that is only available.
     ageNode.textContent = minutes < 1 ? "(just now)" : "(" + minutes + " min ago)";
     ageNode.classList.toggle("is-stale", old);
     if (!staleNode) { return; }
-    // The shown snapshot's explicit verdict, if one arrived, wins over the
-    // browser's clock; before it, the one timer advances or clears the one
-    // banner.
+    // The one timer advances or clears the one banner of the shown
+    // snapshot; it does not render or dismiss a pending pane.
     staleNode.hidden = !old;
     staleNode.textContent = old ? "STALE: published " + ageText(seconds * 1000) + " ago (" + timeNode.dateTime + "). Every number below is from then. Run amq-board sync." : "";
   }
   tick(); window.setInterval(tick, 30000);
   if (!live) { return; }
-  function applyShownPane(model) {
-    // The pane's publication is now the one the page shows. This runs only
-    // on Update, when the reload has replaced the cards.
-    if (typeof model.published_at === "string" && timeNode) {
-      timeNode.dateTime = model.published_at;
-      timeNode.textContent = model.published_at;
-      generated = Date.parse(model.published_at);
-    }
-    shownStale = model.stale;
-  }
   function applyFreshPane(model) {
     // pane.json is a bounded freshness face, not the whole board model.
     // A newer pane that is only available changes the Update affordance
@@ -267,13 +255,11 @@
     // banner still describe the shown cards until Update replaces them.
     if (model.dir) { snapshot.dir = model.dir; }
     if (model.generation) { snapshot.generation = model.generation; }
-    pendingPane = model;
   }
   var state = document.getElementById("live-state");
   var refresh = document.getElementById("refresh");
   var update = document.getElementById("apply-update");
   var pending = false;
-  var pendingPane = null;
   var checking = false;
   function check() {
     if (checking) { return Promise.resolve(); }
@@ -304,9 +290,6 @@
     }).finally(function () { checking = false; });
   }
   function applyUpdate() {
-    // Update replaces the shown cards. The header time and the banner then
-    // describe the pane the user chose, not the page's old publication.
-    if (pendingPane) { applyShownPane(pendingPane); }
     save(); window.location.reload();
   }
   update.addEventListener("click", applyUpdate);
