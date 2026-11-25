@@ -56,6 +56,13 @@ func (source CodexGoals) Read(ctx context.Context, env board.Env) board.Result {
 	}
 	home, err = filepath.EvalSymlinks(home)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			// No Codex home on this machine: the source is not present,
+			// not a failed read. Any other home error stays a failed read.
+			res.Status, res.Detail = board.StatusUnavailable, "codex home "+home+" is absent"
+			res.Coverage.Unresolved++
+			return res
+		}
 		return fail(err)
 	}
 	res.Namespace = home

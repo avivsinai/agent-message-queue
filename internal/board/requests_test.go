@@ -430,7 +430,7 @@ func TestExpiredOwnerQuestionLeavesNeedsYouAndHeadline(t *testing.T) {
 	if err := WriteText(&text, m); err != nil {
 		t.Fatal(err)
 	}
-	headline, _, _ := strings.Cut(strings.TrimLeft(text.String(), "\n"), "\n")
+	headline, _, _ := strings.Cut(text.String(), "\n")
 	if !strings.Contains(headline, "needs you 0") {
 		t.Errorf("headline: %s", headline)
 	}

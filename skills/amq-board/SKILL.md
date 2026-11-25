@@ -47,11 +47,17 @@ ask the seat once, then replace it. It is not proof that a process stopped.
 `seat_stalled`, `seat_at_limit`, `ready_not_started`,
 `in_progress_not_worked`, `reply_overdue` and `source_failed` are the kinds.
 `source_failed` means the source's `read_failed` fact: its applicable current
-read supplied no list. Healthy partial reads, capacity-limited reads,
-unavailable sources and disabled sources are not source failures. Quality can
-be separately healthy yet partial. The problem's `source` field names the
-failing provider, and its incident identity ignores error prose. A retained
-card does not change a failed current read to a successful one. `reply_overdue`
+read supplied no list. The problem's `source` field names the failing
+provider, and its incident identity ignores error prose. A retained card does
+not change a failed current read to a successful one. Each source reports one
+of these states:
+
+| State | Meaning | Floor problem |
+| --- | --- | --- |
+| ok | The read supplied a current list | no |
+| ok with limits | Partial or capacity-limited; the coverage names the limit | no |
+| read failed | `read_failed` is true; the read supplied no list | yes, `source_failed` |
+| unavailable or disabled | The source has no home or is turned off; shown, not read | no | `reply_overdue`
 covers overdue agent replies, owner questions and owner rulings. The sender
 reads the thread before taking a default or closing a ruling. The command exits 0 on an empty list, 6
 on problems, and 1 on a stale or absent snapshot. A seat whose harness records

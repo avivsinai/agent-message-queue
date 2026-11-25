@@ -107,11 +107,8 @@ func TestTextStartsWithSnapshotAge(t *testing.T) {
 	if err := WriteText(&out, m); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(out.String(), "STALE: published 2h ago (2026-11-25T10:00:00Z). Every number below is from then. Run amq-board sync.\n") {
-		t.Fatalf("old facts not refused visibly: %q", out.String())
-	}
-	if err := CheckFreshness(Snapshot{PublishedAt: m.PublishedAt}, DefaultConfig(), now); err == nil {
-		t.Fatal("old snapshot's retro was not refused")
+	if first, _, _ := strings.Cut(out.String(), "\n"); first != "STALE: published 2h ago (2026-11-25T10:00:00Z). Every number below is from then. Run amq-board sync." {
+		t.Fatalf("the text view's first line is not the staleness line: %q", first)
 	}
 	if err := CheckFreshness(Snapshot{PublishedAt: now}, DefaultConfig(), now); err != nil {
 		t.Fatal(err)

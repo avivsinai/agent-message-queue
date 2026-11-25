@@ -167,9 +167,11 @@ func runPresenceList(args []string) error {
 		}
 		note, since, hasAge := presence.NoteDisplay(item.Note, item.NoteAt, time.Now(), 0)
 		if note != "" {
-			text := "Says: " + note + " (age unknown)"
+			// The line shape stays main's so a reader or a script keeps
+			// parsing it; the age appends to the note, with no prefix.
+			text := note + " (age unknown)"
 			if hasAge {
-				text = fmt.Sprintf("Says: %s (%s ago)", note, since.Round(time.Minute))
+				text = fmt.Sprintf("%s (%s ago)", note, since.Round(time.Minute))
 			}
 			if err := writeStdout("  %s\n", text); err != nil {
 				return err

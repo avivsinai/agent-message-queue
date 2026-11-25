@@ -126,7 +126,7 @@ func TestAccountLimitIsRebuttedOnlyByItsOwnAccount(t *testing.T) {
 	}
 }
 
-// wow-teardown 2026-11-25: a fresh wake does not make the note fresh.
+// Field, 2026-11-25: the board showed a 40-hour-old snapshot as current; a fresh wake does not make the note fresh.
 func TestStationNoteUsesItsOwnTimestamp(t *testing.T) {
 	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
 	for _, row := range []struct{ name, at, want string }{

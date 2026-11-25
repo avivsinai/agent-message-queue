@@ -42,11 +42,10 @@ names those other limits. Machine-readable source coverage includes
 under `source`, not `session`, so that source name is also its incident
 identity. Floor-problem text still uses the source's existing coverage gap.
 
-`amq presence list` is the raw roster record: it prints every stored note with
-its age, or `(age unknown)` for a missing or invalid `note_at`; note age does not
-remove a record from this listing. Only the board Floor hides notes older than
-`liveness_window`. Slice the note text itself, never the agent's liveness
-update: `note_at` changes when the text changes, not on a liveness Touch.
+`amq presence list` prints every stored note with its age, or `(age unknown)`
+for a missing or invalid `note_at`. A note older than `liveness_window` still
+prints here; only the board Floor hides it. `note_at` changes when the note
+text changes, not on a liveness Touch.
 
 The installed `amq` must support `amq thread list --all-sessions --json`.
 An unavailable command is reported as incomplete history. The board does not

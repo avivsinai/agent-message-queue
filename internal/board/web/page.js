@@ -219,8 +219,9 @@
   var generated = timeNode ? Date.parse(timeNode.dateTime) : NaN;
   var staleNode = document.querySelector(".snapshot-stale");
   var freshnessNode = document.getElementById("freshness-window");
-  var freshnessWindow = freshnessNode ? Number(freshnessNode.textContent) : 1800;
-  var observedStale = null;
+  // No bound from the server means no client timer: the page must not guess one.
+  var freshnessWindow = freshnessNode ? Number(freshnessNode.textContent) : Infinity;
+  var shownStale = null;
   function ageText(milliseconds) {
     var seconds = Math.floor(milliseconds / 1000);
     if (seconds < 60) { return seconds + "s"; }
@@ -234,38 +235,45 @@
     if (!ageNode || isNaN(generated)) { return; }
     var seconds = Math.max(0, Date.now() - generated) / 1000;
     var minutes = Math.floor(seconds / 60);
+    var old = seconds > freshnessWindow || shownStale === true;
+    // The header time and the stale banner describe the cards the page
+    // SHOWS. They move only when Update replaces those cards, never on a
+    // pane that is only available.
     ageNode.textContent = minutes < 1 ? "(just now)" : "(" + minutes + " min ago)";
-    var old = seconds > freshnessWindow || observedStale === true;
     ageNode.classList.toggle("is-stale", old);
     if (!staleNode) { return; }
-    // An explicit pane verdict always wins over the browser's clock. Until
-    // a pane arrives, the one timer advances or clears the one banner.
+    // The shown snapshot's explicit verdict, if one arrived, wins over the
+    // browser's clock; before it, the one timer advances or clears the one
+    // banner.
     staleNode.hidden = !old;
     staleNode.textContent = old ? "STALE: published " + ageText(seconds * 1000) + " ago (" + timeNode.dateTime + "). Every number below is from then. Run amq-board sync." : "";
   }
   tick(); window.setInterval(tick, 30000);
   if (!live) { return; }
-  function applyFreshPane(model) {
-    // pane.json is a bounded freshness face, not the whole board model.
-    // Cards are replaced only by explicit Update. Data needed for the
-    // existing page's freshness and commands is updated here, so an old
-    // publication's banner and age cannot survive a newer pane.
+  function applyShownPane(model) {
+    // The pane's publication is now the one the page shows. This runs only
+    // on Update, when the reload has replaced the cards.
     if (typeof model.published_at === "string" && timeNode) {
       timeNode.dateTime = model.published_at;
       timeNode.textContent = model.published_at;
       generated = Date.parse(model.published_at);
-      var minutes = Math.max(0, Math.floor((Date.now() - generated) / 60000));
-      if (ageNode) { ageNode.textContent = minutes < 1 ? "(just now)" : "(" + minutes + " min ago)"; }
     }
+    shownStale = model.stale;
+  }
+  function applyFreshPane(model) {
+    // pane.json is a bounded freshness face, not the whole board model.
+    // A newer pane that is only available changes the Update affordance
+    // and the command data, and nothing else: the header time and the
+    // banner still describe the shown cards until Update replaces them.
     if (model.dir) { snapshot.dir = model.dir; }
     if (model.generation) { snapshot.generation = model.generation; }
-    observedStale = model.stale;
-    tick();
+    pendingPane = model;
   }
   var state = document.getElementById("live-state");
   var refresh = document.getElementById("refresh");
   var update = document.getElementById("apply-update");
   var pending = false;
+  var pendingPane = null;
   var checking = false;
   function check() {
     if (checking) { return Promise.resolve(); }
@@ -295,7 +303,12 @@
       state.classList.add("is-error"); state.textContent = "Refresh failed. Showing the existing snapshot.";
     }).finally(function () { checking = false; });
   }
-  function applyUpdate() { save(); window.location.reload(); }
+  function applyUpdate() {
+    // Update replaces the shown cards. The header time and the banner then
+    // describe the pane the user chose, not the page's old publication.
+    if (pendingPane) { applyShownPane(pendingPane); }
+    save(); window.location.reload();
+  }
   update.addEventListener("click", applyUpdate);
   refresh.addEventListener("click", function () {
     if (pending) { applyUpdate(); return; }

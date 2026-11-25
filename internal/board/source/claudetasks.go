@@ -66,6 +66,14 @@ func (source ClaudeTasks) readHome(ctx context.Context, env board.Env, budget *c
 	}
 	real, err := filepath.EvalSymlinks(absolute)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			// No Claude home on this machine: the source is not present,
+			// not a failed read. Any other home error stays a failed read.
+			result.Status = board.StatusUnavailable
+			result.Detail = "Claude home " + absolute + " is absent"
+			result.Coverage.Unresolved++
+			return result
+		}
 		fail("Claude home " + absolute + " unavailable")
 		return result
 	}
@@ -313,9 +321,6 @@ func (source ClaudeTasks) Read(ctx context.Context, env board.Env) board.Result 
 	// home that yields a list downgrades the result to healthy partial.
 	anyList := !result.ReadFailed
 	result.ReadFailed = false
-	if result.Coverage.Detail == "" && result.Detail != "" {
-		result.Coverage.Detail = result.Detail
-	}
 	seen := map[string]bool{result.Namespace: true}
 	var homes []string
 	for _, binding := range source.Bindings {
@@ -345,7 +350,14 @@ func (source ClaudeTasks) Read(ctx context.Context, env board.Env) board.Result 
 		result.Coverage.Unresolved += next.Coverage.Unresolved
 		result.Coverage.Truncated += next.Coverage.Truncated
 		if next.Status != board.StatusOK {
-			result.Status = board.StatusDegraded
+			// An absent home keeps the source unavailable: it is not a read
+			// that failed, and it must not downgrade an available home's
+			// status to degraded.
+			if next.Status == board.StatusUnavailable && result.Status == board.StatusOK {
+				result.Status = board.StatusUnavailable
+			} else {
+				result.Status = board.StatusDegraded
+			}
 			result.Detail = strings.TrimPrefix(result.Detail+"; "+next.Detail, "; ")
 		}
 		anyList = anyList || !next.ReadFailed

@@ -926,7 +926,7 @@ func (s Store) commit(ctx context.Context, a Acquisition) error {
 				}
 			}
 			if !found {
-				state.Input.Results = append(state.Input.Results, NamedResult{Name: "amq-history", Result: Result{Status: StatusDegraded, ObservedAt: time.Now().UTC(), Detail: err.Error(), Coverage: Coverage{Unresolved: 1, Detail: err.Error()}}})
+				state.Input.Results = append(state.Input.Results, NamedResult{Name: "amq-history", Result: Result{Status: StatusDegraded, ReadFailed: true, ObservedAt: time.Now().UTC(), Detail: err.Error(), Coverage: Coverage{Unresolved: 1, Detail: err.Error()}}})
 			}
 			return nil
 		}

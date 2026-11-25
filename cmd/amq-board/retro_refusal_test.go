@@ -9,8 +9,9 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/board"
 )
 
-// wow-teardown 2026-11-25: old retro omitted 110 recent requests and still
-// reported success. Retro uses check's exact publication refusal instead.
+// Field, 2026-11-25: the board showed a 40-hour-old snapshot as current; old retro
+// omitted 110 recent requests and still reported success. Retro uses check's exact
+// publication refusal instead.
 func TestRetroRefusesTheSameOldSnapshot(t *testing.T) {
 	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
 	state := board.Snapshot{Generation: 8571, PublishedAt: now.Add(-40 * time.Hour), Input: board.Input{Config: board.DefaultConfig()}}

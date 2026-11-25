@@ -70,11 +70,18 @@ func TestSnapshotAgingReachesTextJSONPaneAndHTML(t *testing.T) {
 	if err != nil || !bytes.Contains(freshJSON, []byte(`"stale":false`)) {
 		t.Fatalf("fresh JSON lacks its explicit verdict: %s", freshJSON)
 	}
+	var text bytes.Buffer
+	if err := WriteText(&text, m); err != nil {
+		t.Fatal(err)
+	}
+	wanted := "STALE: published 40h ago (2026-11-23T20:00:00Z). Every number below is from then. Run amq-board sync."
+	if first, _, _ := strings.Cut(text.String(), "\n"); first != wanted {
+		t.Fatalf("text face first line: %q", first)
+	}
 	var page bytes.Buffer
 	if err := WriteHTML(&page, m, "regenerate"); err != nil {
 		t.Fatal(err)
 	}
-	wanted := "STALE: published 40h ago (2026-11-23T20:00:00Z). Every number below is from then. Run amq-board sync."
 	if !strings.Contains(page.String(), wanted) {
 		t.Fatalf("no old publication banner")
 	}

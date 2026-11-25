@@ -67,27 +67,27 @@ func TestTouchPreservesExisting(t *testing.T) {
 func TestNoteAtExistsIndependentlyOfWakeTouches(t *testing.T) {
 	root := t.TempDir()
 	old := time.Now().Add(-2 * time.Hour)
-	if err := Write(root, New("amit", "busy", "waiting", old)); err != nil {
+	if err := Write(root, New("worker", "busy", "waiting", old)); err != nil {
 		t.Fatal(err)
 	}
-	if err := Touch(root, "amit"); err != nil {
+	if err := Touch(root, "worker"); err != nil {
 		t.Fatal(err)
 	}
-	oldPresence, _ := Read(root, "amit")
+	oldPresence, _ := Read(root, "worker")
 	if oldPresence.NoteAt == "" || oldPresence.NoteAt == oldPresence.LastSeen {
 		t.Fatalf("note timestamp=%q last_seen=%q", oldPresence.NoteAt, oldPresence.LastSeen)
 	}
-	if _, err := SetStatus(root, "amit", "off", "waiting"); err != nil {
+	if _, err := SetStatus(root, "worker", "off", "waiting"); err != nil {
 		t.Fatal(err)
 	}
-	same, _ := Read(root, "amit")
+	same, _ := Read(root, "worker")
 	if same.NoteAt != oldPresence.NoteAt {
 		t.Fatalf("same note refreshed: %q -> %q", oldPresence.NoteAt, same.NoteAt)
 	}
-	if _, err := SetStatus(root, "amit", "off", "done"); err != nil {
+	if _, err := SetStatus(root, "worker", "off", "done"); err != nil {
 		t.Fatal(err)
 	}
-	next, _ := Read(root, "amit")
+	next, _ := Read(root, "worker")
 	if next.NoteAt == same.NoteAt {
 		t.Fatal("changed note did not get its new timestamp")
 	}

@@ -157,7 +157,7 @@ func BuildAMQ(c AMQCapture) (res board.Result) {
 				}
 				// doctor --ops carries no presence note; who does.
 				w := who[[2]string{s.Name, e.Handle}]
-				e.Note, e.NoteAt = w.Note, w.NoteAt
+				e.Note = w.Note
 				if e.Harness == "" && w.Identity != nil {
 					e.Harness = w.Identity.Harness
 				}
@@ -186,7 +186,6 @@ func BuildAMQ(c AMQCapture) (res board.Result) {
 				NotifierMode:   w.NotifierMode,
 				NotifierReason: w.NotifierReason,
 				Note:           w.Note,
-				NoteAt:         w.NoteAt,
 				PresenceStatus: "unknown",
 			}
 			if w.Identity != nil {
@@ -308,7 +307,6 @@ func parseDoctorOps(session string, data []byte) ([]board.RosterEntry, *board.Ga
 				PresenceStatus         string    `json:"presence_status"`
 				PresenceAgeSeconds     float64   `json:"presence_age_seconds"`
 				PresenceSource         string    `json:"presence_source"`
-				NoteAt                 string    `json:"note_at"`
 				NotifierStatus         string    `json:"notifier_status"`
 				NotifierMode           string    `json:"notifier_mode"`
 				NotifierReason         string    `json:"notifier_reason"`

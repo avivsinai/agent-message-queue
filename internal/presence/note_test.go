@@ -10,33 +10,23 @@ import (
 func TestNoteDisplayRawListingKeepsOldAndUndatedNotes(t *testing.T) {
 	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
 	for _, row := range []struct {
-		name, at string
-		window   time.Duration
-		wantAge  time.Duration
-		known    bool
+		name    string
+		at      string
+		window  time.Duration
+		want    string
+		wantAge time.Duration
+		known   bool
 	}{
-		{name: "raw old note", at: now.Add(-40 * time.Hour).Format(time.RFC3339), wantAge: 40 * time.Hour, known: true},
-		{name: "Floor old note", at: now.Add(-40 * time.Hour).Format(time.RFC3339), window: 30 * time.Minute, known: false},
-		{name: "Floor at bound", at: now.Add(-30 * time.Minute).Format(time.RFC3339), window: 30 * time.Minute, known: false},
-		{name: "legacy", at: "", known: false},
-		{name: "invalid", at: "not-a-time", known: false},
+		{name: "raw old note", at: now.Add(-40 * time.Hour).Format(time.RFC3339), want: "waiting", wantAge: 40 * time.Hour, known: true},
+		{name: "Floor old note", at: now.Add(-40 * time.Hour).Format(time.RFC3339), window: 30 * time.Minute, want: "", known: false},
+		{name: "Floor at bound", at: now.Add(-30 * time.Minute).Format(time.RFC3339), window: 30 * time.Minute, want: "waiting", wantAge: 30 * time.Minute, known: true},
+		{name: "legacy", at: "", want: "waiting", known: false},
+		{name: "invalid", at: "not-a-time", want: "waiting", known: false},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			got, age, known := NoteDisplay("waiting", row.at, now, row.window)
-			if row.name == "Floor at bound" {
-				if got != "waiting" || !known {
-					t.Fatalf("the bound note was hidden: %q %v", got, known)
-				}
-				return
-			}
-			if row.window > 0 {
-				if got != "" {
-					t.Fatalf("Floor retained %q", got)
-				}
-				return
-			}
-			if got != "waiting" || known != row.known || age != row.wantAge {
-				t.Fatalf("note=%q age=%v known=%v", got, age, known)
+			if got != row.want || known != row.known || age != row.wantAge {
+				t.Fatalf("note=%q age=%v known=%v, want note=%q age=%v known=%v", got, age, known, row.want, row.wantAge, row.known)
 			}
 		})
 	}
