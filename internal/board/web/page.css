@@ -87,6 +87,8 @@ select { color: var(--ink); background: var(--surface); border: 1px solid var(--
 .navigation a { display: block; min-height: 2.75rem; padding: .6875rem .875rem; color: var(--muted); font-size: .9375rem; line-height: 1.4667; font-weight: 600; text-decoration: none; border-radius: .5rem; }
 .navigation a:hover { color: var(--ink); background: var(--subtle); }
 .navigation a[aria-current="page"] { color: var(--accent); background: var(--selected); }
+/* The Inbox count needs the owner, so it keeps the accent ink in every state. */
+.nav-count { margin-left: .375rem; color: var(--accent); font-weight: 700; font-variant-numeric: tabular-nums; }
 .primary-nav, .secondary-nav > div { display: grid; gap: .25rem; }
 .secondary-nav { margin-top: 1.5rem; }
 .secondary-nav { position: relative; }
@@ -171,7 +173,9 @@ textarea { display: block; width: 100%; min-height: 4.5rem; resize: vertical; co
 /* Requests: observations are plain rows with a glyph and words; an opinion
    sits apart on the subtle inset with its classifier. */
 .request-summary { margin-bottom: 2rem; max-width: 66ch; }
-.request-headline { font-size: 1.125rem; font-weight: 600; line-height: 1.4445; }
+.request-headline, .view-headline { font-size: 1.125rem; font-weight: 600; line-height: 1.4445; }
+.view-headline { margin-top: .5rem; max-width: 66ch; }
+.view-headline + .request-note { margin-top: .25rem; }
 .request-note { margin-top: .5rem; color: var(--muted); font-size: .875rem; line-height: 1.4286; }
 .request-counting { margin-top: .25rem; }
 .request-counting > summary { font-size: .875rem; }
@@ -196,6 +200,51 @@ textarea { display: block; width: 100%; min-height: 4.5rem; resize: vertical; co
 .opinion-source { margin-top: .375rem; color: var(--muted); font-size: .875rem; }
 .request-older .title { font-size: 1rem; }
 .request-compact { grid-template-columns: minmax(0, 1fr); padding-block: 1rem; }
+/* Inbox: one reading row per owner item. Options are a definition list,
+   one entry per option, divided by fine rules; answers are copy buttons. */
+.owner-item { grid-template-columns: minmax(0, 1fr); }
+.owner-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: .25rem 1rem; }
+.owner-item .item-meta { margin-top: .375rem; }
+.owner-summary { margin-top: .75rem; max-width: 66ch; overflow-wrap: anywhere; }
+.is-overdue { color: var(--warning); font-weight: 600; }
+.options { max-width: 66rem; margin-top: 1rem; gap: 0 1.5rem; font-size: 1rem; }
+.options > dt { color: var(--ink); font-weight: 600; }
+.options > dt, .options > dd { padding-block: .75rem; border-top: 1px solid var(--divider); }
+.options > dd > p { max-width: 66ch; }
+.recommended { display: block; color: var(--muted); font-size: .875rem; font-weight: 500; line-height: 1.4286; }
+.tradeoff { display: grid; grid-template-columns: 4.5rem minmax(0, 1fr); gap: 0 .5rem; margin-top: .5rem; font-size: .875rem; line-height: 1.4286; }
+.tradeoff-head { color: var(--muted); }
+.tradeoff ul { padding-left: 1rem; }
+.tradeoff li + li { margin-top: .25rem; }
+.if-later { margin-top: .75rem; max-width: 66ch; color: var(--muted); font-size: .875rem; line-height: 1.4286; }
+.owner-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .75rem; }
+.inbox-mail { margin-top: 2rem; }
+.inbox-mail > .request-note { margin: -.5rem 0 .75rem; }
+.mail-row { padding-block: 1rem; }
+.mail-row .item-meta { margin-top: .25rem; }
+/* Cost: two real tables and the limits list on the list surface. Numbers are
+   right-aligned tabular figures; a share carries a thin bar in the neutral
+   control tone, a measurement and never accent. */
+.cost-table { margin-top: 2rem; max-width: 100%; overflow-x: auto; }
+.cost-table table { width: 100%; border-collapse: separate; border-spacing: 0; background: var(--surface); border: 1px solid var(--divider); border-radius: .75rem; font-size: .9375rem; line-height: 1.4667; }
+.cost-table caption, .cost-caption { padding-bottom: .75rem; text-align: left; font-size: 1.125rem; font-weight: 600; line-height: 1.4445; }
+.cost-table th, .cost-table td { padding: .75rem 1rem; text-align: left; vertical-align: top; border-top: 1px solid var(--divider); overflow-wrap: break-word; }
+/* An account harness names a home path, the one cell that may break anywhere. */
+.cost-table td[data-label="Harness"] { overflow-wrap: anywhere; }
+.cost-table thead th { border-top: 0; color: var(--muted); font-size: .875rem; font-weight: 600; line-height: 1.4286; }
+.cost-table tbody th { font-weight: 600; }
+.cost-table .num { text-align: right; white-space: nowrap; }
+.cost-table tr.is-other > * { color: var(--muted); font-weight: 400; }
+.share { display: inline-grid; gap: .3125rem; width: 5.5rem; }
+.share-bar { display: block; width: 100%; height: .25rem; background: var(--subtle); }
+.share-bar rect { fill: var(--control); }
+.cost-limits { margin-top: 2rem; }
+.limit-list { list-style: none; padding: 0; }
+.limit-list li { padding: 1rem 1.5rem; overflow-wrap: anywhere; }
+.limit-list li + li { border-top: 1px solid var(--divider); }
+.limit-account { color: var(--ink); font-size: 1rem; font-weight: 600; line-height: 1.5; }
+.limit-list p { margin-top: .25rem; }
+.limit-list .limit-reached { color: var(--warning); }
 .source, .crew { padding: 1.25rem 1.5rem; overflow-wrap: anywhere; }
 .source + .source, .crew + .crew { border-top: 1px solid var(--divider); }
 .source p, .crew > p { margin-top: .5rem; }
@@ -250,6 +299,9 @@ footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: .5
 .tile { display: flex; flex-direction: column; gap: .375rem; min-width: 0; padding: .875rem 1rem; background: var(--selected); border: 1px solid var(--accent); border-radius: .5rem; overflow-wrap: anywhere; }
 .tile-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; color: var(--ink); font-weight: 600; line-height: 1.375; text-decoration: none; }
 .tile-title:hover { text-decoration: underline; }
+/* An owner request tile is its whole line, deadline included: never clamped. */
+.tile-ask { color: var(--ink); text-decoration: none; }
+.tile-ask:hover { text-decoration: underline; }
 .tile-summary { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; line-clamp: 4; overflow: hidden; font-size: .875rem; line-height: 1.4286; }
 .tile-why { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .25rem 1rem; margin-top: auto; color: var(--muted); font-size: .875rem; line-height: 1.4286; }
 .tile-age { color: var(--accent); font-weight: 600; white-space: nowrap; }
@@ -413,6 +465,21 @@ footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: .5
   .is-empty .stage-head { padding-block: .5rem; }
   .flow-legend { display: none; }
   .floor-session, .station { width: 100%; }
+  .options { grid-template-columns: minmax(0, 1fr); }
+  .options > dd { padding-top: 0; border-top: 0; }
+  .owner-actions { align-items: stretch; }
+  .limit-list li { padding: 1rem; }
+  /* A table row becomes a definition list: each cell names its column. */
+  .cost-table table, .cost-table tbody, .cost-table tr, .cost-table th, .cost-table td { display: block; }
+  .cost-table caption { display: block; }
+  /* The list surface moves to the rows, so the caption stays above it. */
+  .cost-table table { border: 0; background: none; }
+  .cost-table tbody { background: var(--surface); border: 1px solid var(--divider); border-radius: .75rem; }
+  .cost-table thead { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+  .cost-table tbody tr { padding: .75rem 1rem; }
+  .cost-table tbody tr + tr { border-top: 1px solid var(--divider); }
+  .cost-table tbody th, .cost-table td, .cost-table .num { display: grid; grid-template-columns: minmax(7rem, 1fr) minmax(0, 2fr); gap: 1rem; padding: .25rem 0; border-top: 0; text-align: left; white-space: normal; }
+  .cost-table tbody th::before, .cost-table td::before { content: attr(data-label); color: var(--muted); font-size: .875rem; font-weight: 400; }
   .enhanced .flow-card > details[open] > .sheet, .enhanced .station > details[open] > .sheet { padding: 1rem; }
 }
 @media (prefers-reduced-motion: no-preference) {

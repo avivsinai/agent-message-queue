@@ -12,7 +12,7 @@ import (
 // pageRequests is the Requests view: the headline and its qualifications,
 // Recent requests by addressee, then Undated; and the separate Older view.
 type pageRequests struct {
-	// Headline links to the Flow view, whose Needs you strip lists the items.
+	// Headline links to the Inbox view, which lists the items.
 	Headline                template.HTML
 	Partition               string
 	Notes                   []string
@@ -58,9 +58,9 @@ type pageOpinion struct{ Value, Classifier, Quote, Source string }
 func buildRequestsPage(m Model, now time.Time) pageRequests {
 	v := m.Requests
 	p := pageRequests{RecentCount: len(v.Recent), OlderCount: len(v.Older)}
-	p.Headline = template.HTML(template.HTMLEscapeString(requestHeadline(m.Inbox, "under Needs you")))
+	p.Headline = template.HTML(template.HTMLEscapeString(requestHeadline(m.Inbox, "in the Inbox")))
 	if len(m.Inbox.Items) > 0 {
-		p.Headline = `<a href="#view-flow">` + p.Headline + `</a>`
+		p.Headline = `<a href="#view-inbox">` + p.Headline + `</a>`
 	}
 	for _, note := range requestBookkeeping(v) {
 		p.Notes = append(p.Notes, clean(note))

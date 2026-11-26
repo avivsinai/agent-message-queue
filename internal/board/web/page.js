@@ -60,9 +60,18 @@
     var strip = link.parentElement, box = strip.getBoundingClientRect(), at = link.getBoundingClientRect();
     if (at.left < box.left || at.right > box.right) { strip.scrollLeft += at.left - box.left; }
   }
+  // A fragment names a view (#view-inbox) or a record inside one, such as
+  // an Inbox item a Needs you tile links to; a record opens its view.
+  function hashTarget() {
+    var id = "";
+    try { id = decodeURIComponent(window.location.hash.slice(1)); } catch (e) { return null; }
+    var node = id ? document.getElementById(id) : null;
+    return node && !node.matches(".view") && node.closest(".view") ? node : null;
+  }
   function selectView(focus) {
     var requested = window.location.hash.replace(/^#view-/, "");
-    var chosen = views.find(function (view) { return view.dataset.view === requested; });
+    var target = hashTarget();
+    var chosen = target ? target.closest(".view") : views.find(function (view) { return view.dataset.view === requested; });
     if (!chosen) { chosen = views.find(function (view) { return view.dataset.view === (saved.view || "flow"); }) || views[0]; }
     if (!chosen) { return; }
     current = chosen.dataset.view;
@@ -77,7 +86,11 @@
     // One view shows at a time, so a view link opens it from the top with
     // the masthead and navigation in place instead of jumping to its anchor.
     if (requested === current) { window.scrollTo(0, 0); }
-    if (focus) {
+    if (target) {
+      var title = target.querySelector("h2") || target;
+      target.scrollIntoView({block:"start"});
+      title.tabIndex = -1; title.focus({preventScroll:true});
+    } else if (focus) {
       var heading = chosen.querySelector("h1");
       if (heading) { heading.tabIndex = -1; heading.focus({preventScroll:true}); }
     }
@@ -141,15 +154,7 @@
   });
   document.addEventListener("click", function (event) {
     var close = event.target.closest(".sheet-close");
-    if (close) { closeSheet(close.closest(".card-sheet"), true); return; }
-    var opener = event.target.closest("[data-open]");
-    if (!opener) { return; }
-    var target = document.getElementById(opener.getAttribute("data-open"));
-    if (!target) { return; }
-    event.preventDefault();
-    var row = target.closest(".flow-card");
-    if (row) { row.hidden = false; }
-    target.open = true;
+    if (close) { closeSheet(close.closest(".card-sheet"), true); }
   });
 
   var appearance = document.getElementById("appearance");
@@ -169,7 +174,8 @@
 
   function manualCopy(button, command) {
     var row = button.closest(".strip");
-    if (row) { row.querySelector(".item-details").open = true; }
+    var details = row && row.querySelector(".item-details");
+    if (details) { details.open = true; }
     var scope = row || button.closest(".cmd") || button.closest(".sheet");
     var field = scope && Array.prototype.slice.call(scope.querySelectorAll("textarea")).find(function (node) { return node.value === command; });
     button.classList.add("is-failed");

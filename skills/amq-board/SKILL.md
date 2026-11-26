@@ -17,6 +17,10 @@ amq-board --json                   # published model, including source coverage
 amq-board --html --out board.html  # one static page
 ```
 
+The page opens on Flow; its other primary views are Inbox (what waits on the
+owner, with a copy command per answer), Floor, and Cost (list-price spend by
+model and seat, and account limits).
+
 Read the source ages and coverage for this project. On first initialization run
 `amq-board sync --init`. When a fresh view is requested, or the last source read
 is over ten minutes old, run `amq-board sync` in this project and read the
