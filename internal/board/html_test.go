@@ -260,7 +260,7 @@ func TestHTMLAgentsFoldSessionsWithoutRecentPresence(t *testing.T) {
 	}
 	html := page.String()
 	live, fold, quiet := strings.Index(html, "<h2>s2</h2>"), strings.Index(html, `<details class="context-block quiet-sessions"><summary>1 session without recent presence</summary>`), strings.Index(html, "<h2>s1</h2>")
-	if live < 0 || fold < 0 || !(live < fold && fold < quiet) {
+	if live < 0 || fold < 0 || live >= fold || fold >= quiet {
 		t.Errorf("Agents does not list the live session first and fold the quiet one after it (live %d, fold %d, quiet %d)", live, fold, quiet)
 	}
 }
