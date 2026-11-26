@@ -61,6 +61,8 @@ func TestRunCoopNamedInjectOnAttendedSeatSkipsTheNamedCandidate(t *testing.T) {
 
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("CURSOR_CONFIG_DIR", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
 	writeCursorChatMetaForTest(t, home, "feature/x")
 
 	stderr := runCoopNamedInjectAttended(t, root)
@@ -92,6 +94,8 @@ func TestRunCoopNamedInjectOnAttendedSeatRefusesTheUnnamedCandidate(t *testing.T
 
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("CURSOR_CONFIG_DIR", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
 	writeCursorChatMetaForTest(t, home, "")
 
 	stderr := runCoopNamedInjectAttended(t, root)
@@ -100,5 +104,39 @@ func TestRunCoopNamedInjectOnAttendedSeatRefusesTheUnnamedCandidate(t *testing.T
 	}
 	if !strings.Contains(stderr, coopNamedTUIManualReminder("feature/x", "cursor-agent", "the seat is attended")) {
 		t.Fatalf("stderr = %q, want the attended manual reminder", stderr)
+	}
+}
+
+func TestRunCoopNamedInjectRefusesWritesIfOriginalParentExited(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "queue")
+	if err := runInit([]string{"--root", root, "--agents", "cursor"}); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := t.TempDir()
+	t.Setenv("CURSOR_CONFIG_DIR", config)
+	writeNamedStoreMeta(t, config, "target", cwd, "", time.Now())
+	oldInject := coopNamedTTYInject
+	t.Cleanup(func() { coopNamedTTYInject = oldInject })
+	checked := false
+	coopNamedTTYInject = func(_, _ string, inputFree func() bool) error {
+		checked = true
+		if inputFree() {
+			t.Fatal("allowed a write after the launching process exited")
+		}
+		return errCoopNamedDialogOpen
+	}
+	_, _, err = captureEnvOutput(t, func() error {
+		return runCoopNamedInject([]string{
+			"--name", "s1/cursor", "--binary", "cursor-agent",
+			"--root", root, "--me", "cursor", "--startup-delay", "0",
+			"--parent-pid", strconv.Itoa(os.Getpid()),
+		})
+	})
+	if err != nil || !checked {
+		t.Fatalf("naming returned %v, checked input = %t", err, checked)
 	}
 }

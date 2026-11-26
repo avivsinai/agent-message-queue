@@ -3,6 +3,8 @@
 package cli
 
 import (
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,6 +16,8 @@ import (
 func TestCursorNamedStoreReaderFiltersCWDAndWindow(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("CURSOR_CONFIG_DIR", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -139,6 +143,8 @@ func TestCoopNamedSlashCommandStopsWhenADialogOpens(t *testing.T) {
 func TestCursorNamedStoreReaderSkipsCorruptMeta(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("CURSOR_CONFIG_DIR", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -160,5 +166,95 @@ func TestCursorNamedStoreReaderSkipsCorruptMeta(t *testing.T) {
 	candidate, err := (cursorNamedStoreReader{}).locate(cwd, start)
 	if err != nil || candidate.storePath != good {
 		t.Fatalf("locate = %#v, %v; want the valid chat", candidate, err)
+	}
+}
+
+func TestCursorNamedStoreReaderUsesCursorConfigPrecedence(t *testing.T) {
+	home, config, xdg := t.TempDir(), t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	cwd, start := t.TempDir(), time.Now()
+	homeChat := writeNamedStoreMeta(t, filepath.Join(home, ".cursor"), "h", cwd, "home", start)
+	configChat := writeNamedStoreMeta(t, config, "c", cwd, "config", start)
+	xdgChat := writeNamedStoreMeta(t, filepath.Join(xdg, "cursor"), "x", cwd, "xdg", start)
+	for _, tc := range []struct{ name, config, xdg, want string }{
+		{name: "explicit", config: config, xdg: xdg, want: configChat},
+		{name: "xdg", config: " ", xdg: xdg, want: xdgChat},
+		{name: "home", want: homeChat},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CURSOR_CONFIG_DIR", tc.config)
+			t.Setenv("XDG_CONFIG_HOME", tc.xdg)
+			got, err := (cursorNamedStoreReader{}).locate(cwd, start)
+			if err != nil || got.storePath != tc.want {
+				t.Fatalf("locate = %q, %v; want %q", got.storePath, err, tc.want)
+			}
+		})
+	}
+}
+
+func writeNamedStoreMeta(t *testing.T, config, id, cwd, title string, createdAt time.Time) string {
+	t.Helper()
+	path := filepath.Join(config, "chats", "workspace", id, "meta.json")
+	body, err := json.Marshal(map[string]any{
+		"schemaVersion": 1, "createdAtMs": createdAt.UnixMilli(), "cwd": cwd,
+		"title": title, "hasConversation": false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestWaitCoopNamedStoreCandidateWaitsForExactNewMetadata(t *testing.T) {
+	config := t.TempDir()
+	t.Setenv("CURSOR_CONFIG_DIR", config)
+	cwd, start := t.TempDir(), time.Now()
+	// Neither an older chat in this workspace nor a fresh chat elsewhere
+	// authorizes typing. A fresh sidecar in this workspace arrives later.
+	writeNamedStoreMeta(t, config, "old", cwd, "", start.Add(-time.Minute))
+	writeNamedStoreMeta(t, config, "other", t.TempDir(), "", start)
+	oldSleep := coopNamedLocateSleep
+	t.Cleanup(func() { coopNamedLocateSleep = oldSleep })
+	var want string
+	coopNamedLocateSleep = func(time.Duration) {
+		if want != "" {
+			t.Fatal("did not accept the exact newly written chat")
+		}
+		want = writeNamedStoreMeta(t, config, "target", cwd, "", start)
+	}
+	got, err := waitCoopNamedStoreCandidate(cursorNamedStoreReader{}, cwd, start)
+	if err != nil || want == "" || got.storePath != want {
+		t.Fatalf("candidate = %q, %v; want late metadata %q", got.storePath, err, want)
+	}
+}
+
+func TestWaitCoopNamedStoreCandidateDoesNotWaitOnAmbiguity(t *testing.T) {
+	config := t.TempDir()
+	t.Setenv("CURSOR_CONFIG_DIR", config)
+	cwd, start := t.TempDir(), time.Now()
+	writeNamedStoreMeta(t, config, "a", cwd, "", start)
+	writeNamedStoreMeta(t, config, "b", cwd, "", start)
+	oldSleep := coopNamedLocateSleep
+	t.Cleanup(func() { coopNamedLocateSleep = oldSleep })
+	coopNamedLocateSleep = func(time.Duration) { t.Fatal("waited after an ambiguous match") }
+	if _, err := waitCoopNamedStoreCandidate(cursorNamedStoreReader{}, cwd, start); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("locate error = %v; want ambiguous", err)
+	}
+}
+
+func TestWaitCoopNamedStoreCandidateStopsWhenTimeoutExpires(t *testing.T) {
+	oldTimeout, oldSleep := coopNamedTUILocateTimeout, coopNamedLocateSleep
+	t.Cleanup(func() { coopNamedTUILocateTimeout, coopNamedLocateSleep = oldTimeout, oldSleep })
+	coopNamedTUILocateTimeout = 0
+	coopNamedLocateSleep = func(time.Duration) { t.Fatal("waited after timeout") }
+	reader := &fakeCoopNamedStoreReader{locateErr: errCursorNamedStoreAbsent}
+	if _, err := waitCoopNamedStoreCandidate(reader, t.TempDir(), time.Now()); !errors.Is(err, errCursorNamedStoreAbsent) {
+		t.Fatalf("locate error = %v; want store absent", err)
 	}
 }
