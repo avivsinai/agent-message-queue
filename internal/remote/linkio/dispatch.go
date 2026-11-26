@@ -31,15 +31,18 @@ type job struct {
 	// place, and before any worker can run it; false refuses the job, which
 	// then takes no place.
 	admit func() bool
-	// keep makes the job run when the connection ends before it starts, in
-	// its place behind the jobs of its key that still run. Every other job
-	// not yet started then never runs.
+	// keep means the job must finish after disconnect. A named revoke earns
+	// it on admission; an ordinary job earns it only when a worker claims it.
 	keep bool
+	// onFinish releases a retiring queue's binding after its last kept job.
+	// The dispatcher lock orders registration with completion.
+	onFinish func()
 }
 
 // dispatcher runs server requests on bounded workers, in arrival order per
 // request, and never makes the reader wait: a full queue answers busy.
 type dispatcher struct {
+	ctx     context.Context
 	mu      sync.Mutex
 	queues  map[string][]*job // per request key, head is running or next
 	ready   chan string       // keys whose head may run
@@ -52,9 +55,9 @@ type dispatcher struct {
 }
 
 func newDispatcher(ctx context.Context) *dispatcher {
-	d := &dispatcher{queues: map[string][]*job{}, ready: make(chan string, dispatchQueued), drained: make(chan struct{})}
+	d := &dispatcher{ctx: ctx, queues: map[string][]*job{}, ready: make(chan string, dispatchQueued), drained: make(chan struct{})}
 	for range dispatchWorkers {
-		go d.work(ctx)
+		go d.work()
 	}
 	return d
 }
@@ -64,7 +67,7 @@ func newDispatcher(ctx context.Context) *dispatcher {
 func (d *dispatcher) enqueue(j *job) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.stopped || d.queued >= dispatchQueued {
+	if d.ctx.Err() != nil || d.queued >= dispatchQueued {
 		return false
 	}
 	if j.admit != nil && !j.admit() {
@@ -79,88 +82,52 @@ func (d *dispatcher) enqueue(j *job) bool {
 	return true
 }
 
-// work runs heads of ready keys until the connection ends, then the jobs
-// stop kept, until none is left.
-func (d *dispatcher) work(ctx context.Context) {
+// Each ready key has exactly one worker until that worker publishes its
+// successor. Cancellation wakes idle workers even when there is no work.
+func (d *dispatcher) work() {
+	done := d.ctx.Done()
 	for {
 		select {
-		case <-ctx.Done():
-			d.stop()
-			for {
-				select {
-				case <-d.drained:
-					return
-				case key := <-d.ready:
-					d.runHead(ctx, key)
-				}
-			}
+		case <-done:
+			d.mu.Lock()
+			d.stopped = true
+			d.closeIfDrainedLocked()
+			d.mu.Unlock()
+			done = nil
+		case <-d.drained:
+			return
 		case key := <-d.ready:
-			d.runHead(ctx, key)
+			d.runHead(key)
 		}
 	}
 }
 
 // runHead runs the head of key's queue and readies the next job of key.
-func (d *dispatcher) runHead(ctx context.Context, key string) {
+func (d *dispatcher) runHead(key string) {
 	d.mu.Lock()
 	j := d.queues[key][0]
+	// Receiving a ready key reserves the queue. Checking the connection
+	// here claims its head; only a retained job can be claimed after cancel.
+	if d.ctx.Err() == nil {
+		j.keep = true
+	}
+	run := j.keep
 	d.mu.Unlock()
-	out, err := j.run()
-	answer(ctx, j.sess, j.f.ID, out, err)
+	if run {
+		out, err := j.run()
+		answer(d.ctx, j.sess, j.f.ID, out, err)
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.queued--
+	if j.onFinish != nil {
+		j.onFinish()
+	}
 	if q := d.queues[key][1:]; len(q) > 0 {
 		d.queues[key] = q
 		d.ready <- key
 	} else {
 		delete(d.queues, key)
-	}
-	d.closeIfDrainedLocked()
-}
-
-// stop ends the dispatcher once. A head a worker already took (its key is
-// not in ready) finishes once. Of the jobs not started, those with keep stay
-// in order behind it and run; every other one never runs.
-func (d *dispatcher) stop() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.stopped {
-		return
-	}
-	d.stopped = true
-	// A worker takes keys from ready without the lock, so the drain never
-	// waits on it.
-	idle := map[string]bool{}
-drain:
-	for {
-		select {
-		case key := <-d.ready:
-			idle[key] = true
-		default:
-			break drain
-		}
-	}
-	for key, q := range d.queues {
-		var kept []*job
-		if !idle[key] {
-			kept, q = append(kept, q[0]), q[1:]
-		}
-		for _, j := range q {
-			if j.keep {
-				kept = append(kept, j)
-			}
-		}
-		d.queued -= len(d.queues[key]) - len(kept)
-		switch {
-		case len(kept) == 0:
-			delete(d.queues, key)
-		case idle[key]:
-			d.queues[key] = kept
-			d.ready <- key // cannot block: ready was drained and holds at most dispatchQueued keys
-		default:
-			d.queues[key] = kept
-		}
 	}
 	d.closeIfDrainedLocked()
 }

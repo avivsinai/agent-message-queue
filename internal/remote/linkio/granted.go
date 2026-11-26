@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"maps"
 	"regexp"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -49,6 +51,9 @@ func (c *Carrier) handleGrantRequest(sess *session, f Frame) {
 		binding := signedGrantBinding(m)
 		if binding == "" {
 			c.refuse(sess, f.ID, ErrorBody{Code: CodeConsentInvalid, Message: "the signed grant names no binding"})
+			return
+		}
+		if c.refuseRetiringGrant(sess, f, binding) {
 			return
 		}
 		c.enqueue(sess, f, "grant:"+binding, func() (any, error) { return c.acceptGrant(m, binding) })
@@ -95,6 +100,9 @@ func (c *Carrier) handleGrantRequest(sess *session, f Frame) {
 		// The named grant stops counting once the job has its place, before
 		// any later frame is read; the store decides on the dispatcher, in
 		// order with signed grants, also when the connection ends first.
+		if c.refuseRetiringGrant(sess, f, m.Binding) {
+			return
+		}
 		p := namedRevoke{binding: m.Binding, digest: m.GrantDigest}
 		c.enqueueJob(&job{
 			sess: sess, f: f, key: "grant:" + m.Binding, keep: true,
@@ -102,6 +110,50 @@ func (c *Carrier) handleGrantRequest(sess *session, f Frame) {
 			admit: func() bool { return c.holdNamed(p) },
 		})
 	}
+}
+
+// retireGrantQueues records unfinished grant keys before the next reader
+// starts. Several retired connections can have legacy grant work for the
+// same binding. The last worker for each key releases only its own count.
+func (c *Carrier) retireGrantQueues(d *dispatcher) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for key, queue := range d.queues {
+		if !strings.HasPrefix(key, "grant:") {
+			continue
+		}
+		for _, j := range slices.Backward(queue) {
+			if j.keep {
+				c.retiringGrants[key]++
+				j.onFinish = func() { c.finishRetiringKey(key) }
+				break
+			}
+		}
+	}
+}
+
+func (c *Carrier) finishRetiringKey(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.retiringGrants[key] > 1 {
+		c.retiringGrants[key]--
+	} else {
+		delete(c.retiringGrants, key)
+	}
+}
+
+// A signed acceptance or named revoke cannot pass an earlier connection's
+// unfinished work for the binding. The reader can still serve other keys.
+func (c *Carrier) refuseRetiringGrant(sess *session, f Frame, binding string) bool {
+	c.mu.Lock()
+	pending := c.retiringGrants["grant:"+binding] != 0
+	c.mu.Unlock()
+	if pending {
+		c.refuse(sess, f.ID, ErrorBody{Code: string(protocol.CodeBusy), Message: "a previous connection is finishing work for this binding", RetryAfterMS: busyRetryAfterMS})
+	}
+	return pending
 }
 
 // grantDigestRE is the spelling of a grant's digest: "sha256:" and the hex
@@ -209,6 +261,9 @@ func (c *Carrier) acceptGrant(m SignedGrant, binding string) (any, error) {
 		}
 		return nil, refuse(e.code, "%s; ask grant_info and sign again", e.why)
 	}
+	if named := c.named.Load(); named != nil && (*named)[namedRevoke{sg.Binding, sg.Digest}].unsettled {
+		return nil, refuse(string(protocol.CodeStorageFull), "the revoke of this grant is unresolved; retry the named revoke")
+	}
 	reply := GrantReply{Grant: GrantAccepted{Digest: sg.Digest, GrantID: sg.GrantID, Binding: sg.Binding, NotAfter: sg.NotAfter}}
 	if st.Stored != nil && st.Stored.Digest == sg.Digest {
 		return reply, nil
@@ -222,7 +277,6 @@ func (c *Carrier) acceptGrant(m SignedGrant, binding string) (any, error) {
 		}
 		return nil, err
 	}
-	c.settleNamedOf(sg.Binding)
 	if old := st.Stored; old != nil {
 		// Replaced by the newer grant: it ends with no notice of its own.
 		delete(c.grantSeen, old.Digest)
@@ -350,7 +404,7 @@ type namedRevoke struct{ binding, digest string }
 // namedHold is how revokes hold one named grant. held counts the revokes
 // whose job is queued or running; each job releases its own. unsettled
 // marks a revoke whose decision failed; the next decision of the store for
-// the grant, or a grant the binding accepts after it, settles it.
+// this exact grant settles it.
 type namedHold struct {
 	held      int
 	unsettled bool
@@ -397,19 +451,6 @@ func (c *Carrier) updateNamed(p namedRevoke, change func(*namedHold)) {
 		next[p] = h
 	}
 	c.named.Store(&next)
-}
-
-// settleNamedOf settles every unsettled revoke of binding: a grant the
-// binding accepted after them replaced the grant they name, or is a new
-// grant they came before. Its caller holds gmu.
-func (c *Carrier) settleNamedOf(binding string) {
-	if named := c.named.Load(); named != nil {
-		for p, h := range *named {
-			if p.binding == binding && h.unsettled {
-				c.updateNamed(p, func(h *namedHold) { h.unsettled = false })
-			}
-		}
-	}
 }
 
 // namedHeld reports whether a grant_revoke/2 holds the grant with digest of
@@ -744,13 +785,16 @@ func findGrant(g Grants, targetID, digest string) (GrantRecord, *StoredGrant) {
 // read of the key list, and no grant_revoke/2 holds the grant. Else it is
 // the grant code and why. It reads only snapshots and does no I/O.
 func (c *Carrier) grantEnd(r GrantRecord, sg *StoredGrant, now time.Time, kl keyListNow) (code, why string) {
+	// Read the temporary hold before the permanent end. A reader using an
+	// older grant snapshot must see the end once the decision drops its hold.
+	held := c.namedHeld(sg.Binding, sg.Digest)
 	code, why = c.grantEndSeen(r, sg, now, kl)
 	switch {
 	case code != "":
 		return code, why
 	case !kl.current:
 		return CodeGrantRevoked, grantKeysUnread
-	case c.namedHeld(sg.Binding, sg.Digest):
+	case held:
 		return CodeGrantRevoked, "a revoke of this grant is in progress"
 	}
 	return "", ""

@@ -283,7 +283,12 @@ retired.
   no answer. The refusal before the decision lives in the machine's memory:
   a restart before the decision is written drops it, and the named grant
   admits tasks again until the server sends the same revoke again. So the
-  server keeps the named revoke and sends it again until it gets an answer.
+  server keeps the named revoke and suspends submissions under that digest
+  until a correlated `revoked` reply names the same binding and digest.
+  Either value of `ended` settles that row. A signed-grant acknowledgement,
+  disconnect, or refusal leaves it pending. On reconnect, a named revoke
+  or signed grant can receive `busy` with a retry delay while an earlier
+  connection finishes work for that binding.
   A task already handed to the harness is not recalled.
 
 Mixed versions: a server sends `grant_revoke/2` only on a connection whose

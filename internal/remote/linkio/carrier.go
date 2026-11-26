@@ -184,8 +184,9 @@ type Carrier struct {
 	// mintLocks holds one lock per binding, taken around a binding's
 	// generation mint and its leaving revokedBindings, so two mints of
 	// one binding never run at once. mintLocksMu guards the map.
-	mintLocksMu sync.Mutex
-	mintLocks   map[string]*sync.Mutex
+	mintLocksMu    sync.Mutex
+	mintLocks      map[string]*sync.Mutex
+	retiringGrants map[string]int // under mu: earlier connections still finishing work for each grant key
 	// namedMu serializes writers of named, which holds each grant a
 	// grant_revoke/2 names from the frame that named it until the store
 	// decided and the snapshot was published. A grant in it admits no task
@@ -266,6 +267,7 @@ func New(cfg Config) (*Carrier, error) {
 		status:     Status{State: "offline"},
 		waiters:    map[string]waiter{},
 	}
+	c.retiringGrants = make(map[string]int)
 	c.held.tasks = map[string]*HeldTask{}
 	c.held.confirmed = map[string]time.Time{}
 	c.grantSeen, c.storeErr, c.mintLocks = map[string]StoredGrant{}, map[string]string{}, map[string]*sync.Mutex{}
@@ -669,7 +671,6 @@ func (c *Carrier) serveOnce(ctx context.Context) error {
 		frameLimit = l
 	}
 	connCtx, connCancel := context.WithCancel(ctx)
-	defer connCancel()
 	sess := &session{
 		ws: ws, gen: gen, prefix: newPrefix(), frameLimit: frameLimit,
 		control: make(chan []byte, controlQueue), data: make(chan []byte, dataQueue),
@@ -698,6 +699,8 @@ func (c *Carrier) serveOnce(ctx context.Context) error {
 		c.cfg.Logf("link %s: online", c.cfg.Name)
 	}
 	defer func() {
+		connCancel()
+		c.retireGrantQueues(sess.dispatch)
 		c.mu.Lock()
 		if c.sess == sess {
 			c.sess = nil

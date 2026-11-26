@@ -107,24 +107,23 @@ func namedRevokeMachine(t *testing.T, store GrantStore, g *grantGate, notices ch
 }
 
 // review finding, 2026-11-26: a revoke of one grant could end its successor.
-// Delayed A, live B: the server still holds the row of grant A when B,
-// issued later for the same binding, is accepted, and only then sends a
-// grant_revoke/2 naming A. The machine answers ended false and keeps B, its
-// generation and its floor: a granted task under B runs, the hand-over check
-// passes, and B is still on disk when the store is read again.
+// A failed revoke of A stays pending across the acceptance of B. The server
+// retries A after B has been accepted. The machine answers ended false and
+// keeps B, its generation and its floor. B passes submit and handoff.
 func TestNamedRevokeOfAReplacedGrantKeepsItsSuccessor(t *testing.T) {
 	view, key := goldenView(t)
 	b := view.Bindings["pi-demo"]
 	const gen = "g_3jx7k2m4qv5w6y7zab2cd3ef4g" // the golden grant's generation
 	stateDir := namedRevokeStore(t, b.Binding, GrantRecord{Generation: gen})
 	digestB := goldenGrantDigest(t)
+	store := &flakyGrants{GrantStore: FileGrants(stateDir, "example")}
 	fs, clk := newFakeServer(t), grantClock()
 	var c *Carrier
 	c, _ = startCarrier(t, fs, clk, func(cfg *Config) {
 		cfg.StoreID = view.StoreID
 		cfg.ConsentKeys = func() ([]ConsentKey, error) { return []ConsentKey{key}, nil }
 		cfg.Bindings = func() []Binding { return []Binding{b} }
-		cfg.Grants = FileGrants(stateDir, "example")
+		cfg.Grants = store
 		cfg.GrantInfoFor = func(Binding) (bool, string, int) { return true, "", protocol.MaxInputBytes }
 		cfg.Handle = func(cmd *protocol.Command, src core.Source) (any, error) {
 			if _, reason := c.GrantLive(cmd.TargetID, src.GrantDigest); reason != "" {
@@ -145,7 +144,20 @@ func TestNamedRevokeOfAReplacedGrantKeepsItsSuccessor(t *testing.T) {
 	if r := send(Frame{Schema: SchemaFrame, ID: "m_sga", Body: mustJSON(older)}); json.Unmarshal(r.Body, &accepted) != nil || accepted.Grant.Digest != digestA {
 		t.Fatalf("signed grant A: %s; want it accepted", r.Body)
 	}
+	// Review found that accepting B released A's failed revoke before the
+	// new grant snapshot was published to the handoff check.
+	store.failNextLoad.Store(true)
+	var refused struct{ Error ErrorBody }
+	if r := send(namedRevokeFrame(t, digestA)); r.Re != "m_gr2" || json.Unmarshal(r.Body, &refused) != nil || refused.Error.Code != string(protocol.CodeStorageFull) {
+		t.Fatalf("first revoke of A: %s; want storage_full", r.Body)
+	}
 	sameBody(t, send(goldenFrame(t, "44-signed_grant.json")), "m_sg1", "45-grant_reply.json")
+	if !c.namedHeld(b.Binding, digestA) {
+		t.Fatal("accepting B settled the failed revoke of A")
+	}
+	if _, reason := c.GrantLive(b.TargetID, digestB); reason != "" {
+		t.Fatalf("pending revoke of A refused the handoff under B: %s", reason)
+	}
 	before, err := LoadGrants(stateDir, "example")
 	if err != nil || before[b.Binding].Grant == nil || before[b.Binding].Grant.Digest != digestB {
 		t.Fatalf("grants.json after B: %+v, %v; want B stored", before[b.Binding], err)
@@ -330,11 +342,11 @@ func mustUnmarshalAnyJSON(t *testing.T, raw []byte) any {
 	return v
 }
 
-// flakyGrants is memGrants whose next Load fails once when failNextLoad is
+// flakyGrants is a store whose next Load fails once when failNextLoad is
 // set, and whose Load right after a Revoke that removed a grant fails once
 // when failReadBack is set.
 type flakyGrants struct {
-	*memGrants
+	GrantStore
 	failNextLoad, failReadBack atomic.Bool
 }
 
@@ -342,11 +354,11 @@ func (f *flakyGrants) Load() (Grants, error) {
 	if f.failNextLoad.CompareAndSwap(true, false) {
 		return nil, errors.New("grants.json: input/output error")
 	}
-	return f.memGrants.Load()
+	return f.GrantStore.Load()
 }
 
 func (f *flakyGrants) Revoke(binding, digest string) (bool, error) {
-	changed, err := f.memGrants.Revoke(binding, digest)
+	changed, err := f.GrantStore.Revoke(binding, digest)
 	if changed && f.failReadBack.Load() {
 		f.failNextLoad.Store(true)
 	}
@@ -368,16 +380,17 @@ func TestNamedRevokeStorageFailureRecovers(t *testing.T) {
 			b := view.Bindings["pi-demo"]
 			const gen = "g_3jx7k2m4qv5w6y7zab2cd3ef4g"
 			digestB := goldenGrantDigest(t)
-			store := &flakyGrants{memGrants: &memGrants{g: Grants{b.Binding: {Generation: gen, Grant: goldenGrant(t, b, key, gen, "2026-10-09T22:10:00Z", key)}}}}
+			mem := &memGrants{g: Grants{b.Binding: {Generation: gen, Grant: goldenGrant(t, b, key, gen, "2026-10-09T22:10:00Z", key)}}}
+			store := &flakyGrants{GrantStore: mem}
 			fs, clk := newFakeServer(t), grantClock()
 			c, _ := startCarrier(t, fs, clk, namedRevokeMachine(t, store, nil, nil))
 			wgen := fs.waitWelcome()
 			waitOnline(t, c)
 			switch fault {
 			case "write":
-				store.mu.Lock()
-				store.clearErr = errors.New("grants.json: no space left on device")
-				store.mu.Unlock()
+				mem.mu.Lock()
+				mem.clearErr = errors.New("grants.json: no space left on device")
+				mem.mu.Unlock()
 			case "read back":
 				store.failReadBack.Store(true)
 			case "first read":
@@ -391,15 +404,25 @@ func TestNamedRevokeStorageFailureRecovers(t *testing.T) {
 			if r := fs.next(); json.Unmarshal(r.Body, &refused) != nil || refused.Error.Code != string(protocol.CodeStorageFull) {
 				t.Fatalf("grant_revoke/2 with the %s failing: %s; want %s", fault, r.Body, protocol.CodeStorageFull)
 			}
+			if fault == "write" {
+				// A duplicate acceptance cannot settle a failed revoke of that document.
+				signed := goldenFrame(t, "44-signed_grant.json")
+				signed.Gen = wgen
+				fs.send(signed)
+				var retry struct{ Error ErrorBody }
+				if r := fs.next(); r.Re != signed.ID || json.Unmarshal(r.Body, &retry) != nil || retry.Error.Code != string(protocol.CodeStorageFull) {
+					t.Fatalf("same signed grant during a failed revoke: %s; want storage_full", r.Body)
+				}
+			}
 			if !c.namedHeld(b.Binding, digestB) {
 				t.Fatalf("the hold of B was released after the %s failed", fault)
 			}
 			if _, reason := c.GrantLive(b.TargetID, digestB); !strings.HasPrefix(reason, CodeGrantRevoked+": ") && !strings.HasPrefix(reason, CodeGrantExpired+": ") {
 				t.Fatalf("hand-over check of B after the %s failed = %q, want refused", fault, reason)
 			}
-			store.mu.Lock()
-			store.clearErr = nil
-			store.mu.Unlock()
+			mem.mu.Lock()
+			mem.clearErr = nil
+			mem.mu.Unlock()
 			store.failReadBack.Store(false)
 			c.Tick()
 			if c.namedHeld(b.Binding, digestB) {
@@ -413,11 +436,9 @@ func TestNamedRevokeStorageFailureRecovers(t *testing.T) {
 }
 
 // review finding, 2026-11-26: a revoke of one grant could end its successor.
-// The connection ends while the signed grant B is still being accepted and
-// a grant_revoke/2 naming B waits behind it. The revoke still decides, after
-// the acceptance it follows, so B ends on disk and is refused; it never
-// decides ahead of that acceptance (review finding: a revoke dropped at the
-// disconnect was decided by the tick before B was stored, and B stayed).
+// Review found that a tick or a replay on a new connection could decide
+// before an earlier acceptance finished storing B. The server keeps its
+// intent through busy and retries after the old queue has finished.
 func TestNamedRevokeAfterADisconnectFollowsItsPredecessor(t *testing.T) {
 	view, _ := goldenView(t)
 	b := view.Bindings["pi-demo"]
@@ -434,19 +455,29 @@ func TestNamedRevokeAfterADisconnectFollowsItsPredecessor(t *testing.T) {
 	f.Gen = wgen
 	fs.send(f)
 	waitFor(t, func() bool { return c.namedHeld(b.Binding, digestB) })
+	c.mu.Lock()
+	drained := c.sess.dispatch.drained
+	c.mu.Unlock()
 	fs.close(websocket.StatusGoingAway)
-	fs.waitWelcome() // the machine dialed again: the first connection ended
-	for range 10 {
-		c.Tick()
-		time.Sleep(5 * time.Millisecond)
-	}
+	f.Gen = fs.waitWelcome()
+	c.Tick()
+	fs.send(f)
+	replay := fs.next()
 	close(gate.release)
-	waitFor(t, func() bool {
-		g, err := LoadGrants(stateDir, "example")
-		return err == nil && g[b.Binding].Grant == nil && g[b.Binding].IssuedFloor != "" && !c.namedHeld(b.Binding, digestB)
-	})
-	if g, _ := LoadGrants(stateDir, "example"); g[b.Binding].Generation != gen || g[b.Binding].IssuedFloor != "2026-10-09T14:10:00Z" {
-		t.Fatalf("grants.json after the revoke: %+v; want generation %s and B's floor", g[b.Binding], gen)
+	var refused struct{ Error ErrorBody }
+	if replay.Re != f.ID || replay.Gen != f.Gen || json.Unmarshal(replay.Body, &refused) != nil ||
+		refused.Error.Code != string(protocol.CodeBusy) || refused.Error.RetryAfterMS <= 0 {
+		t.Fatalf("replay while the old acceptance is running: %+v; want correlated busy with a retry delay", replay)
+	}
+	select {
+	case <-drained:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first connection never finished its accepted work")
+	}
+	fs.send(f)
+	sameBody(t, fs.next(), f.ID, "86-revoked_reply_v2_not_ended.json")
+	if g, err := LoadGrants(stateDir, "example"); err != nil || g[b.Binding].Grant != nil || g[b.Binding].Generation != gen || g[b.Binding].IssuedFloor != "2026-10-09T14:10:00Z" {
+		t.Fatalf("grants.json after the revoke: %+v, %v; want no grant, generation %s and B's floor", g[b.Binding], err, gen)
 	}
 	if _, reason := c.GrantLive(b.TargetID, digestB); reason == "" {
 		t.Fatal("hand-over check of B after its revoke = live")
@@ -502,14 +533,12 @@ func TestDispatcherStopKeepsClaimedAndNamedJobsInOrder(t *testing.T) {
 	add("e", "e1", false, false) // a head no worker took
 	add("e", "e2", true, false)
 	cancel()
-	d.stop()
 	close(release)
-	waitFor(t, func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return len(ran) == 12
-	})
-	time.Sleep(20 * time.Millisecond)
+	select {
+	case <-d.drained:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the canceled dispatcher never drained")
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	pos := map[string]int{}
