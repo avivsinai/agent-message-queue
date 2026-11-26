@@ -2,7 +2,9 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -188,25 +190,103 @@ func ensureAgentLocked(root *fsq.DeliveryRoot, handle string, create bool) (bool
 		}
 		return true, nil
 	}
-	var cfg Config
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return false, fmt.Errorf("parse config: %w", err)
-	}
-	for _, a := range cfg.Agents {
-		if a == handle {
-			// A visible registration can follow a failed post-rename sync.
-			return false, root.SyncDir("meta")
+	added, err := mergeAgentsLocked(root, data, []string{handle}, nil)
+	return len(added) > 0, err
+}
+
+// ErrNoConfig reports a root without meta/config.json. It wraps
+// fs.ErrNotExist.
+var ErrNoConfig = fmt.Errorf("no meta/config.json: %w", fs.ErrNotExist)
+
+// AddAgents registers handles in the existing config.json of rootDir with one
+// read-merge-write under the config lock, and returns the handles it added in
+// request order. It never creates a config or the config lock: a root without
+// a config returns an error wrapping ErrNoConfig, so a mistyped root does not
+// become a queue.
+//
+// Under the lock, after the roster parses and before the write, provision is
+// called once with the pinned root and whether the on-disk roster lists a
+// handle, so the caller can make mailboxes durable before the roster names
+// them. A provision error aborts the call with the roster unchanged.
+func AddAgents(rootDir string, handles []string, provision func(r *fsq.DeliveryRoot, listed func(handle string) bool) error) ([]string, error) {
+	for _, handle := range handles {
+		if err := fsq.ValidateHandle(handle); err != nil {
+			return nil, fmt.Errorf("invalid handle %q: %w", handle, err)
 		}
 	}
-	cfg.Agents = append(cfg.Agents, handle)
-	out, mErr := marshalConfigPreservingUnknowns(data, cfg)
-	if mErr != nil {
-		return false, mErr
+	identity, err := fsq.SnapshotDeliveryRoot(rootDir)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot root: %w", err)
 	}
-	if _, wErr := root.WriteFileAtomic("meta", "config.json", append(out, '\n'), 0o600); wErr != nil {
-		return false, wErr
+	root, err := fsq.OpenDeliveryRoot(rootDir, identity)
+	if err != nil {
+		return nil, fmt.Errorf("open root: %w", err)
 	}
-	return true, nil
+	defer func() { _ = root.Close() }()
+	// Checked before WithConfigLock, which would create meta/config.lock.
+	if _, err := root.Stat("meta/config.json"); err != nil {
+		return nil, configReadError(root, err)
+	}
+	var added []string
+	err = root.WithConfigLock(func(r *fsq.DeliveryRoot) error {
+		data, rErr := r.ReadRegularNoFollow("meta/config.json")
+		if rErr != nil {
+			return configReadError(r, rErr)
+		}
+		added, rErr = mergeAgentsLocked(r, data, handles, provision)
+		return rErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return added, nil
+}
+
+func configReadError(root *fsq.DeliveryRoot, err error) error {
+	if errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("%w at %s", ErrNoConfig, root.Base())
+	}
+	return fmt.Errorf("read config: %w", err)
+}
+
+// mergeAgentsLocked appends every handle the parsed roster lacks and rewrites
+// config.json, preserving Version, CreatedUTC, the existing roster order, and
+// every unmodelled key. The caller holds the config lock and read data under
+// it. With nothing to add it only re-syncs meta: a visible registration can
+// follow a failed post-rename sync.
+func mergeAgentsLocked(root *fsq.DeliveryRoot, data []byte, handles []string, provision func(r *fsq.DeliveryRoot, listed func(handle string) bool) error) ([]string, error) {
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	onDisk := make(map[string]bool, len(cfg.Agents))
+	for _, a := range cfg.Agents {
+		onDisk[a] = true
+	}
+	if provision != nil {
+		if err := provision(root, func(handle string) bool { return onDisk[handle] }); err != nil {
+			return nil, err
+		}
+	}
+	var added []string
+	for _, handle := range handles {
+		if !onDisk[handle] {
+			onDisk[handle] = true
+			added = append(added, handle)
+		}
+	}
+	if len(added) == 0 {
+		return nil, root.SyncDir("meta")
+	}
+	cfg.Agents = append(cfg.Agents, added...)
+	out, err := marshalConfigPreservingUnknowns(data, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := root.WriteFileAtomic("meta", "config.json", append(out, '\n'), 0o600); err != nil {
+		return nil, err
+	}
+	return added, nil
 }
 
 // MarshalPreservingUnknowns re-marshals cfg together with every key present
