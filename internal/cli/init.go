@@ -23,9 +23,12 @@ func runInit(args []string) error {
 	registerImplicitRootFlag(fs, rootFlag, "Root directory for the queue")
 	agentsFlag := fs.String("agents", "", "Comma-separated agent handles (required)")
 	forceFlag := fs.Bool("force", false, "Overwrite existing config.json if present")
-	addFlag := fs.Bool("add", false, "Register --agents in an already-initialized root, provisioning only new or incomplete mailboxes")
+	addFlag := fs.Bool("add", false, "Use with --agents: register those handles in an already-initialized root, provisioning only new mailboxes and repairing any listed mailbox that is incomplete")
 
-	usage := usageWithFlags(fs, "amq init --root <path> --agents a,b,c [--force | --add]")
+	usage := usageWithFlags(fs, "amq init --root <path> --agents a,b [--force]",
+		"Add handles to an initialized queue (--add is a switch used with --agents, not a handle list):",
+		"  amq init --root <path> --agents c --add",
+		"--add cannot be combined with --force.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
