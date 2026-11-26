@@ -20,9 +20,7 @@ import (
 const coopNamedTUIStartupDelay = 3 * time.Second
 
 var (
-	coopNamedTUILocateTimeout = 5 * time.Second
-	coopNamedLocateSleep      = time.Sleep
-	coopNamedTTYReady         = func() bool {
+	coopNamedTTYReady = func() bool {
 		return tiocsti.Available() && coopNamedHasControllingTTY()
 	}
 	coopNamedTTYInject = func(me, binaryBase string, inputFree func() bool) error {
@@ -76,8 +74,6 @@ func startCoopNamedTUIInjectorProcess(name, cmdName, root, handle string, execSt
 			"--provider-binary-device", strconv.FormatUint(target.ProviderIdentity.Device, 10),
 			"--provider-binary-inode", strconv.FormatUint(target.ProviderIdentity.Inode, 10),
 		)
-	} else {
-		args = append(args, "--parent-pid", strconv.Itoa(os.Getpid()))
 	}
 	cmd := exec.Command(args[0], args[1:]...)
 	// Leave stdin/stdout on the null device so the helper does not steal the
@@ -194,9 +190,6 @@ func runCoopNamedInject(args []string) error {
 	// wait above can hold for minutes, and a seat that becomes attended in
 	// that wait must not be typed into when the wait ends.
 	inputFree := func() bool {
-		if *parentPIDFlag <= 1 || os.Getppid() != *parentPIDFlag {
-			return false
-		}
 		if settings, _ := coopWaitSettings(root, handle, wakeSettingsLayers{}); settings.attended {
 			_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, binaryBase, "the seat is attended"))
 			return false
@@ -253,26 +246,8 @@ func validateCoopNamedSessionLabel(name string) error {
 	}
 }
 
-// Cursor writes the chat metadata asynchronously. The startup delay alone
-// is not proof that it exists yet. An ambiguous or unreadable store is not
-// retried here: we never guess which session to rename.
-func waitCoopNamedStoreCandidate(reader coopNamedStoreReader, cwd string, execStart time.Time) (coopNamedStoreCandidate, error) {
-	deadline := time.Now().Add(coopNamedTUILocateTimeout)
-	for {
-		candidate, err := reader.locate(cwd, execStart)
-		if !errors.Is(err, errCursorNamedStoreAbsent) && !errors.Is(err, errCursorNamedCandidateAbsent) {
-			return candidate, err
-		}
-		if remaining := time.Until(deadline); remaining > 0 {
-			coopNamedLocateSleep(min(remaining, coopNamedTUIReadbackInterval))
-			continue
-		}
-		return candidate, err
-	}
-}
-
 func runCoopNamedTUI(reader coopNamedStoreReader, name, binaryBase, cwd string, execStart time.Time, inputFree func() bool) error {
-	candidate, err := waitCoopNamedStoreCandidate(reader, cwd, execStart)
+	candidate, err := reader.locate(cwd, execStart)
 	if err != nil {
 		_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, binaryBase, err.Error()))
 		return nil

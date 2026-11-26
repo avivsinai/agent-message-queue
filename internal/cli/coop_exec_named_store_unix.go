@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -47,10 +48,16 @@ func coopNamedStoreReaderFor(binary string) (coopNamedStoreReader, bool) {
 	}
 }
 
-var (
-	errCursorNamedStoreAbsent     = errors.New("cursor chat store is absent")
-	errCursorNamedCandidateAbsent = errors.New("no new Cursor chat store candidate")
-)
+func selectCoopNamedStoreCandidate(candidates []coopNamedStoreCandidate, description string) (coopNamedStoreCandidate, error) {
+	switch len(candidates) {
+	case 0:
+		return coopNamedStoreCandidate{}, fmt.Errorf("no new %s store candidate", description)
+	case 1:
+		return candidates[0], nil
+	default:
+		return coopNamedStoreCandidate{}, fmt.Errorf("%d new %s store candidates are ambiguous", len(candidates), description)
+	}
+}
 
 type cursorChatMeta struct {
 	Title       string          `json:"title"`
@@ -61,13 +68,13 @@ type cursorChatMeta struct {
 
 type cursorNamedStoreReader struct{}
 
-// Cursor CLI stores its chats under its config directory. A custom
-// CURSOR_CONFIG_DIR takes precedence over XDG_CONFIG_HOME and the default.
+// cursorNamedStoreRoot looks in the Cursor CLI's configured directory,
+// rather than falling back to a second store that may hold another chat.
 func cursorNamedStoreRoot() (string, error) {
 	if dir := os.Getenv("CURSOR_CONFIG_DIR"); strings.TrimSpace(dir) != "" {
 		return filepath.Join(dir, "chats"), nil
 	}
-	if dir := os.Getenv("XDG_CONFIG_HOME"); strings.TrimSpace(dir) != "" {
+	if dir := os.Getenv("XDG_CONFIG_HOME"); runtime.GOOS == "linux" && strings.TrimSpace(dir) != "" {
 		return filepath.Join(dir, "cursor", "chats"), nil
 	}
 	home, err := os.UserHomeDir()
@@ -127,18 +134,11 @@ func (cursorNamedStoreReader) locate(cwd string, execStart time.Time) (coopNamed
 	})
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return coopNamedStoreCandidate{}, errCursorNamedStoreAbsent
+			return coopNamedStoreCandidate{}, errors.New("cursor chat store is absent")
 		}
 		return coopNamedStoreCandidate{}, fmt.Errorf("scan Cursor chat store: %w", err)
 	}
-	switch len(candidates) {
-	case 0:
-		return coopNamedStoreCandidate{}, errCursorNamedCandidateAbsent
-	case 1:
-		return candidates[0], nil
-	default:
-		return coopNamedStoreCandidate{}, fmt.Errorf("%d new Cursor chat store candidates are ambiguous", len(candidates))
-	}
+	return selectCoopNamedStoreCandidate(candidates, "Cursor chat")
 }
 
 func (cursorNamedStoreReader) readName(candidate coopNamedStoreCandidate) (string, error) {
