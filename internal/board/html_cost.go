@@ -135,7 +135,7 @@ func buildCostPage(u *UsageView, now time.Time) pageCost {
 			continue
 		}
 		w, _ := windowOf(a.Other, longest.Window)
-		row := pageCostRow{Name: "Other sessions", Meta: otherCount(a) + " session" + plural(a.OtherSessions) + " · " + accountName(a.Key), Cost: clean(costFigure(w)), Other: true}
+		row := pageCostRow{Name: "Other sessions", Meta: otherCount(a) + " session" + plural(a.OtherSessions) + " · " + clean(accountName(a.Key)), Cost: clean(costFigure(w)), Other: true}
 		if w5, ok := windowOf(a.Other, usage.Window5h); ok {
 			row.Cost5h = clean(costFigure(w5))
 			row.CacheShare, _ = cacheReadShare(w5)
@@ -147,7 +147,7 @@ func buildCostPage(u *UsageView, now time.Time) pageCost {
 	p.SeatsEmpty = "No spend is recorded for a seat in this snapshot."
 
 	for _, a := range u.Accounts {
-		pl := pageCostLimit{Account: accountName(a.Key)}
+		pl := pageCostLimit{Account: clean(accountName(a.Key))}
 		if len(a.Limits) == 0 {
 			pl.Lines = append(pl.Lines, pageLimitLine{Text: limitsLine(nil, now)})
 		}
@@ -160,19 +160,22 @@ func buildCostPage(u *UsageView, now time.Time) pageCost {
 }
 
 // setShares gives each priced row its part of the rows' priced total, as a
-// percent with one decimal.
+// percent with one decimal; a priced row of a zero total has 0.0%. Only an
+// unpriced row has no share.
 func setShares(rows []pageCostRow, us []Usage) {
 	total := 0.0
 	for _, u := range us {
 		total += dollarsOf(u)
 	}
-	if total <= 0 {
-		return
-	}
 	for i, u := range us {
-		if u.CostUSD != nil {
-			rows[i].Share = strconv.FormatFloat(100*dollarsOf(u)/total, 'f', 1, 64) + "%"
+		if u.CostUSD == nil {
+			continue
 		}
+		share := 0.0
+		if total > 0 {
+			share = 100 * dollarsOf(u) / total
+		}
+		rows[i].Share = strconv.FormatFloat(share, 'f', 1, 64) + "%"
 	}
 }
 

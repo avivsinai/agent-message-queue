@@ -329,8 +329,9 @@ func TestHTMLInboxDecisionCopiesOneAnswerPerOption(t *testing.T) {
 	}
 }
 
-// The Cost view lists each priced model in one table row, largest cost first.
-func TestHTMLCostListsModelsByCost(t *testing.T) {
+// The Cost view lists each model row with its cost and share, in the order
+// the usage view gives them.
+func TestHTMLCostListsEachModelWithCostAndShare(t *testing.T) {
 	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
 	cost := func(v float64) *float64 { return &v }
 	window := func(w string, c float64) Usage {
@@ -353,7 +354,7 @@ func TestHTMLCostListsModelsByCost(t *testing.T) {
 	}
 	large, small := strings.Index(html, `data-label="Model"><span class="cell-name">demo-large</span>`), strings.Index(html, `data-label="Model"><span class="cell-name">demo-small</span>`)
 	if large < 0 || small < 0 || large > small {
-		t.Errorf("model rows missing or out of cost order: large %d, small %d", large, small)
+		t.Errorf("model rows missing or out of the usage view's order: large %d, small %d", large, small)
 	}
 	if !strings.Contains(html, "$225.00") || !strings.Contains(html, "75.0%") || !strings.Contains(html, "25.0%") {
 		t.Error("model rows lack their cost or share")
