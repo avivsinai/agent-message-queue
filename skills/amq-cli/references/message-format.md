@@ -99,10 +99,12 @@ command per option:
 Send it with `amq send --to user --kind question --subject "..." --body @file
 --context @decision.json`. `send` and `reply` refuse, as a usage error that
 names the field, a decision that is not an object with 2 to 6 options; a
-label that is empty, longer than 40 characters, repeated, or holds a control
-character; a summary longer than 200 characters; more than 5 pros or 5 cons,
+label that is empty, longer than 40 characters, starts or ends with white
+space, starts with `-` or `@`, repeats another label (ignoring case), or holds
+a control character (C0, DEL, C1, or the Unicode line and paragraph
+separators U+2028 and U+2029); a summary longer than 200 characters; more than 5 pros or 5 cons,
 or one longer than 120 characters; a `recommended` that is not one of the
-labels; a `blocking` that is not a boolean; an `if_later` longer than 200
+labels; a `blocking` that is present and not `true` or `false`; an `if_later` longer than 200
 characters; or an unknown field. A message with no `decision` key is not
 checked. The board reads the decision by the same rule and shows a message
 whose decision breaks it as a plain question.

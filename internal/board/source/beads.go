@@ -250,8 +250,10 @@ func (b Beads) item(r beadRow, byID map[string]beadRow, humans map[string]bool) 
 			it.Evidence = append(it.Evidence, board.Evidence{Field: "closed_at", Value: r.ClosedAt, At: closed})
 		}
 		it.Reason = board.Reason{Field: "status", Text: "bead closed", Since: since}
-	case r.IssueType == "decision" && (r.Status == "open" || r.Status == "in_progress"):
-		// Only the owner makes a decision, whoever the assignee is.
+	case r.IssueType == "decision" && (r.Status == "open" || r.Status == "in_progress" && owner.Kind == board.OwnerHuman):
+		// An open decision is the owner's to make. In progress, it is the
+		// owner's only when a human holds it; an agent that holds it may be
+		// writing the decision record, which is that agent's work.
 		it.State = board.StateNeedsHuman
 		it.Reason = board.Reason{Field: "issue_type", Text: "decision waits on you", Since: since}
 	case r.Status == "in_progress":

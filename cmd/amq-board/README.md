@@ -244,21 +244,26 @@ The Inbox is what waits on the owner, by one rule:
 
 1. an open obligation owed by the owner handle `user`: a question, review
    request, or todo addressed to `user` that no closer closed, by the rule of
-   `amq thread open`, across the retained history;
-2. a card under Needs you: an open bead of type `decision`, or work whose
-   blocker or blocked state needs a human.
+   `amq thread open`, opened within `obligation_max_age` (14 days by default);
+2. a card under Needs you: a bead of type `decision` that is open, or in
+   progress with a human assignee, or work whose blocker or blocked state
+   needs a human.
 
 Nothing else is an item. Needs you in the text headline and section, the
-Flow strip, and the Requests headline count these items; the pane's
-`waiting_total` counts the Needs you cards only. Items are listed blocking first, then
+Flow strip, the pane's `waiting_total`, and the Requests headline count these
+items. On the page, the Requests headline links to the Flow view's Needs you
+strip. Items are listed blocking first, then
 oldest first. A question whose header carries a valid `context.decision`
 shows its options with pros and cons, the recommended option, whether it
 blocks, what happens if the answer comes later, and one copy command per
 option that answers with the option label as the body; the free-text answer
 and the acknowledgement follow. A decision that breaks the `send` rule shows
-as a plain question. A bead shows its `bd show` command. After the items,
-the owner's unread mail is one line per session with its count, oldest age,
-and the `amq drain` command that reads it; mail is never an item.
+as a plain question. A request with no answer command says why (for
+example, the requester is in the base root, or its project is not a
+configured peer); a reply-by time in the past is marked overdue. A bead shows
+its `bd show` command. After the items, the owner's unread mail is one line
+per session with its count, oldest age, and the `amq drain` command whose
+`--limit` covers that count; mail is never an item.
 
 The first section of the text view is `== Inbox ==`; it shows at most 25
 items; `--json` carries every item under `inbox` (`items`, `mail`).

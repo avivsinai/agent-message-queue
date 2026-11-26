@@ -201,5 +201,37 @@
     "dependency_count": 0,
     "dependent_count": 0,
     "comment_count": 0
+  },
+  {
+    "id": "demo-b12",
+    "title": "Decide: the retry window",
+    "assignee": "user",
+    "started_at": "2026-10-21T13:00:00Z",
+    "owner": "owner@example.com",
+    "created_at": "2026-10-21T13:00:00Z",
+    "created_by": "Demo",
+    "updated_at": "2026-10-21T13:00:00Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0,
+    "priority": 1,
+    "issue_type": "decision",
+    "status": "in_progress"
+  },
+  {
+    "id": "demo-b13",
+    "title": "Decide: record the cache choice",
+    "assignee": "alpha",
+    "started_at": "2026-10-21T13:00:00Z",
+    "owner": "owner@example.com",
+    "created_at": "2026-10-21T13:00:00Z",
+    "created_by": "Demo",
+    "updated_at": "2026-10-21T13:00:00Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0,
+    "priority": 1,
+    "issue_type": "decision",
+    "status": "in_progress"
   }
 ]

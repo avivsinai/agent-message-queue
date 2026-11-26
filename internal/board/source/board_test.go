@@ -185,6 +185,10 @@ func TestBoardPlacesCapturedAMQAndBeadsPayloads(t *testing.T) {
 		// Field, 2026-11-26: a decision for the owner sat in Backlog and
 		// Needs you read 0.
 		"bead:demo-b11": board.ColumnWaiting,
+		// Review of the Inbox: a decision in progress is the owner's when a
+		// human holds it, and the holding agent's work otherwise.
+		"bead:demo-b12": board.ColumnWaiting,
+		"bead:demo-b13": board.ColumnInFlight,
 	}
 	for ref, col := range want {
 		card, ok := cards[ref]

@@ -122,6 +122,9 @@ func writeInbox(b *strings.Builder, inbox Inbox, now time.Time) {
 		}
 		if it.ReplyBy != nil {
 			line += " · reply by " + it.ReplyBy.UTC().Format(time.RFC3339)
+			if it.ReplyBy.Before(now) {
+				line += " (overdue)"
+			}
 		}
 		fmt.Fprintf(b, "  %s\n", line)
 		answers := map[string]Action{}
@@ -154,6 +157,9 @@ func writeInbox(b *strings.Builder, inbox Inbox, now time.Time) {
 		if !answered && len(it.Options) == 0 && len(it.Answer) > 0 {
 			fmt.Fprintf(b, "    answer: %s\n", it.Answer[0].Command)
 			answered = true
+		}
+		if it.NoAnswer != "" {
+			fmt.Fprintf(b, "    no answer command: %s\n", clean(it.NoAnswer))
 		}
 		if !answered && it.Read != nil {
 			fmt.Fprintf(b, "    read: %s\n", it.Read.Command)
@@ -528,7 +534,7 @@ func newestCards(cards []Card) []Card {
 func writeRequests(b *strings.Builder, m Model, now time.Time) {
 	v := m.Requests
 	fmt.Fprintf(b, "\n== Requests (outside task counts) ==\n")
-	fmt.Fprintf(b, "  %s\n", requestHeadline(m.Inbox))
+	fmt.Fprintf(b, "  %s\n", requestHeadline(m.Inbox, "in the Inbox"))
 	for _, note := range requestBookkeeping(v) {
 		fmt.Fprintf(b, "    %s\n", clean(note))
 	}

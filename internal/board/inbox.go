@@ -26,7 +26,9 @@ type OwnerItem struct {
 	// Answer is one command per option (the option label is the body), then
 	// the free-text answer and the acknowledgement.
 	Answer []Action `json:"answer,omitempty"`
-	Read   *Action  `json:"read,omitempty"`
+	// NoAnswer says why a request has no answer command.
+	NoAnswer string  `json:"no_answer,omitempty"`
+	Read     *Action `json:"read,omitempty"`
 }
 
 // OwnerOption is one option of a decision.
@@ -87,7 +89,7 @@ func buildInbox(m *Model, messages map[string]Message, sessionPaths map[string]s
 				labels = append(labels, o.Label)
 			}
 		}
-		it.Answer = AnswerActions(a.answer, peers, labels...)
+		it.Answer, it.NoAnswer = answerItem(a.answer, peers, labels)
 		if a.answer != nil {
 			if read, ok := ShowThread(sessionPaths[a.answer.OwnerSession], a.answer.Thread); ok {
 				it.Read = &read
@@ -106,7 +108,7 @@ func buildInbox(m *Model, messages map[string]Message, sessionPaths map[string]s
 	})
 	for _, g := range m.Gates {
 		mail := OwnerMail{Session: g.Session, Unread: g.OpenCount, OldestAgeSeconds: g.OldestAgeSeconds}
-		if read, ok := ReadOwnerMail(g.Session); ok {
+		if read, ok := ReadOwnerMail(g.Session, g.OpenCount); ok {
 			mail.Read = &read
 		}
 		inbox.Mail = append(inbox.Mail, mail)
@@ -137,7 +139,7 @@ func cardItem(c Card, peers map[string]bool) OwnerItem {
 				break
 			}
 		}
-		it.Answer = AnswerActions(i.Obligation, peers)
+		it.Answer, it.NoAnswer = answerItem(i.Obligation, peers, nil)
 		break
 	}
 	for _, a := range c.Actions {
@@ -148,6 +150,18 @@ func cardItem(c Card, peers map[string]bool) OwnerItem {
 		}
 	}
 	return it
+}
+
+// answerItem is the answer commands of a request, or why it has none.
+func answerItem(o *ObligationFacts, peers map[string]bool, options []string) ([]Action, string) {
+	answer := AnswerActions(o, peers, options...)
+	if len(answer) > 0 {
+		return answer, ""
+	}
+	if _, blocked := answerRoute(o, peers); blocked != "" {
+		return nil, blocked
+	}
+	return nil, "the request's kind has no answer command"
 }
 
 // obligationAnswer is the answer route of an obligation the snapshot's

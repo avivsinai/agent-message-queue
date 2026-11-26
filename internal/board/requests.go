@@ -633,16 +633,17 @@ func participantLabel(p Participant) string {
 }
 
 // requestHeadline counts what waits on the owner by the Inbox rule, so the
-// Requests view and Needs you never disagree. The refs-based observations
-// below it are never a count of unfinished work.
-func requestHeadline(inbox Inbox) string {
+// Requests view and Needs you never disagree; where names the place that
+// lists the items. The refs-based observations below it are never a count of
+// unfinished work.
+func requestHeadline(inbox Inbox, where string) string {
 	switch n := len(inbox.Items); n {
 	case 0:
 		return "Nothing waits on you"
 	case 1:
-		return "1 item waits on you in the Inbox"
+		return "1 item waits on you " + where
 	default:
-		return strconv.Itoa(n) + " items wait on you in the Inbox"
+		return strconv.Itoa(n) + " items wait on you " + where
 	}
 }
 

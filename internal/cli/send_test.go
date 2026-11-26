@@ -73,6 +73,13 @@ func TestSendValidatesContextDecision(t *testing.T) {
 		{"recommended not among the labels", strings.Replace(valid, `"recommended":"Opt-in"`, `"recommended":"Later"`, 1), "context.decision.recommended"},
 		{"one option only", `{"decision":{"options":[{"label":"Opt-in"}]}}`, "context.decision.options"},
 		{"label with a newline", strings.Replace(valid, `"Opt-in"},`, `"Opt\nin"},`, 1), "context.decision.options[0].label"},
+		// Pre-merge review of the Inbox: send accepted these labels, which
+		// the board could not answer or told apart.
+		{"label with a line separator", strings.Replace(valid, `"Opt-in"},`, `"Opt\u2028in"},`, 1), "context.decision.options[0].label"},
+		{"label that starts with @", strings.Replace(valid, `"Opt-in"},`, `"@opt-in"},`, 1), "context.decision.options[0].label"},
+		{"label with trailing space", strings.Replace(valid, `"Opt-in"},`, `"Opt-in "},`, 1), "context.decision.options[0].label"},
+		{"labels equal but for case", strings.Replace(valid, `"On by default"`, `"opt-in"`, 1), "context.decision.options[1].label"},
+		{"blocking null", strings.Replace(valid, `"blocking":false`, `"blocking":null`, 1), "context.decision.blocking"},
 		{"valid", valid, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

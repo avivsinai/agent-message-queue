@@ -96,11 +96,12 @@ commands are in the amq-cli skill, "Ask the owner without stopping".
   options in `--context @decision.json` (the `context.decision` shape in the
   amq-cli message format), so the Inbox shows one card with one answer
   command per option. Send it with `--follow-up` of the default time (48
-  hours for a design choice) and go on with other work.
+  hours for a design choice) and go on with other work. When the notice
+  comes, read the thread first: an answer may have come. No answer: take the
+  default, and close the question with a line that says it was a default,
+  not the owner's decision.
 - **A decision only the owner can make** is such a question or a bead of
-  type `decision`, never a Backlog task: both wait on the owner in the Inbox. When the notice comes, read the thread
-  first: an answer may have come. No answer: take the default, and close the
-  question with a line that says it was a default, not the owner's decision.
+  type `decision`, never a Backlog task: both wait on the owner in the Inbox.
 - **A ruling** is a question that you answer yourself first. Take it when
   the work would stop and the action can be undone. Label it `ruling`, say
   what you decided, why, and how to undo it, give it 24 hours, and act now.
