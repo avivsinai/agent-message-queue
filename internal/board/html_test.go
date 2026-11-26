@@ -315,7 +315,7 @@ func TestHTMLInboxDecisionCopiesOneAnswerPerOption(t *testing.T) {
 	html := page.String()
 	for _, want := range []string{
 		`aria-label="Inbox, 1 waiting"`,
-		"1 decision waits on you, 1 blocks work.",
+		"1 item waits on you, 1 blocks work.",
 		`<dt>Log <span class="recommended">Recommended</span></dt>`,
 		"<li>No dependency</li>", "<li>Needs a lock</li>",
 	} {
@@ -351,7 +351,7 @@ func TestHTMLCostListsModelsByCost(t *testing.T) {
 	if !strings.Contains(html, "List-price equivalent: $4.00 in the last 5 h, $300.00 in 7 d.") {
 		t.Error("Cost view lacks the fleet sentence")
 	}
-	large, small := strings.Index(html, `data-label="Model">demo-large<`), strings.Index(html, `data-label="Model">demo-small<`)
+	large, small := strings.Index(html, `data-label="Model"><span class="cell-name">demo-large</span>`), strings.Index(html, `data-label="Model"><span class="cell-name">demo-small</span>`)
 	if large < 0 || small < 0 || large > small {
 		t.Errorf("model rows missing or out of cost order: large %d, small %d", large, small)
 	}

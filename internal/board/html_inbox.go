@@ -76,7 +76,7 @@ func buildInboxPage(inbox Inbox, now time.Time) pageInbox {
 		p.More = omittedLine(n, "item")
 	}
 	if n := len(inbox.Items); n > 0 {
-		p.Headline = pluralize(n, "decision") + map[bool]string{true: " waits", false: " wait"}[n == 1] + " on you"
+		p.Headline = pluralize(n, "item") + map[bool]string{true: " waits", false: " wait"}[n == 1] + " on you"
 		if blocking > 0 {
 			p.Headline += ", " + strconv.Itoa(blocking) + map[bool]string{true: " blocks", false: " block"}[blocking == 1] + " work"
 		}

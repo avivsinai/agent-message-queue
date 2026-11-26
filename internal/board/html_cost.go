@@ -1,7 +1,6 @@
 package board
 
 import (
-	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,13 +23,14 @@ type pageCost struct {
 	HasUsage      bool
 }
 
-// pageCostRow is one table row. Share is the row's part of its table's
-// priced total, empty for a row with no price.
+// pageCostRow is one table row. Meta is a seat row's session and harness
+// line. Share is the row's part of its table's priced total, empty for a row
+// with no price.
 type pageCostRow struct {
-	Name, Session, Harness, Cost, Share string
-	Fresh, Cached, Output               string
-	Cost5h, Context, CacheShare         string
-	Other                               bool
+	Name, Meta, Harness, Cost, Share string
+	Fresh, Cached, Output            string
+	Cost5h, Context, CacheShare      string
+	Other                            bool
 }
 
 // pageCostLimit is one account and its limits, one line each.
@@ -119,7 +119,7 @@ func buildCostPage(u *UsageView, now time.Time) pageCost {
 	var seatUsage []Usage
 	for _, s := range seats {
 		w, _ := windowOf(s.usage, longest.Window)
-		row := pageCostRow{Name: clean(s.key.Handle), Session: clean(s.key.Session), Harness: strings.Join(s.harnesses, ", "), Cost: clean(costFigure(w))}
+		row := pageCostRow{Name: clean(s.key.Handle), Meta: clean(s.key.Session) + " · " + strings.Join(s.harnesses, ", "), Cost: clean(costFigure(w))}
 		if w5, ok := windowOf(s.usage, usage.Window5h); ok {
 			row.Cost5h = clean(costFigure(w5))
 			if !w5.LastAt.IsZero() && w5.LastContextTokens > 0 {
@@ -135,7 +135,7 @@ func buildCostPage(u *UsageView, now time.Time) pageCost {
 			continue
 		}
 		w, _ := windowOf(a.Other, longest.Window)
-		row := pageCostRow{Name: "Other sessions", Session: otherCount(a) + " session" + plural(a.OtherSessions), Harness: accountName(a.Key), Cost: clean(costFigure(w)), Other: true}
+		row := pageCostRow{Name: "Other sessions", Meta: otherCount(a) + " session" + plural(a.OtherSessions) + " · " + accountName(a.Key), Cost: clean(costFigure(w)), Other: true}
 		if w5, ok := windowOf(a.Other, usage.Window5h); ok {
 			row.Cost5h = clean(costFigure(w5))
 			row.CacheShare, _ = cacheReadShare(w5)
@@ -174,16 +174,6 @@ func setShares(rows []pageCostRow, us []Usage) {
 			rows[i].Share = strconv.FormatFloat(100*dollarsOf(u)/total, 'f', 1, 64) + "%"
 		}
 	}
-}
-
-// cacheReadShare is a 5 h window's cache reads as a share of its fresh and
-// cached tokens, by the rule of contextLine: none without cache reads, and
-// truncated to one decimal, never rounded.
-func cacheReadShare(u Usage) (string, bool) {
-	if u.CacheRead <= 0 {
-		return "", false
-	}
-	return strconv.FormatFloat(math.Floor(1000*float64(u.CacheRead)/float64(u.Fresh+u.CacheRead))/10, 'f', 1, 64) + "%", true
 }
 
 // windowOf is the usage of one window, by name.
