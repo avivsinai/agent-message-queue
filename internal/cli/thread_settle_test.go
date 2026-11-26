@@ -45,7 +45,7 @@ func TestThreadSettleSendsOneMarkerPerThreadAndOwner(t *testing.T) {
 			if strings.Contains(stdout, "{") {
 				t.Fatalf("text output includes JSON prefix:\n%s", stdout)
 			}
-			if !strings.Contains(stdout, "settled 3 requests to beta in p2p/alpha__beta through 2026-11-13T00-00-02.000Z_pid3_t3 (\"review 1\") as ") {
+			if !strings.Contains(stdout, "settled 3 requests to beta in p2p/alpha__beta through "+openers[2].id+" (\"review 1\") as ") {
 				t.Fatalf("text shape wrong:\n%s", stdout)
 			}
 			if !strings.Contains(stdout, "kept: 1 request newer than 24h") {
@@ -117,6 +117,14 @@ func expectOnlyNewObligation(t *testing.T, root, id string) {
 	}
 }
 
+// settleTestID names a fixture message by a time relative to now. A message
+// id carries its time, and a scan skips ids older than the obligation window,
+// so a fixed date in an id makes the fixture disappear on a later day.
+func settleTestID(base time.Time, second int, tail string) string {
+	at := base.UTC().Truncate(time.Minute).Add(time.Duration(second) * time.Second)
+	return at.Format("2006-01-02T15-04-05.000Z") + "_" + tail
+}
+
 func buildSettleFixture(t *testing.T) (root string, openers []testOpener) {
 	t.Helper()
 	root = filepath.Join(t.TempDir(), "queue")
@@ -136,10 +144,10 @@ func buildSettleFixture(t *testing.T) (root string, openers []testOpener) {
 	}
 	openers = []testOpener{}
 	wants := []in{
-		{"2026-11-13T00-00-00.000Z_pid1_t1", format.KindTodo, "todo 1", old},
-		{"2026-11-13T00-00-01.000Z_pid2_t2", format.KindTodo, "todo 2", old},
-		{"2026-11-13T00-00-02.000Z_pid3_t3", format.KindReviewRequest, "review 1", old},
-		{"2026-11-13T00-00-03.000Z_pid4_t4", format.KindTodo, "todo 4", fresh},
+		{settleTestID(old, 0, "pid1_t1"), format.KindTodo, "todo 1", old},
+		{settleTestID(old, 1, "pid2_t2"), format.KindTodo, "todo 2", old},
+		{settleTestID(old, 2, "pid3_t3"), format.KindReviewRequest, "review 1", old},
+		{settleTestID(old, 3, "pid4_t4"), format.KindTodo, "todo 4", fresh},
 	}
 	for _, in := range wants {
 		e := format.Message{Header: format.Header{
@@ -210,7 +218,7 @@ func TestThreadSettleLeavesAnotherProjectsRequestsWithMyHandle(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	id := "2026-11-12T00-00-00.000Z_pid1_other"
+	id := settleTestID(time.Now().UTC().Add(-72*time.Hour), 0, "pid1_other")
 	msg := format.Message{Header: format.Header{
 		Schema: format.CurrentSchema, ID: id, From: "alpha", To: []string{"beta"},
 		ReplyProject: "other-project", Thread: "p2p/other-project:alpha__beta",
