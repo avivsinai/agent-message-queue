@@ -420,6 +420,26 @@ Usage collection can be disabled with `{"usage":{"enabled":false}}`. Enabled
 usage reads numeric harness usage facts; Codex plan limits use its installed
 app-server interface and the existing bounded collector cache.
 
+Each counted response keeps its model (Claude `message.model`, the Codex
+`turn_context` model before the token count, pi `message.model`; a record
+with none is `unknown model`). Cost is the list-price equivalent in US
+dollars: each token class times that model's list price per million tokens.
+It is a measure for comparison, not a bill. A cost pi recorded keeps its own
+kind. The shipped price table (`internal/board/usage/prices.json`) holds only
+prices read from the vendors' pricing pages, each with its source and date;
+an entry's `match` is a model id or id prefix, and the longest match wins.
+Cache writes are priced at the 5-minute write price. Add or replace entries
+with `{"usage":{"prices":{"models":[{"match":"<id>","input":0,"cache_read":0,"cache_write":0,"output":0}]}}}`
+in `~/.amq/board.json`; every class is required, and a refused entry is a
+warning and is ignored. Tokens of a model with no price are never priced at
+zero: a figure that leaves them out says so (`unpriced_tokens` in `--json`).
+`--json` carries `models` per account and `fleet_models`, each with the 5 h and
+7 d rows, largest 7 d cost first, and `prices_as_of`. The text view prints a
+`cost` block after `limits`: the fleet per window, the five largest models and
+seats over 7 d, and the other sessions. A plan window that is at least half
+used and used faster than its clock reads, for example, `5 h 62% used at 40%
+of the window: on pace to reach the limit before it resets`.
+
 ## Views
 
 Text, JSON, static HTML, and the live page use the same pure task projection.

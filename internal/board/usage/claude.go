@@ -138,7 +138,7 @@ func readClaude(acct *Account, files []file, now time.Time, eligible Eligible, b
 				seen[l.SessionID] = ids
 			}
 			s := session(l.SessionID)
-			e := event{at: l.Timestamp, Counts: Counts{In: u.In, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite, Out: u.Out}}
+			e := event{at: l.Timestamp, model: l.Message.Model, Counts: Counts{In: u.In, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite, Out: u.Out}}
 			if i, ok := ids[l.Message.ID]; ok {
 				s.events[i] = e
 				return true

@@ -2,6 +2,7 @@ package usage
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -59,7 +60,15 @@ type codexTokenCount struct {
 	} `json:"payload"`
 }
 
-var codexKeys = [][]byte{[]byte(`"token_count"`)}
+// codexTurn is a turn_context line: the model of the turn's responses.
+type codexTurn struct {
+	Type    string `json:"type"`
+	Payload struct {
+		Model string `json:"model"`
+	} `json:"payload"`
+}
+
+var codexKeys = [][]byte{[]byte(`"token_count"`), []byte(`"turn_context"`)}
 
 // metaLines bounds how far into a rollout the reader looks for its
 // session_meta. A rollout without one has no working directory and is never
@@ -198,7 +207,17 @@ func readRollout(f *os.File, since time.Time, eligible Eligible, b *budget, skip
 		var prev *codexUsage
 		baselineMissing := false
 		first := true
+		// model is the newest turn_context's model read so far: a
+		// token_count before any in the read range has none.
+		model := ""
 		done := scan(f, off, codexKeys, b, skipped, func(raw []byte) bool {
+			var turn codexTurn
+			if bytes.Contains(raw, codexKeys[1]) && json.Unmarshal(raw, &turn) == nil && turn.Type == "turn_context" {
+				if turn.Payload.Model != "" {
+					model = turn.Payload.Model
+				}
+				return true
+			}
 			var tc codexTokenCount
 			if json.Unmarshal(raw, &tc) != nil || tc.Payload.Type != "token_count" {
 				return true
@@ -228,7 +247,7 @@ func readRollout(f *os.File, since time.Time, eligible Eligible, b *budget, skip
 			if tc.Timestamp.Before(since) {
 				return true // the baseline, not counted
 			}
-			evs = append(evs, event{at: tc.Timestamp, Counts: Counts{In: d.In - d.Cached, CacheRead: d.Cached, CacheWrite: d.CacheWrite, Out: d.Out}})
+			evs = append(evs, event{at: tc.Timestamp, model: model, Counts: Counts{In: d.In - d.Cached, CacheRead: d.Cached, CacheWrite: d.CacheWrite, Out: d.Out}})
 			return true
 		})
 		if baselineMissing {

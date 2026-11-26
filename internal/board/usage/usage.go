@@ -59,6 +59,8 @@ type Config struct {
 	Homes       map[string][]string
 	BudgetWall  time.Duration
 	BudgetBytes int64
+	// Prices gives each counted event a list-price equivalent.
+	Prices Prices
 }
 
 // DefaultConfig reads the default home of each harness under home.
@@ -71,6 +73,7 @@ func DefaultConfig(home string) Config {
 		},
 		BudgetWall:  DefaultBudgetWall,
 		BudgetBytes: DefaultBudgetBytes,
+		Prices:      shipped,
 	}
 }
 
@@ -80,15 +83,20 @@ type Counts struct {
 	// Cost is set only when the harness reported a cost for the event.
 	Cost     *float64
 	CostKind string
+	// Unpriced is the tokens of events with no cost: no recorded cost and
+	// no price for their model.
+	Unpriced int64
 }
 
 // Fresh is the headline figure: uncached input, cache writes and output.
 // Cache reads dominate and are shown beside it, never summed into it.
 func (c Counts) Fresh() int64 { return c.In + c.CacheWrite + c.Out }
 
-// event is one counted event of a harness session.
+// event is one counted event of a harness session. model is the model
+// that served it, "" when the record names none.
 type event struct {
-	at time.Time
+	at    time.Time
+	model string
 	Counts
 }
 
@@ -167,6 +175,8 @@ func (a Account) Partial() bool { return a.Read < a.Files || a.Skipped > 0 || a.
 type Report struct {
 	Now      time.Time
 	Accounts []Account
+	// PricesAsOf dates the price table the costs were computed with.
+	PricesAsOf string
 }
 
 // RosterKey names the worker a harness session runs as.
@@ -261,11 +271,17 @@ func read(cfg Config, now time.Time, roots []string, mapping Mapping, clock func
 		b := &budget{deadline: share(deadline, left), bytes: bytesLeft / int64(left), clock: clock}
 		given := b.bytes
 		acct := readHome(h.harness, h.path, h.files, now, eligible, mapping, h.first, b)
+		for i := range acct.Sessions {
+			evs := acct.Sessions[i].events
+			for j := range evs {
+				evs[j].Counts = cfg.Prices.price(evs[j].model, evs[j].Counts)
+			}
+		}
 		acct.Unlisted = h.unlisted
 		accounts[i] = withDetail(acct)
 		bytesLeft -= given - max(b.bytes, 0)
 	}
-	return Report{Now: now, Accounts: accounts}
+	return Report{Now: now, Accounts: accounts, PricesAsOf: cfg.Prices.AsOf}
 }
 
 func readHome(harness, home string, files []file, now time.Time, eligible Eligible, mapping Mapping, first func(string) bool, b *budget) Account {
@@ -543,6 +559,18 @@ func (s Session) Totals(from time.Time) (Counts, time.Time) {
 	return c, asOf
 }
 
+// ByModel sums events at or after from per model; "" holds the events
+// whose record names no model.
+func (s Session) ByModel(from time.Time) map[string]Counts {
+	out := map[string]Counts{}
+	for _, e := range s.events {
+		if !e.at.Before(from) {
+			out[e.model] = add(out[e.model], e.Counts)
+		}
+	}
+	return out
+}
+
 // Last is the newest counted event of the session: the prompt size of its
 // latest response, with its time. A session whose records were not counted
 // has none.
@@ -564,6 +592,7 @@ func add(a, b Counts) Counts {
 	a.CacheRead += b.CacheRead
 	a.CacheWrite += b.CacheWrite
 	a.Out += b.Out
+	a.Unpriced += b.Unpriced
 	if b.Cost != nil {
 		sum := *b.Cost
 		if a.Cost != nil {

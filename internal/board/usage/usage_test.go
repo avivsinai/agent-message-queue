@@ -425,14 +425,15 @@ func TestByteBudgetReadsTheMappedSessionAndTheProjectFirst(t *testing.T) {
 func TestLastResponseContextIsTheNewestCountedEvent(t *testing.T) {
 	const claudeID = "aaaaaaaa-0000-4000-8000-000000000001"
 	claudeRow := func(at, id string, in, read int) string {
-		return `{"type":"assistant","timestamp":"2026-10-22T` + at + `.000Z","sessionId":"` + claudeID + `","cwd":"/work/demo","version":"2.1.300","message":{"id":"` + id + `","usage":{"input_tokens":` + fmt.Sprint(in) + `,"cache_creation_input_tokens":0,"cache_read_input_tokens":` + fmt.Sprint(read) + `,"output_tokens":10}}}`
+		return `{"type":"assistant","timestamp":"2026-10-22T` + at + `.000Z","sessionId":"` + claudeID + `","cwd":"/work/demo","version":"2.1.300","message":{"id":"` + id + `","model":"claude-test-1","usage":{"input_tokens":` + fmt.Sprint(in) + `,"cache_creation_input_tokens":0,"cache_read_input_tokens":` + fmt.Sprint(read) + `,"output_tokens":10}}}`
 	}
+	codexTurn := `{"timestamp":"2026-10-22T11:00:00.500Z","type":"turn_context","payload":{"cwd":"/work/demo","model":"gpt-test-1"}}`
 	codexMeta := `{"timestamp":"2026-10-22T11:00:00.000Z","type":"session_meta","payload":{"id":"cccccccc-0000-4000-8000-000000000003","cwd":"/work/demo","cli_version":"0.163.0","source":"cli"}}`
 	codexTotal := func(at string, in, cached int) string {
 		return `{"timestamp":"2026-10-22T` + at + `.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":` + fmt.Sprint(in) + `,"cached_input_tokens":` + fmt.Sprint(cached) + `,"output_tokens":0,"total_tokens":` + fmt.Sprint(in+cached) + `}}}}`
 	}
 	piLine := func(at, id string, in int) string {
-		return `{"type":"message","id":"` + id + `","timestamp":"2026-10-22T` + at + `.000Z","message":{"role":"assistant","usage":{"input":` + fmt.Sprint(in) + `,"output":5,"cacheRead":0,"cacheWrite":0}}}`
+		return `{"type":"message","id":"` + id + `","timestamp":"2026-10-22T` + at + `.000Z","message":{"role":"assistant","provider":"test","model":"pi-test-1","usage":{"input":` + fmt.Sprint(in) + `,"output":5,"cacheRead":0,"cacheWrite":0}}}`
 	}
 	piHeader := `{"type":"session","version":3,"id":"eeeeeeee-0000-4000-8000-000000000005","timestamp":"2026-10-22T10:00:00.000Z","cwd":"/work/demo"}`
 	for _, tc := range []struct {
@@ -441,6 +442,10 @@ func TestLastResponseContextIsTheNewestCountedEvent(t *testing.T) {
 		files      map[string][]string
 		wantTokens int64
 		wantAt     string
+		// wantModel is the model every counted response of the session
+		// keeps (field, 2026-11-26: the board could not say which model
+		// spent what).
+		wantModel string
 	}{
 		{"claude", Claude, map[string][]string{
 			"projects/-work-demo/" + claudeID + ".jsonl": {
@@ -449,23 +454,24 @@ func TestLastResponseContextIsTheNewestCountedEvent(t *testing.T) {
 				// window sum of both messages.
 				claudeRow("11:00:00", "msg_b", 2, 886312),
 			},
-		}, 2 + 886312, "2026-10-22T11:00:00Z"},
+		}, 2 + 886312, "2026-10-22T11:00:00Z", "claude-test-1"},
 		{"codex", Codex, map[string][]string{
 			"sessions/2026/10/22/rollout-2026-10-22T11-00-00-cccccccc-0000-4000-8000-000000000003.jsonl": {
 				codexMeta,
+				codexTurn,
 				codexTotal("11:00:01", 1000, 800),
 				codexTotal("11:00:02", 1000, 800),    // repeated total: no spend
 				codexTotal("11:00:03", 1000, 800),    // repeated total: no spend
 				codexTotal("11:00:05", 109435, 1000), // the delta is the response
 			},
-		}, 108235 + 200, "2026-10-22T11:00:05Z"},
+		}, 108235 + 200, "2026-10-22T11:00:05Z", "gpt-test-1"},
 		{"pi", Pi, map[string][]string{
 			"agent/sessions/--work-demo--/2026-10-22T10-00-00-000Z_eeeeeeee-0000-4000-8000-000000000005.jsonl": {
 				piHeader,
 				piLine("10:00:05", "a1b2c3d4", 100),
 				piLine("11:00:00", "b5c6d7e8", 86359),
 			},
-		}, 86359, "2026-10-22T11:00:00Z"},
+		}, 86359, "2026-10-22T11:00:00Z", "pi-test-1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -483,6 +489,48 @@ func TestLastResponseContextIsTheNewestCountedEvent(t *testing.T) {
 			wantAt, _ := time.Parse(time.RFC3339, tc.wantAt)
 			if !at.Equal(wantAt) {
 				t.Errorf("last response at %v, want %v", at, wantAt)
+			}
+			if models := a.Sessions[0].ByModel(testNow.Add(-span)); len(models) != 1 || models[tc.wantModel].Fresh() == 0 {
+				t.Errorf("spend by model = %v, want all of it on %q", models, tc.wantModel)
+			}
+		})
+	}
+}
+
+// A user price entry replaces the shipped one with the same match; a
+// refused entry is named in a warning and ignored, and usage stays on
+// (field, 2026-11-26: the board had no price table to override).
+func TestUserPricesOverrideTheShippedTable(t *testing.T) {
+	shippedOpus, ok := shipped.lookup("claude-opus-5-5")
+	if !ok {
+		t.Fatal("the shipped table has no claude-opus-5-5 entry")
+	}
+	for _, tc := range []struct {
+		name      string
+		entry     string
+		wantInput float64
+		warning   string
+	}{
+		{"override", `{"match":"claude-opus-5-5","input":1,"cache_read":0.1,"cache_write":1.25,"output":5,"source":"user"}`, 1, ""},
+		{"wrong type", `{"match":"claude-opus-5-5","input":"1","cache_read":0.1,"cache_write":1.25,"output":5}`, shippedOpus.Input, "usage.prices.models[0]"},
+		{"missing class", `{"match":"claude-opus-5-5","input":1,"cache_read":0.1,"output":5}`, shippedOpus.Input, "cache_write needs a price"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "board.json")
+			writeFile(t, path, `{"usage":{"prices":{"models":[`+tc.entry+`]}}}`)
+			st, err := LoadSettings(path, t.TempDir())
+			if err != nil || !st.Enabled {
+				t.Fatalf("LoadSettings = enabled %v, err %v; want usage on", st.Enabled, err)
+			}
+			got, ok := st.Config.Prices.lookup("claude-opus-5-5")
+			if !ok || got.Input != tc.wantInput {
+				t.Errorf("input price = %v (found %v), want %v", got.Input, ok, tc.wantInput)
+			}
+			switch {
+			case tc.warning == "" && len(st.Warnings) > 0:
+				t.Errorf("warnings = %q, want none", st.Warnings)
+			case tc.warning != "" && (len(st.Warnings) != 1 || !strings.Contains(st.Warnings[0], tc.warning)):
+				t.Errorf("warnings = %q, want one naming %q", st.Warnings, tc.warning)
 			}
 		})
 	}
