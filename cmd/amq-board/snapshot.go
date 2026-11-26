@@ -190,6 +190,17 @@ type syncRun struct {
 	suggestions bool
 }
 
+// sourceOptions bounds a pass by who waits for it. A one-shot sync has a
+// person waiting, so its GitHub read and its limits read are short. A watch
+// pass has no one waiting: both keep the source deadline, so a slow answer is
+// a result and not a failed read every pass.
+func (r *syncRun) sourceOptions() sourceOptions {
+	if r.watch {
+		return sourceOptions{limits: r.limits.run}
+	}
+	return sourceOptions{githubTimeout: oneShotGitHubTimeout, limits: oneShotLimits}
+}
+
 // pass acquires and publishes one generation and returns the published state.
 func (r *syncRun) pass(ctx context.Context) (board.Snapshot, error) {
 	env := r.env
@@ -205,10 +216,8 @@ func (r *syncRun) pass(ctx context.Context) (board.Snapshot, error) {
 	if readErr != nil {
 		return board.Snapshot{}, readErr
 	}
-	opt := sourceOptions{githubTimeout: oneShotGitHubTimeout, limits: oneShotLimits, claudeLists: state.ClaudeLists}
-	if r.watch {
-		opt.limits = r.limits.run
-	}
+	opt := r.sourceOptions()
+	opt.claudeLists = state.ClaudeLists
 	if cfg.SourceGitHub && cfg.TokenOnce {
 		runner.ghToken, opt.ghAccount = r.token.get(ctx, newEnv(dir, runner), r.loader.Logf)
 	}

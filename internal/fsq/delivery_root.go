@@ -518,6 +518,24 @@ func (r *DeliveryRoot) EnsureAgentDirs(agent string) error {
 	return r.mkdirAllSynced(syncIfCreated, dirs...)
 }
 
+// EnsureAgentDirsSynced is EnsureAgentDirs for a caller about to publish the
+// mailbox: it re-syncs the whole ancestor chain even when every directory
+// already exists, because an earlier call may have created a level and died
+// before syncing it. Use it before a roster write names the handle.
+func (r *DeliveryRoot) EnsureAgentDirsSynced(agent string) error {
+	if err := ValidateHandle(agent); err != nil {
+		return err
+	}
+	if err := r.VerifyBase(); err != nil {
+		return err
+	}
+	dirs := make([]string, 0, len(requiredMailboxLeaves))
+	for _, leaf := range requiredMailboxLeaves {
+		dirs = append(dirs, MailboxRootRelativePath(agent, leaf))
+	}
+	return r.mkdirAllSynced(syncAlways, dirs...)
+}
+
 // EnsureAgentDir creates exactly one mailbox leaf for an agent through the
 // pinned root capability. Writers that own a single leaf (for example the
 // notification-attempt ledger under receipts) use this instead of
