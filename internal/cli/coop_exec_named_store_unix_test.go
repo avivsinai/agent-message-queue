@@ -3,8 +3,10 @@
 package cli
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -14,6 +16,8 @@ import (
 func TestCursorNamedStoreReaderFiltersCWDAndWindow(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("CURSOR_CONFIG_DIR", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -139,6 +143,8 @@ func TestCoopNamedSlashCommandStopsWhenADialogOpens(t *testing.T) {
 func TestCursorNamedStoreReaderSkipsCorruptMeta(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("CURSOR_CONFIG_DIR", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -160,5 +166,114 @@ func TestCursorNamedStoreReaderSkipsCorruptMeta(t *testing.T) {
 	candidate, err := (cursorNamedStoreReader{}).locate(cwd, start)
 	if err != nil || candidate.storePath != good {
 		t.Fatalf("locate = %#v, %v; want the valid chat", candidate, err)
+	}
+}
+
+func TestCursorNamedStoreReaderUsesCursorConfigPrecedence(t *testing.T) {
+	home, config, xdg := t.TempDir(), t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	cwd, start := t.TempDir(), time.Now()
+	homeChat := writeNamedStoreMeta(t, filepath.Join(home, ".cursor"), "home", cwd, "home", start)
+	configChat := writeNamedStoreMeta(t, config, "override", cwd, "override", start)
+	xdgChat := homeChat
+	if runtime.GOOS == "linux" {
+		xdgChat = writeNamedStoreMeta(t, filepath.Join(xdg, "cursor"), "xdg", cwd, "xdg", start)
+	}
+	for _, tc := range []struct{ name, config, xdg, want string }{
+		{name: "explicit", config: config, xdg: xdg, want: configChat},
+		{name: "missing explicit store does not fall back", config: filepath.Join(config, "absent"), xdg: xdg},
+		{name: "xdg on Linux only", config: " ", xdg: xdg, want: xdgChat},
+		{name: "home", want: homeChat},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CURSOR_CONFIG_DIR", tc.config)
+			t.Setenv("XDG_CONFIG_HOME", tc.xdg)
+			got, err := (cursorNamedStoreReader{}).locate(cwd, start)
+			if tc.want == "" {
+				if err == nil || got.storePath != "" {
+					t.Fatalf("locate = %q, %v; want missing store, not a candidate from another root", got.storePath, err)
+				}
+			} else if err != nil || got.storePath != tc.want {
+				t.Fatalf("locate = %q, %v; want %q", got.storePath, err, tc.want)
+			}
+		})
+	}
+}
+
+func writeNamedStoreMeta(t *testing.T, config, id, cwd, title string, createdAt time.Time) string {
+	t.Helper()
+	path := filepath.Join(config, "chats", "workspace", id, "meta.json")
+	body, err := json.Marshal(map[string]any{
+		"schemaVersion": 1, "createdAtMs": createdAt.UnixMilli(), "cwd": cwd,
+		"title": title, "hasConversation": false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+type cursorNamedStoreAfterFirstLookup struct {
+	cursorNamedStoreReader
+	lookups int
+	after   func()
+}
+
+func (r *cursorNamedStoreAfterFirstLookup) locate(cwd string, start time.Time) (coopNamedStoreCandidate, error) {
+	candidate, err := r.cursorNamedStoreReader.locate(cwd, start)
+	r.lookups++
+	if r.lookups == 1 {
+		r.after()
+	}
+	return candidate, err
+}
+
+func TestRunCoopNamedTUIDoesNotAdoptLateConcurrentCursorChat(t *testing.T) {
+	config := t.TempDir()
+	t.Setenv("CURSOR_CONFIG_DIR", config)
+	cwd, start := t.TempDir(), time.Now()
+	writeNamedStoreMeta(t, config, "old", cwd, "", start.Add(-time.Minute))
+	reader := &cursorNamedStoreAfterFirstLookup{after: func() {
+		// A different Cursor process in this workspace writes its metadata
+		// first. A retry must not claim its chat as the one we launched.
+		writeNamedStoreMeta(t, config, "foreign", cwd, "", start)
+	}}
+	oldInject := coopNamedTTYInject
+	t.Cleanup(func() { coopNamedTTYInject = oldInject })
+	coopNamedTTYInject = func(string, string, func() bool) error {
+		t.Fatal("typed after an unbound concurrent chat appeared")
+		return nil
+	}
+	_, stderr, err := captureEnvOutput(t, func() error {
+		return runCoopNamedTUI(reader, "session1/cursor", "cursor-agent", cwd, start, nil)
+	})
+	if err != nil || reader.lookups != 1 || !strings.Contains(stderr, "no new Cursor chat store candidate") {
+		t.Fatalf("named lookup: err=%v lookups=%d stderr=%q; want one scan and a manual reminder", err, reader.lookups, stderr)
+	}
+}
+
+func TestRunCoopNamedTUIRefusesConcurrentCursorChatsInConfiguredStore(t *testing.T) {
+	config := t.TempDir()
+	t.Setenv("CURSOR_CONFIG_DIR", config)
+	cwd, start := t.TempDir(), time.Now()
+	writeNamedStoreMeta(t, config, "foreign", cwd, "", start)
+	writeNamedStoreMeta(t, config, "ours", cwd, "", start)
+	oldInject := coopNamedTTYInject
+	t.Cleanup(func() { coopNamedTTYInject = oldInject })
+	coopNamedTTYInject = func(string, string, func() bool) error {
+		t.Fatal("typed with two equally possible Cursor chats")
+		return nil
+	}
+	_, stderr, err := captureEnvOutput(t, func() error {
+		return runCoopNamedTUI(cursorNamedStoreReader{}, "session1/cursor", "cursor-agent", cwd, start, nil)
+	})
+	if err != nil || !strings.Contains(stderr, "2 new Cursor chat store candidates are ambiguous") {
+		t.Fatalf("named lookup: err=%v stderr=%q; want ambiguity and a manual reminder", err, stderr)
 	}
 }
