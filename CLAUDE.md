@@ -342,8 +342,10 @@ AMQ messages to a teammate still require the team leader to relay them.
 ## Testing
 
 Run the tests of the packages you changed, narrowest first. The pre-push hook
-runs `make check`; CI runs the full `make ci` suite. Useful focused commands
-include:
+runs `make check`; CI runs the full `make ci` suite. `make test` runs with a
+scratch HOME. A child fixture takes its write destination from its parent and
+refuses without it, so a test run by hand with a child selector needs no scratch
+HOME. Useful focused commands include:
 
 ```bash
 go test ./internal/fsq -run TestMaildir
