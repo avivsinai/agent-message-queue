@@ -28,9 +28,9 @@ type job struct {
 	key  string // request identity: commands for one request run in order
 	run  func() (any, error)
 	// admit, when set, runs under the dispatcher's lock once the job has a
-	// place, and before any worker can run it; false refuses the job, which
+	// place, and before any worker can run it; an error refuses the job, which
 	// then takes no place.
-	admit func() bool
+	admit func() error
 	// keep means the job must finish after disconnect. A named revoke earns
 	// it on admission; an ordinary job earns it only when a worker claims it.
 	keep bool
@@ -62,16 +62,20 @@ func newDispatcher(ctx context.Context) *dispatcher {
 	return d
 }
 
-// enqueue adds a job; false means the dispatcher is full, stopped, or the
-// job's admit refused it.
-func (d *dispatcher) enqueue(j *job) bool {
+// enqueue reserves a place or returns the reason for the busy reply.
+func (d *dispatcher) enqueue(j *job) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.ctx.Err() != nil || d.queued >= dispatchQueued {
-		return false
+	if err := d.ctx.Err(); err != nil {
+		return err
 	}
-	if j.admit != nil && !j.admit() {
-		return false
+	if d.queued >= dispatchQueued {
+		return errors.New("too many requests in progress")
+	}
+	if j.admit != nil {
+		if err := j.admit(); err != nil {
+			return err
+		}
 	}
 	d.queued++
 	q := d.queues[j.key]
@@ -79,7 +83,7 @@ func (d *dispatcher) enqueue(j *job) bool {
 	if len(q) == 0 {
 		d.ready <- j.key // cannot block: ready holds at most dispatchQueued keys
 	}
-	return true
+	return nil
 }
 
 // Each ready key has exactly one worker until that worker publishes its

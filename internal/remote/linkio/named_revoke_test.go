@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -474,6 +475,12 @@ func TestNamedRevokeAfterADisconnectFollowsItsPredecessor(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the first connection never finished its accepted work")
 	}
+	// No replay has arrived. Once the predecessor has finished, a successful
+	// refresh of the now-absent grant can release the busy hold.
+	c.Tick()
+	if c.namedHeld(b.Binding, digestB) {
+		t.Fatal("busy hold survived the completed queue and confirmed absence")
+	}
 	fs.send(f)
 	sameBody(t, fs.next(), f.ID, "86-revoked_reply_v2_not_ended.json")
 	if g, err := LoadGrants(stateDir, "example"); err != nil || g[b.Binding].Grant != nil || g[b.Binding].Generation != gen || g[b.Binding].IssuedFloor != "2026-10-09T14:10:00Z" {
@@ -481,6 +488,90 @@ func TestNamedRevokeAfterADisconnectFollowsItsPredecessor(t *testing.T) {
 	}
 	if _, reason := c.GrantLive(b.TargetID, digestB); reason == "" {
 		t.Fatal("hand-over check of B after its revoke = live")
+	}
+}
+
+// Review finding, 2026-11-26: a granted task ran while a revoke of its grant
+// was answered busy behind a predecessor on a disconnected session.
+func TestNamedRevokeBusyOnReconnectDeniesTheGrantUntilReplay(t *testing.T) {
+	view, key := goldenView(t)
+	b := view.Bindings["pi-demo"]
+	const gen = "g_3jx7k2m4qv5w6y7zab2cd3ef4g"
+	digest := goldenGrantDigest(t)
+	store := &memGrants{g: Grants{b.Binding: {Generation: gen, Grant: goldenGrant(t, b, key, gen, "2026-10-09T22:10:00Z", key)}}}
+	fs, gate := newFakeServer(t), newGrantGate()
+	c, _ := startCarrier(t, fs, grantClock(), namedRevokeMachine(t, store, gate, nil))
+	release := sync.OnceFunc(func() { close(gate.release) })
+	defer release()
+	wgen := fs.waitWelcome()
+	waitOnline(t, c)
+	gate.holdOn(t, fs, wgen, goldenFrame(t, "41-grant_info.json"))
+	c.mu.Lock()
+	drained := c.sess.dispatch.drained
+	c.mu.Unlock()
+	fs.close(websocket.StatusGoingAway)
+	wgen = fs.waitWelcome()
+	send := func(f Frame) Frame {
+		f.Gen = wgen
+		fs.send(f)
+		return fs.next()
+	}
+	revoke := namedRevokeFrame(t, digest)
+	busy := func(f Frame) string {
+		t.Helper()
+		r := send(f)
+		var refused struct{ Error ErrorBody }
+		if r.Re != f.ID || json.Unmarshal(r.Body, &refused) != nil || refused.Error.Code != string(protocol.CodeBusy) || refused.Error.RetryAfterMS <= 0 {
+			t.Fatalf("revoke behind retired work: %s; want correlated busy with retry delay", r.Body)
+		}
+		return refused.Error.Message
+	}
+	for range 3 {
+		busy(revoke)
+	}
+	// B occupies one place however many times the server repeats it.
+	var overflow string
+	for i := range dispatchQueued {
+		other := fmt.Sprintf("sha256:%064x", i)
+		message := busy(namedRevokeFrame(t, other))
+		if i == dispatchQueued-1 {
+			overflow = other
+			if !strings.Contains(message, "set is full") || c.namedHeld(b.Binding, other) {
+				t.Fatalf("new pair at capacity: %q, held=%t", message, c.namedHeld(b.Binding, other))
+			}
+		} else if !c.namedHeld(b.Binding, other) {
+			t.Fatalf("pair %d was refused before capacity", i)
+		}
+	}
+	c.Tick()
+	submit := goldenFrame(t, "49-granted_submit.json")
+	var refused struct{ Error ErrorBody }
+	if r := send(submit); r.Re != submit.ID || json.Unmarshal(r.Body, &refused) != nil || refused.Error.Code != CodeGrantRevoked {
+		t.Errorf("submit while revoke is busy: %s; want grant_revoked", r.Body)
+	}
+	if _, reason := c.GrantLive(b.TargetID, digest); !strings.HasPrefix(reason, CodeGrantRevoked+": ") {
+		t.Errorf("handoff while revoke is busy: %q; want grant_revoked", reason)
+	}
+	release()
+	select {
+	case <-drained:
+	case <-time.After(5 * time.Second):
+		t.Fatal("retiring work never finished")
+	}
+	// The bounded set still reports capacity on the healthy dispatcher.
+	if message := busy(namedRevokeFrame(t, overflow)); !strings.Contains(message, "set is full") {
+		t.Fatalf("new pair before absence readback: %q; want capacity reason", message)
+	}
+	c.Tick()
+	if _, reason := c.GrantLive(b.TargetID, digest); !strings.HasPrefix(reason, CodeGrantRevoked+": ") {
+		t.Errorf("handoff before replay: %q; want grant_revoked", reason)
+	}
+	if n := len(*c.named.Load()); n != 1 {
+		t.Fatalf("holds after the readback: %d; want only live B", n)
+	}
+	sameBody(t, send(revoke), revoke.ID, "85-revoked_reply_v2_ended.json")
+	if c.namedHeld(b.Binding, digest) {
+		t.Fatal("the replay decided but a busy hold remains")
 	}
 }
 
@@ -513,8 +604,8 @@ func TestDispatcherStopKeepsClaimedAndNamedJobsInOrder(t *testing.T) {
 			record(name + " end")
 			return nil, nil
 		}}
-		if !d.enqueue(j) {
-			t.Fatalf("enqueue %s refused", name)
+		if err := d.enqueue(j); err != nil {
+			t.Fatalf("enqueue %s: %v", name, err)
 		}
 	}
 	// Every worker takes a head that blocks.

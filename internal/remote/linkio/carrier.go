@@ -1008,8 +1008,8 @@ func (c *Carrier) enqueue(sess *session, f Frame, key string, run func() (any, e
 }
 
 func (c *Carrier) enqueueJob(j *job) bool {
-	if !j.sess.dispatch.enqueue(j) {
-		c.refuse(j.sess, j.f.ID, ErrorBody{Code: string(protocol.CodeBusy), Message: "too many requests in progress", RetryAfterMS: busyRetryAfterMS})
+	if err := j.sess.dispatch.enqueue(j); err != nil {
+		c.refuse(j.sess, j.f.ID, ErrorBody{Code: string(protocol.CodeBusy), Message: err.Error(), RetryAfterMS: busyRetryAfterMS})
 		return false
 	}
 	return true

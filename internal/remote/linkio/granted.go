@@ -53,7 +53,7 @@ func (c *Carrier) handleGrantRequest(sess *session, f Frame) {
 			c.refuse(sess, f.ID, ErrorBody{Code: CodeConsentInvalid, Message: "the signed grant names no binding"})
 			return
 		}
-		if c.refuseRetiringGrant(sess, f, binding) {
+		if c.refuseRetiringGrant(sess, f, binding, "") {
 			return
 		}
 		c.enqueue(sess, f, "grant:"+binding, func() (any, error) { return c.acceptGrant(m, binding) })
@@ -100,14 +100,14 @@ func (c *Carrier) handleGrantRequest(sess *session, f Frame) {
 		// The named grant stops counting once the job has its place, before
 		// any later frame is read; the store decides on the dispatcher, in
 		// order with signed grants, also when the connection ends first.
-		if c.refuseRetiringGrant(sess, f, m.Binding) {
+		if c.refuseRetiringGrant(sess, f, m.Binding, m.GrantDigest) {
 			return
 		}
 		p := namedRevoke{binding: m.Binding, digest: m.GrantDigest}
 		c.enqueueJob(&job{
 			sess: sess, f: f, key: "grant:" + m.Binding, keep: true,
 			run:   func() (any, error) { return c.revokeNamed(p) },
-			admit: func() bool { return c.holdNamed(p) },
+			admit: func() error { return c.holdNamed(p, false) },
 		})
 	}
 }
@@ -146,12 +146,19 @@ func (c *Carrier) finishRetiringKey(key string) {
 
 // A signed acceptance or named revoke cannot pass an earlier connection's
 // unfinished work for the binding. The reader can still serve other keys.
-func (c *Carrier) refuseRetiringGrant(sess *session, f Frame, binding string) bool {
+// A revoke carries a digest; a signed acceptance has no revoke to hold.
+func (c *Carrier) refuseRetiringGrant(sess *session, f Frame, binding, revokeDigest string) bool {
 	c.mu.Lock()
 	pending := c.retiringGrants["grant:"+binding] != 0
+	message := "a previous connection is finishing work for this binding"
+	if pending && revokeDigest != "" {
+		if err := c.holdNamed(namedRevoke{binding, revokeDigest}, true); err != nil {
+			message = err.Error()
+		}
+	}
 	c.mu.Unlock()
 	if pending {
-		c.refuse(sess, f.ID, ErrorBody{Code: string(protocol.CodeBusy), Message: "a previous connection is finishing work for this binding", RetryAfterMS: busyRetryAfterMS})
+		c.refuse(sess, f.ID, ErrorBody{Code: string(protocol.CodeBusy), Message: message, RetryAfterMS: busyRetryAfterMS})
 	}
 	return pending
 }
@@ -404,34 +411,42 @@ type namedRevoke struct{ binding, digest string }
 // namedHold is how revokes hold one named grant. held counts the revokes
 // whose job is queued or running; each job releases its own. unsettled
 // marks a revoke whose decision failed; the next decision of the store for
-// this exact grant settles it.
+// this exact grant settles it. awaitingReplay holds a busy revoke that has
+// no job. An admitted replay takes over that hold in the same publication.
 type namedHold struct {
-	held      int
-	unsettled bool
+	held           int
+	unsettled      bool
+	awaitingReplay bool
 }
 
-// holdNamed holds the grant p names from now on, with no I/O, and reports
-// false when that would hold more grants than the dispatcher queues jobs.
+// holdNamed holds the grant p names without I/O, within the dispatch bound.
 // Another revoke of a grant already held takes no new place.
-func (c *Carrier) holdNamed(p namedRevoke) bool {
+func (c *Carrier) holdNamed(p namedRevoke, awaitingReplay bool) error {
 	c.namedMu.Lock()
 	defer c.namedMu.Unlock()
 	next := map[namedRevoke]namedHold{}
 	if old := c.named.Load(); old != nil {
-		if _, ok := (*old)[p]; !ok && len(*old) >= dispatchQueued {
-			return false
+		h, known := (*old)[p]
+		if awaitingReplay && h.awaitingReplay {
+			return nil
+		}
+		if !known && len(*old) >= dispatchQueued {
+			return errors.New("the named revoke set is full; no hold was added for this grant")
 		}
 		next = maps.Clone(*old)
 	}
 	h := next[p]
-	h.held++
+	h.awaitingReplay = awaitingReplay
+	if !awaitingReplay {
+		h.held++
+	}
 	next[p] = h
 	c.named.Store(&next)
-	return true
+	return nil
 }
 
-// updateNamed changes the hold of p, copy-on-write, and lets p go once no
-// revoke holds it and none is unsettled.
+// updateNamed publishes the remaining obligations for p, dropping the entry
+// once the admitted jobs, storage retries and replay hold are all settled.
 func (c *Carrier) updateNamed(p namedRevoke, change func(*namedHold)) {
 	c.namedMu.Lock()
 	defer c.namedMu.Unlock()
@@ -445,7 +460,7 @@ func (c *Carrier) updateNamed(p namedRevoke, change func(*namedHold)) {
 	}
 	next := maps.Clone(*old)
 	change(&h)
-	if h.held <= 0 && !h.unsettled {
+	if h == (namedHold{}) {
 		delete(next, p)
 	} else {
 		next[p] = h
@@ -491,7 +506,7 @@ func (c *Carrier) decideNamed(p namedRevoke, own bool) (bool, error) {
 		if named == nil {
 			return false, nil
 		}
-		if h, ok := (*named)[p]; !ok || !h.unsettled || h.held > 0 {
+		if h, ok := (*named)[p]; !ok || !h.unsettled || h.held > 0 || h.awaitingReplay {
 			return false, nil
 		}
 	}
@@ -533,7 +548,7 @@ func (c *Carrier) settleNamedRevokes() {
 		return
 	}
 	for p, h := range *named {
-		if h.unsettled && h.held == 0 {
+		if h.unsettled && h.held == 0 && !h.awaitingReplay {
 			_, _ = c.decideNamed(p, false)
 		}
 	}
@@ -653,7 +668,31 @@ func (c *Carrier) RefreshGrants() {
 	}
 	c.gmu.Lock()
 	defer c.gmu.Unlock()
-	c.refreshGrantsLocked()
+	g, ok := c.refreshGrantsRead()
+	if ok {
+		c.releaseAbsentReplayHolds(g)
+	}
+}
+
+// A busy revoke of a still-stored grant needs an admitted replay. If the
+// old work finished and the exact grant is absent, there is nothing left to
+// fence. The caller holds gmu across the read and this check. The reader's
+// retirement check and hold publication are ordered with this scan by mu.
+func (c *Carrier) releaseAbsentReplayHolds(g Grants) {
+	named := c.named.Load()
+	if named == nil || len(*named) == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for p, h := range *named {
+		if !h.awaitingReplay || c.retiringGrants["grant:"+p.binding] != 0 {
+			continue
+		}
+		if sg := g[p.binding].Grant; sg == nil || sg.Digest != p.digest {
+			c.updateNamed(p, func(h *namedHold) { h.awaitingReplay = false })
+		}
+	}
 }
 
 // refreshGrantsLocked reads the store, stores the snapshot and returns it.

@@ -269,8 +269,8 @@ retired.
 - `amq.remote.link.grant_revoke/2` `{schema, binding, grant_digest}` (the
   binding must be this link's; `grant_digest` is the `digest` the grant's
   `grant_reply` gave). A /2 revoke names the accepted grant by its document
-  digest. Granted tasks under that grant read after this frame are refused
-  until the machine has decided, and it answers `{"revoked": {binding,
+  digest. On admission the machine immediately refuses tasks under that
+  grant. After its store decision it answers `{"revoked": {binding,
   grant_digest, ended}}`. The machine returns ended=true when it removes
   that grant and ended=false when the named grant has already ended or
   another grant is current. Both outcomes preserve the binding generation.
@@ -288,7 +288,11 @@ retired.
   Either value of `ended` settles that row. A signed-grant acknowledgement,
   disconnect, or refusal leaves it pending. On reconnect, a named revoke
   or signed grant can receive `busy` with a retry delay while an earlier
-  connection finishes work for that binding.
+  connection finishes work for that binding. A named revoke refused for
+  that reason holds the exact grant until an admitted replay decides, or
+  until the old work finishes and the machine reads the grant as absent.
+  At the 64-pair limit a new pair refused for capacity adds no hold; the
+  server retries (or uses `/1` for a separate binding-wide revocation).
   A task already handed to the harness is not recalled.
 
 Mixed versions: a server sends `grant_revoke/2` only on a connection whose
