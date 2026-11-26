@@ -465,8 +465,8 @@ of the seat's last sent message and its last read of mail (both from
 `amq doctor --ops`, the same for every harness), the worker's newest usage
 record, and presence last seen when no wake is live: a live wake refreshes
 presence itself, so it proves only the wake. The last sent message is dated
-by its id; the last read of mail is the seat's newest receipt, which every
-consumer writes when it moves mail out of `inbox/new`. The plate
+by its id; the last read of mail is the seat's newest drained or dlq receipt,
+which every consumer writes when it moves mail out of `inbox/new`. The plate
 names the fact it used: sent, read mail, usage, or presence. A harness AMQ
 does not know prints no harness label. The board cannot see processes and never says a
 worker is running or has stopped. A seat lists the current cards that name

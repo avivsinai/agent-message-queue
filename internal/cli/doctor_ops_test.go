@@ -15,6 +15,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
 	"github.com/avivsinai/agent-message-queue/internal/notificationattempt"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
+	"github.com/avivsinai/agent-message-queue/internal/receipt"
 )
 
 func TestRunOpsChecks_BasicAgentStats(t *testing.T) {
@@ -467,10 +468,20 @@ func TestRunOpsChecksReportsLastSentAndLastRead(t *testing.T) {
 	}
 	deliverGuardMessage(t, root, "alice", id)
 	delivered := filepath.Join(fsq.AgentInboxNew(root, "alice"), id+".md")
-	if err := os.Chtimes(delivered, now.Add(-2*time.Hour), now.Add(-2*time.Hour)); err != nil {
+	if err := os.Chtimes(delivered, now.Add(-3*time.Hour), now.Add(-3*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := drainInboxItems(openDeliveryRootForCLITest(t, root), root, "alice", false, 0, &headerValidator{}); err != nil {
+		t.Fatal(err)
+	}
+	drainedAt := now.Add(-time.Hour)
+	if err := os.Chtimes(filepath.Join(fsq.AgentReceipts(root, "alice"), receipt.Filename(id, "alice", receipt.StageDrained)), drainedAt, drainedAt); err != nil {
+		t.Fatal(err)
+	}
+	// Live run of the first receipt build: the wake's notification ledger
+	// in receipts/ read as a read of mail seconds old on a seat with 57
+	// unread messages.
+	if err := os.WriteFile(filepath.Join(fsq.AgentReceipts(root, "alice"), "notification-attempts.jsonl"), []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -485,8 +496,8 @@ func TestRunOpsChecksReportsLastSentAndLastRead(t *testing.T) {
 	if sent := *a.LastSentAgeSeconds; sent < 7100 || sent > 7300 {
 		t.Fatalf("last sent age = %v, want about 7200", sent)
 	}
-	if read := *a.LastReadAgeSeconds; read > 60 {
-		t.Fatalf("last read age = %v, want the drain's age, not the delivery's", read)
+	if read := *a.LastReadAgeSeconds; read < 3500 || read > 3700 {
+		t.Fatalf("last read age = %v, want about 3600: the drain's receipt, not the delivery or another record", read)
 	}
 }
 
