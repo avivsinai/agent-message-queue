@@ -435,6 +435,60 @@ func TestOpsMailboxCountCountsOnlyMessageFiles(t *testing.T) {
 	}
 }
 
+// Doctor dates a seat's newest sent message and its last read of mail. A
+// read keeps the message's delivery time, so the read age is the claim's.
+func TestRunOpsChecksReportsLastSentAndLastRead(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.WriteConfig(filepath.Join(root, "meta", "config.json"), config.Config{Version: 1, Agents: []string{"alice"}}, true); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	for _, path := range []string{
+		filepath.Join(fsq.AgentOutboxSent(root, "alice"), "sent1.md"),
+		filepath.Join(fsq.AgentInboxNew(root, "alice"), "msg1.md"),
+	} {
+		if err := os.WriteFile(path, []byte("message"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	identity, err := fsq.SnapshotDeliveryRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliveryRoot, err := fsq.OpenDeliveryRoot(root, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = deliveryRoot.Close() }()
+	if err := fsq.MoveNewToCur(deliveryRoot, "alice", "msg1.md"); err != nil {
+		t.Fatal(err)
+	}
+
+	result := runOpsChecks(root, "test_source", false)
+	if len(result.Agents) != 1 {
+		t.Fatalf("agents = %+v, want alice only", result.Agents)
+	}
+	a := result.Agents[0]
+	if a.LastSentAgeSeconds == nil || a.LastReadAgeSeconds == nil {
+		t.Fatalf("last sent age = %v, last read age = %v; want both", a.LastSentAgeSeconds, a.LastReadAgeSeconds)
+	}
+	if sent := *a.LastSentAgeSeconds; sent < 7100 || sent > 7300 {
+		t.Fatalf("last sent age = %v, want about 7200", sent)
+	}
+	if read := *a.LastReadAgeSeconds; read > 60 {
+		t.Fatalf("last read age = %v, want the claim's age, not the delivery's", read)
+	}
+}
+
 // A session root without its own config reads the base roster under --fix-wake-locks, with no false config_error (audit 2026-11-10).
 func TestRunOpsChecksFixWakeLocksUsesBaseConfigForSessionRoot(t *testing.T) {
 	parent := t.TempDir()

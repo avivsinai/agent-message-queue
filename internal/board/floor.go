@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/board/usage"
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 )
 
 // StationState is a seat's state on the Floor. The board cannot see a
@@ -90,8 +91,8 @@ type Station struct {
 	// projection time, dated from when AMQ was read.
 	OldestUnreadAgeSeconds float64   `json:"oldest_unread_age_seconds,omitempty"`
 	LastActivity           time.Time `json:"last_activity,omitzero"`
-	// ActivitySource names the fact behind LastActivity: usage, or presence
-	// when no wake is live.
+	// ActivitySource names the fact behind LastActivity: sent, read mail,
+	// usage, or presence when no wake is live.
 	ActivitySource string      `json:"activity_source,omitempty"`
 	Wake           StationWake `json:"wake"`
 	// Limit is the account's reached limit while its reset is ahead. When
@@ -308,23 +309,30 @@ func newStation(a RosterAgent, ownsWork bool, observed time.Time, cfg Config, no
 	return st
 }
 
-// lastActivity is the newest activity fact: the worker's newest usage
+// lastActivity is the newest activity fact and its source: the seat's
+// newest sent message, its last read of mail, the worker's newest usage
 // record, or presence last seen when no wake is live. A live wake refreshes
 // presence on its own, so with one presence proves only the wake. Doctor
-// --ops reports presence age; a mailbox only who lists has none.
+// --ops reports presence age and the sent and read times; a mailbox only who
+// lists has none of them.
 func lastActivity(a RosterAgent, observed time.Time) (time.Time, string) {
 	var at time.Time
 	source := ""
+	newer := func(t time.Time, from string) {
+		if t.After(at) {
+			at, source = t, from
+		}
+	}
 	doctorReported := a.Counted || a.CountError != ""
 	wakeLive := a.PresenceSource == "notifier_live"
 	if doctorReported && !wakeLive && !observed.IsZero() && a.PresenceStatus != "" && a.PresenceStatus != "unknown" {
-		at, source = observed.Add(-seconds(a.PresenceAgeSeconds)), "presence"
+		newer(observed.Add(-seconds(a.PresenceAgeSeconds)), "presence")
 	}
 	for _, u := range a.Usage {
-		if u.AsOf.After(at) {
-			at, source = u.AsOf, "usage"
-		}
+		newer(u.AsOf, "usage")
 	}
+	newer(a.LastSentAt, "sent")
+	newer(a.LastReadAt, "read mail")
 	return at, source
 }
 
@@ -356,13 +364,17 @@ func weekdayTime(t, now time.Time) string {
 	return t.Local().Format("Jan 2 15:04")
 }
 
-// harnessName is the harness as the owner knows it.
+// harnessName is the harness as the owner knows it; empty for a harness
+// AMQ does not know, so no label stands for an unknown one.
 func harnessName(h string) string {
 	switch h {
 	case usage.Claude:
 		return "Claude Code"
 	case usage.Codex:
 		return "Codex"
+	}
+	if harness.Lookup(h).Name == harness.Other {
+		return ""
 	}
 	return h
 }

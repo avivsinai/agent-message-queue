@@ -77,6 +77,15 @@ type opsAgent struct {
 	OldestDLQAgeSeconds float64 `json:"oldest_dlq_age_seconds"`
 	// DLQCountError is UnreadCountError for the DLQ.
 	DLQCountError string `json:"dlq_count_error,omitempty"`
+	// LastSentAgeSeconds is the age of the newest message in the agent's
+	// outbox/sent; absent when it sent none.
+	LastSentAgeSeconds *float64 `json:"last_sent_age_seconds,omitempty"`
+	// LastReadAgeSeconds is the age of the agent's last read of mail. A read
+	// renames a message from inbox/new to inbox/cur and the file keeps its
+	// delivery time, so the age is that of inbox/cur's own modification
+	// time, which the rename sets; an explicit history cleanup that removes
+	// read mail sets it too. Absent when inbox/cur holds no message.
+	LastReadAgeSeconds *float64 `json:"last_read_age_seconds,omitempty"`
 	// Follow-ups this agent armed as a sender: all of them, those already
 	// due, and the earliest due time.
 	FollowUpsPending int    `json:"follow_ups_pending,omitempty"`
@@ -267,6 +276,8 @@ func runOpsChecksWithSchema(
 		mailboxPresent := dirExists(fsq.AgentBase(root, handle))
 		agent.UnreadCount, agent.OldestUnreadAgeSeconds, agent.UnreadCountError = opsMailboxCount(fsq.AgentInboxNew(root, handle), mailboxPresent, now)
 		agent.DLQCount, agent.OldestDLQAgeSeconds, agent.DLQCountError = opsMailboxCount(fsq.AgentDLQNew(root, handle), mailboxPresent, now)
+		agent.LastSentAgeSeconds = opsLastChangeAge(fsq.AgentOutboxSent(root, handle), false, now)
+		agent.LastReadAgeSeconds = opsLastChangeAge(fsq.AgentInboxCur(root, handle), true, now)
 		opsFollowUps(&agent, root, now)
 
 		// Presence
@@ -597,6 +608,40 @@ func opsMailboxCount(dir string, mailboxPresent bool, now time.Time) (int, float
 		}
 	}
 	return count, oldest, ""
+}
+
+// opsLastChangeAge is the age, in whole seconds, of the newest change to a
+// mailbox directory that holds a message file as opsMailboxCount counts
+// them: the newest message file's modification time, or with dirTime the
+// directory's own modification time, which an entry renamed into or removed
+// from it sets. Nil when the directory holds no message or cannot be read.
+func opsLastChangeAge(dir string, dirTime bool, now time.Time) *float64 {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var newest time.Time
+	for _, e := range entries {
+		if !opsMessageEntry(e) {
+			continue
+		}
+		if dirTime {
+			info, err := os.Lstat(dir)
+			if err != nil || !info.IsDir() {
+				return nil
+			}
+			newest = info.ModTime()
+			break
+		}
+		if info, err := e.Info(); err == nil && info.ModTime().After(newest) {
+			newest = info.ModTime()
+		}
+	}
+	if newest.IsZero() {
+		return nil
+	}
+	age := math.Round(now.Sub(newest).Seconds())
+	return &age
 }
 
 // opsMessageEntry reports whether a mailbox entry is a message file: a

@@ -447,8 +447,8 @@ omitted count) and `forge_cards`; each card carries `stage`, `stage_since`,
 Requests remain.
 
 Floor is a page view and a `== Floor ==` text section with one station per
-agent seat of the AMQ roster. A seat is shown when its wake is live, presence
-or usage shows activity inside `liveness_window`, it has unread mail newer than
+agent seat of the AMQ roster. A seat is shown when its wake is live, it shows
+activity inside `liveness_window`, it has unread mail newer than
 `stale_after`, or a current card names it; the other mailboxes fold into one
 dormant count per session, and so does a mailbox whose fresh mail arrived after
 more than `stale_after` without activity. The state is the first that matches:
@@ -460,10 +460,15 @@ ages date from the AMQ read),
 Working (activity inside `liveness_window`), Idle (the wake is live and the
 inbox is counted; no mail waits without an activity record), Off (no wake and
 no recent activity; the inbox is counted), and Unknown (the inbox was not
-counted, or mail waits and no activity was observed). Activity is the
-worker's newest usage record, or presence last seen when no wake is live: a
-live wake refreshes presence itself, so it proves only the wake. The plate
-names the fact it used. The board cannot see processes and never says a
+counted, or mail waits and no activity was observed). Activity is the newest
+of the seat's last sent message and its last read of mail (both from
+`amq doctor --ops`, the same for every harness), the worker's newest usage
+record, and presence last seen when no wake is live: a live wake refreshes
+presence itself, so it proves only the wake. The last read of mail is the
+modification time of the seat's `inbox/cur`, which an explicit
+`amq cleanup --history-older-than` or `--history-max-size` also sets. The plate
+names the fact it used: sent, read mail, usage, or presence. A harness AMQ
+does not know prints no harness label. The board cannot see processes and never says a
 worker is running or has stopped. A seat lists the current cards that name
 it, In progress first, then In review, Ready, and Blocked; a card that names a
 handle without a session is listed under each seat of that handle with

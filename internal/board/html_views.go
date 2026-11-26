@@ -229,7 +229,7 @@ func buildFloorPage(m Model, now time.Time) pageFloor {
 		}
 		ps.SharedN = st.HandleSessions
 		ps.ActivitySource = st.ActivitySource
-		ps.WakePresence = st.Wake.Live && st.ActivitySource != "usage"
+		ps.WakePresence = st.Wake.Live && st.ActivitySource == ""
 		ps.Foot = sum.Wake
 		if st.State != StationWorking {
 			ps.Foot += " · " + sum.Activity
