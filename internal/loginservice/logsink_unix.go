@@ -80,14 +80,17 @@ func (l *logWriter) Write(p []byte) (int, error) {
 		rest = rest[len(line):]
 		l.bol = line[len(line)-1] == '\n'
 	}
-	if err := lock.Lock(l.lk); err != nil {
-		return 0, err
+	// A line is never dropped for the sake of the bound: with no lock the
+	// write goes on without rotation, and a rotation that cannot run leaves
+	// the log as it is.
+	locked := lock.Lock(l.lk) == nil
+	if locked {
+		defer func() { _ = lock.Unlock(l.lk) }()
 	}
-	defer func() { _ = lock.Unlock(l.lk) }()
 	for b.Len() > 0 {
 		chunk := b.Next(int(l.max))
-		if err := l.rotate(int64(len(chunk))); err != nil {
-			return 0, err
+		if locked {
+			_ = l.rotate(int64(len(chunk)))
 		}
 		if _, err := l.f.Write(chunk); err != nil {
 			return 0, err

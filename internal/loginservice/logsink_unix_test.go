@@ -75,3 +75,41 @@ func TestLogSinkWithoutAppendFlag(t *testing.T) {
 		t.Fatalf("up.log = %q, want two timestamped lines", cur)
 	}
 }
+
+// Review finding, 2026-11-26: a log whose path was given to another file
+// refused every write once it crossed its cap. The writer keeps the lines
+// in the file it holds; it does not drop them for the sake of the bound.
+func TestLogSinkKeepsWritingWhenItsPathNamesAnotherFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "up.log")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	w := LogSink(path, f)
+	l, ok := w.(*logWriter)
+	if !ok {
+		t.Fatalf("LogSink(up.log) = %T, want *logWriter", w)
+	}
+	l.max = 100
+	moved := filepath.Join(dir, "moved.log")
+	if err := os.Rename(path, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 10 {
+		if _, err := fmt.Fprintf(w, "link example: state %d\n", i); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+	held, err := os.ReadFile(moved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`state 0\n`).Match(held) || !regexp.MustCompile(`state 9\n$`).Match(held) {
+		t.Fatalf("the held log lost lines:\n%s", held)
+	}
+}
