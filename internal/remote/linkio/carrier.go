@@ -514,7 +514,7 @@ func (c *Carrier) Request(ctx context.Context, body any) (json.RawMessage, error
 // next session sends the bindings as they are then.
 func (c *Carrier) Tick() {
 	c.writeRevokedGenerations() // a revoke whose new generation is not yet written
-	c.settleNamedRevokes()      // a named revoke whose decision failed or never ran
+	c.settleNamedRevokes()      // a named revoke whose decision failed
 	c.refreshKeys()             // a key list the CLI changed is seen here
 	c.RefreshGrants()           // and a grant ended by it, by the owner or by its expiry
 	c.mu.Lock()

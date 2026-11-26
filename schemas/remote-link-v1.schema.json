@@ -11,7 +11,7 @@
     "re": { "$ref": "#/$defs/frame_id" },
     "gen": { "type": "integer", "minimum": 1 },
     "body": { "type": "object" },
-    "grant_revoke_v2": { "const": true, "description": "Only on hello, only from a machine that accepts grant_revoke/2 on this connection. Transport metadata outside the signed hello; absent means the machine accepts only grant_revoke/1." }
+    "grant_revoke_v2": { "const": true, "description": "Only on hello, only from a machine that accepts grant_revoke/2 on this connection. Transport metadata outside the signed hello. Absent means no advertised grant_revoke/2 support, not proof that the machine accepts grant_revoke/1." }
   },
   "anyOf": [{ "required": ["id"] }, { "required": ["re"] }],
   "if": { "required": ["grant_revoke_v2"] },

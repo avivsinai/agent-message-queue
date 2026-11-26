@@ -27,9 +27,14 @@ type job struct {
 	f    Frame
 	key  string // request identity: commands for one request run in order
 	run  func() (any, error)
-	// drop, when set, runs instead of run for a job that never starts
-	// because the connection ended.
-	drop func()
+	// admit, when set, runs under the dispatcher's lock once the job has a
+	// place, and before any worker can run it; false refuses the job, which
+	// then takes no place.
+	admit func() bool
+	// keep makes the job run when the connection ends before it starts, in
+	// its place behind the jobs of its key that still run. Every other job
+	// not yet started then never runs.
+	keep bool
 }
 
 // dispatcher runs server requests on bounded workers, in arrival order per
@@ -40,21 +45,29 @@ type dispatcher struct {
 	ready   chan string       // keys whose head may run
 	queued  int
 	stopped bool
+	// drained is closed once the dispatcher stopped and no job is queued or
+	// running; the workers then return.
+	drained  chan struct{}
+	isClosed bool
 }
 
 func newDispatcher(ctx context.Context) *dispatcher {
-	d := &dispatcher{queues: map[string][]*job{}, ready: make(chan string, dispatchQueued)}
+	d := &dispatcher{queues: map[string][]*job{}, ready: make(chan string, dispatchQueued), drained: make(chan struct{})}
 	for range dispatchWorkers {
 		go d.work(ctx)
 	}
 	return d
 }
 
-// enqueue adds a job; false means the dispatcher is full.
+// enqueue adds a job; false means the dispatcher is full, stopped, or the
+// job's admit refused it.
 func (d *dispatcher) enqueue(j *job) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.stopped || d.queued >= dispatchQueued {
+		return false
+	}
+	if j.admit != nil && !j.admit() {
 		return false
 	}
 	d.queued++
@@ -66,38 +79,53 @@ func (d *dispatcher) enqueue(j *job) bool {
 	return true
 }
 
+// work runs heads of ready keys until the connection ends, then the jobs
+// stop kept, until none is left.
 func (d *dispatcher) work(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
 			d.stop()
-			return
-		case key := <-d.ready:
-			d.mu.Lock()
-			j := d.queues[key][0]
-			d.mu.Unlock()
-			out, err := j.run()
-			answer(ctx, j.sess, j.f.ID, out, err)
-			d.mu.Lock()
-			d.queued--
-			if q := d.queues[key][1:]; len(q) > 0 {
-				d.queues[key] = q
-				d.ready <- key
-			} else {
-				delete(d.queues, key)
+			for {
+				select {
+				case <-d.drained:
+					return
+				case key := <-d.ready:
+					d.runHead(ctx, key)
+				}
 			}
-			d.mu.Unlock()
+		case key := <-d.ready:
+			d.runHead(ctx, key)
 		}
 	}
 }
 
-// stop ends the dispatcher once: no job is queued after it, and every job
-// that has not started never runs and has its drop called. A head whose key
-// is not in ready has been taken by a worker and finishes as usual.
+// runHead runs the head of key's queue and readies the next job of key.
+func (d *dispatcher) runHead(ctx context.Context, key string) {
+	d.mu.Lock()
+	j := d.queues[key][0]
+	d.mu.Unlock()
+	out, err := j.run()
+	answer(ctx, j.sess, j.f.ID, out, err)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.queued--
+	if q := d.queues[key][1:]; len(q) > 0 {
+		d.queues[key] = q
+		d.ready <- key
+	} else {
+		delete(d.queues, key)
+	}
+	d.closeIfDrainedLocked()
+}
+
+// stop ends the dispatcher once. A head a worker already took (its key is
+// not in ready) finishes once. Of the jobs not started, those with keep stay
+// in order behind it and run; every other one never runs.
 func (d *dispatcher) stop() {
 	d.mu.Lock()
+	defer d.mu.Unlock()
 	if d.stopped {
-		d.mu.Unlock()
 		return
 	}
 	d.stopped = true
@@ -113,21 +141,34 @@ drain:
 			break drain
 		}
 	}
-	var dropped []*job
 	for key, q := range d.queues {
-		if idle[key] {
-			dropped = append(dropped, q...)
+		var kept []*job
+		if !idle[key] {
+			kept, q = append(kept, q[0]), q[1:]
+		}
+		for _, j := range q {
+			if j.keep {
+				kept = append(kept, j)
+			}
+		}
+		d.queued -= len(d.queues[key]) - len(kept)
+		switch {
+		case len(kept) == 0:
 			delete(d.queues, key)
-			continue
+		case idle[key]:
+			d.queues[key] = kept
+			d.ready <- key // cannot block: ready was drained and holds at most dispatchQueued keys
+		default:
+			d.queues[key] = kept
 		}
-		dropped = append(dropped, q[1:]...)
-		d.queues[key] = q[:1]
 	}
-	d.mu.Unlock()
-	for _, j := range dropped {
-		if j.drop != nil {
-			j.drop()
-		}
+	d.closeIfDrainedLocked()
+}
+
+func (d *dispatcher) closeIfDrainedLocked() {
+	if d.stopped && len(d.queues) == 0 && !d.isClosed {
+		d.isClosed = true
+		close(d.drained)
 	}
 }
 

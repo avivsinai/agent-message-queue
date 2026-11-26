@@ -92,17 +92,15 @@ func (c *Carrier) handleGrantRequest(sess *session, f Frame) {
 			c.refuse(sess, f.ID, ErrorBody{Code: string(protocol.CodeUnshared), Message: fmt.Sprintf("binding %q is not shared with this link", m.Binding)})
 			return
 		}
-		// The named grant stops counting now, before any later frame is read;
-		// the store decides on the dispatcher, in order with signed grants.
+		// The named grant stops counting once the job has its place, before
+		// any later frame is read; the store decides on the dispatcher, in
+		// order with signed grants, also when the connection ends first.
 		p := namedRevoke{binding: m.Binding, digest: m.GrantDigest}
-		if !c.holdNamed(p) {
-			c.refuse(sess, f.ID, ErrorBody{Code: string(protocol.CodeBusy), Message: "too many grant revokes in progress", RetryAfterMS: busyRetryAfterMS})
-			return
-		}
-		j := &job{sess: sess, f: f, key: "grant:" + m.Binding, run: func() (any, error) { return c.revokeNamed(p) }, drop: func() { c.dropNamed(p) }}
-		if !c.enqueueJob(j) {
-			c.updateNamed(p, func(h *namedHold) { h.held-- })
-		}
+		c.enqueueJob(&job{
+			sess: sess, f: f, key: "grant:" + m.Binding, keep: true,
+			run:   func() (any, error) { return c.revokeNamed(p) },
+			admit: func() bool { return c.holdNamed(p) },
+		})
 	}
 }
 
@@ -224,6 +222,7 @@ func (c *Carrier) acceptGrant(m SignedGrant, binding string) (any, error) {
 		}
 		return nil, err
 	}
+	c.settleNamedOf(sg.Binding)
 	if old := st.Stored; old != nil {
 		// Replaced by the newer grant: it ends with no notice of its own.
 		delete(c.grantSeen, old.Digest)
@@ -349,9 +348,9 @@ func (c *Carrier) revokeGrant(binding string, mark uint64) (any, error) {
 type namedRevoke struct{ binding, digest string }
 
 // namedHold is how revokes hold one named grant. held counts the revokes
-// whose job may still run; each job releases its own. unsettled marks a
-// revoke whose decision failed or whose job will never run; the next
-// decision of the store for the grant settles it.
+// whose job is queued or running; each job releases its own. unsettled
+// marks a revoke whose decision failed; the next decision of the store for
+// the grant, or a grant the binding accepts after it, settles it.
 type namedHold struct {
 	held      int
 	unsettled bool
@@ -400,10 +399,17 @@ func (c *Carrier) updateNamed(p namedRevoke, change func(*namedHold)) {
 	c.named.Store(&next)
 }
 
-// dropNamed is the drop of a revoke job that never ran: the grant stays
-// held, unsettled, until the store decides.
-func (c *Carrier) dropNamed(p namedRevoke) {
-	c.updateNamed(p, func(h *namedHold) { h.held--; h.unsettled = true })
+// settleNamedOf settles every unsettled revoke of binding: a grant the
+// binding accepted after them replaced the grant they name, or is a new
+// grant they came before. Its caller holds gmu.
+func (c *Carrier) settleNamedOf(binding string) {
+	if named := c.named.Load(); named != nil {
+		for p, h := range *named {
+			if p.binding == binding && h.unsettled {
+				c.updateNamed(p, func(h *namedHold) { h.unsettled = false })
+			}
+		}
+	}
 }
 
 // namedHeld reports whether a grant_revoke/2 holds the grant with digest of
@@ -433,18 +439,30 @@ func (c *Carrier) revokeNamed(p namedRevoke) (any, error) {
 // store still holds it, under the store's own lock, and reads the store
 // again into the snapshot. Only then does it release the revoke's hold (own)
 // and settle the grant. Ended is true when this clear removed a grant that
-// had not already ended. On any failure the grant stays held, unsettled.
+// had not already ended. On any failure the grant stays held, unsettled. A
+// retry (not own) runs only while the grant is unsettled and no revoke job
+// of it is queued, which would decide in its place.
 func (c *Carrier) decideNamed(p namedRevoke, own bool) (bool, error) {
 	c.gmu.Lock()
 	defer c.gmu.Unlock()
-	c.refreshGrantsLocked()
-	_, endedBefore := c.endedGrant(p.digest)
-	changed, err := c.cfg.Grants.Revoke(p.binding, p.digest)
-	c.logStore("clear the revoked grant of "+p.binding, err)
-	if err == nil {
-		if _, read := c.refreshGrantsRead(); !read {
-			err = fmt.Errorf("the grants of binding %q cannot be read back", p.binding)
+	if !own {
+		named := c.named.Load()
+		if named == nil {
+			return false, nil
 		}
+		if h, ok := (*named)[p]; !ok || !h.unsettled || h.held > 0 {
+			return false, nil
+		}
+	}
+	var changed, endedBefore bool
+	_, err := c.readGrantsLocked(p.binding)
+	if err == nil {
+		_, endedBefore = c.endedGrant(p.digest)
+		changed, err = c.cfg.Grants.Revoke(p.binding, p.digest)
+		c.logStore("clear the revoked grant of "+p.binding, err)
+	}
+	if err == nil {
+		_, err = c.readGrantsLocked(p.binding)
 	}
 	c.updateNamed(p, func(h *namedHold) {
 		if own {
@@ -455,9 +473,19 @@ func (c *Carrier) decideNamed(p namedRevoke, own bool) (bool, error) {
 	return changed && !endedBefore, err
 }
 
-// settleNamedRevokes decides each named grant whose revoke is unsettled and
-// whose jobs have all ended. The carrier's tick runs it, so a failed
-// decision is tried again at every tick until it succeeds.
+// readGrantsLocked reads the store into the snapshot, or says it cannot.
+func (c *Carrier) readGrantsLocked(binding string) (Grants, error) {
+	g, read := c.refreshGrantsRead()
+	if !read {
+		return nil, fmt.Errorf("the grants of binding %q cannot be read", binding)
+	}
+	return g, nil
+}
+
+// settleNamedRevokes retries the decision of each named grant whose revoke
+// is unsettled and has no job queued. The carrier's tick runs it, so a
+// failed decision is tried again at every tick until it succeeds;
+// decideNamed checks again under gmu that it is still owed.
 func (c *Carrier) settleNamedRevokes() {
 	named := c.named.Load()
 	if c.cfg.Grants == nil || named == nil {

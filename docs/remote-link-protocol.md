@@ -35,8 +35,9 @@ server implementation copies them and runs the same checks as
 - Notifications (`bindings`, `key_revoked`) carry an `id` and get no reply.
 - `grant_revoke_v2` (`true`) appears only on `hello`, from a machine that
   accepts `grant_revoke/2` on that connection (see
-  [Requests](#requests)). It is outside the signed hello; absent means the
-  machine accepts only `grant_revoke/1`.
+  [Requests](#requests)). It is outside the signed hello. Its absence means
+  the machine advertises no `grant_revoke/2` support; it does not prove
+  that the machine accepts `grant_revoke/1`.
 - The envelope ignores unknown fields. Every body is strict: an unknown or
   duplicate key is refused. A new body version is a new schema string.
 
@@ -277,6 +278,12 @@ retired.
   empty or malformed `grant_digest` is `invalid`. When the machine cannot
   decide it answers `storage_full`, and the named grant stays refused until
   the server sends the same revoke again or the machine decides on its own.
+  When the connection ends first, the machine still decides, in order
+  behind the requests of the binding that were already running, and sends
+  no answer. The refusal before the decision lives in the machine's memory:
+  a restart before the decision is written drops it, and the named grant
+  admits tasks again until the server sends the same revoke again. So the
+  server keeps the named revoke and sends it again until it gets an answer.
   A task already handed to the harness is not recalled.
 
 Mixed versions: a server sends `grant_revoke/2` only on a connection whose
@@ -285,7 +292,11 @@ Mixed versions: a server sends `grant_revoke/2` only on a connection whose
 ends the named grant. A revoke the server recorded as named stays named: it
 is never sent again as `/1`, also after a reconnect to an older machine,
 and the server asks for the machine to be upgraded instead. Upgrade the
-machines first, then send named revokes on the upgraded links.
+machines first, then send named revokes on the upgraded links. A server row
+with no recorded digest, under the named protocol, is closed locally: the
+server sends nothing and makes no claim that the machine's grant ended,
+which stays live until it expires, a newer grant replaces it, or a
+binding-wide revoke ends it.
 
 ### What the machine checks at each granted task
 

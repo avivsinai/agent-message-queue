@@ -2,15 +2,19 @@ package linkio
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
@@ -39,6 +43,67 @@ func namedRevokeStore(t *testing.T, binding string, rec GrantRecord) string {
 		t.Fatal(err)
 	}
 	return stateDir
+}
+
+// grantGate holds the first grant availability check made after it is
+// armed until it is released: the job that makes the check, and every later
+// job of its binding, waits behind it.
+type grantGate struct {
+	armed            atomic.Bool
+	waiting, release chan struct{}
+}
+
+func newGrantGate() *grantGate {
+	return &grantGate{waiting: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (g *grantGate) check() {
+	if g.armed.CompareAndSwap(true, false) {
+		close(g.waiting)
+		<-g.release
+	}
+}
+
+// holdOn arms g, sends f on fs and returns once f's job waits at g.
+func (g *grantGate) holdOn(t *testing.T, fs *fakeServer, gen int64, f Frame) {
+	t.Helper()
+	g.armed.Store(true)
+	f.Gen = gen
+	fs.send(f)
+	select {
+	case <-g.waiting:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the held job never reached the machine")
+	}
+}
+
+// namedRevokeMachine is the machine of the golden binding on store: its
+// grant availability checks pass g, its notices go to notices, and no
+// granted task may run.
+func namedRevokeMachine(t *testing.T, store GrantStore, g *grantGate, notices chan string) func(*Config) {
+	view, key := goldenView(t)
+	b := view.Bindings["pi-demo"]
+	return func(cfg *Config) {
+		cfg.StoreID = view.StoreID
+		cfg.ConsentKeys = func() ([]ConsentKey, error) { return []ConsentKey{key}, nil }
+		cfg.Bindings = func() []Binding { return []Binding{b} }
+		cfg.Grants = store
+		cfg.Notify = func(_, body string) {
+			if notices != nil {
+				notices <- body
+			}
+		}
+		cfg.GrantInfoFor = func(Binding) (bool, string, int) {
+			if g != nil {
+				g.check()
+			}
+			return true, "", protocol.MaxInputBytes
+		}
+		cfg.Handle = func(*protocol.Command, core.Source) (any, error) {
+			t.Error("a granted task ran under a grant a revoke named")
+			return protocol.Reply{Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Evidence: "submitted"}}, nil
+		}
+	}
 }
 
 // review finding, 2026-11-26: a revoke of one grant could end its successor.
@@ -123,26 +188,8 @@ func TestNamedRevokeHoldsTheGrantUntilTheStoreDecides(t *testing.T) {
 	digestB := goldenGrantDigest(t)
 	stateDir := namedRevokeStore(t, b.Binding, GrantRecord{Generation: gen, Grant: goldenGrant(t, b, key, gen, "2026-10-09T22:10:00Z", key)})
 	notices := make(chan string, 8)
-	var hold atomic.Bool
-	waiting, release := make(chan struct{}), make(chan struct{})
-	machine := func(cfg *Config) {
-		cfg.StoreID = view.StoreID
-		cfg.ConsentKeys = func() ([]ConsentKey, error) { return []ConsentKey{key}, nil }
-		cfg.Bindings = func() []Binding { return []Binding{b} }
-		cfg.Grants = FileGrants(stateDir, "example")
-		cfg.Notify = func(_, body string) { notices <- body }
-		cfg.GrantInfoFor = func(Binding) (bool, string, int) {
-			if hold.CompareAndSwap(true, false) {
-				close(waiting)
-				<-release
-			}
-			return true, "", protocol.MaxInputBytes
-		}
-		cfg.Handle = func(*protocol.Command, core.Source) (any, error) {
-			t.Error("a granted task ran under a grant a revoke named")
-			return protocol.Reply{Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Evidence: "submitted"}}, nil
-		}
-	}
+	gate := newGrantGate()
+	machine := namedRevokeMachine(t, FileGrants(stateDir, "example"), gate, notices)
 	fs, clk := newFakeServer(t), grantClock()
 	c, _ := startCarrier(t, fs, clk, machine)
 	wgen := fs.waitWelcome()
@@ -153,13 +200,7 @@ func TestNamedRevokeHoldsTheGrantUntilTheStoreDecides(t *testing.T) {
 	}
 	// A grant_info of the binding holds the binding's queue; the revoke of B
 	// waits behind it.
-	hold.Store(true)
-	sendOn(fs, wgen, goldenFrame(t, "41-grant_info.json"))
-	select {
-	case <-waiting:
-	case <-time.After(5 * time.Second):
-		t.Fatal("grant_info never reached the machine")
-	}
+	gate.holdOn(t, fs, wgen, goldenFrame(t, "41-grant_info.json"))
 	sendOn(fs, wgen, namedRevokeFrame(t, digestB))
 	sendOn(fs, wgen, goldenFrame(t, "49-granted_submit.json"))
 	var refused struct{ Error ErrorBody }
@@ -172,7 +213,7 @@ func TestNamedRevokeHoldsTheGrantUntilTheStoreDecides(t *testing.T) {
 	if g, err := LoadGrants(stateDir, "example"); err != nil || g[b.Binding].Grant == nil {
 		t.Fatalf("grants.json while the revoke waits: %+v, %v; want B still stored", g[b.Binding], err)
 	}
-	close(release)
+	close(gate.release)
 	if r := fs.next(); r.Re != "m_gi1" {
 		t.Fatalf("frame %s re %s; want the grant_info reply", r.Body, r.Re)
 	}
@@ -287,4 +328,256 @@ func mustUnmarshalAnyJSON(t *testing.T, raw []byte) any {
 		t.Fatal(err)
 	}
 	return v
+}
+
+// flakyGrants is memGrants whose next Load fails once when failNextLoad is
+// set, and whose Load right after a Revoke that removed a grant fails once
+// when failReadBack is set.
+type flakyGrants struct {
+	*memGrants
+	failNextLoad, failReadBack atomic.Bool
+}
+
+func (f *flakyGrants) Load() (Grants, error) {
+	if f.failNextLoad.CompareAndSwap(true, false) {
+		return nil, errors.New("grants.json: input/output error")
+	}
+	return f.memGrants.Load()
+}
+
+func (f *flakyGrants) Revoke(binding, digest string) (bool, error) {
+	changed, err := f.memGrants.Revoke(binding, digest)
+	if changed && f.failReadBack.Load() {
+		f.failNextLoad.Store(true)
+	}
+	return changed, err
+}
+
+// review finding, 2026-11-26: a revoke of one grant could end its successor.
+// A named revoke whose decision fails answers storage_full and keeps the
+// grant held: when the clear cannot be written, when the store cannot be
+// read back after it, and when the first read fails. In that last case the
+// grant expired unseen, so a clear there must not answer ended true (review
+// finding: the first read's failure was ignored). Once the store works, the
+// carrier's tick decides: the grant is cleared, its generation kept, and
+// the hold is released.
+func TestNamedRevokeStorageFailureRecovers(t *testing.T) {
+	for _, fault := range []string{"write", "read back", "first read"} {
+		t.Run(fault, func(t *testing.T) {
+			view, key := goldenView(t)
+			b := view.Bindings["pi-demo"]
+			const gen = "g_3jx7k2m4qv5w6y7zab2cd3ef4g"
+			digestB := goldenGrantDigest(t)
+			store := &flakyGrants{memGrants: &memGrants{g: Grants{b.Binding: {Generation: gen, Grant: goldenGrant(t, b, key, gen, "2026-10-09T22:10:00Z", key)}}}}
+			fs, clk := newFakeServer(t), grantClock()
+			c, _ := startCarrier(t, fs, clk, namedRevokeMachine(t, store, nil, nil))
+			wgen := fs.waitWelcome()
+			waitOnline(t, c)
+			switch fault {
+			case "write":
+				store.mu.Lock()
+				store.clearErr = errors.New("grants.json: no space left on device")
+				store.mu.Unlock()
+			case "read back":
+				store.failReadBack.Store(true)
+			case "first read":
+				clk.advance(9 * time.Hour) // past B's not_after, never read
+				store.failNextLoad.Store(true)
+			}
+			f := namedRevokeFrame(t, digestB)
+			f.Gen = wgen
+			fs.send(f)
+			var refused struct{ Error ErrorBody }
+			if r := fs.next(); json.Unmarshal(r.Body, &refused) != nil || refused.Error.Code != string(protocol.CodeStorageFull) {
+				t.Fatalf("grant_revoke/2 with the %s failing: %s; want %s", fault, r.Body, protocol.CodeStorageFull)
+			}
+			if !c.namedHeld(b.Binding, digestB) {
+				t.Fatalf("the hold of B was released after the %s failed", fault)
+			}
+			if _, reason := c.GrantLive(b.TargetID, digestB); !strings.HasPrefix(reason, CodeGrantRevoked+": ") && !strings.HasPrefix(reason, CodeGrantExpired+": ") {
+				t.Fatalf("hand-over check of B after the %s failed = %q, want refused", fault, reason)
+			}
+			store.mu.Lock()
+			store.clearErr = nil
+			store.mu.Unlock()
+			store.failReadBack.Store(false)
+			c.Tick()
+			if c.namedHeld(b.Binding, digestB) {
+				t.Fatal("the tick did not settle the revoke once the store worked")
+			}
+			if g, err := store.Load(); err != nil || g[b.Binding].Grant != nil || g[b.Binding].Generation != gen {
+				t.Fatalf("store after the recovery: %+v, %v; want no grant and generation %s", g[b.Binding], err, gen)
+			}
+		})
+	}
+}
+
+// review finding, 2026-11-26: a revoke of one grant could end its successor.
+// The connection ends while the signed grant B is still being accepted and
+// a grant_revoke/2 naming B waits behind it. The revoke still decides, after
+// the acceptance it follows, so B ends on disk and is refused; it never
+// decides ahead of that acceptance (review finding: a revoke dropped at the
+// disconnect was decided by the tick before B was stored, and B stayed).
+func TestNamedRevokeAfterADisconnectFollowsItsPredecessor(t *testing.T) {
+	view, _ := goldenView(t)
+	b := view.Bindings["pi-demo"]
+	const gen = "g_3jx7k2m4qv5w6y7zab2cd3ef4g"
+	digestB := goldenGrantDigest(t)
+	stateDir := namedRevokeStore(t, b.Binding, GrantRecord{Generation: gen})
+	gate := newGrantGate()
+	fs, clk := newFakeServer(t), grantClock()
+	c, _ := startCarrier(t, fs, clk, namedRevokeMachine(t, FileGrants(stateDir, "example"), gate, nil))
+	wgen := fs.waitWelcome()
+	waitOnline(t, c)
+	gate.holdOn(t, fs, wgen, goldenFrame(t, "44-signed_grant.json"))
+	f := namedRevokeFrame(t, digestB)
+	f.Gen = wgen
+	fs.send(f)
+	waitFor(t, func() bool { return c.namedHeld(b.Binding, digestB) })
+	fs.close(websocket.StatusGoingAway)
+	fs.waitWelcome() // the machine dialed again: the first connection ended
+	for range 10 {
+		c.Tick()
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(gate.release)
+	waitFor(t, func() bool {
+		g, err := LoadGrants(stateDir, "example")
+		return err == nil && g[b.Binding].Grant == nil && g[b.Binding].IssuedFloor != "" && !c.namedHeld(b.Binding, digestB)
+	})
+	if g, _ := LoadGrants(stateDir, "example"); g[b.Binding].Generation != gen || g[b.Binding].IssuedFloor != "2026-10-09T14:10:00Z" {
+		t.Fatalf("grants.json after the revoke: %+v; want generation %s and B's floor", g[b.Binding], gen)
+	}
+	if _, reason := c.GrantLive(b.TargetID, digestB); reason == "" {
+		t.Fatal("hand-over check of B after its revoke = live")
+	}
+}
+
+// review finding, 2026-11-26: a revoke of one grant could end its successor.
+// When the connection ends, a job a worker already took runs once, a named
+// revoke queued behind it runs after it, and every other job not started
+// never runs (review finding: the shutdown made queued revokes unordered
+// retry work).
+func TestDispatcherStopKeepsClaimedAndNamedJobsInOrder(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d := newDispatcher(ctx)
+	sess := &session{data: make(chan []byte, 64)}
+	release := make(chan struct{})
+	started := make(chan string, 8)
+	var mu sync.Mutex
+	var ran []string
+	record := func(name string) {
+		mu.Lock()
+		ran = append(ran, name)
+		mu.Unlock()
+	}
+	add := func(key, name string, keep, blocks bool) {
+		j := &job{sess: sess, key: key, keep: keep, run: func() (any, error) {
+			record(name + " start")
+			if blocks {
+				started <- name
+				<-release
+			}
+			record(name + " end")
+			return nil, nil
+		}}
+		if !d.enqueue(j) {
+			t.Fatalf("enqueue %s refused", name)
+		}
+	}
+	// Every worker takes a head that blocks.
+	for _, key := range []string{"a", "b", "c", "d"} {
+		add(key, key+"1", false, true)
+	}
+	for range 4 {
+		select {
+		case <-started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("a worker never took its job")
+		}
+	}
+	add("a", "a2", false, false)
+	add("a", "a3", true, false)
+	add("e", "e1", false, false) // a head no worker took
+	add("e", "e2", true, false)
+	cancel()
+	d.stop()
+	close(release)
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(ran) == 12
+	})
+	time.Sleep(20 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	pos := map[string]int{}
+	for i, r := range ran {
+		if _, dup := pos[r]; dup {
+			t.Fatalf("%s twice: %v", r, ran)
+		}
+		pos[r] = i
+	}
+	for _, name := range []string{"a1", "b1", "c1", "d1", "a3", "e2"} {
+		if _, ok := pos[name+" end"]; !ok {
+			t.Fatalf("%s did not run: %v", name, ran)
+		}
+	}
+	for _, name := range []string{"a2", "e1"} {
+		if _, ok := pos[name+" start"]; ok {
+			t.Fatalf("%s ran after the connection ended: %v", name, ran)
+		}
+	}
+	if pos["a3 start"] < pos["a1 end"] {
+		t.Fatalf("a3 ran before a1 ended: %v", ran)
+	}
+	if len(ran) != 12 {
+		t.Fatalf("jobs run: %v", ran)
+	}
+}
+
+// review finding, 2026-11-26: a revoke of one grant could end its successor.
+// Replay before the decision is written: the machine that read the revoke
+// holds B only in its memory, so a restarted machine on the same state sees
+// B live (the server keeps and replays the named revoke). The replayed
+// revoke ends B there; the first machine's own decision then answers ended
+// false. The replay after the decision is written is in
+// TestNamedRevokeHoldsTheGrantUntilTheStoreDecides.
+func TestNamedRevokeReplayedAfterARestartBeforeItsDecision(t *testing.T) {
+	view, key := goldenView(t)
+	b := view.Bindings["pi-demo"]
+	const gen = "g_3jx7k2m4qv5w6y7zab2cd3ef4g"
+	digestB := goldenGrantDigest(t)
+	stateDir := namedRevokeStore(t, b.Binding, GrantRecord{Generation: gen, Grant: goldenGrant(t, b, key, gen, "2026-10-09T22:10:00Z", key)})
+	gate := newGrantGate()
+	fs, clk := newFakeServer(t), grantClock()
+	c, _ := startCarrier(t, fs, clk, namedRevokeMachine(t, FileGrants(stateDir, "example"), gate, nil))
+	wgen := fs.waitWelcome()
+	waitOnline(t, c)
+	gate.holdOn(t, fs, wgen, goldenFrame(t, "41-grant_info.json"))
+	f := namedRevokeFrame(t, digestB)
+	f.Gen = wgen
+	fs.send(f)
+	waitFor(t, func() bool { return c.namedHeld(b.Binding, digestB) })
+
+	fs2 := newFakeServer(t)
+	restarted, _ := startCarrier(t, fs2, clk, namedRevokeMachine(t, FileGrants(stateDir, "example"), nil, nil))
+	wgen2 := fs2.waitWelcome()
+	waitOnline(t, restarted)
+	if _, reason := restarted.GrantLive(b.TargetID, digestB); reason != "" {
+		t.Fatalf("hand-over check of B on the restarted machine = %q; want live until the replay", reason)
+	}
+	f.Gen = wgen2
+	fs2.send(f)
+	sameBody(t, fs2.next(), "m_gr2", "85-revoked_reply_v2_ended.json")
+	if g, err := LoadGrants(stateDir, "example"); err != nil || g[b.Binding].Grant != nil || g[b.Binding].Generation != gen || g[b.Binding].IssuedFloor != "2026-10-09T14:10:00Z" {
+		t.Fatalf("grants.json after the replay: %+v, %v; want no grant, generation %s and B's floor", g[b.Binding], err, gen)
+	}
+
+	close(gate.release)
+	if r := fs.next(); r.Re != "m_gi1" {
+		t.Fatalf("frame %s re %s; want the grant_info reply", r.Body, r.Re)
+	}
+	sameBody(t, fs.next(), "m_gr2", "86-revoked_reply_v2_not_ended.json")
 }

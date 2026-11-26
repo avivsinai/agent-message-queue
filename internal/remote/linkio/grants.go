@@ -182,9 +182,11 @@ func RevokeGrant(stateDir, link, binding, digest string) (bool, error) {
 
 // clearGrant is the exact clear: it removes the binding's stored grant only
 // when its digest is digest, keeps every other value of the file, and
-// reports whether it changed the record.
+// reports whether it changed the record. A link that does not exist has
+// nothing to clear; a failed write is an error, whatever its cause.
 func clearGrant(stateDir, link, binding, digest string) (bool, error) {
 	changed := false
+	var writeErr error
 	err := withGrants(stateDir, link, func() error {
 		g, err := LoadGrants(stateDir, link)
 		if err != nil {
@@ -196,13 +198,16 @@ func clearGrant(stateDir, link, binding, digest string) (bool, error) {
 		}
 		rec.Grant = nil
 		g[binding] = rec
-		if err := writeJSON(LinkDir(stateDir, link), grantsFile, g); err != nil {
-			return err
+		if writeErr = writeJSON(LinkDir(stateDir, link), grantsFile, g); writeErr != nil {
+			return writeErr
 		}
 		changed = true
 		return nil
 	})
-	if errors.Is(err, os.ErrNotExist) {
+	switch {
+	case writeErr != nil:
+		return false, writeErr
+	case errors.Is(err, os.ErrNotExist):
 		return false, nil
 	}
 	return changed, err
