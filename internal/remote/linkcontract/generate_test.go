@@ -212,15 +212,16 @@ func TestGenerateFixtures(t *testing.T) {
 		"not_after": grantedNotAfter, "native_run": nil, "observed_at": "2026-10-09T14:10:20Z",
 	}
 	const gen = 12
+	hello := map[string]any{
+		"schema": "amq.remote.link.hello/1", "device_key": b64.EncodeToString(deviceSPKI), "store_id": storeID,
+		"amq_version": "0.95.0", "signature": b64.EncodeToString(ed25519.Sign(dk, helloMessage(serverID, nonce, storeID))),
+		"bindings": []any{binding}, "pending_local": []string{},
+	}
 	frames := []goldenFrame{
 		{"challenge", "server_to_endpoint", "challenge", "First frame after the socket opens. No gen yet.",
 			env(map[string]any{"schema": "amq.remote.link.challenge/1", "server_id": serverID, "nonce": nonce}, "id", "m_c1")},
 		{"hello", "endpoint_to_server", "hello", "Reply to the challenge; it carries its own id because welcome answers it. signature is Ed25519 over helloMessage (README).",
-			env(map[string]any{
-				"schema": "amq.remote.link.hello/1", "device_key": b64.EncodeToString(deviceSPKI), "store_id": storeID,
-				"amq_version": "0.95.0", "signature": b64.EncodeToString(ed25519.Sign(dk, helloMessage(serverID, nonce, storeID))),
-				"bindings": []any{binding}, "pending_local": []string{},
-			}, "id", "m_h1", "re", "m_c1")},
+			env(hello, "id", "m_h1", "re", "m_c1")},
 		{"welcome", "server_to_endpoint", "welcome", "Reply to hello. From here every frame carries gen; a frame from an older generation is dropped.",
 			env(map[string]any{
 				"schema": "amq.remote.link.welcome/1", "user": "example.user", "connection_generation": gen,
@@ -369,6 +370,16 @@ func TestGenerateFixtures(t *testing.T) {
 			}, "id", "m_e12", "gen", gen)},
 	}
 	frames = append(frames, answerFrames(t, host, gen)...)
+	frames = append(frames, []goldenFrame{
+		{"hello_grant_revoke_v2", "endpoint_to_server", "hello", "The hello of a machine that accepts grant_revoke/2: grant_revoke_v2 true on the envelope, outside the signed hello. The body is the same as without it.",
+			env(hello, "id", "m_h1", "re", "m_c1", "grant_revoke_v2", true)},
+		{"grant_revoke_v2", "server_to_endpoint", "grant_revoke_v2", "End one accepted grant, named by the digest grant_reply gave. Granted tasks under it read after this frame are refused; a task already handed to the harness is not recalled. Send it only to a machine whose hello on this connection had grant_revoke_v2.",
+			env(map[string]any{"schema": "amq.remote.link.grant_revoke/2", "binding": bindingName, "grant_digest": grantDigest}, "id", "m_gr2", "gen", gen)},
+		{"revoked_reply_v2_ended", "endpoint_to_server", "revoked_reply_v2", "This revoke removed the named grant. The binding's grant generation is unchanged.",
+			env(map[string]any{"revoked": map[string]any{"binding": bindingName, "grant_digest": grantDigest, "ended": true}}, "re", "m_gr2", "gen", gen)},
+		{"revoked_reply_v2_not_ended", "endpoint_to_server", "revoked_reply_v2", "The named grant had already ended, or another grant is current; nothing changed. It settles the server's row of the named grant and says nothing of another grant.",
+			env(map[string]any{"revoked": map[string]any{"binding": bindingName, "grant_digest": grantDigest, "ended": false}}, "re", "m_gr2", "gen", gen)},
+	}...)
 	// Write the frames beside the old ones, then swap, so an aborted rewrite
 	// never leaves an empty folder.
 	_ = os.RemoveAll(filepath.Join(linkDir, "frames.new"))

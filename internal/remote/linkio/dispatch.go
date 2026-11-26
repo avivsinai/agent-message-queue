@@ -27,6 +27,9 @@ type job struct {
 	f    Frame
 	key  string // request identity: commands for one request run in order
 	run  func() (any, error)
+	// drop, when set, runs instead of run for a job that never starts
+	// because the connection ended.
+	drop func()
 }
 
 // dispatcher runs server requests on bounded workers, in arrival order per
@@ -67,9 +70,7 @@ func (d *dispatcher) work(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			d.mu.Lock()
-			d.stopped = true
-			d.mu.Unlock()
+			d.stop()
 			return
 		case key := <-d.ready:
 			d.mu.Lock()
@@ -86,6 +87,46 @@ func (d *dispatcher) work(ctx context.Context) {
 				delete(d.queues, key)
 			}
 			d.mu.Unlock()
+		}
+	}
+}
+
+// stop ends the dispatcher once: no job is queued after it, and every job
+// that has not started never runs and has its drop called. A head whose key
+// is not in ready has been taken by a worker and finishes as usual.
+func (d *dispatcher) stop() {
+	d.mu.Lock()
+	if d.stopped {
+		d.mu.Unlock()
+		return
+	}
+	d.stopped = true
+	// A worker takes keys from ready without the lock, so the drain never
+	// waits on it.
+	idle := map[string]bool{}
+drain:
+	for {
+		select {
+		case key := <-d.ready:
+			idle[key] = true
+		default:
+			break drain
+		}
+	}
+	var dropped []*job
+	for key, q := range d.queues {
+		if idle[key] {
+			dropped = append(dropped, q...)
+			delete(d.queues, key)
+			continue
+		}
+		dropped = append(dropped, q[1:]...)
+		d.queues[key] = q[:1]
+	}
+	d.mu.Unlock()
+	for _, j := range dropped {
+		if j.drop != nil {
+			j.drop()
 		}
 	}
 }
