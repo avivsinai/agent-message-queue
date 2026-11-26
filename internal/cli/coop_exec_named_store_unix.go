@@ -10,7 +10,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/launch"
@@ -66,12 +68,27 @@ type cursorChatMeta struct {
 
 type cursorNamedStoreReader struct{}
 
-func (cursorNamedStoreReader) locate(cwd string, execStart time.Time) (coopNamedStoreCandidate, error) {
+// cursorNamedStoreRoot looks in the Cursor CLI's configured directory,
+// rather than falling back to a second store that may hold another chat.
+func cursorNamedStoreRoot() (string, error) {
+	if dir := os.Getenv("CURSOR_CONFIG_DIR"); strings.TrimSpace(dir) != "" {
+		return filepath.Join(dir, "chats"), nil
+	}
+	if dir := os.Getenv("XDG_CONFIG_HOME"); runtime.GOOS == "linux" && strings.TrimSpace(dir) != "" {
+		return filepath.Join(dir, "cursor", "chats"), nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return coopNamedStoreCandidate{}, fmt.Errorf("resolve Cursor home: %w", err)
+		return "", fmt.Errorf("resolve Cursor home: %w", err)
 	}
-	root := filepath.Join(home, ".cursor", "chats")
+	return filepath.Join(home, ".cursor", "chats"), nil
+}
+
+func (cursorNamedStoreReader) locate(cwd string, execStart time.Time) (coopNamedStoreCandidate, error) {
+	root, err := cursorNamedStoreRoot()
+	if err != nil {
+		return coopNamedStoreCandidate{}, err
+	}
 	windowStart := execStart.Add(-coopNamedStoreClockSlack)
 	var candidates []coopNamedStoreCandidate
 	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {

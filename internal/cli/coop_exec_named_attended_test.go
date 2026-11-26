@@ -61,6 +61,8 @@ func TestRunCoopNamedInjectOnAttendedSeatSkipsTheNamedCandidate(t *testing.T) {
 
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("CURSOR_CONFIG_DIR", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
 	writeCursorChatMetaForTest(t, home, "feature/x")
 
 	stderr := runCoopNamedInjectAttended(t, root)
@@ -92,6 +94,8 @@ func TestRunCoopNamedInjectOnAttendedSeatRefusesTheUnnamedCandidate(t *testing.T
 
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("CURSOR_CONFIG_DIR", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
 	writeCursorChatMetaForTest(t, home, "")
 
 	stderr := runCoopNamedInjectAttended(t, root)
