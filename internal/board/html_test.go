@@ -223,6 +223,10 @@ func TestHTMLCoverageNamesTheGaps(t *testing.T) {
 			`<span class="gap"><span class="gap-name">beads</span> partly read</span></summary><div class="coverage-body"><div class="coverage-gap"><p><span class="gap-name">beads</span> partly read: 238 mentioned bead ids over the lookup cap.</p></div><p>Nothing for you to do.</p>` + sources},
 		{"claude-tasks", Result{Status: StatusOK, Coverage: Coverage{Unresolved: 1, Detail: UnboundClaudeListGap("/h/.claude", "team-a")}},
 			`<label class="cmd-label">Bind the Claude task list<textarea readonly rows="2" spellcheck="false">amq-board bind-claude-list --home /h/.claude --list team-a</textarea>`},
+		// Review of the polish pass: a list or home holding a separator gave a
+		// wrong copy-ready command; it now gets none and its gap still shows.
+		{"claude-tasks", Result{Status: StatusOK, Coverage: Coverage{Unresolved: 1, Detail: UnboundClaudeListGap("/h/.claude", "a in b")}},
+			`partly read: unbound native task list a in b in /h/.claude.</p></div>` + sources},
 		{"codex-goals", Result{Status: StatusUnavailable, Detail: SQLite3Missing},
 			`<p><span class="gap-name">codex-goals</span> unavailable.</p><p>Install sqlite3.</p></div>` + sources},
 		{"github", Result{Status: StatusDegraded, Detail: "gh api graphql failed: HTTP 401"},

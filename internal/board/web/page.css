@@ -137,6 +137,7 @@ details:not(.card-sheet) > summary::before { content: ""; display: inline-block;
 details:not(.card-sheet)[open] > summary::before { transform: rotate(45deg); vertical-align: .1875rem; }
 .detail-content { border-radius: .5rem; padding: 1rem; background: var(--subtle); overflow-wrap: anywhere; }
 .detail-content > * + * { margin-top: 1rem; }
+.detail-content > details + details { margin-top: 0; }
 .detail-content p { max-width: 66ch; }
 .prose { white-space: pre-line; }
 dl { display: grid; grid-template-columns: minmax(7rem, 1fr) minmax(0, 3fr); gap: .5rem 1rem; font-size: .875rem; }
@@ -207,6 +208,9 @@ textarea { display: block; width: 100%; min-height: 4.5rem; resize: vertical; co
 .agent-heading strong { font-size: 1rem; }
 .agent-heading span, .agent > p, .muted, .quiet { color: var(--muted); }
 .agent > p { margin-top: .5rem; }
+/* A seat's disclosures share one row; an open one takes the full width. */
+.agent > details { display: inline-block; margin-right: 1.5rem; vertical-align: top; }
+.agent > details[open] { display: block; margin-right: 0; }
 .limit-reached { color: var(--warning); }
 .quiet-sessions .crew { padding-inline: 0; }
 .account { padding-block: 1rem; }
@@ -368,8 +372,10 @@ footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: .5
   .snapshot { display: contents; }
   #refresh { grid-row: 1; grid-column: 2; }
   .mast-gen { grid-column: 1 / -1; text-align: left; }
-  .live-state { display: block; }
-  .live-state:not(:empty) { margin: .25rem 0 0; }
+  /* The Update label carries a waiting update; its sentence stays for
+     assistive technology only. An error takes its own line. */
+  .live-state:not(.is-error) { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .live-state.is-error { display: block; margin: .25rem 0 0; }
   .workspace { grid-template-columns: minmax(0, 1fr); gap: 1.5rem; padding-top: 1rem; }
   .navigation { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: .5rem; }
   .primary-nav { display: flex; flex-wrap: wrap; gap: .25rem; }

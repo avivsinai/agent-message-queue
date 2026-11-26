@@ -298,7 +298,7 @@
         state.textContent = "";
       }
     }).catch(function () {
-      setPending(false);
+      // A failed poll keeps a waiting update: the button still applies it.
       state.classList.add("is-error"); state.textContent = "Refresh failed. Showing the existing snapshot.";
     }).finally(function () { checking = false; });
   }

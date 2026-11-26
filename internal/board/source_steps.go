@@ -37,7 +37,9 @@ func ownerSteps(s SourceView) (steps []ownerStep, noStep bool) {
 	for _, part := range strings.Split(s.Coverage.Detail, "; ") {
 		if rest, ok := strings.CutPrefix(part, unboundClaudeListPrefix); ok {
 			list, home, _ := strings.Cut(rest, " in ")
-			if action, ok := BindClaudeList(home, list); ok {
+			// The gap is joined text: a home or list that holds a separator
+			// cannot be read back exactly, so it gets no command.
+			if action, ok := BindClaudeList(home, list); ok && unambiguousGapField(home) && unambiguousGapField(list) {
 				steps = append(steps, ownerStep{Command: &action})
 			} else {
 				// An unbound list needs the owner even when no safe command can name it.
@@ -50,4 +52,10 @@ func ownerSteps(s SourceView) (steps []ownerStep, noStep bool) {
 		}
 	}
 	return steps, known && len(steps) == 0
+}
+
+// unambiguousGapField reports that a value holds neither the "; " that joins
+// gaps nor the " in " that joins a list to its home.
+func unambiguousGapField(v string) bool {
+	return !strings.Contains(v, ";") && !strings.Contains(v, " in ")
 }

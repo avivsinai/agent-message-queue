@@ -157,10 +157,10 @@
   {{template "coverage" .Coverage}}
   <div class="request-summary">
     <p class="request-headline">{{.Headline}}</p>
-    <p class="request-note">This is not a count of unfinished work: a request can be done without a direct reply, and a reply does not finish it.</p>
+    <p class="request-note">This is not a count of unfinished work: a request can be done without a direct reply, and a reply does not finish it.{{if .OlderCount}} <a href="#view-older-requests">Search older requests</a>{{end}}</p>
     <details class="request-counting"><summary>How this is counted</summary><div class="detail-content">
       {{range .Notes}}<p class="request-note">{{.}}</p>{{end}}
-      <p class="request-note">{{.Partition}}{{if .OlderCount}} <a href="#view-older-requests">Search older requests</a>{{end}}</p>
+      <p class="request-note">{{.Partition}}</p>
     </div></details>
   </div>
   {{range .Groups}}
