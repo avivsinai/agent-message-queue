@@ -212,6 +212,7 @@ func loadConfigFiles(dir, home string) (board.FileConfig, []string) {
 		return cfg, append(warnings, "no home directory: usage not read")
 	}
 	st, err := boardusage.LoadSettings(userPath, home)
+	warnings = append(warnings, st.Warnings...)
 	if err != nil {
 		warnings = append(warnings, "usage not read: "+err.Error())
 		st.Enabled = false

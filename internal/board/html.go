@@ -11,8 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/avivsinai/agent-message-queue/internal/board/usage"
 )
 
 // The page files are named one by one, so nothing else under web/ (product
@@ -370,7 +368,7 @@ func buildPage(m Model, regenerate string) pageData {
 		for _, a := range m.Usage.Accounts {
 			other := ""
 			if a.OtherSessions > 0 {
-				other = "other sessions (" + otherCount(a) + "): " + spendLine(a.Other, now, a.Harness == usage.Pi)
+				other = "other sessions (" + otherCount(a) + "): " + spendLine(a.Other, now, false)
 			}
 			if a.Detail != "" {
 				other = strings.TrimPrefix(other+" · "+a.Detail, " · ")
