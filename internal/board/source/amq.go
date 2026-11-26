@@ -372,9 +372,10 @@ func parseDoctorOps(session string, data []byte, observed time.Time) ([]board.Ro
 }
 
 // agedFrom is the time an age reported at observed names; zero when either
-// is missing.
+// is missing. A negative age (a time ahead of the reader's clock) is no
+// evidence: it would keep the seat active and never let it read Stalled.
 func agedFrom(observed time.Time, ageSeconds *float64) time.Time {
-	if observed.IsZero() || ageSeconds == nil {
+	if observed.IsZero() || ageSeconds == nil || *ageSeconds < 0 {
 		return time.Time{}
 	}
 	return observed.Add(-time.Duration(*ageSeconds * float64(time.Second)))

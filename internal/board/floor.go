@@ -93,8 +93,12 @@ type Station struct {
 	LastActivity           time.Time `json:"last_activity,omitzero"`
 	// ActivitySource names the fact behind LastActivity: sent, read mail,
 	// usage, or presence when no wake is live.
-	ActivitySource string      `json:"activity_source,omitempty"`
-	Wake           StationWake `json:"wake"`
+	ActivitySource string `json:"activity_source,omitempty"`
+	// WorkActivity is the newest evidence that the seat works: a usage
+	// record, or presence when no wake is live. Sent and read mail show only
+	// that the seat attends its mailbox.
+	WorkActivity time.Time   `json:"work_activity,omitzero"`
+	Wake         StationWake `json:"wake"`
 	// Limit is the account's reached limit while its reset is ahead. When
 	// the seat, or any session of the account, was active after the limit
 	// was read, LimitNote says so and the state comes from the other rules.
@@ -245,7 +249,7 @@ func newStation(a RosterAgent, ownsWork bool, observed time.Time, cfg Config, no
 			st.Spend5h = &u
 		}
 	}
-	st.LastActivity, st.ActivitySource = lastActivity(a, observed)
+	st.LastActivity, st.ActivitySource, st.WorkActivity = lastActivity(a, observed)
 	last := st.LastActivity
 	known := !last.IsZero()
 	recent := known && now.Sub(last) < cfg.LivenessWindow
@@ -311,13 +315,11 @@ func newStation(a RosterAgent, ownsWork bool, observed time.Time, cfg Config, no
 
 // lastActivity is the newest activity fact and its source: the seat's
 // newest sent message, its last read of mail, the worker's newest usage
-// record, or presence last seen when no wake is live. A live wake refreshes
-// presence on its own, so with one presence proves only the wake. Doctor
-// --ops reports presence age and the sent and read times; a mailbox only who
-// lists has none of them.
-func lastActivity(a RosterAgent, observed time.Time) (time.Time, string) {
-	var at time.Time
-	source := ""
+// record, or presence last seen when no wake is live. work is the newest of
+// the last two alone. A live wake refreshes presence on its own, so with one
+// presence proves only the wake. Doctor --ops reports presence age and the
+// sent and read times; a mailbox only who lists has none of them.
+func lastActivity(a RosterAgent, observed time.Time) (at time.Time, source string, work time.Time) {
 	newer := func(t time.Time, from string) {
 		if t.After(at) {
 			at, source = t, from
@@ -331,9 +333,16 @@ func lastActivity(a RosterAgent, observed time.Time) (time.Time, string) {
 	for _, u := range a.Usage {
 		newer(u.AsOf, "usage")
 	}
+	work = at
 	newer(a.LastSentAt, "sent")
 	newer(a.LastReadAt, "read mail")
-	return at, source
+	return at, source, work
+}
+
+// workObserved reports whether the seat has evidence that it works, not
+// only that it attends its mailbox.
+func (st Station) workObserved() bool {
+	return !st.WorkActivity.IsZero()
 }
 
 // limitWhy names a reached limit and its reset.

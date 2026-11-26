@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
+	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
 	"github.com/avivsinai/agent-message-queue/internal/notificationattempt"
@@ -435,8 +436,8 @@ func TestOpsMailboxCountCountsOnlyMessageFiles(t *testing.T) {
 	}
 }
 
-// Doctor dates a seat's newest sent message and its last read of mail. A
-// read keeps the message's delivery time, so the read age is the claim's.
+// Doctor dates a seat's newest sent message from its id and its last read
+// of mail from the receipt the drain writes, not from the mail's delivery.
 func TestRunOpsChecksReportsLastSentAndLastRead(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
@@ -448,28 +449,28 @@ func TestRunOpsChecksReportsLastSentAndLastRead(t *testing.T) {
 	if err := config.WriteConfig(filepath.Join(root, "meta", "config.json"), config.Config{Version: 1, Agents: []string{"alice"}}, true); err != nil {
 		t.Fatal(err)
 	}
-	old := time.Now().Add(-2 * time.Hour)
-	for _, path := range []string{
-		filepath.Join(fsq.AgentOutboxSent(root, "alice"), "sent1.md"),
-		filepath.Join(fsq.AgentInboxNew(root, "alice"), "msg1.md"),
-	} {
-		if err := os.WriteFile(path, []byte("message"), 0o600); err != nil {
+	now := time.Now()
+	// Review of the first build: a send time ahead of the clock gave a
+	// negative age, so the seat read Working and never Stalled.
+	for _, at := range []time.Time{now.Add(-2 * time.Hour), now.Add(time.Hour)} {
+		id, err := format.NewMessageID(at)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Chtimes(path, old, old); err != nil {
+		if err := os.WriteFile(filepath.Join(fsq.AgentOutboxSent(root, "alice"), id+".md"), []byte("sent"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	identity, err := fsq.SnapshotDeliveryRoot(root)
+	id, err := format.NewMessageID(now.Add(-2 * time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
-	deliveryRoot, err := fsq.OpenDeliveryRoot(root, identity)
-	if err != nil {
+	deliverGuardMessage(t, root, "alice", id)
+	delivered := filepath.Join(fsq.AgentInboxNew(root, "alice"), id+".md")
+	if err := os.Chtimes(delivered, now.Add(-2*time.Hour), now.Add(-2*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = deliveryRoot.Close() }()
-	if err := fsq.MoveNewToCur(deliveryRoot, "alice", "msg1.md"); err != nil {
+	if _, err := drainInboxItems(openDeliveryRootForCLITest(t, root), root, "alice", false, 0, &headerValidator{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -485,7 +486,7 @@ func TestRunOpsChecksReportsLastSentAndLastRead(t *testing.T) {
 		t.Fatalf("last sent age = %v, want about 7200", sent)
 	}
 	if read := *a.LastReadAgeSeconds; read > 60 {
-		t.Fatalf("last read age = %v, want the claim's age, not the delivery's", read)
+		t.Fatalf("last read age = %v, want the drain's age, not the delivery's", read)
 	}
 }
 

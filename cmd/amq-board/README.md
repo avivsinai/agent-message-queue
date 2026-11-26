@@ -59,7 +59,7 @@ scan mailboxes itself or fall back to a different source.
 - `seat_at_limit`: a seat is at its plan limit and owns current work.
 - `account_near_cap`: a harness account's freshest cap reading shows 90 percent or more of a cap used. A reading stays current until its future reset time; without one, its timestamp must be within the 15-minute limit bound. It needs no mapped worker and no card. Codex reports the pre-limit figures; Claude Code and pi report nothing before the limit, so they give no line.
 - `ready_not_started`: a seat with nothing in progress is idle or off and has ready work assigned.
-- `in_progress_not_worked`: a card is in progress longer than the liveness window, and its owner's last observed activity is older than that window. A seat with no observed activity is not listed.
+- `in_progress_not_worked`: a card is in progress longer than the liveness window, and its owner's last observed work (a usage record, or presence when no wake is live) is older than that window. Sent and read mail do not count as work. A seat with no observed work is not listed.
 - `reply_overdue` covers overdue agent replies, owner questions and owner rulings. For owner questions and rulings the sender reads the thread before taking the default or closing the ruling. Owner todos and review requests stay under Needs you.
 
 An unclosed request older than `obligation_max_age` (14 days by default) expires, as in `amq thread open`. It leaves Needs you and the overdue check. Set `obligation_max_age` to `0` to disable expiry.
@@ -464,9 +464,9 @@ counted, or mail waits and no activity was observed). Activity is the newest
 of the seat's last sent message and its last read of mail (both from
 `amq doctor --ops`, the same for every harness), the worker's newest usage
 record, and presence last seen when no wake is live: a live wake refreshes
-presence itself, so it proves only the wake. The last read of mail is the
-modification time of the seat's `inbox/cur`, which an explicit
-`amq cleanup --history-older-than` or `--history-max-size` also sets. The plate
+presence itself, so it proves only the wake. The last sent message is dated
+by its id; the last read of mail is the seat's newest receipt, which every
+consumer writes when it moves mail out of `inbox/new`. The plate
 names the fact it used: sent, read mail, usage, or presence. A harness AMQ
 does not know prints no harness label. The board cannot see processes and never says a
 worker is running or has stopped. A seat lists the current cards that name

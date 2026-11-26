@@ -78,13 +78,13 @@ type opsAgent struct {
 	// DLQCountError is UnreadCountError for the DLQ.
 	DLQCountError string `json:"dlq_count_error,omitempty"`
 	// LastSentAgeSeconds is the age of the newest message in the agent's
-	// outbox/sent; absent when it sent none.
+	// outbox/sent, from the send time its id carries; a time ahead of now is
+	// ignored. Absent when none remains.
 	LastSentAgeSeconds *float64 `json:"last_sent_age_seconds,omitempty"`
-	// LastReadAgeSeconds is the age of the agent's last read of mail. A read
-	// renames a message from inbox/new to inbox/cur and the file keeps its
-	// delivery time, so the age is that of inbox/cur's own modification
-	// time, which the rename sets; an explicit history cleanup that removes
-	// read mail sets it too. Absent when inbox/cur holds no message.
+	// LastReadAgeSeconds is the age of the agent's newest receipt: every
+	// consumer writes one when it moves mail out of inbox/new, so its file
+	// time is the last read. Removing old receipts does not move it; a time
+	// ahead of now is ignored. Absent when none remains.
 	LastReadAgeSeconds *float64 `json:"last_read_age_seconds,omitempty"`
 	// Follow-ups this agent armed as a sender: all of them, those already
 	// due, and the earliest due time.
@@ -276,8 +276,8 @@ func runOpsChecksWithSchema(
 		mailboxPresent := dirExists(fsq.AgentBase(root, handle))
 		agent.UnreadCount, agent.OldestUnreadAgeSeconds, agent.UnreadCountError = opsMailboxCount(fsq.AgentInboxNew(root, handle), mailboxPresent, now)
 		agent.DLQCount, agent.OldestDLQAgeSeconds, agent.DLQCountError = opsMailboxCount(fsq.AgentDLQNew(root, handle), mailboxPresent, now)
-		agent.LastSentAgeSeconds = opsLastChangeAge(fsq.AgentOutboxSent(root, handle), false, now)
-		agent.LastReadAgeSeconds = opsLastChangeAge(fsq.AgentInboxCur(root, handle), true, now)
+		agent.LastSentAgeSeconds = opsLastSentAge(fsq.AgentOutboxSent(root, handle), now)
+		agent.LastReadAgeSeconds = opsNewestFileAge(fsq.AgentReceipts(root, handle), now)
 		opsFollowUps(&agent, root, now)
 
 		// Presence
@@ -610,12 +610,11 @@ func opsMailboxCount(dir string, mailboxPresent bool, now time.Time) (int, float
 	return count, oldest, ""
 }
 
-// opsLastChangeAge is the age, in whole seconds, of the newest change to a
-// mailbox directory that holds a message file as opsMailboxCount counts
-// them: the newest message file's modification time, or with dirTime the
-// directory's own modification time, which an entry renamed into or removed
-// from it sets. Nil when the directory holds no message or cannot be read.
-func opsLastChangeAge(dir string, dirTime bool, now time.Time) *float64 {
+// opsLastSentAge is the age of the newest send time among the ids that
+// name an outbox's message files, as opsMailboxCount counts them. A time
+// ahead of now (clock skew, a restored copy) is no evidence; nil when no
+// other remains.
+func opsLastSentAge(dir string, now time.Time) *float64 {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
@@ -625,22 +624,39 @@ func opsLastChangeAge(dir string, dirTime bool, now time.Time) *float64 {
 		if !opsMessageEntry(e) {
 			continue
 		}
-		if dirTime {
-			info, err := os.Lstat(dir)
-			if err != nil || !info.IsDir() {
-				return nil
-			}
-			newest = info.ModTime()
-			break
-		}
-		if info, err := e.Info(); err == nil && info.ModTime().After(newest) {
-			newest = info.ModTime()
+		if at, ok := fsq.IDTime(strings.TrimSuffix(e.Name(), ".md")); ok && at.After(newest) && !at.After(now) {
+			newest = at
 		}
 	}
-	if newest.IsZero() {
+	return opsAge(newest, now)
+}
+
+// opsNewestFileAge is the age of the newest regular, non-hidden file of a
+// directory. A time ahead of now is no evidence; nil when no other remains.
+func opsNewestFileAge(dir string, now time.Time) *float64 {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
 		return nil
 	}
-	age := math.Round(now.Sub(newest).Seconds())
+	var newest time.Time
+	for _, e := range entries {
+		if !e.Type().IsRegular() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		if info, err := e.Info(); err == nil && info.ModTime().After(newest) && !info.ModTime().After(now) {
+			newest = info.ModTime()
+		}
+	}
+	return opsAge(newest, now)
+}
+
+// opsAge is the age of at in whole seconds. A missing time, or one ahead of
+// now (clock skew, a restored copy), is no evidence: nil.
+func opsAge(at, now time.Time) *float64 {
+	if at.IsZero() || at.After(now) {
+		return nil
+	}
+	age := math.Round(now.Sub(at).Seconds())
 	return &age
 }
 

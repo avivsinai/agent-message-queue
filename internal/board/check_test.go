@@ -24,8 +24,9 @@ func TestCheck(t *testing.T) {
 		{name: "idle seat holds ready work", state: StationIdle, stage: StageReady, want: ProblemReadyNotBegun, card: "one", full: "s1/amit is idle and has ready work that is not started: First card"},
 		{name: "idle owner with activity has not moved card in two hours", state: StationIdle, stage: StageInProgress, want: ProblemNotWorked, card: "one"},
 		// A pi seat gave a live but absent LastActivity on 2026-11-18;
-		// it must not be reported as neglecting a card it still runs.
-		{name: "idle seat without activity evidence stays quiet", state: StationIdle, stage: StageInProgress, card: "one"},
+		// it must not be reported as neglecting a card it still runs. Its
+		// sent and read mail show it attends its mailbox, not that it works.
+		{name: "idle seat without work evidence stays quiet", state: StationIdle, stage: StageInProgress, card: "one"},
 		{name: "working owner is clean", state: StationWorking, stage: StageInProgress, card: "one"},
 		{name: "idle owner with activity has not moved card in two hours", state: StationIdle, stage: StageInProgress, want: ProblemNotWorked, card: "one"},
 		{name: "a seat with ready work and one in progress is not free", state: StationIdle},
@@ -48,6 +49,20 @@ func TestCheck(t *testing.T) {
 			}
 			if row.stage == StageInProgress && row.want == ProblemNotWorked {
 				m.Stations[0].LastActivity = now.Add(-2 * time.Hour)
+				m.Stations[0].WorkActivity = m.Stations[0].LastActivity
+			}
+			if row.name == "idle seat without work evidence stays quiet" {
+				pi := RosterAgent{RosterEntry: RosterEntry{
+					Session: "s1", Handle: "amit", ValidHandle: true, Counted: true, Harness: "pi",
+					PresenceStatus: "active", PresenceSource: "notifier_live",
+					LastSentAt: now.Add(-time.Hour), LastReadAt: now.Add(-time.Hour),
+				}}
+				st := newStation(pi, true, now, DefaultConfig(), now)
+				if st.State != StationIdle {
+					t.Fatalf("pi seat state = %q (%s), want idle", st.State, st.StateWhy)
+				}
+				st.Now = []string{"one"}
+				m.Stations[0] = st
 			}
 			if row.replyOverdue {
 				opened := now.Add(-RequestWindow - time.Hour)
