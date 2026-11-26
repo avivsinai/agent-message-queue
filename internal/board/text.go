@@ -75,12 +75,107 @@ func needsYou(m Model) ownerAttention {
 			view.rows = append(view.rows, clean(kind)+" · "+cleanTitle(a.Subject)+" · from "+clean(participantLabel(a.From))+deadlineSuffix(kind, true, a.ReplyBy))
 		}
 	}
-	view.count = len(view.cards) + human
+	view.count = len(m.Inbox.Items)
 	if human > viewLimit {
 		view.more = omittedLine(human-viewLimit, "open request")
 	}
 	return view
 }
+
+// writeInbox prints what waits on the owner, blocking first, each decision
+// with its options and the command that answers it; then the owner's unread
+// mail, one line per session, which is never an item. It shows at most
+// viewLimit items; --json keeps every one.
+func writeInbox(b *strings.Builder, inbox Inbox, now time.Time) {
+	b.WriteString("\n== Inbox ==  ")
+	if n := len(inbox.Items); n == 0 {
+		b.WriteString("nothing waits on you\n")
+	} else {
+		blocking := 0
+		for _, it := range inbox.Items {
+			if it.Blocking {
+				blocking++
+			}
+		}
+		fmt.Fprintf(b, "%d wait%s on you", n, map[bool]string{true: "s", false: ""}[n == 1])
+		if blocking > 0 {
+			fmt.Fprintf(b, " (%d blocking)", blocking)
+		}
+		b.WriteString("\n")
+	}
+	shown := inbox.Items[:min(len(inbox.Items), viewLimit)]
+	for _, it := range shown {
+		line := cleanTitle(it.Title)
+		if it.Blocking {
+			line = "[blocking] " + line
+		}
+		switch {
+		case it.Bead != "":
+			line += " · bead " + clean(it.Bead)
+		case it.Kind == "task":
+			line += " · task " + clean(it.ID)
+		case it.From != "":
+			line += " · from " + clean(it.From)
+		}
+		if !it.Since.IsZero() {
+			line += " · " + age(now.Sub(it.Since))
+		}
+		if it.ReplyBy != nil {
+			line += " · reply by " + it.ReplyBy.UTC().Format(time.RFC3339)
+			if it.ReplyBy.Before(now) {
+				line += " (overdue)"
+			}
+		}
+		fmt.Fprintf(b, "  %s\n", line)
+		answers := map[string]Action{}
+		for _, a := range it.Answer {
+			answers[a.Label] = a
+		}
+		for i, o := range it.Options {
+			text := optionLetter(i) + ") " + clean(o.Label)
+			if o.Label == it.Recommended {
+				text += " (recommended)"
+			}
+			if o.Summary != "" {
+				text += ": " + clean(o.Summary)
+			}
+			fmt.Fprintf(b, "    %s\n", text)
+		}
+		if it.IfLater != "" {
+			fmt.Fprintf(b, "    if later: %s\n", clean(it.IfLater))
+		}
+		answered := false
+		for i, o := range it.Options {
+			if it.Recommended != "" && o.Label != it.Recommended {
+				continue
+			}
+			if a, ok := answers["answer "+o.Label]; ok {
+				fmt.Fprintf(b, "    answer %s: %s\n", optionLetter(i), a.Command)
+				answered = true
+			}
+		}
+		if !answered && len(it.Options) == 0 && len(it.Answer) > 0 {
+			fmt.Fprintf(b, "    answer: %s\n", it.Answer[0].Command)
+			answered = true
+		}
+		if it.NoAnswer != "" {
+			fmt.Fprintf(b, "    no answer command: %s\n", clean(it.NoAnswer))
+		}
+		if !answered && it.Read != nil {
+			fmt.Fprintf(b, "    read: %s\n", it.Read.Command)
+		}
+	}
+	writeOmitted(b, len(inbox.Items)-len(shown), "item")
+	for _, mail := range inbox.Mail {
+		line := fmt.Sprintf("mail: %s %d unread, oldest %s", clean(mail.Session), mail.Unread, age(seconds(mail.OldestAgeSeconds)))
+		if mail.Read != nil {
+			line += " · " + mail.Read.Command
+		}
+		fmt.Fprintf(b, "  %s\n", line)
+	}
+}
+
+func optionLetter(i int) string { return string(rune('A' + i)) }
 
 // WriteText renders the model for a terminal, in the page's order: header,
 // sources, Waiting on you, the other columns, roster, footer.
@@ -136,6 +231,8 @@ func WriteText(w io.Writer, m Model) error {
 			live[[2]string{a.Session, a.Handle}] = a.Liveness
 		}
 	}
+
+	writeInbox(&b, m.Inbox, now)
 
 	if len(m.Next) > 0 {
 		b.WriteString("\n== Next ==\n")
@@ -437,7 +534,7 @@ func newestCards(cards []Card) []Card {
 func writeRequests(b *strings.Builder, m Model, now time.Time) {
 	v := m.Requests
 	fmt.Fprintf(b, "\n== Requests (outside task counts) ==\n")
-	fmt.Fprintf(b, "  %s\n", requestHeadline(v))
+	fmt.Fprintf(b, "  %s\n", requestHeadline(m.Inbox, "in the Inbox"))
 	for _, note := range requestBookkeeping(v) {
 		fmt.Fprintf(b, "    %s\n", clean(note))
 	}

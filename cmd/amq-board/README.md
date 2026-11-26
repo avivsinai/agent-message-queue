@@ -181,15 +181,13 @@ handle.
 Requests from the last 14 days, by recorded message time, are Recent; the
 rest are Older, or Undated when the time is missing, unreadable, or in the
 future. Age never completes a request. Recent requests are grouped by scoped
-addressee, with requests that have no direct reply first. Needs you lists open
-obligations owed by the owner across the retained history, alongside waiting cards.
-The Requests headline is "N recent requests to you with no direct reply observed": a
-request addressed to the owner handle `user`, in any root, with no direct
-reply from it. The Requests section states the rest in one sentence, "N
+addressee, with requests that have no direct reply first. The Requests
+headline counts the Inbox items (see Inbox), so it always equals Needs you.
+The Requests section states the requests to agents in one sentence, "N
 recent requests to agents have no direct reply observed", and calls it the
 agents' bookkeeping: agents often answer with a new message instead of a
-reply. A request counts once, as the owner's when the owner has not replied
-directly, otherwise when any scoped recipient sent no direct reply; later
+reply. A request addressed to the owner handle `user` never counts there; any
+other request counts once when any scoped recipient sent no direct reply; later
 thread activity is a secondary observation on the row. In a `p2p/` thread
 every message between the pair shares the thread, so later activity there is
 weak evidence. Requests with an unknown recipient scope are listed and
@@ -239,6 +237,36 @@ classifier]`. An identical label is accepted again; a different value for
 the same key is refused, so a revised classifier uses a revised name. The
 board runs no model and schedules nothing; the `amq-board` skill describes
 the classification loop for a harness model.
+
+## Inbox
+
+The Inbox is what waits on the owner, by one rule:
+
+1. an open obligation owed by the owner handle `user`: a question, review
+   request, or todo addressed to `user` that no closer closed, by the rule of
+   `amq thread open`, opened within `obligation_max_age` (14 days by default);
+2. a card under Needs you: a bead of type `decision` that is open, or in
+   progress with a human assignee, or work whose blocker or blocked state
+   needs a human.
+
+Nothing else is an item. Needs you in the text headline and section, the
+Flow strip, the pane's `waiting_total`, and the Requests headline count these
+items. On the page, the Requests headline links to the Flow view's Needs you
+strip. Items are listed blocking first, then
+oldest first. A question whose header carries a valid `context.decision`
+shows its options with pros and cons, the recommended option, whether it
+blocks, what happens if the answer comes later, and one copy command per
+option that answers with the option label as the body; the free-text answer
+and the acknowledgement follow. A decision that breaks the `send` rule shows
+as a plain question. A request with no answer command says why (for
+example, the requester is in the base root, or its project is not a
+configured peer); a reply-by time in the past is marked overdue. A bead shows
+its `bd show` command. After the items, the owner's unread mail is one line
+per session with its count, oldest age, and the `amq drain` command whose
+`--limit` covers that count; mail is never an item.
+
+The first section of the text view is `== Inbox ==`; it shows at most 25
+items; `--json` carries every item under `inbox` (`items`, `mail`).
 
 ## Withdrawals
 
