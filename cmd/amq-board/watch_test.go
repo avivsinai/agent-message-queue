@@ -143,3 +143,17 @@ func TestFloorStepNilWithoutRecipientsAndWatchLoopProceeds(t *testing.T) {
 		t.Fatalf("published lines = %d, want 2: %q", n, log.String())
 	}
 }
+
+// Field, 2026-11-26: the fleet's watch loop gave its GitHub read the two-second
+// one-shot deadline, so the source failed and recovered several times an hour
+// and each failure sent a floor notice.
+func TestWatchPassKeepsTheSourceDeadlineForGitHub(t *testing.T) {
+	watch := (&syncRun{watch: true, limits: &serveLimits{}}).sourceOptions()
+	if watch.githubTimeout != 0 {
+		t.Fatalf("watch GitHub timeout = %s, want the source deadline (zero)", watch.githubTimeout)
+	}
+	oneShot := (&syncRun{limits: &serveLimits{}}).sourceOptions()
+	if oneShot.githubTimeout != oneShotGitHubTimeout {
+		t.Fatalf("one-shot GitHub timeout = %s, want %s", oneShot.githubTimeout, oneShotGitHubTimeout)
+	}
+}
