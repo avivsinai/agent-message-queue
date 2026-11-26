@@ -207,24 +207,26 @@ func TestHTMLCardShowsSummaryAndPrefixChip(t *testing.T) {
 	}
 }
 
-// Every view names its coverage gaps in one plain line that links to
-// Sources. It says "Nothing for you to do" only when the board knows no
-// owner step exists, names a step it detects, and otherwise says neither.
-func TestHTMLCoverageLineNamesTheGaps(t *testing.T) {
+// Every view names its coverage gaps in one compact disclosure whose body
+// links to Sources. It says "Nothing for you to do" only when the board knows
+// no owner step exists, offers a step it detects (a command as a copyable
+// field), and otherwise says neither.
+func TestHTMLCoverageNamesTheGaps(t *testing.T) {
 	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	sources := `<p><a href="#view-sources">Sources</a> says why.</p></div></details>`
 	rows := []struct {
 		name   string
 		result Result
 		want   string
 	}{
 		{"beads", Result{Status: StatusOK, Coverage: Coverage{Unresolved: 238, Detail: "238 mentioned bead ids over the lookup cap"}},
-			`<span class="gap"><span class="gap-name">beads</span> partly read</span>.</span> <span class="gaps-count">1 source.</span> Nothing for you to do. <a href="#view-sources">Sources</a> says why.</p>`},
+			`<span class="gap"><span class="gap-name">beads</span> partly read</span></summary><div class="coverage-body"><div class="coverage-gap"><p><span class="gap-name">beads</span> partly read: 238 mentioned bead ids over the lookup cap.</p></div><p>Nothing for you to do.</p>` + sources},
 		{"claude-tasks", Result{Status: StatusOK, Coverage: Coverage{Unresolved: 1, Detail: UnboundClaudeListGap("/h/.claude", "team-a")}},
-			`<span class="gaps-count">1 source.</span> Run amq-board bind-claude-list --home /h/.claude --list team-a. <a href="#view-sources">Sources</a> says why.</p>`},
+			`<label class="cmd-label">Bind the Claude task list<textarea readonly rows="2" spellcheck="false">amq-board bind-claude-list --home /h/.claude --list team-a</textarea>`},
 		{"codex-goals", Result{Status: StatusUnavailable, Detail: SQLite3Missing},
-			`<span class="gaps-count">1 source.</span> Install sqlite3. <a href="#view-sources">Sources</a> says why.</p>`},
+			`<p><span class="gap-name">codex-goals</span> unavailable.</p><p>Install sqlite3.</p></div>` + sources},
 		{"github", Result{Status: StatusDegraded, Detail: "gh api graphql failed: HTTP 401"},
-			`<span class="gaps-count">1 source.</span> <a href="#view-sources">Sources</a> says why.</p>`},
+			`<p><span class="gap-name">github</span> read failed.</p></div>` + sources},
 	}
 	for _, row := range rows {
 		row.result.ObservedAt = now
@@ -234,8 +236,28 @@ func TestHTMLCoverageLineNamesTheGaps(t *testing.T) {
 			t.Fatal(err)
 		}
 		if !strings.Contains(page.String(), row.want) {
-			t.Errorf("%s: the coverage line lacks %s", row.name, row.want)
+			t.Errorf("%s: the coverage disclosure lacks %s", row.name, row.want)
 		}
+	}
+}
+
+// The Agents view lists sessions with a live wake or recent presence first
+// and folds the rest into one closed disclosure at its end.
+func TestHTMLAgentsFoldSessionsWithoutRecentPresence(t *testing.T) {
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	m := Build(Input{Config: DefaultConfig(), Now: now})
+	m.Roster = []RosterSession{
+		{Session: "s1", Agents: []RosterAgent{{RosterEntry: RosterEntry{Session: "s1", Handle: "quietone"}, Liveness: "quiet"}}},
+		{Session: "s2", Agents: []RosterAgent{{RosterEntry: RosterEntry{Session: "s2", Handle: "liveone"}, Liveness: "live"}}},
+	}
+	var page strings.Builder
+	if err := WriteHTML(&page, m, "amq-board --html"); err != nil {
+		t.Fatal(err)
+	}
+	html := page.String()
+	live, fold, quiet := strings.Index(html, "<h2>s2</h2>"), strings.Index(html, `<details class="context-block quiet-sessions"><summary>1 session without recent presence</summary>`), strings.Index(html, "<h2>s1</h2>")
+	if live < 0 || fold < 0 || !(live < fold && fold < quiet) {
+		t.Errorf("Agents does not list the live session first and fold the quiet one after it (live %d, fold %d, quiet %d)", live, fold, quiet)
 	}
 }
 

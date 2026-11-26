@@ -18,10 +18,9 @@
 <header class="mast">
   <div class="mast-id"><a class="brand" href="#view-flow">AMQ</a><span class="project">{{.Project}}</span></div>
   <div class="snapshot">
-    <p class="mast-gen">Snapshot <time datetime="{{.Generated}}">{{.Clock}}</time><span id="page-age"></span></p>
+    <p class="mast-gen">Snapshot <time datetime="{{.Generated}}">{{.Clock}}</time><span id="page-age"></span>{{if .Live}}<span id="live-state" class="live-state" aria-live="polite"></span>{{end}}</p>
     {{if .Live}}<button type="button" id="refresh">Refresh</button>{{end}}
   </div>
-  {{if .Live}}<div class="live-feedback"><p id="live-state" class="live-state" aria-live="polite">Updates checked automatically</p><button type="button" id="apply-update" hidden>Update snapshot</button></div>{{end}}
 </header>
 <div class="workspace">
 <nav class="navigation" aria-label="Board views">
@@ -158,8 +157,11 @@
   {{template "coverage" .Coverage}}
   <div class="request-summary">
     <p class="request-headline">{{.Headline}}</p>
-    {{range .Notes}}<p class="request-note">{{.}}</p>{{end}}
-    <p class="request-note">This is not a count of unfinished work: a request can be done without a direct reply, and a reply does not finish it. {{.Partition}}{{if .OlderCount}} <a href="#view-older-requests">Search older requests</a>{{end}}</p>
+    <p class="request-note">This is not a count of unfinished work: a request can be done without a direct reply, and a reply does not finish it.</p>
+    <details class="request-counting"><summary>How this is counted</summary><div class="detail-content">
+      {{range .Notes}}<p class="request-note">{{.}}</p>{{end}}
+      <p class="request-note">{{.Partition}}{{if .OlderCount}} <a href="#view-older-requests">Search older requests</a>{{end}}</p>
+    </div></details>
   </div>
   {{range .Groups}}
   <section class="request-group" aria-labelledby="{{.ID}}">
@@ -213,15 +215,10 @@
 <section class="view" id="view-agents" data-view="agents" aria-labelledby="heading-agents">
   <div class="view-heading"><div><h1 id="heading-agents">Agents</h1><p class="view-description">Wake and presence observations. These do not prove that a task is running.</p></div></div>
   {{if .RosterNote}}<p class="coverage">{{.RosterNote}}</p>{{end}}
-  <div class="source-list">{{range .Roster}}
-  <section class="crew"><h2>{{.Name}}</h2>{{if .Agents}}<ul class="crew-list">{{range .Agents}}
-  <li class="agent"><div class="agent-heading"><strong>{{.Handle}}</strong><span>{{if .Human}}Owner{{else if eq .Liveness "live"}}Wake running{{else if eq .Liveness "recent"}}Recent presence{{else}}No recent presence{{end}}{{if .Invalid}} · invalid mailbox{{end}}</span></div>
-  {{if .Counts}}<p>{{.Counts}}</p>{{end}}{{if .Usage}}<details><summary{{if .Limited}} class="limit-reached"{{end}}>Usage{{if .Limited}}: limit reached{{end}}</summary><p>{{.Usage}}</p>{{if .Context}}<p>{{.Context}}</p>{{end}}</details>{{end}}
-  {{if or .Action .Split}}<details><summary>Session details</summary>{{range .Split}}<p>{{.}}</p>{{end}}{{with .Action}}{{template "cmd" .}}{{end}}</details>{{end}}</li>
-  {{end}}</ul>{{else}}<p class="muted">No live wake observed in this session.</p>{{end}}
-  {{if .Quiet}}<details class="quiet"><summary>{{len .Quiet}} without recent presence</summary><ul>{{range .Quiet}}<li>{{.}}</li>{{end}}</ul></details>{{end}}</section>{{end}}</div>
+  {{if .Roster}}<div class="source-list">{{range .Roster}}{{template "crew" .}}{{end}}</div>{{end}}
   {{if .Limits}}<details class="context-block"><summary>Plan limits</summary>{{range .Limits}}<section class="account"><h2>{{.Account}}</h2><p>{{.Limits}}</p>{{if .Other}}<p>{{.Other}}</p>{{end}}</section>{{end}}</details>{{end}}
   {{if .Fleet}}<details class="context-block"><summary>Fleet usage</summary><p>{{.Fleet}}</p></details>{{end}}
+  {{if .QuietRoster}}<details class="context-block quiet-sessions"><summary>{{.QuietTitle}}</summary>{{range .QuietRoster}}{{template "crew" .}}{{end}}</details>{{end}}
 </section>
 </main>
 </div>
@@ -309,7 +306,15 @@
 {{end}}
 {{define "title"}}{{if .Prefix}}<span class="cc">{{.Prefix}}</span> {{end}}{{.Title}}{{end}}
 {{define "owners"}}{{range $i, $o := .}}{{if $i}}, {{end}}{{if $o.Unmapped}}<span class="sr-only">not mapped: </span>{{end}}{{$o.Name}}{{end}}{{end}}
-{{define "coverage"}}{{if .}}<p class="coverage-line"><span class="coverage-word">Incomplete coverage:</span> <span class="gaps">{{range $i, $g := .}}{{if $i}}, {{end}}<span class="gap"><span class="gap-name">{{$g.Name}}</span> {{$g.Status}}</span>{{end}}.</span> <span class="gaps-count">{{len .}} {{if eq (len .) 1}}source{{else}}sources{{end}}.</span>{{with .Steps}}{{range .}} {{.}}.{{end}}{{else}}{{if .NothingToDo}} Nothing for you to do.{{end}}{{end}} <a href="#view-sources">Sources</a> says why.</p>{{end}}{{end}}
+{{define "coverage"}}{{if .}}<details class="coverage"><summary><span class="coverage-word">Incomplete coverage:</span> {{range $i, $g := .}}{{if $i}}, {{end}}<span class="gap"><span class="gap-name">{{$g.Name}}</span> {{$g.Status}}</span>{{end}}</summary><div class="coverage-body">{{range .}}<div class="coverage-gap"><p><span class="gap-name">{{.Name}}</span> {{.Status}}{{if eq .Status "partly read"}}: {{.Gap}}{{end}}.</p>{{range .Steps}}{{with .Command}}{{template "cmd" .}}{{else}}<p>{{.Text}}.</p>{{end}}{{end}}</div>{{end}}{{if .NothingToDo}}<p>Nothing for you to do.</p>{{end}}<p><a href="#view-sources">Sources</a> says why.</p></div></details>{{end}}{{end}}
+{{define "crew"}}
+  <section class="crew"><h2>{{.Name}}</h2>{{if .Agents}}<ul class="crew-list">{{range .Agents}}
+  <li class="agent"><div class="agent-heading"><strong>{{.Handle}}</strong><span>{{if .Human}}Owner{{else if eq .Liveness "live"}}Wake running{{else if eq .Liveness "recent"}}Recent presence{{else}}No recent presence{{end}}{{if .Invalid}} · invalid mailbox{{end}}</span></div>
+  {{if .Counts}}<p>{{.Counts}}</p>{{end}}{{if .Usage}}<details><summary{{if .Limited}} class="limit-reached"{{end}}>Usage{{if .Limited}}: limit reached{{end}}</summary><p>{{.Usage}}</p>{{if .Context}}<p>{{.Context}}</p>{{end}}</details>{{end}}
+  {{if or .Action .Split}}<details><summary>Session details</summary>{{range .Split}}<p>{{.}}</p>{{end}}{{with .Action}}{{template "cmd" .}}{{end}}</details>{{end}}</li>
+  {{end}}</ul>{{else}}<p class="muted">No live wake observed in this session.</p>{{end}}
+  {{if .Quiet}}<details class="quiet"><summary>{{len .Quiet}} without recent presence</summary><ul>{{range .Quiet}}<li>{{.}}</li>{{end}}</ul></details>{{end}}</section>
+{{end}}
 {{define "cmd"}}
 <div class="cmd"><label class="cmd-label">{{.Label}}<textarea readonly rows="2" spellcheck="false">{{.Command}}</textarea></label><code class="sr-only">{{.Command}}</code><button type="button" class="copy" data-command="{{.Command}}" aria-label="Copy: {{.Label}}">Copy command</button></div>
 {{end}}
