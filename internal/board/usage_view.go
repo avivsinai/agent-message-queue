@@ -141,8 +141,8 @@ func WithUsage(m Model, r usage.Report, mapping usage.Mapping) Model {
 		workerLast := map[usage.RosterKey]*lastCounts{}
 		models := modelSums{}
 		for _, s := range a.Sessions {
-			models.add(s, windows)
-			fleetModels.add(s, trailing)
+			models.add(s, windows, au.Partial)
+			fleetModels.add(s, trailing, au.Partial)
 			key, mapped := mapping[usage.SessionRef{Harness: s.Harness, ID: s.ID}]
 			if mapped {
 				w := workers[key]
@@ -201,7 +201,7 @@ func WithUsage(m Model, r usage.Report, mapping usage.Mapping) Model {
 		for i, win := range windows {
 			au.Other = append(au.Other, makeUsage(win, other[i], otherAsOf[i], au.Partial, otherSpend.unknown()))
 		}
-		au.Models = models.view(windows, au.Partial)
+		au.Models = models.view(windows)
 		fleetPartial = fleetPartial || au.Partial
 		view.Accounts = append(view.Accounts, au)
 	}
@@ -209,7 +209,7 @@ func WithUsage(m Model, r usage.Report, mapping usage.Mapping) Model {
 		for i, win := range trailing {
 			view.Fleet = append(view.Fleet, makeUsage(win, fleet[i], fleetAsOf[i], fleetPartial, fleetSpend.unknown()))
 		}
-		view.FleetModels = fleetModels.view(trailing, fleetPartial)
+		view.FleetModels = fleetModels.view(trailing)
 	}
 	m.Usage = view
 	attachUsage(&m)
@@ -354,31 +354,38 @@ func makeUsage(w window, c usage.Counts, asOf time.Time, partial bool, unknown s
 	}
 }
 
-// modelSums sums sessions per harness and model, window by window.
-type modelSums map[modelKey][]usage.Counts
+// modelSums sums sessions per harness and model, window by window. A sum
+// is partial only when an account that spent that model is partial.
+type modelSums map[modelKey]*modelSum
 
 type modelKey struct{ harness, model string }
 
-func (ms modelSums) add(s usage.Session, windows []window) {
+type modelSum struct {
+	counts  []usage.Counts
+	partial bool
+}
+
+func (ms modelSums) add(s usage.Session, windows []window, partial bool) {
 	for i, win := range windows {
 		for model, c := range s.ByModel(win.from) {
 			k := modelKey{harness: s.Harness, model: model}
 			if ms[k] == nil {
-				ms[k] = make([]usage.Counts, len(windows))
+				ms[k] = &modelSum{counts: make([]usage.Counts, len(windows))}
 			}
-			ms[k][i] = usage.Add(ms[k][i], c)
+			ms[k].counts[i] = usage.Add(ms[k].counts[i], c)
+			ms[k].partial = ms[k].partial || partial
 		}
 	}
 }
 
 // view lists the models with spend, largest cost in the last window first,
 // then most tokens, so every face lists them in one order.
-func (ms modelSums) view(windows []window, partial bool) []ModelUsage {
+func (ms modelSums) view(windows []window) []ModelUsage {
 	out := []ModelUsage{}
-	for k, cs := range ms {
+	for k, sum := range ms {
 		mu := ModelUsage{Model: k.model, Harness: k.harness}
 		for i, win := range windows {
-			mu.Usage = append(mu.Usage, makeUsage(win, cs[i], time.Time{}, partial, ""))
+			mu.Usage = append(mu.Usage, makeUsage(win, sum.counts[i], time.Time{}, sum.partial, ""))
 		}
 		out = append(out, mu)
 	}

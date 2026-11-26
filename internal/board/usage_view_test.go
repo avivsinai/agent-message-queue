@@ -191,7 +191,7 @@ func TestHTMLSeatContextIsItsOwnParagraph(t *testing.T) {
 // and an unpriced one; the unpriced model spent more tokens. The priced
 // request's prompt is over its model's tier, and half of its cache writes
 // are 1-hour writes.
-func twoModelUsage(t *testing.T) Model {
+func twoModelUsage(t *testing.T, extra ...usage.Account) Model {
 	t.Helper()
 	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
 	const sid = "aaaaaaaa-0000-4000-8000-000000000001"
@@ -211,6 +211,7 @@ func twoModelUsage(t *testing.T) Model {
 		OverPromptTokens: 12_000_000, Over: &usage.Rates{Input: 8, CacheRead: 0.4, CacheWrite: 10, CacheWrite1h: 16, Output: 40}}}}
 	mapping := usage.Mapping{{Harness: usage.Claude, ID: sid}: {Session: "s1", Handle: "w"}}
 	rep := usage.Read(usage.Config{Homes: map[string][]string{usage.Claude: {home}}, Prices: prices}, now, []string{"/work/demo"}, mapping)
+	rep.Accounts = append(rep.Accounts, extra...)
 	m := Model{GeneratedAt: now, Roster: []RosterSession{{Session: "s1", Agents: []RosterAgent{{RosterEntry: RosterEntry{Session: "s1", Handle: "w", ValidHandle: true}}}}}}
 	return WithUsage(m, rep, mapping)
 }
@@ -233,6 +234,12 @@ func TestCostPricesEachModelAndCountsTheUnpriced(t *testing.T) {
 	models := m.Usage.Accounts[0].Models
 	if len(models) != 2 || models[0].Model != "model-priced-1" || models[1].Model != "model-unpriced-1" || models[1].Usage[1].CostUSD != nil {
 		t.Fatalf("models = %+v, want the priced model first and the unpriced one without a cost", models)
+	}
+	// Review of the cost follow-up: a partial account that never used the
+	// model made every fleet model row "at least".
+	partial := twoModelUsage(t, usage.Account{Key: "codex:~/.codex", Harness: usage.Codex, Files: 2, Read: 1})
+	if f, fm := partial.Usage.Fleet[1], partial.Usage.FleetModels[0]; !f.Partial || fm.Model != "model-priced-1" || fm.Usage[1].Partial {
+		t.Fatalf("fleet partial %v, %s row partial %v; want a partial fleet and a complete row for a model only the complete account used", f.Partial, fm.Model, fm.Usage[1].Partial)
 	}
 }
 

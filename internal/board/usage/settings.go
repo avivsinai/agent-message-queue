@@ -114,7 +114,7 @@ func userPrices(path string, raw json.RawMessage) ([]Price, []string) {
 	for i, m := range p.Models {
 		e, err := parsePrice(m)
 		if err == nil && seen[e.Match] {
-			err = fmt.Errorf("match %q is listed earlier; the first entry stands", e.Match)
+			err = fmt.Errorf("match %q is listed earlier", e.Match)
 		}
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("%s: usage.prices.models[%d] %s: %v; ignored", path, i, strings.TrimSpace(string(m)), err))
