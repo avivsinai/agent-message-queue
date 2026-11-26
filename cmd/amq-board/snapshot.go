@@ -17,6 +17,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/board"
 	"github.com/avivsinai/agent-message-queue/internal/board/decision"
 	"github.com/avivsinai/agent-message-queue/internal/board/source"
+	"github.com/avivsinai/agent-message-queue/internal/exitcode"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/loginservice"
 )
@@ -98,12 +99,24 @@ func notifyRoster(ctx context.Context, env board.Env) ([]board.RosterEntry, erro
 	return roster, nil
 }
 
+func boardSyncLog(stderr *os.File) io.Writer {
+	path := outputFilePath(stderr)
+	if !strings.HasSuffix(path, "/extensions/board/watch.log") {
+		return stderr
+	}
+	return loginservice.LogSink(path, stderr)
+}
+
 func runSync(args []string) int {
+	// launchd can restart a watch that fails before it resolves its project.
+	// Its inherited log continues to belong to the installed unit on a reroute.
+	log := boardSyncLog(os.Stderr)
 	flags := flag.NewFlagSet("amq-board sync", flag.ContinueOnError)
+	flags.SetOutput(log)
 	init := flags.Bool("init", false, "initialize the project store for the first time")
 	suggestions := flags.Bool("suggestions", false, "opt in to provisional suggestions with user-configured provider pins")
 	watch := flags.Bool("watch", false, "acquire and publish once per minute")
-	session := flags.String("session", "", "resolve the board and floor notices in this AMQ session")
+	session := sessionFlag(flags, "resolve the board and floor notices in this AMQ session")
 	notify := flags.String("notify", "", "send new floor problems to these comma-separated handles after each pass (with --watch)")
 	as := flags.String("as", "", "dedicated observer handle for floor notices (with --watch)")
 	if err := flags.Parse(args); err != nil {
@@ -116,17 +129,17 @@ func runSync(args []string) int {
 		return exitUsage
 	}
 	if *notify != "" && !*watch {
-		fmt.Fprintln(os.Stderr, "amq-board sync: --notify requires --watch")
+		_, _ = fmt.Fprintln(log, "amq-board sync: --notify requires --watch")
 		return exitUsage
 	}
 	recipients, err := watchRecipients(*notify, *as)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "amq-board sync:", err)
+		_, _ = fmt.Fprintln(log, "amq-board sync:", err)
 		return exitUsage
 	}
 	dir, err := os.Getwd()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		_, _ = fmt.Fprintln(log, err)
 		return exitGeneral
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -134,12 +147,8 @@ func runSync(args []string) int {
 	env := newEnv(dir, execRunner{})
 	store, env, err := resolveBoardSession(ctx, env, *session)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return exitGeneral
-	}
-	var log io.Writer = os.Stderr
-	if *watch {
-		log = loginservice.LogSink(filepath.Join(store.Dir, "watch.log"), log)
+		_, _ = fmt.Fprintln(log, err)
+		return exitcode.GetExitCode(err)
 	}
 	if *init {
 		if err = store.Init(ctx); err != nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/board"
+	"github.com/avivsinai/agent-message-queue/internal/exitcode"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
@@ -25,6 +27,20 @@ type boardContext struct {
 	Session    string `json:"session_name"`
 	Project    string `json:"project"`
 	Me         string `json:"me"`
+}
+
+// The AMQ resolver validates nonempty names. Distinguish an explicitly
+// empty argument from an omitted session, which selects the project route.
+func sessionFlag(flags *flag.FlagSet, usage string) *string {
+	var name string
+	flags.Func("session", usage, func(value string) error {
+		if value == "" {
+			return errors.New("session name cannot be empty")
+		}
+		name = value
+		return nil
+	})
+	return &name
 }
 
 func readBoardContext(ctx context.Context, env board.Env) (boardContext, error) {
@@ -45,6 +61,11 @@ func readBoardRoute(ctx context.Context, env board.Env, session string) (boardCo
 		return result, err
 	}
 	if result.Root == "" || result.RootID == "" || result.BaseRoot == "" || result.BaseRootID == "" {
+		if session != "" && result.Session == session && result.Root != "" {
+			if _, err := os.Lstat(result.Root); errors.Is(err, os.ErrNotExist) {
+				return result, exitcode.NotFoundError("no session named %q in this project", session)
+			}
+		}
 		return result, errors.New("AMQ full authenticated context unavailable")
 	}
 	return result, nil

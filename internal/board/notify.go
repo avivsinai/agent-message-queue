@@ -53,6 +53,14 @@ type deliveredSet struct {
 	Sent []deliveredEntry `json:"sent"`
 }
 
+// SessionDescription names the base queue or one named session in diagnostics.
+func SessionDescription(name string) string {
+	if name == "" {
+		return "the base session"
+	}
+	return "session " + name
+}
+
 // ValidateNotifyRoster checks all notice identities against one live session.
 func ValidateNotifyRoster(session, sender string, recipients []string, roster []RosterEntry) error {
 	unknown := map[string]bool{}
@@ -71,7 +79,7 @@ func ValidateNotifyRoster(session, sender string, recipients []string, roster []
 		}
 	}
 	if len(unknown) > 0 {
-		return fmt.Errorf("notify handle is not in the board's session %q: %s", session, strings.Join(notifySortedKeys(unknown), ", "))
+		return fmt.Errorf("notify handle is not in %s: %s", SessionDescription(session), strings.Join(notifySortedKeys(unknown), ", "))
 	}
 	return nil
 }

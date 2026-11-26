@@ -4,6 +4,7 @@ package loginservice
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -79,34 +80,48 @@ func (l *logWriter) Write(p []byte) (int, error) {
 		rest = rest[len(line):]
 		l.bol = line[len(line)-1] == '\n'
 	}
-	if err := lock.Lock(l.lk); err == nil {
-		defer func() { _ = lock.Unlock(l.lk) }()
-		l.rotate(int64(b.Len()))
-	}
-	if _, err := l.f.Write(b.Bytes()); err != nil {
+	if err := lock.Lock(l.lk); err != nil {
 		return 0, err
+	}
+	defer func() { _ = lock.Unlock(l.lk) }()
+	for b.Len() > 0 {
+		chunk := b.Next(int(l.max))
+		if err := l.rotate(int64(len(chunk))); err != nil {
+			return 0, err
+		}
+		if _, err := l.f.Write(chunk); err != nil {
+			return 0, err
+		}
 	}
 	return len(p), nil
 }
 
-// rotate moves the log to <path>.1 and empties it when n more bytes would
-// take it past max. It leaves the log as it is when the path no longer names
-// the open file or the copy fails, so a failed rotation never drops lines.
-func (l *logWriter) rotate(n int64) {
+// rotate archives the newest max bytes and empties the open log before
+// the next write would cross its limit. An older unbounded log can be large.
+func (l *logWriter) rotate(n int64) error {
 	st, err := l.f.Stat()
-	if err != nil || st.Size()+n <= l.max || st.Size() == 0 {
-		return
+	if err != nil || st.Size()+n <= l.max {
+		return err
 	}
-	if cur, err := os.Stat(l.path); err != nil || !os.SameFile(st, cur) {
-		return
-	}
-	data, err := os.ReadFile(l.path)
+	src, err := os.Open(l.path)
 	if err != nil {
-		return
+		return err
+	}
+	defer func() { _ = src.Close() }()
+	cur, err := src.Stat()
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(st, cur) {
+		return fmt.Errorf("log file %s was replaced", l.path)
+	}
+	data, err := io.ReadAll(io.NewSectionReader(src, max(0, st.Size()-l.max), l.max))
+	if err != nil {
+		return err
 	}
 	dir := filepath.Dir(l.path)
 	if _, err := fsq.WriteStateFile(filepath.Dir(dir), filepath.Join(filepath.Base(dir), filepath.Base(l.path)+".1"), data, 0o600); err != nil {
-		return
+		return err
 	}
-	_ = l.f.Truncate(0)
+	return l.f.Truncate(0)
 }

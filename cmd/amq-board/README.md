@@ -556,10 +556,12 @@ of its path's SHA-256 digest; reinstalling from another directory using the
 same store replaces the service and updates its working directory.
 Install resolves the login route without the shell's AMQ pins, prints the
 session and project, and checks every notice handle against that session's
-roster; select a named session with `--session NAME`.
+roster. Select a named session with `--session NAME`. An invalid name exits 2
+and a missing session exits 3. Install looks up `amq` on the service PATH.
 
 - On macOS the agent is `~/Library/LaunchAgents/io.github.avivsinai.amq-board.HASH.plist`.
-  Its log is `BASE_ROOT/extensions/board/watch.log`, with one rotated copy.
+  The installed `BASE_ROOT/extensions/board/watch.log` receives startup errors
+  and watch output, with one rotated copy. Each file holds at most 1 MiB.
 - On Linux the unit is `$XDG_CONFIG_HOME/systemd/user/amq-board-HASH.service`.
   The default configuration directory is `~/.config`. Read the log with
   `journalctl --user -u amq-board-HASH.service`.

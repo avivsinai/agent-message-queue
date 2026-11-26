@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/board"
+	"github.com/avivsinai/agent-message-queue/internal/exitcode"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/loginservice"
 )
@@ -97,9 +99,10 @@ func service(args []string) int {
 	}
 	flags := flag.NewFlagSet("amq-board service "+args[0], flag.ContinueOnError)
 	asJSON := flags.Bool("json", false, "print the result as JSON")
-	var session, notify, observer string
+	var session *string
+	var notify, observer string
 	if args[0] == "install" {
-		flags.StringVar(&session, "session", "", "AMQ session for the service and its notices")
+		session = sessionFlag(flags, "AMQ session for the service and its notices")
 		flags.StringVar(&notify, "notify", "", "send new floor problems to these comma-separated handles")
 		flags.StringVar(&observer, "as", "", "dedicated observer handle for floor notices")
 	}
@@ -120,7 +123,7 @@ func service(args []string) int {
 			fmt.Fprintln(os.Stderr, flags.Name()+":", err)
 			return exitUsage
 		}
-		return runServiceInstall(session, recipients, observer, *asJSON)
+		return runServiceInstall(*session, recipients, observer, *asJSON)
 	case "status":
 		return runServiceStatus(*asJSON)
 	default:
@@ -128,9 +131,9 @@ func service(args []string) int {
 	}
 }
 
-const boardServiceUsage = `usage: amq-board service install [--session <name>] [--notify <handles> --as <observer>]
+const boardServiceUsage = `usage: amq-board service install [--session <name>] [--notify <handles> --as <observer>] [--json]
        amq-board service status [--json]
-       amq-board service uninstall
+       amq-board service uninstall [--json]
 `
 
 // serviceProject is the working directory saved in the service.
@@ -144,13 +147,29 @@ func serviceProject() (string, error) {
 
 // A login service resolves its route from the project and its fixed arguments.
 func loginBoardEnv(dir string) board.Env {
-	environ := make([]string, 0)
+	var runner execRunner
 	for _, entry := range os.Environ() {
 		if !strings.HasPrefix(entry, "AM_") {
-			environ = append(environ, entry)
+			runner.amqEnv = append(runner.amqEnv, entry)
 		}
 	}
-	return newEnv(dir, execRunner{amqEnv: environ})
+	return newEnv(dir, runner)
+}
+
+// Resolve the command on the same PATH its children will inherit. Go's
+// exec.Command otherwise looks up an unqualified name on the caller's PATH.
+func servicePreflightEnv(dir, path string) (board.Env, error) {
+	env := loginBoardEnv(dir)
+	runner := env.Run.(execRunner)
+	for _, bin := range filepath.SplitList(path) {
+		if amq, err := exec.LookPath(filepath.Join(bin, "amq")); err == nil {
+			runner.amqExe = amq
+			runner.amqEnv = append(runner.amqEnv, "PATH="+path) // os/exec takes the last value
+			env.Run = runner
+			return env, nil
+		}
+	}
+	return board.Env{}, fmt.Errorf("amq is missing from the service PATH %s; install amq in a directory on that PATH", path)
 }
 
 func runServiceInstall(session string, recipients []string, observer string, asJSON bool) int {
@@ -160,12 +179,22 @@ func runServiceInstall(session string, recipients []string, observer string, asJ
 		fmt.Fprintln(os.Stderr, "amq-board:", err)
 		return exitGeneral
 	}
-	// The store must be initialized already; install never creates one.
-	ctx := context.Background()
-	store, env, err := resolveBoardSession(ctx, loginBoardEnv(dir), session)
+	exe, warning, err := boardStableExecutable()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "amq-board:", err)
-		return exitGeneral
+		return exitActionRequired
+	}
+	env, err := servicePreflightEnv(dir, loginservice.PATH(exe))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "amq-board:", err)
+		return exitActionRequired
+	}
+	// The store must be initialized already; install never creates one.
+	ctx := context.Background()
+	store, env, err := resolveBoardSession(ctx, env, session)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "amq-board:", err)
+		return exitcode.GetExitCode(err)
 	}
 	if _, err := store.Read(); err != nil {
 		fmt.Fprintln(os.Stderr, "amq-board:", err)
@@ -185,11 +214,6 @@ func runServiceInstall(session string, recipients []string, observer string, asJ
 			fmt.Fprintf(os.Stderr, "amq-board: %v; choose distinct handles registered in this session, or select their session with --session\n", err)
 			return exitActionRequired
 		}
-	}
-	exe, warning, err := boardStableExecutable()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "amq-board:", err)
-		return exitActionRequired
 	}
 	u := boardServiceUnit(storeDigest(store.Dir))
 	previous, err := readBoardInstallation(u)
@@ -232,7 +256,9 @@ func runServiceInstall(session string, recipients []string, observer string, asJ
 	if prior.file.Owned {
 		fmt.Printf("Replaced %s, installed for another board store.\n", prior.path)
 	}
-	if before.Owned {
+	if before.Owned && before.Dir == dir {
+		fmt.Printf("Reinstalled the login service for store %s.\n", store.Dir)
+	} else if before.Owned {
 		fmt.Printf("Replaced the login service for store %s (working directory %s, previously %s).\n", store.Dir, dir, before.Dir)
 	}
 	if started {
@@ -244,14 +270,10 @@ func runServiceInstall(session string, recipients []string, observer string, asJ
 	if project == "" {
 		project = dir
 	}
-	name := route.Session
-	if name == "" {
-		name = "(base)"
-	}
 	if len(recipients) > 0 {
-		fmt.Printf("Floor notices go to session %s of %s.\n", name, project)
+		fmt.Printf("Floor notices go to %s of %s.\n", board.SessionDescription(route.Session), project)
 	} else {
-		fmt.Printf("Board route is session %s of %s. Floor notices are disabled.\n", name, project)
+		fmt.Printf("Board route is %s of %s. Floor notices are disabled.\n", board.SessionDescription(route.Session), project)
 	}
 	if warning != "" {
 		fmt.Printf("Warning: %s.\n", warning)
@@ -299,6 +321,16 @@ func runServiceStatus(asJSON bool) int {
 	if st.Exe != "" {
 		fmt.Printf("Runs %s (%s).\n", st.Exe, st.Version)
 	}
+	session := board.SessionDescription(st.Session)
+	if st.Session == "" {
+		session = "project login route (unavailable)"
+		if env, err := servicePreflightEnv(st.Dir, loginservice.PATH(st.Exe)); err == nil {
+			if route, err := readBoardContext(context.Background(), env); err == nil {
+				session = board.SessionDescription(route.Session)
+			}
+		}
+	}
+	fmt.Printf("Route: %s.\n", session)
 	if st.Notify != "" {
 		fmt.Printf("Floor notices: --as %s --notify %s.\n", st.As, st.Notify)
 	}

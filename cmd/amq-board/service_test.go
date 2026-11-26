@@ -125,3 +125,42 @@ func TestBoardServiceStatus(t *testing.T) {
 		})
 	}
 }
+
+// Service review found preflight used the shell's amq and lost both session
+// error codes. The fixture is the CLI boundary, including its successful
+// env JSON for a named session whose directory does not exist.
+func TestInstallResolvesSessionWithServiceExecutable(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("Unix login service")
+	}
+	project := t.TempDir()
+	t.Chdir(project)
+	t.Setenv("HOME", project)
+	t.Setenv("TMPDIR", filepath.Join(project, "tmp"))
+	ambient, bin := t.TempDir(), t.TempDir()
+	t.Setenv("PATH", ambient)
+	exe := filepath.Join(bin, "amq-board")
+	for path, contents := range map[string]string{
+		exe:                           "",
+		filepath.Join(ambient, "amq"): "#!/bin/sh\nexit 9\n",
+		filepath.Join(bin, "amq"): `#!/bin/sh
+[ "${PATH%%:*}/amq" = "$0" ] || exit 9
+case "$4" in
+  missing) printf '{"root":"%s/missing","base_root":"%s","session_name":"missing"}\n' "$PWD" "$PWD" ;;
+  *) echo "invalid session name" >&2; exit 2 ;;
+esac
+`,
+	} {
+		if err := os.WriteFile(path, []byte(contents), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	previous := serviceExecutable
+	serviceExecutable = func() (string, error) { return exe, nil }
+	t.Cleanup(func() { serviceExecutable = previous })
+	for name, want := range map[string]int{"missing": 3, "bad/name": 2} {
+		if got := service([]string{"install", "--session", name}); got != want {
+			t.Errorf("install --session %q exited %d, want %d", name, got, want)
+		}
+	}
+}
