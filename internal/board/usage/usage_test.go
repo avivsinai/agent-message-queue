@@ -514,6 +514,12 @@ func TestUserPricesOverrideTheShippedTable(t *testing.T) {
 		{"override", `{"match":"claude-opus-5-5","input":1,"cache_read":0.1,"cache_write":1.25,"output":5,"source":"user"}`, 1, ""},
 		{"wrong type", `{"match":"claude-opus-5-5","input":"1","cache_read":0.1,"cache_write":1.25,"output":5}`, shippedOpus.Input, "usage.prices.models[0]"},
 		{"missing class", `{"match":"claude-opus-5-5","input":1,"cache_read":0.1,"output":5}`, shippedOpus.Input, "cache_write needs a price"},
+		// Review of the first cut: a finite huge price made the cost +Inf,
+		// and the usage view no longer encoded as JSON.
+		{"price out of range", `{"match":"claude-opus-5-5","input":1e308,"cache_read":0.1,"cache_write":1.25,"output":5}`, shippedOpus.Input, "input needs a price from 0 to 1000000"},
+		// Review of the first cut: a repeated match was taken silently and
+		// the last entry won.
+		{"repeated match", `{"match":"claude-opus-5-5","input":1,"cache_read":0.1,"cache_write":1.25,"output":5},{"match":"claude-opus-5-5","input":2,"cache_read":0.1,"cache_write":1.25,"output":5}`, 1, `usage.prices.models[1]`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "board.json")

@@ -29,6 +29,10 @@ type claudeLine struct {
 			CacheRead  int64 `json:"cache_read_input_tokens"`
 			CacheWrite int64 `json:"cache_creation_input_tokens"`
 			Out        int64 `json:"output_tokens"`
+			// CacheCreation splits the cache writes by lifetime.
+			CacheCreation struct {
+				OneHour int64 `json:"ephemeral_1h_input_tokens"`
+			} `json:"cache_creation"`
 		} `json:"usage"`
 	} `json:"message"`
 	QuotaLimits *struct {
@@ -138,7 +142,7 @@ func readClaude(acct *Account, files []file, now time.Time, eligible Eligible, b
 				seen[l.SessionID] = ids
 			}
 			s := session(l.SessionID)
-			e := event{at: l.Timestamp, model: l.Message.Model, Counts: Counts{In: u.In, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite, Out: u.Out}}
+			e := event{at: l.Timestamp, model: l.Message.Model, Counts: Counts{In: u.In, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite, CacheWrite1h: min(u.CacheCreation.OneHour, u.CacheWrite), Out: u.Out}}
 			if i, ok := ids[l.Message.ID]; ok {
 				s.events[i] = e
 				return true

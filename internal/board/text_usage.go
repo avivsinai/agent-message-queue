@@ -27,7 +27,7 @@ func writeUsage(b *strings.Builder, m Model) {
 	b.WriteString("limits:\n")
 	for _, a := range u.Accounts {
 		fmt.Fprintf(b, "  %s: %s\n", accountName(a.Key), clean(limitsLine(a.Limits, now)))
-		other := fmt.Sprintf("other sessions in this project (%s): %s", otherCount(a), spendLine(a.Other, now, a.Harness == usage.Pi))
+		other := fmt.Sprintf("other sessions in this project (%s): %s", otherCount(a), spendLine(a.Other, now, false))
 		if a.Detail != "" {
 			other += " · " + a.Detail
 		}
@@ -63,10 +63,23 @@ func writeCost(b *strings.Builder, u *UsageView) {
 	fmt.Fprintf(b, "  fleet: %s\n", strings.Join(fleet, " · "))
 	last := len(u.Fleet) - 1
 	window := windowName(u.Fleet[last].Window)
+	// A model id spent under more than one harness, and the unknown model,
+	// name the harness, so no two entries read alike.
+	harnesses := map[string]map[string]bool{}
+	for _, mu := range u.FleetModels {
+		if harnesses[mu.Model] == nil {
+			harnesses[mu.Model] = map[string]bool{}
+		}
+		harnesses[mu.Model][mu.Harness] = true
+	}
 	var models []string
 	for _, mu := range u.FleetModels {
 		w := mu.Usage[last]
-		models = append(models, modelName(mu.Model)+" "+costFigure(w)+" ("+si(w.CacheRead)+" cached, "+si(w.Out)+" out)")
+		name := modelName(mu.Model)
+		if mu.Model == "" || len(harnesses[mu.Model]) > 1 {
+			name += " (" + mu.Harness + ")"
+		}
+		models = append(models, name+" "+costFigure(w)+" ("+si(w.CacheRead)+" cached, "+si(w.Out)+" out)")
 	}
 	if len(models) > 0 {
 		fmt.Fprintf(b, "  by model, %s: %s\n", window, clean(topJoin(models)))
@@ -201,7 +214,7 @@ func otherCount(a AccountUsage) string {
 func usageLine(a RosterAgent, now time.Time) string {
 	var parts []string
 	if len(a.Usage) > 0 {
-		parts = append(parts, spendLine(a.Usage, now, false))
+		parts = append(parts, spendLine(a.Usage, now, true))
 	}
 	if l := a.LimitReached; l != nil {
 		p := "limit reached"
@@ -253,9 +266,10 @@ func pastLimit(l usage.Limit, now time.Time) string {
 	return p + "; the account was active since then"
 }
 
-// spendLine prints each window's fresh and cached tokens. withCost names
-// "cost not reported" for a harness that can report cost and did not.
-func spendLine(us []Usage, now time.Time, withCost bool) string {
+// spendLine prints each window's fresh and cached tokens. A seat's line
+// also prints its 5 h cost; every other figure of money is in the cost
+// block.
+func spendLine(us []Usage, now time.Time, seat bool) string {
 	var parts []string
 	var asOf time.Time
 	for _, w := range us {
@@ -269,13 +283,14 @@ func spendLine(us []Usage, now time.Time, withCost bool) string {
 		}
 		p += si(w.Fresh) + " fresh, " + si(w.CacheRead) + " cached"
 		switch {
+		case !seat || w.Window != usage.Window5h:
 		case w.CostUSD != nil:
 			p += ", " + dollars(*w.CostUSD) + " " + w.CostKind
 			if w.Unpriced > 0 {
 				p += " + " + si(w.Unpriced) + " tokens unpriced"
 			}
-		case withCost:
-			p += ", cost not reported"
+		case w.Unpriced > 0:
+			p += ", no price"
 		}
 		parts = append(parts, p)
 		asOf = later(asOf, w.AsOf)

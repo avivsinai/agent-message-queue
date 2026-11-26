@@ -422,21 +422,32 @@ app-server interface and the existing bounded collector cache.
 
 Each counted response keeps its model (Claude `message.model`, the Codex
 `turn_context` model before the token count, pi `message.model`; a record
-with none is `unknown model`). Cost is the list-price equivalent in US
-dollars: each token class times that model's list price per million tokens.
-It is a measure for comparison, not a bill. A cost pi recorded keeps its own
-kind. The shipped price table (`internal/board/usage/prices.json`) holds only
-prices read from the vendors' pricing pages, each with its source and date;
-an entry's `match` is a model id or id prefix, and the longest match wins.
-Cache writes are priced at the 5-minute write price. Add or replace entries
+with none is `unknown model`). A Codex token count read before the first
+`turn_context` of the part of a rollout the reader reads has no model, so it
+counts as `unknown model` with no price. Cost is the list-price equivalent in
+US dollars: each token class times that model's list price per million
+tokens. It is a list-price equivalent for comparison: a subscription is not
+billed this way. Fast-mode, batch and regional (data residency) multipliers
+are not applied. Prompt-length tiers and the recorded cache-write split are
+applied: a request whose prompt is over an entry's `over_prompt_tokens` is
+priced whole at its `over` rates (a Codex request's prompt is its
+`last_token_usage` input), and cache writes Claude Code records as 1-hour
+writes are priced at `cache_write_1h`, the rest at `cache_write`. A cost pi
+recorded keeps its own kind. The shipped price table
+(`internal/board/usage/prices.json`) holds only prices read from the
+vendors' pricing pages, each with its source and date; an entry's `match` is
+a model id or id prefix, and the longest match wins. Add or replace entries
 with `{"usage":{"prices":{"models":[{"match":"<id>","input":0,"cache_read":0,"cache_write":0,"output":0}]}}}`
-in `~/.amq/board.json`; every class is required, and a refused entry is a
-warning and is ignored. Tokens of a model with no price are never priced at
-zero: a figure that leaves them out says so (`unpriced_tokens` in `--json`).
-`--json` carries `models` per account and `fleet_models`, each with the 5 h and
-7 d rows, largest 7 d cost first, and `prices_as_of`. The text view prints a
-`cost` block after `limits`: the fleet per window, the five largest models and
-seats over 7 d, and the other sessions. A plan window that is at least half
+in `~/.amq/board.json`. Every class except `cache_write_1h` (default
+`cache_write`) needs a price from 0 to 1,000,000; a refused entry, or a later
+entry with a match already listed, is a warning and is ignored. Tokens of a
+model with no price are never priced at zero: a figure that leaves them out
+says so (`unpriced_tokens` in `--json`). `--json` carries `models` per account
+and `fleet_models`, each with the 5 h and 7 d rows, largest 7 d cost first,
+and `prices_as_of`. Money is printed in the text view's `cost` block, after
+`limits` (the fleet per window, the five largest models and seats over 7 d,
+and the other sessions; a model id spent under more than one harness names
+the harness), and as a seat's 5 h cost on its roster line. A plan window that is at least half
 used and used faster than its clock reads, for example, `5 h 62% used at 40%
 of the window: on pace to reach the limit before it resets`.
 

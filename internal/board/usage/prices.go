@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 )
 
@@ -12,12 +13,26 @@ import (
 // list-price equivalent in US dollars, a measure for comparison, not a bill.
 const ListPrice = "list-price equivalent"
 
-// Price is the list price of the models whose id starts with Match, in US
-// dollars per million tokens of each class.
+// maxRate bounds a price in dollars per million tokens: no list price is
+// near it, and a sum of rates below it stays finite.
+const maxRate = 1_000_000
+
+// Rates are the list prices of each token class, in US dollars per million
+// tokens. CacheWrite1h prices the cache writes a harness recorded as 1-hour
+// writes; the rest of the writes are priced at CacheWrite.
+type Rates struct {
+	Input, CacheRead, CacheWrite, CacheWrite1h, Output float64
+}
+
+// Price is the list price of the models whose id starts with Match. A
+// request whose prompt (input, cache reads and cache writes) is over
+// OverPromptTokens is priced whole at Over.
 type Price struct {
-	Match                                string
-	Input, CacheRead, CacheWrite, Output float64
-	Source, Note                         string
+	Match string
+	Rates
+	OverPromptTokens int64
+	Over             *Rates
+	Source, Note     string
 }
 
 // Prices is the price table. The longest Match that prefixes a model id
@@ -53,17 +68,41 @@ func mustPrices(data []byte) Prices {
 	return p
 }
 
-// parsePrice reads one price entry. Every class needs a price of zero or
-// more: a missing class would read as free.
+type rawRates struct {
+	Input        *float64 `json:"input"`
+	CacheRead    *float64 `json:"cache_read"`
+	CacheWrite   *float64 `json:"cache_write"`
+	CacheWrite1h *float64 `json:"cache_write_1h"`
+	Output       *float64 `json:"output"`
+}
+
+// rates checks each class: every class but cache_write_1h needs a price
+// from 0 to maxRate, since a missing class would read as free; a missing
+// cache_write_1h prices 1-hour writes at cache_write.
+func (r rawRates) rates(prefix string) (Rates, error) {
+	if r.CacheWrite1h == nil {
+		r.CacheWrite1h = r.CacheWrite
+	}
+	for _, c := range []struct {
+		name string
+		v    *float64
+	}{{"input", r.Input}, {"cache_read", r.CacheRead}, {"cache_write", r.CacheWrite}, {"cache_write_1h", r.CacheWrite1h}, {"output", r.Output}} {
+		if c.v == nil || math.IsNaN(*c.v) || *c.v < 0 || *c.v > maxRate {
+			return Rates{}, fmt.Errorf("%s%s needs a price from 0 to %d", prefix, c.name, maxRate)
+		}
+	}
+	return Rates{Input: *r.Input, CacheRead: *r.CacheRead, CacheWrite: *r.CacheWrite, CacheWrite1h: *r.CacheWrite1h, Output: *r.Output}, nil
+}
+
+// parsePrice reads one price entry.
 func parsePrice(raw json.RawMessage) (Price, error) {
 	var e struct {
-		Match      string   `json:"match"`
-		Input      *float64 `json:"input"`
-		CacheRead  *float64 `json:"cache_read"`
-		CacheWrite *float64 `json:"cache_write"`
-		Output     *float64 `json:"output"`
-		Source     string   `json:"source"`
-		Note       string   `json:"note"`
+		Match string `json:"match"`
+		rawRates
+		OverPromptTokens int64     `json:"over_prompt_tokens"`
+		Over             *rawRates `json:"over"`
+		Source           string    `json:"source"`
+		Note             string    `json:"note"`
 	}
 	if err := json.Unmarshal(raw, &e); err != nil {
 		return Price{}, err
@@ -71,15 +110,22 @@ func parsePrice(raw json.RawMessage) (Price, error) {
 	if strings.TrimSpace(e.Match) == "" {
 		return Price{}, errors.New("match is empty")
 	}
-	for _, c := range []struct {
-		name string
-		v    *float64
-	}{{"input", e.Input}, {"cache_read", e.CacheRead}, {"cache_write", e.CacheWrite}, {"output", e.Output}} {
-		if c.v == nil || *c.v < 0 {
-			return Price{}, fmt.Errorf("%s needs a price of zero or more", c.name)
-		}
+	r, err := e.rates("")
+	if err != nil {
+		return Price{}, err
 	}
-	return Price{Match: e.Match, Input: *e.Input, CacheRead: *e.CacheRead, CacheWrite: *e.CacheWrite, Output: *e.Output, Source: e.Source, Note: e.Note}, nil
+	p := Price{Match: e.Match, Rates: r, Source: e.Source, Note: e.Note}
+	switch {
+	case e.OverPromptTokens < 0 || (e.OverPromptTokens > 0) != (e.Over != nil):
+		return Price{}, errors.New("over_prompt_tokens and over go together")
+	case e.Over != nil:
+		over, err := e.Over.rates("over.")
+		if err != nil {
+			return Price{}, err
+		}
+		p.OverPromptTokens, p.Over = e.OverPromptTokens, &over
+	}
+	return p, nil
 }
 
 // with returns the table with the user's entries: an entry replaces the one
@@ -112,9 +158,10 @@ func (p Prices) lookup(model string) (Price, bool) {
 }
 
 // price gives an event its cost: a cost the harness recorded stays, a
-// priced model gets its list-price equivalent, and the tokens of a model
-// with no price are counted as unpriced.
-func (p Prices) price(model string, c Counts) Counts {
+// priced model gets its list-price equivalent at the tier of the request's
+// prompt size, and the tokens of a model with no price are counted as
+// unpriced.
+func (p Prices) price(model string, prompt int64, c Counts) Counts {
 	if c.Cost != nil {
 		return c
 	}
@@ -123,7 +170,12 @@ func (p Prices) price(model string, c Counts) Counts {
 		c.Unpriced = c.In + c.CacheRead + c.CacheWrite + c.Out
 		return c
 	}
-	cost := (float64(c.In)*e.Input + float64(c.CacheRead)*e.CacheRead + float64(c.CacheWrite)*e.CacheWrite + float64(c.Out)*e.Output) / 1e6
+	r := e.Rates
+	if e.Over != nil && prompt > e.OverPromptTokens {
+		r = *e.Over
+	}
+	cost := (float64(c.In)*r.Input + float64(c.CacheRead)*r.CacheRead + float64(c.CacheWrite-c.CacheWrite1h)*r.CacheWrite +
+		float64(c.CacheWrite1h)*r.CacheWrite1h + float64(c.Out)*r.Output) / 1e6
 	c.Cost, c.CostKind = &cost, ListPrice
 	return c
 }

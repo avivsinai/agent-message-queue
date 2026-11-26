@@ -80,6 +80,9 @@ func DefaultConfig(home string) Config {
 // Counts are one event's tokens, normalized: In is uncached input.
 type Counts struct {
 	In, CacheRead, CacheWrite, Out int64
+	// CacheWrite1h is the part of CacheWrite the harness recorded as
+	// 1-hour cache writes.
+	CacheWrite1h int64
 	// Cost is set only when the harness reported a cost for the event.
 	Cost     *float64
 	CostKind string
@@ -93,10 +96,13 @@ type Counts struct {
 func (c Counts) Fresh() int64 { return c.In + c.CacheWrite + c.Out }
 
 // event is one counted event of a harness session. model is the model
-// that served it, "" when the record names none.
+// that served it, "" when the record names none. prompt is the prompt size
+// of the request the harness recorded for the event; 0 means the event is
+// one request and its prompt is its input, cache reads and cache writes.
 type event struct {
-	at    time.Time
-	model string
+	at     time.Time
+	model  string
+	prompt int64
 	Counts
 }
 
@@ -274,7 +280,11 @@ func read(cfg Config, now time.Time, roots []string, mapping Mapping, clock func
 		for i := range acct.Sessions {
 			evs := acct.Sessions[i].events
 			for j := range evs {
-				evs[j].Counts = cfg.Prices.price(evs[j].model, evs[j].Counts)
+				prompt := evs[j].prompt
+				if prompt == 0 {
+					prompt = evs[j].In + evs[j].CacheRead + evs[j].CacheWrite
+				}
+				evs[j].Counts = cfg.Prices.price(evs[j].model, prompt, evs[j].Counts)
 			}
 		}
 		acct.Unlisted = h.unlisted
@@ -591,6 +601,7 @@ func add(a, b Counts) Counts {
 	a.In += b.In
 	a.CacheRead += b.CacheRead
 	a.CacheWrite += b.CacheWrite
+	a.CacheWrite1h += b.CacheWrite1h
 	a.Out += b.Out
 	a.Unpriced += b.Unpriced
 	if b.Cost != nil {

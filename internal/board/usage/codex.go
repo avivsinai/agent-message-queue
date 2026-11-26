@@ -48,6 +48,9 @@ type codexTokenCount struct {
 		Type string `json:"type"`
 		Info *struct {
 			Total codexUsage `json:"total_token_usage"`
+			// Last is the newest request's own usage: its input is the
+			// prompt size that picks a price tier.
+			Last *codexUsage `json:"last_token_usage"`
 		} `json:"info"`
 		RateLimits *struct {
 			Primary   json.RawMessage `json:"primary"`
@@ -247,7 +250,11 @@ func readRollout(f *os.File, since time.Time, eligible Eligible, b *budget, skip
 			if tc.Timestamp.Before(since) {
 				return true // the baseline, not counted
 			}
-			evs = append(evs, event{at: tc.Timestamp, model: model, Counts: Counts{In: d.In - d.Cached, CacheRead: d.Cached, CacheWrite: d.CacheWrite, Out: d.Out}})
+			var prompt int64
+			if last := tc.Payload.Info.Last; last != nil {
+				prompt = last.In
+			}
+			evs = append(evs, event{at: tc.Timestamp, model: model, prompt: prompt, Counts: Counts{In: d.In - d.Cached, CacheRead: d.Cached, CacheWrite: d.CacheWrite, Out: d.Out}})
 			return true
 		})
 		if baselineMissing {

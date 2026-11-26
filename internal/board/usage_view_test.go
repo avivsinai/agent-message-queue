@@ -188,13 +188,15 @@ func TestHTMLSeatContextIsItsOwnParagraph(t *testing.T) {
 }
 
 // twoModelUsage reads one mapped Claude session that used a priced model
-// and an unpriced one; the unpriced model spent more tokens.
+// and an unpriced one; the unpriced model spent more tokens. The priced
+// request's prompt is over its model's tier, and half of its cache writes
+// are 1-hour writes.
 func twoModelUsage(t *testing.T) Model {
 	t.Helper()
 	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
 	const sid = "aaaaaaaa-0000-4000-8000-000000000001"
 	row := func(id, model string, in, read, write, out int) string {
-		return `{"type":"assistant","timestamp":"2026-11-26T11:00:00.000Z","sessionId":"` + sid + `","cwd":"/work/demo","version":"2.1.300","message":{"id":"` + id + `","model":"` + model + `","usage":{"input_tokens":` + strconv.Itoa(in) + `,"cache_creation_input_tokens":` + strconv.Itoa(write) + `,"cache_read_input_tokens":` + strconv.Itoa(read) + `,"output_tokens":` + strconv.Itoa(out) + `}}}`
+		return `{"type":"assistant","timestamp":"2026-11-26T11:00:00.000Z","sessionId":"` + sid + `","cwd":"/work/demo","version":"2.1.300","message":{"id":"` + id + `","model":"` + model + `","usage":{"input_tokens":` + strconv.Itoa(in) + `,"cache_creation_input_tokens":` + strconv.Itoa(write) + `,"cache_creation":{"ephemeral_5m_input_tokens":` + strconv.Itoa(write-write/2) + `,"ephemeral_1h_input_tokens":` + strconv.Itoa(write/2) + `},"cache_read_input_tokens":` + strconv.Itoa(read) + `,"output_tokens":` + strconv.Itoa(out) + `}}}`
 	}
 	home := t.TempDir()
 	path := filepath.Join(home, "projects", "-work-demo", sid+".jsonl")
@@ -205,21 +207,25 @@ func twoModelUsage(t *testing.T) Model {
 	if err := os.WriteFile(path, []byte(lines), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	prices := usage.Prices{AsOf: "2026-11-26", Models: []usage.Price{{Match: "model-priced", Input: 4, CacheRead: 0.2, CacheWrite: 5, Output: 20}}}
+	prices := usage.Prices{AsOf: "2026-11-26", Models: []usage.Price{{Match: "model-priced", Rates: usage.Rates{Input: 4, CacheRead: 0.2, CacheWrite: 5, CacheWrite1h: 8, Output: 20},
+		OverPromptTokens: 12_000_000, Over: &usage.Rates{Input: 8, CacheRead: 0.4, CacheWrite: 10, CacheWrite1h: 16, Output: 40}}}}
 	mapping := usage.Mapping{{Harness: usage.Claude, ID: sid}: {Session: "s1", Handle: "w"}}
 	rep := usage.Read(usage.Config{Homes: map[string][]string{usage.Claude: {home}}, Prices: prices}, now, []string{"/work/demo"}, mapping)
 	m := Model{GeneratedAt: now, Roster: []RosterSession{{Session: "s1", Agents: []RosterAgent{{RosterEntry: RosterEntry{Session: "s1", Handle: "w", ValidHandle: true}}}}}}
 	return WithUsage(m, rep, mapping)
 }
 
-// A row's cost is its priced tokens at list prices; the tokens of a model
-// with no price are counted beside it, never priced at zero, and per-model
-// rows list the largest cost first (field, 2026-11-26: the board printed
-// tokens only, with no common unit across harnesses and no model).
+// A row's cost is its priced tokens at list prices, the whole request at
+// the tier of its prompt size and each cache write at its recorded
+// lifetime; the tokens of a model with no price are counted beside it,
+// never priced at zero, and per-model rows list the largest cost first
+// (field, 2026-11-26: the board printed tokens only, with no common unit
+// across harnesses and no model; 43 percent of cache writes were 1-hour).
 func TestCostPricesEachModelAndCountsTheUnpriced(t *testing.T) {
 	m := twoModelUsage(t)
-	// 1M × $4 + 10M × $0.20 + 2M × $5 + 0.5M × $20
-	const want = 4 + 2 + 10 + 10.0
+	// A 13M prompt is over the 12M tier: 1M × $8 + 10M × $0.40 + 1M × $10
+	// (5-minute writes) + 1M × $16 (1-hour writes) + 0.5M × $40.
+	const want = 8 + 4 + 10 + 16 + 20.0
 	w := m.Usage.Accounts[0].Workers[0].Usage[1]
 	if w.CostUSD == nil || *w.CostUSD != want || w.CostKind != usage.ListPrice || w.Unpriced != 3_000_000+90_000_000+1_000_000 {
 		t.Fatalf("worker 7 d cost = %v %q with %d unpriced tokens, want $%v list price with 94M unpriced", w.CostUSD, w.CostKind, w.Unpriced, want)
@@ -237,9 +243,9 @@ func TestTextPrintsTheCostBlock(t *testing.T) {
 	writeUsage(&b, twoModelUsage(t))
 	for _, want := range []string{
 		"cost (list-price equivalent, prices as of 2026-11-26):\n",
-		"  fleet: 5 h $26.00 · 7 d $26.00 · 94.0M tokens of an unpriced model not counted\n",
-		"  by model, 7 d: model-priced-1 $26.00 (10.0M cached, 500.0K out) · model-unpriced-1 no price (90.0M cached, 1.0M out)\n",
-		"  by seat, 7 d: w $26.00 + 94.0M tokens unpriced\n",
+		"  fleet: 5 h $58.00 · 7 d $58.00 · 94.0M tokens of an unpriced model not counted\n",
+		"  by model, 7 d: model-priced-1 $58.00 (10.0M cached, 500.0K out) · model-unpriced-1 no price (90.0M cached, 1.0M out)\n",
+		"  by seat, 7 d: w $58.00 + 94.0M tokens unpriced\n",
 	} {
 		if !strings.Contains(b.String(), want) {
 			t.Errorf("text lacks %q:\n%s", want, b.String())
