@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -181,6 +182,9 @@ func TestBoardPlacesCapturedAMQAndBeadsPayloads(t *testing.T) {
 		"bead:demo-b6": board.ColumnWaiting,
 		// Pro finding 5: an unmapped assignee is held, not unclaimed.
 		"bead:demo-b4": board.ColumnInFlight,
+		// Field, 2026-11-26: a decision for the owner sat in Backlog and
+		// Needs you read 0.
+		"bead:demo-b11": board.ColumnWaiting,
 	}
 	for ref, col := range want {
 		card, ok := cards[ref]
@@ -196,6 +200,9 @@ func TestBoardPlacesCapturedAMQAndBeadsPayloads(t *testing.T) {
 		if action.CardID == "bead:demo-b1" {
 			t.Error("unassigned blocked work appears in Next without a named blocker")
 		}
+	}
+	if i := slices.IndexFunc(m.Inbox.Items, func(it board.OwnerItem) bool { return it.ID == "bead:demo-b11" }); i < 0 || m.Inbox.Items[i].Kind != "bead" || m.Inbox.Items[i].Read == nil {
+		t.Errorf("the decision bead is not an Inbox item with its show-bead command: %+v", m.Inbox.Items)
 	}
 	if _, ok := cards["bead:demo-b9"]; ok {
 		t.Error("deferred bead is shown on the columns")

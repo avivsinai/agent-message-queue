@@ -13,7 +13,6 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
-	"github.com/avivsinai/agent-message-queue/internal/route"
 	"github.com/avivsinai/agent-message-queue/internal/thread"
 )
 
@@ -76,12 +75,7 @@ type threadOpenOpener struct {
 	Labels       []string `json:"labels"`
 }
 
-type threadOpenDestination struct {
-	Handle  string `json:"handle"`
-	Session string `json:"session"`
-	Project string `json:"project"`
-	Source  string `json:"source"`
-}
+type threadOpenDestination = thread.Destination
 
 type threadOpenRecipe struct {
 	Kind   string   `json:"kind"`
@@ -460,34 +454,6 @@ func completionRecipe(openerKind string) threadOpenRecipe {
 	return threadOpenRecipe{Kind: kind, Labels: labels}
 }
 
-// replyDestination derives the route back to the requester by the rules amq
-// reply uses: reply_project, then reply_to, then the sender in the owner's
-// session.
-func replyDestination(ob *thread.Obligation) (*threadOpenDestination, error) {
-	opener := ob.Opener
-	if opener.ReplyProject != "" {
-		if strings.TrimSpace(opener.ReplyProject) != opener.ReplyProject {
-			return nil, fmt.Errorf("invalid reply_project %q", opener.ReplyProject)
-		}
-		handle, session, err := route.ParseReplyTo(opener.ReplyTo, true)
-		if err != nil {
-			return nil, err
-		}
-		return &threadOpenDestination{Handle: handle, Session: session, Project: opener.ReplyProject, Source: "reply_project"}, nil
-	}
-	if opener.ReplyTo != "" {
-		handle, session, err := route.ParseReplyTo(opener.ReplyTo, false)
-		if err != nil {
-			return nil, err
-		}
-		return &threadOpenDestination{Handle: handle, Session: session, Source: "reply_to"}, nil
-	}
-	if handle, err := normalizeHandle(opener.From); err != nil || handle != opener.From {
-		return nil, fmt.Errorf("invalid sender handle %q", opener.From)
-	}
-	return &threadOpenDestination{Handle: opener.From, Session: ob.Owner.Session, Source: "local"}, nil
-}
-
 func obligationJSON(ob *thread.Obligation, now time.Time) threadOpenObligation {
 	opener := ob.Opener
 	owedByKind := "agent"
@@ -523,7 +489,7 @@ func obligationJSON(ob *thread.Obligation, now time.Time) threadOpenObligation {
 	if opener.NewsBy != "" {
 		out.OwnerReplied = &ob.OwnerReplied
 	}
-	if dest, err := replyDestination(ob); err != nil {
+	if dest, err := thread.ReplyDestination(ob); err != nil {
 		out.ReplyDestinationError = err.Error()
 	} else {
 		out.ReplyDestination = dest

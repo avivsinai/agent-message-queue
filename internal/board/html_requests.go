@@ -55,7 +55,7 @@ type pageOpinion struct{ Value, Classifier, Quote, Source string }
 func buildRequestsPage(m Model, now time.Time) pageRequests {
 	v := m.Requests
 	p := pageRequests{RecentCount: len(v.Recent), OlderCount: len(v.Older)}
-	p.Headline = requestHeadline(v)
+	p.Headline = requestHeadline(m.Inbox)
 	for _, note := range requestBookkeeping(v) {
 		p.Notes = append(p.Notes, clean(note))
 	}

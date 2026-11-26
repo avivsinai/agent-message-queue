@@ -250,6 +250,10 @@ func (b Beads) item(r beadRow, byID map[string]beadRow, humans map[string]bool) 
 			it.Evidence = append(it.Evidence, board.Evidence{Field: "closed_at", Value: r.ClosedAt, At: closed})
 		}
 		it.Reason = board.Reason{Field: "status", Text: "bead closed", Since: since}
+	case r.IssueType == "decision" && (r.Status == "open" || r.Status == "in_progress"):
+		// Only the owner makes a decision, whoever the assignee is.
+		it.State = board.StateNeedsHuman
+		it.Reason = board.Reason{Field: "issue_type", Text: "decision waits on you", Since: since}
 	case r.Status == "in_progress":
 		it.State = board.StateActive
 		if !started.IsZero() {

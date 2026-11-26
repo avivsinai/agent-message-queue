@@ -62,6 +62,8 @@ type Model struct {
 	Config              Config `json:"-"`
 	// Asks are the open human obligations and timed agent obligations.
 	Asks []Ask `json:"asks"`
+	// Inbox is what waits on the owner; Needs you counts its items.
+	Inbox Inbox `json:"inbox"`
 	// Requests are the recorded request messages with their observations
 	// and attributed opinions, outside task and work counts.
 	Requests    RequestView     `json:"requests"`
@@ -223,16 +225,11 @@ func Build(in Input) Model {
 		}
 	}
 
-	sessionPaths := map[string]string{}
-	peers := map[string]bool{}
+	sessionPaths, peers := amqRoutes(amqCtx)
 	if amqCtx != nil {
 		m.Project = amqCtx.Project
 		for _, s := range amqCtx.Sessions {
 			m.Sessions = append(m.Sessions, s.Name)
-			sessionPaths[s.Name] = s.Path
-		}
-		for _, p := range amqCtx.Peers {
-			peers[p] = true
 		}
 		m.Gates = append(m.Gates, amqCtx.Gates...)
 		m.Conversations = amqCtx.Conversations
@@ -294,7 +291,24 @@ func Build(in Input) Model {
 
 	m.Roster = buildRoster(amqCtx, roster, items, in.Config)
 	m.Next = selectNext(m.Columns)
+	buildInbox(&m, nil, sessionPaths, peers)
 	return m
+}
+
+// amqRoutes are the session roots and the .amqrc peer projects of the AMQ
+// context, which every copy command routes by.
+func amqRoutes(amqCtx *AMQContext) (map[string]string, map[string]bool) {
+	sessionPaths := map[string]string{}
+	peers := map[string]bool{}
+	if amqCtx != nil {
+		for _, s := range amqCtx.Sessions {
+			sessionPaths[s.Name] = s.Path
+		}
+		for _, p := range amqCtx.Peers {
+			peers[p] = true
+		}
+	}
+	return sessionPaths, peers
 }
 
 func buildCard(g group, col Column, idx int, in Input, observed map[string]time.Time, threadSize map[Ref]int, sessionPaths map[string]string, peers map[string]bool) Card {

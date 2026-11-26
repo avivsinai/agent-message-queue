@@ -27,7 +27,8 @@ The Requests section lists questions, review requests, and todos. Each
 recipient has an observation: a direct reply (a message whose last ref is
 the request), then later messages in the same thread as secondary context,
 or "not assessed" when the recipient's session is unknown. The headline
-counts only recent requests to the owner with no direct reply observed. The
+counts the Inbox items: open obligations owed by `user` and the cards under
+Needs you, the same number as Needs you. The
 Requests section counts requests to agents with no direct reply as the
 agents' bookkeeping, with its coverage notes.
 

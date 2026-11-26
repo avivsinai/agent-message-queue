@@ -71,7 +71,10 @@ func validThread(t string) bool {
 // AnswerActions builds "complete" and "acknowledge" for an obligation owed by
 // the reserved human (design 9.2). The route is the obligation's reply
 // destination, never its own session. peers is the project's .amqrc peer set.
-func AnswerActions(o *ObligationFacts, peers map[string]bool) []Action {
+// Each option adds first one "complete" whose body is the option label; a
+// label that send would read as stdin or a file (blank, "-", or a leading
+// "@") yields no command.
+func AnswerActions(o *ObligationFacts, peers map[string]bool, options ...string) []Action {
 	if o == nil || o.Destination == nil {
 		return nil
 	}
@@ -101,7 +104,7 @@ func AnswerActions(o *ObligationFacts, peers map[string]bool) []Action {
 		}
 		route = append(route, "--session", d.Session)
 	}
-	build := func(label, kind string, labels []string) (Action, bool) {
+	build := func(label, kind string, labels []string, body string) (Action, bool) {
 		if !format.IsValidKind(kind) {
 			return Action{}, false
 		}
@@ -115,14 +118,22 @@ func AnswerActions(o *ObligationFacts, peers map[string]bool) []Action {
 			}
 			argv = append(argv, "--labels", strings.Join(labels, ","))
 		}
-		argv = append(argv, "--body", "-")
+		argv = append(argv, "--body", body)
 		return newAction(label, argv...), true
 	}
 	var out []Action
-	if a, ok := build("complete: answer "+d.Handle, o.CompletionKind, o.CompletionLabels); ok {
+	for _, option := range options {
+		if strings.TrimSpace(option) == "" || option == "-" || strings.HasPrefix(option, "@") || hasControl(option) {
+			continue
+		}
+		if a, ok := build("answer "+option, o.CompletionKind, o.CompletionLabels, option); ok {
+			out = append(out, a)
+		}
+	}
+	if a, ok := build("complete: answer "+d.Handle, o.CompletionKind, o.CompletionLabels, "-"); ok {
 		out = append(out, a)
 	}
-	if a, ok := build("acknowledge: the card stays", o.AcknowledgeKind, nil); ok {
+	if a, ok := build("acknowledge: the card stays", o.AcknowledgeKind, nil, "-"); ok {
 		out = append(out, a)
 	}
 	return out
@@ -134,6 +145,15 @@ func MessageAgent(session, handle string) (Action, bool) {
 		return Action{}, false
 	}
 	return newAction("message "+handle, "amq", "send", "--session", session, "--me", reservedHuman, "--to", handle, "--body", "-"), true
+}
+
+// ReadOwnerMail builds the drain of the owner's unread mail in one session.
+// The base root has no session name to route by, so it has no command.
+func ReadOwnerMail(session string) (Action, bool) {
+	if !validHandle(session) {
+		return Action{}, false
+	}
+	return newAction("read mail", "amq", "drain", "--me", reservedHuman, "--session", session, "--include-body"), true
 }
 
 // ShowThread builds the read-only thread inspection command.

@@ -187,5 +187,19 @@
         "metadata": "{}"
       }
     ]
+  },
+  {
+    "id": "demo-b11",
+    "title": "Decide: the input guard on by default",
+    "status": "open",
+    "priority": 1,
+    "issue_type": "decision",
+    "owner": "owner@example.com",
+    "created_at": "2026-10-21T13:00:00Z",
+    "created_by": "Demo",
+    "updated_at": "2026-10-21T13:00:00Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
   }
 ]
