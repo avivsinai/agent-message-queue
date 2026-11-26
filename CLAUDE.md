@@ -141,6 +141,7 @@ internal/hookfile/            Byte-surgery hooks-file editor with a per-file loc
 internal/integration/         Shared adapter support for Symphony and Kanban
 internal/keepalive/           Companion registry, adapters, hooks, and supervision
 internal/launch/              Plans, adapters, trust, leases, bindings, and resume state
+internal/loginservice/        Neutral login-service unit render, manager calls, and log sink (amq-remote, amq-board)
 internal/lock/                Advisory file locks
 internal/notificationattempt/ Durable log of wake notification attempts
 internal/presence/            Agent presence metadata

@@ -23,11 +23,20 @@ type boardContext struct {
 	BaseRoot   string `json:"base_root"`
 	BaseRootID string `json:"base_root_id"`
 	Session    string `json:"session_name"`
+	Project    string `json:"project"`
 	Me         string `json:"me"`
 }
 
 func readBoardContext(ctx context.Context, env board.Env) (boardContext, error) {
-	raw, err := env.Run.Run(ctx, env.Dir, []string{"amq", "env", "--json"})
+	return readBoardRoute(ctx, env, "")
+}
+
+func readBoardRoute(ctx context.Context, env board.Env, session string) (boardContext, error) {
+	args := []string{"amq", "env", "--json"}
+	if session != "" {
+		args = append(args, "--session", session)
+	}
+	raw, err := env.Run.Run(ctx, env.Dir, args)
 	if err != nil {
 		return boardContext{}, err
 	}
@@ -46,7 +55,11 @@ func resolveStore(ctx context.Context, env board.Env) (board.Store, error) {
 	return store, err
 }
 func resolveBoardContext(ctx context.Context, env board.Env) (board.Store, board.Env, error) {
-	initial, err := readBoardContext(ctx, env)
+	return resolveBoardSession(ctx, env, "")
+}
+
+func resolveBoardSession(ctx context.Context, env board.Env, session string) (board.Store, board.Env, error) {
+	initial, err := readBoardRoute(ctx, env, session)
 	if err != nil {
 		return board.Store{}, env, err
 	}
@@ -59,8 +72,12 @@ func resolveBoardContext(ctx context.Context, env board.Env) (board.Store, board
 		return board.Store{}, env, errors.New("board context requires the production command runner")
 	}
 	pin := map[string]string{"AM_ROOT": initial.Root, "AM_ROOT_ID": initial.RootID, "AM_BASE_ROOT": initial.BaseRoot, "AM_BASE_ROOT_ID": initial.BaseRootID, "AM_SESSION": initial.Session, "AM_ME": initial.Me}
+	environ := runner.amqEnv
+	if environ == nil {
+		environ = os.Environ()
+	}
 	runner.amqEnv = []string{}
-	for _, entry := range os.Environ() {
+	for _, entry := range environ {
 		key, _, _ := strings.Cut(entry, "=")
 		if _, replace := pin[key]; !replace {
 			runner.amqEnv = append(runner.amqEnv, entry)
@@ -74,8 +91,11 @@ func resolveBoardContext(ctx context.Context, env board.Env) (board.Store, board
 	validate := func(ctx context.Context) error {
 		// The original resolver detects a changed project route. The pinned resolver
 		// separately checks the identities on disk rather than trusting stored IDs.
-		for _, candidate := range []board.Env{env, pinned} {
-			actual, err := readBoardContext(ctx, candidate)
+		for _, route := range []struct {
+			env     board.Env
+			session string
+		}{{env, session}, {pinned, ""}} {
+			actual, err := readBoardRoute(ctx, route.env, route.session)
 			if err != nil {
 				return err
 			}

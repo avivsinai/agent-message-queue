@@ -1,18 +1,20 @@
 //go:build unix
 
-package main
+package loginservice
 
 import (
+	"fmt"
+
 	"os"
 	"path/filepath"
 	"regexp"
 	"testing"
 )
 
-// up.log gets a timestamp per line and stays under its cap by keeping one
-// older file (an unbounded 544 KB up.log with no timestamps, bead
+// A watched log gets a timestamp per line and stays under its cap by keeping
+// one older file (an unbounded 544 KB up.log with no timestamps, bead
 // agent-message-queue-9df).
-func TestUpLogTimestampsAndRotates(t *testing.T) {
+func TestLogSinkTimestampsAndRotates(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "up.log")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
@@ -20,14 +22,14 @@ func TestUpLogTimestampsAndRotates(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = f.Close() }()
-	w := logSink(dir, f)
-	l, ok := w.(*upLog)
+	w := LogSink(path, f)
+	l, ok := w.(*logWriter)
 	if !ok {
-		t.Fatalf("logSink(up.log) = %T, want *upLog", w)
+		t.Fatalf("LogSink(up.log) = %T, want *logWriter", w)
 	}
 	l.max = 400
 	for i := range 20 {
-		say(w, "link example: state %d", i)
+		_, _ = fmt.Fprintf(w, "link example: state %d\n", i)
 	}
 	cur, err := os.ReadFile(path)
 	if err != nil {
@@ -49,9 +51,9 @@ func TestUpLogTimestampsAndRotates(t *testing.T) {
 	}
 }
 
-// Review of the disk bounds: a service manager may open up.log without
+// Review of the disk bounds: a service manager may open the log without
 // O_APPEND; the sink must still lock, timestamp and append at the end.
-func TestUpLogSinkWithoutAppendFlag(t *testing.T) {
+func TestLogSinkWithoutAppendFlag(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "up.log")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
@@ -59,12 +61,12 @@ func TestUpLogSinkWithoutAppendFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = f.Close() }()
-	w := logSink(dir, f)
-	if _, ok := w.(*upLog); !ok {
-		t.Fatalf("logSink(non-append up.log) = %T, want *upLog", w)
+	w := LogSink(path, f)
+	if _, ok := w.(*logWriter); !ok {
+		t.Fatalf("LogSink(non-append up.log) = %T, want *logWriter", w)
 	}
-	say(w, "one")
-	say(w, "two")
+	_, _ = fmt.Fprintln(w, "one")
+	_, _ = fmt.Fprintln(w, "two")
 	cur, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)

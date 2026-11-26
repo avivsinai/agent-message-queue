@@ -13,6 +13,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/board"
 	boardusage "github.com/avivsinai/agent-message-queue/internal/board/usage"
+	"github.com/avivsinai/agent-message-queue/internal/loginservice"
 )
 
 const floodEnv = "AMQ_BOARD_TEST_FLOOD"
@@ -24,6 +25,8 @@ func TestMain(m *testing.M) {
 		_, _ = os.Stdout.Write(bytes.Repeat([]byte("x"), 2<<20))
 		os.Exit(0)
 	}
+	loginservice.Run = func(string, ...string) error { return errors.New("tests run no service manager") }
+	loginservice.RunOutput = func(string, ...string) (string, error) { return "", errors.New("tests run no service manager") }
 	os.Exit(m.Run())
 }
 

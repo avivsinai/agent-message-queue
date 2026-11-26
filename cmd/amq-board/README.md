@@ -537,3 +537,39 @@ again each minute. It ends on Ctrl-C or TERM, or when the project it serves was
 replaced. With `--notify <handles> --as <observer>` it sends each new floor
 problem once after every pass; a board that stops being published is reported
 by the existing stale notice after the liveness window.
+
+### Login service
+
+After initializing the board with `amq-board sync --init`, run the following
+from the project directory to publish it every minute and send floor notices.
+
+```sh
+amq-board service install --session review --notify lead,alt --as floor
+amq-board service status --json
+amq-board service uninstall
+```
+
+Omit both notice flags to publish without sending notices. Install starts
+`amq-board sync --watch` and configures it to start at login. If macOS has no
+GUI login session, the service starts at the next login. Each canonical board store has one service, named by the first eight hex digits
+of its path's SHA-256 digest; reinstalling from another directory using the
+same store replaces the service and updates its working directory.
+Install resolves the login route without the shell's AMQ pins, prints the
+session and project, and checks every notice handle against that session's
+roster; select a named session with `--session NAME`.
+
+- On macOS the agent is `~/Library/LaunchAgents/io.github.avivsinai.amq-board.HASH.plist`.
+  Its log is `BASE_ROOT/extensions/board/watch.log`, with one rotated copy.
+- On Linux the unit is `$XDG_CONFIG_HOME/systemd/user/amq-board-HASH.service`.
+  The default configuration directory is `~/.config`. Read the log with
+  `journalctl --user -u amq-board-HASH.service`.
+
+Status reports whether the installed unit is current, stale or missing,
+whether it is running, its executable and version, and its notice recipients
+and observer. Status and uninstall work after the board store is removed.
+After pointing a project at another store, run `amq-board service install` again.
+Uninstall before moving a project. On macOS uninstall also removes the watch
+log, rotated copy and lock. A refused stop leaves the unit in place for a retry.
+
+After upgrading the binary, rerun the install command with the desired notice
+flags to restart the service on the new version.

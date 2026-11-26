@@ -35,13 +35,16 @@ const (
 )
 
 const usage = `Usage: amq-board [--json | --pane-json | --html [--out FILE]]
-       amq-board sync [--init] [--watch] [--suggestions]
+       amq-board sync [--init] [--watch] [--session NAME] [--suggestions]
        amq-board suggest --endpoint URL --model qwen3.5:4b --digest HEX [--message KEY]
        amq-board suggestions
        amq-board adopt-suggestion --suggestion ID --choice ID --generation N [--confirm-independent]
        amq-board ignore-suggestion --suggestion ID --generation N
        amq-board serve
        amq-board check [--json]
+       amq-board service install [--session NAME] [--notify HANDLES --as OBSERVER]
+       amq-board service status [--json]
+       amq-board service uninstall
        amq-board retro [--since DUR] [--json]
        amq-board classify --classifier NAME [--next N] --json
        amq-board classify --file LABELS.json
@@ -92,6 +95,8 @@ func run(args []string) int {
 			return runSync(args[1:])
 		case "classify":
 			return runClassify(args[1:])
+		case "service":
+			return service(args[1:])
 		case "admit", "attach", "detach", "move", "dismiss", "cancel", "reopen", "adopt", "bind-claude-list", "unbind-claude-list", "consolidate", "move-alias", "catalogue":
 			return runOwner(args[0], args[1:])
 		}
