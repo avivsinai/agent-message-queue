@@ -325,6 +325,7 @@ func installSetupHarness(t *testing.T) {
 	setupLookPath = func(string) (string, error) { return "", os.ErrNotExist }
 	setupCmuxAvailable = func() bool { return false }
 	setupGhosttyAvailable = func() bool { return false }
+	setupRexAvailable = func() bool { return false }
 	setupCommitStepHook = nil
 	t.Cleanup(func() {
 		setupHarnessAdapters = func() []launch.HarnessAdapter {
@@ -338,6 +339,7 @@ func installSetupHarness(t *testing.T) {
 		setupLookPath = execLookPathForSetup
 		setupCmuxAvailable = setupCmuxAvailableDefault
 		setupGhosttyAvailable = setupGhosttyAvailableDefault
+		setupRexAvailable = setupRexAvailableDefault
 		setupCommitStepHook = nil
 	})
 }

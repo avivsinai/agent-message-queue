@@ -100,6 +100,9 @@ var (
 	setupGhosttyAvailable = func() bool {
 		return launch.NewGhosttyBackend().Detect().Available
 	}
+	setupRexAvailable = func() bool {
+		return launch.NewRexBackend("").Detect().Available
+	}
 	setupIsTerminal = func() bool {
 		return term.IsTerminal(int(os.Stdin.Fd()))
 	}
@@ -743,8 +746,8 @@ func chooseSetupLaunchers(options setupOptions, detected []string, existing laun
 }
 
 func detectSetupLaunchers() []string {
-	result := make([]string, 0, 4)
-	for _, name := range []string{launch.LauncherCMux, launch.LauncherGhostty, launch.LauncherTMux} {
+	result := make([]string, 0, 5)
+	for _, name := range []string{launch.LauncherCMux, launch.LauncherGhostty, launch.LauncherRex, launch.LauncherTMux} {
 		if setupLauncherAvailable(name) {
 			result = append(result, name)
 		}
@@ -758,6 +761,8 @@ func setupLauncherAvailable(name string) bool {
 		return setupCmuxAvailable()
 	case launch.LauncherGhostty:
 		return setupGhosttyAvailable()
+	case launch.LauncherRex:
+		return setupRexAvailable()
 	}
 	_, err := setupLookPath(name)
 	return err == nil

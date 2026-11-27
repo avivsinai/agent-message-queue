@@ -375,6 +375,7 @@ var (
 	execLookPathForSetup         = setupLookPath
 	setupCmuxAvailableDefault    = setupCmuxAvailable
 	setupGhosttyAvailableDefault = setupGhosttyAvailable
+	setupRexAvailableDefault     = setupRexAvailable
 	setupTerminalDefault         = setupIsTerminal
 )
 
@@ -400,6 +401,7 @@ func setupProjectFixture(t *testing.T, adapters ...string) string {
 	setupLookPath = func(string) (string, error) { return "", fs.ErrNotExist }
 	setupCmuxAvailable = func() bool { return false }
 	setupGhosttyAvailable = func() bool { return false }
+	setupRexAvailable = func() bool { return false }
 	setupCommitStepHook = nil
 	t.Cleanup(func() {
 		_ = os.Chdir(oldCWD)
@@ -415,6 +417,7 @@ func setupProjectFixture(t *testing.T, adapters ...string) string {
 		setupLookPath = execLookPathForSetup
 		setupCmuxAvailable = setupCmuxAvailableDefault
 		setupGhosttyAvailable = setupGhosttyAvailableDefault
+		setupRexAvailable = setupRexAvailableDefault
 		setupIsTerminal = setupTerminalDefault
 		setupCommitStepHook = nil
 	})

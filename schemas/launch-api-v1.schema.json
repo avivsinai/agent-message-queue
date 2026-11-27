@@ -226,7 +226,7 @@
       "properties": {
         "request_version": {"const": 1},
         "target": {"$ref": "#/$defs/TargetV1"},
-        "launcher": {"enum": ["auto", "cmux", "ghostty", "tmux", "commands"]},
+        "launcher": {"enum": ["auto", "cmux", "ghostty", "rex", "tmux", "commands"]},
         "placement": {"$ref": "#/$defs/PlacementV1"},
         "caller_context": {"$ref": "#/$defs/CallerContextV1"},
         "intent": {"$ref": "#/$defs/LaunchIntentV1"},

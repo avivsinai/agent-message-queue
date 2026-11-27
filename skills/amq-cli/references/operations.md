@@ -195,14 +195,16 @@ first semantic plan, and each plan change, needs an interactive trust
 confirmation stored outside the worktree. Non-interactive or `--json` calls
 exit `6` until that digest is trusted. An unknown `session resume` name exits
 `3` and writes nothing. Registered launchers are `commands`, `tmux`, `cmux`,
-and `ghostty`. `--launcher auto` walks the local preference; an explicit
+`ghostty`, and `rex`. `--launcher auto` walks the local preference; an explicit
 `--launcher <name>` wins. Inside cmux (`CMUX_SURFACE_ID`) is preferred over
-inside Ghostty (`TERM_PROGRAM=ghostty`). Setup lists cmux and Ghostty as
-available only when Detect ping succeeds, not from LookPath alone. The
+inside Ghostty (`TERM_PROGRAM=ghostty`), which is preferred over inside Rex
+(`TERM_PROGRAM=rex`). Rex is available only on macOS from inside a Rex pane
+with API revision 24 or later. Setup lists cmux, Ghostty, and Rex as
+available only when Detect succeeds, not from LookPath alone. The
 `commands` backend prints complete `coop exec` commands and exits `6` because
 running them is the remaining operator action. Paste the emitted lines exactly,
 one per terminal; do not reconstruct them from generic `coop exec` examples.
-Managed `tmux`, `cmux`, and `ghostty` backends run the plan in-app instead.
+Managed `tmux`, `cmux`, `ghostty`, and `rex` backends run the plan in-app instead.
 
 Without `--session` or `--root`, `coop exec` uses the declared `default_session` from `.amq/launch.json`, or `collab` when none is declared. Create a session with `amq session create <name>` or a root with `amq init --root` before the first `coop exec`; `coop exec` warns when it has to create a missing one.
 

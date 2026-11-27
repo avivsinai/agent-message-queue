@@ -44,6 +44,13 @@ Cmux Create uses `--focus false` and restores the previously selected workspace
 after Create, including on failure cleanup. Focus then Close can leave a
 neighbor workspace selected.
 
+A Rex binding records the Rex server generation. Rex restores tabs and panes
+after a server restart with new programs, so the restored tab is a different
+backend context and `amq launch` reports `foreign_binding`.
+`amq launch --launcher rex --rebind` starts a fresh generation; the operator
+closes the restored tab. Managed agents start with an empty `OSC7577_TOKEN`, so
+Rex program resume does not restart them outside AMQ.
+
 If an operator chooses to abandon recovery evidence, first inspect the exact
 target without mutation:
 

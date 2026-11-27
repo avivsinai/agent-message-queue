@@ -71,7 +71,7 @@ func LegacyPlacement(backend string) Placement {
 		return Placement{Target: PlacementTargetSession, Layout: PlacementLayoutColumns}
 	case LauncherCMux:
 		return Placement{Target: PlacementTargetCurrentWindow, Layout: PlacementLayoutColumns}
-	case LauncherGhostty:
+	case LauncherGhostty, LauncherRex:
 		return Placement{Target: PlacementTargetNewWindow, Layout: PlacementLayoutColumns}
 	default:
 		return Placement{Target: PlacementTargetSession, Layout: PlacementLayoutColumns}
@@ -93,7 +93,7 @@ func PlacementSupported(backend string, requested Placement) bool {
 		case PlacementTargetCurrentWindow:
 			return tmuxPaneID(requested.LauncherPane) && supportedTmuxLayout(requested.Layout)
 		}
-	case LauncherGhostty:
+	case LauncherGhostty, LauncherRex:
 		return requested.Target == PlacementTargetNewWindow &&
 			requested.LauncherPane == "" &&
 			(requested.Layout == PlacementLayoutColumns || requested.Layout == PlacementLayoutRows)

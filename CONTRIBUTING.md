@@ -75,14 +75,17 @@ AMQ_GHOSTTY_LIVE=1 go test ./internal/keepalive/adapter -run '^TestGhosttyLiveDi
 AMQ_CLAUDE_LIVE=1 go test ./internal/keepalive/adapter -run '^TestClaudePrintLiveResumeAck$' -count=1 -v
 AMQ_CODEX_LIVE=1 AMQ_CODEX_LIVE_THREAD="<scratch-thread-uuid>" go test ./internal/keepalive/adapter -run '^TestCodexQueueLiveEnqueue$' -count=1 -v
 AMQ_TMUX_LIVE=1 go test ./internal/launch -run '^TestTmuxBackendLifecycleAndRecovery$' -count=1 -v
+AMQ_REX_LIVE=1 go test ./internal/launch -run '^TestRexLiveLifecycle$' -count=1 -v
 AMQ_AGY_LIVE=1 go test ./internal/acp/host -run '^TestAgyLiveRemembersAcrossHostRestart$' -count=1 -v
 AMQ_WAKE_SELF_UPGRADE_PTY_LIVE=1 go test ./internal/cli -run '^Test(Darwin|Linux)WakeSelfUpgradeRealPTYStableSymlink$' -count=1 -v
 AMQ_WAKE_INPUT_GUARD_PTY_LIVE=1 go test ./internal/cli -run '^TestWakeInputGuardRealPTY$' -count=1 -v
 ```
 
 Read the selected test before running it. The tmux proof starts a private
-tmux server on its own socket and removes it. The terminal probes create and close
-windows or workspaces; use a dedicated application instance with no concurrent
+tmux server on its own socket and removes it. The Rex proof runs on macOS
+inside a pane of a scratch Rex session; it opens one tab in that session, runs
+a stub command in its two panes, and closes the tab. The terminal probes create
+and close windows or workspaces; use a dedicated application instance with no concurrent
 users. The Claude check creates and resumes a scratch conversation. The agy check
 runs the installed `agy` with its own login, in a temporary directory, for two
 turns across a host restart. The Codex

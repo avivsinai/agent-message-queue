@@ -257,17 +257,21 @@ func DefaultBackends() map[string]Backend {
 		LauncherTMux:     NewTmuxBackend("tmux"),
 		LauncherCMux:     NewCmuxBackend(""),
 		LauncherGhostty:  NewGhosttyBackend(),
+		LauncherRex:      NewRexBackend(""),
 	}
 }
 
-// prependInsideSurfacePreference puts the in-surface launcher first. Inside
-// cmux beats inside Ghostty. Selection still requires Detect availability.
+// prependInsideSurfacePreference puts the in-surface launcher first: cmux,
+// then Ghostty, then Rex. Selection requires Detect availability.
 func prependInsideSurfacePreference(prefs []string) []string {
 	if strings.TrimSpace(os.Getenv("CMUX_SURFACE_ID")) != "" {
 		return prependLauncherPreference(prefs, LauncherCMux)
 	}
 	if strings.TrimSpace(os.Getenv("TERM_PROGRAM")) == "ghostty" {
 		return prependLauncherPreference(prefs, LauncherGhostty)
+	}
+	if strings.TrimSpace(os.Getenv("TERM_PROGRAM")) == "rex" {
+		return prependLauncherPreference(prefs, LauncherRex)
 	}
 	return prefs
 }
