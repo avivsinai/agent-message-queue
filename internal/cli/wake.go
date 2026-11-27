@@ -693,13 +693,15 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		if infoErr != nil {
 			pendingInfo = nil
 		}
-		physicalPending[name] = pendingInfo
 		if baselineIdentity, ignored := cfg.baselineExisting[name]; ignored {
 			if infoErr == nil && matchesWakeFileIdentity(baselineIdentity, fileInfo) {
 				continue
 			}
 			delete(cfg.baselineExisting, name)
 		}
+		// Baseline mail is in neither view: it never triggered a notice, so
+		// it is no evidence about recovery either (as before passive mail).
+		physicalPending[name] = pendingInfo
 
 		var header format.Header
 		if cfg.retainedInbox != nil {
