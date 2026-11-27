@@ -39,6 +39,16 @@ var (
 	ErrMessageTooLarge         = errors.New("message exceeds maximum size")
 )
 
+const (
+	NotifyWake    = "wake"
+	NotifyPassive = "passive"
+)
+
+// IsValidNotify reports whether intent is explicit or uses the legacy default.
+func IsValidNotify(notify string) bool {
+	return notify == "" || notify == NotifyWake || notify == NotifyPassive
+}
+
 // Priority constants for co-op mode message handling.
 const (
 	PriorityUrgent = "urgent"
@@ -70,6 +80,7 @@ type Header struct {
 	Refs    []string `json:"refs,omitempty"`
 
 	// Co-op mode fields (optional, for inter-agent communication)
+	Notify   string         `json:"notify,omitempty"`
 	Priority string         `json:"priority,omitempty"` // urgent, normal, low
 	Kind     string         `json:"kind,omitempty"`     // message kind (see ValidKinds())
 	Labels   []string       `json:"labels,omitempty"`   // free-form tags
@@ -279,12 +290,21 @@ func ReadHeader(r io.Reader) (Header, error) {
 
 	dec := json.NewDecoder(br)
 	var header Header
-	if err := dec.Decode(&header); err != nil {
-		return Header{}, fmt.Errorf("parse frontmatter: %w", err)
+	decodeErr := dec.Decode(&header)
+	if decodeErr != nil {
+		var fieldErr *json.UnmarshalTypeError
+		if !errors.As(decodeErr, &fieldErr) || fieldErr.Field != "notify" {
+			return Header{}, fmt.Errorf("parse frontmatter: %w", decodeErr)
+		}
 	}
 	rest := io.MultiReader(dec.Buffered(), br)
 	if err := consumeFrontmatterEnd(bufio.NewReader(rest)); err != nil {
 		return Header{}, err
+	}
+	if decodeErr != nil {
+		// Hooks can still announce the identified message. Consumers must
+		// treat the error as malformed frontmatter and keep their DLQ path.
+		return header, fmt.Errorf("parse frontmatter: %w", decodeErr)
 	}
 	return header, nil
 }

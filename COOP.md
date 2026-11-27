@@ -324,6 +324,11 @@ For a hands-on run, open three terminals in that directory and run one line in
 each. These are ordinary shells with the AMQ identity of their seat. You
 drain them explicitly at the handoffs below.
 
+Use `--notify wake` when the recipient needs to act. Use `--notify passive`
+for informational mail they can read on their next turn and `amq presence set`
+for availability. Upgrade live wake and hook binaries before sending passive
+mail. A handoff wakes the reviewer and sends the requester a passive update.
+
 ```sh
 amq coop exec --session factory --me lead --no-wake sh
 amq coop exec --session factory --me builder --no-wake sh

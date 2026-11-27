@@ -2365,7 +2365,7 @@ func TestDeliverNewMessageNotificationInjectViaUncertainDoesNotReplay(t *testing
 		cfg,
 		peerWakeNotification("pending message"),
 		false,
-		current,
+		wakePendingMessages{eligible: current, physical: current},
 	)
 	if err != nil {
 		t.Fatalf("delivery error = %v, want live recovery transition", err)
@@ -2391,7 +2391,7 @@ func TestDeliverNewMessageNotificationInjectViaUncertainDoesNotReplay(t *testing
 		cfg,
 		peerWakeNotification("pending message"),
 		false,
-		current,
+		wakePendingMessages{eligible: current, physical: current},
 	); err != nil {
 		t.Fatalf("second delivery error = %v", err)
 	}
@@ -2430,7 +2430,7 @@ func TestDeliverNewMessageNotificationInjectViaOrdinaryFailureFallsBack(t *testi
 		cfg,
 		peerWakeNotification("pending message"),
 		false,
-		current,
+		wakePendingMessages{eligible: current, physical: current},
 	)
 	if err != nil {
 		t.Fatalf("ordinary inject-via failure error = %v, want attention fallback", err)
@@ -2470,7 +2470,7 @@ func TestInjectViaDeferredThenAcceptedUsesOneAttemptAndNoDuplicate(t *testing.T)
 	messageIDs := []string{"msg-deferred-accepted"}
 	notice := peerWakeNotification("pending message")
 
-	if err := deliverWithNotificationLedger(cfg, messageIDs, notice, false, current); !isWakeInjectorDeferred(err) {
+	if err := deliverWithNotificationLedger(cfg, messageIDs, notice, false, wakePendingMessages{eligible: current, physical: current}); !isWakeInjectorDeferred(err) {
 		t.Fatalf("first delivery error = %v, want deferred", err)
 	}
 	first := listNotificationAttemptsForTest(t, root, messageIDs[0])
@@ -2478,7 +2478,7 @@ func TestInjectViaDeferredThenAcceptedUsesOneAttemptAndNoDuplicate(t *testing.T)
 		t.Fatalf("first notification attempts = %#v, want one deferred attempt", first)
 	}
 	cfg.doorbell.makeDue(cfg.wakeDoorbellNow())
-	if err := deliverWithNotificationLedger(cfg, messageIDs, notice, false, current); err != nil {
+	if err := deliverWithNotificationLedger(cfg, messageIDs, notice, false, wakePendingMessages{eligible: current, physical: current}); err != nil {
 		t.Fatalf("accepted retry error = %v", err)
 	}
 
@@ -2499,7 +2499,7 @@ func TestInjectViaDeferredThenAcceptedUsesOneAttemptAndNoDuplicate(t *testing.T)
 	if accepted[0].Prepared.AttemptID != first[0].Prepared.AttemptID || len(accepted[0].History) != 4 {
 		t.Fatalf("accepted lifecycle = %#v, want same ID and attempt/deferred/retried/accepted history", accepted[0])
 	}
-	if err := deliverWithNotificationLedger(cfg, messageIDs, notice, false, current); err != nil {
+	if err := deliverWithNotificationLedger(cfg, messageIDs, notice, false, wakePendingMessages{eligible: current, physical: current}); err != nil {
 		t.Fatalf("post-accept scan error = %v", err)
 	}
 	data, err = os.ReadFile(countPath)
@@ -2530,7 +2530,7 @@ func TestInjectViaLegacyExitZeroIsWrittenButNotAccepted(t *testing.T) {
 	cfg.retryUntil = wakeRetryUntilInjected
 	current := wakeDoorbellTestFiles(t, "pending.md")
 
-	if err := deliverWithNotificationLedger(cfg, []string{"msg-legacy"}, peerWakeNotification("pending message"), false, current); err != nil {
+	if err := deliverWithNotificationLedger(cfg, []string{"msg-legacy"}, peerWakeNotification("pending message"), false, wakePendingMessages{eligible: current, physical: current}); err != nil {
 		t.Fatalf("legacy delivery error = %v, want legacy success", err)
 	}
 	if attentionWrites != 0 || cfg.inputRecoveryRequired || cfg.doorbell.phase != wakeDoorbellAnnounced {
@@ -2569,7 +2569,7 @@ func TestRawTIOCSTIRecordsWrittenWithoutAcceptanceClaim(t *testing.T) {
 		},
 	}
 	current := wakeDoorbellTestFiles(t, "pending.md")
-	if err := deliverWithNotificationLedger(cfg, []string{"msg-raw"}, peerWakeNotification("pending message"), false, current); err != nil {
+	if err := deliverWithNotificationLedger(cfg, []string{"msg-raw"}, peerWakeNotification("pending message"), false, wakePendingMessages{eligible: current, physical: current}); err != nil {
 		t.Fatalf("raw delivery error = %v", err)
 	}
 	if len(writes) == 0 {

@@ -294,6 +294,8 @@ Options:
         Agent handle (or AM_ME)
   -news-within duration
         One notice if the recipient sends you nothing about this message within this time (e.g. 20m)
+  -notify string
+        Notification intent: wake or passive (default wake)
   -priority string
         Message priority: urgent, normal, low (default when --kind is set: low for status, normal otherwise)
   -project string
@@ -683,6 +685,8 @@ Options:
         Agent handle (or AM_ME)
   -news-within duration
         One notice if the recipient sends you nothing about this message within this time (e.g. 20m)
+  -notify string
+        Notification intent: wake or passive (default wake)
   -priority string
         Message priority: urgent, normal, low
   -root string

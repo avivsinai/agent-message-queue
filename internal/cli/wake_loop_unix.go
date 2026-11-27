@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
 	"github.com/fsnotify/fsnotify"
@@ -164,6 +166,9 @@ func (l *wakeLoop) closeWatchers() {
 }
 
 func (l *wakeLoop) stopTimers() {
+	if l.debounceTimer != nil {
+		l.debounceTimer.Stop()
+	}
 	if l.terminalAuthorityRetryTimer != nil {
 		l.terminalAuthorityRetryTimer.Stop()
 	}
@@ -841,6 +846,7 @@ func (l *wakeLoop) run(maintenanceTicks, settingsTicks <-chan time.Time) error {
 			continue
 
 		case <-debounceC:
+			l.debounceTimer = nil
 			if !l.pendingNotify {
 				continue
 			}
@@ -924,26 +930,45 @@ func (l *wakeLoop) onWatcherEvent(event fsnotify.Event) {
 		return
 	}
 	// Skip non-.md files
-	if !strings.HasSuffix(event.Name, ".md") {
+	name := filepath.Base(event.Name)
+	if strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".md") {
 		return
 	}
 
-	// Start or reset debounce timer
+	delay := l.cfg.settings.debounce
+	if event.Op&(fsnotify.Create|fsnotify.Write) != 0 {
+		var header format.Header
+		var err error
+		if l.cfg.retainedInbox != nil {
+			header, err = l.cfg.retainedInbox.ReadHeader(name)
+		} else {
+			header, err = format.ReadHeaderFile(event.Name)
+		}
+		if err == nil {
+			// A passive file replacing a tracked name still warrants
+			// reconciliation of the old physical trigger.
+			_, tracked := l.cfg.doorbell.cohort[name]
+			if !wakeEligible(header) && !tracked {
+				return
+			}
+			if strings.TrimSpace(header.Priority) == format.PriorityUrgent {
+				delay = 0
+			}
+		}
+	}
+
 	l.pendingNotify = true
 	if l.cfg.onPendingNotify != nil {
 		l.cfg.onPendingNotify()
 	}
-	if l.debounceTimer == nil {
-		l.debounceTimer = time.NewTimer(l.cfg.settings.debounce)
-	} else {
-		if !l.debounceTimer.Stop() {
-			select {
-			case <-l.debounceTimer.C:
-			default:
-			}
-		}
+	// Bound the burst from the first eligible event. Urgent arrivals can
+	// shorten an already armed deadline.
+	switch {
+	case l.debounceTimer == nil:
+		l.debounceTimer = time.NewTimer(delay)
+	case delay == 0:
+		l.debounceTimer.Reset(0)
 	}
-	l.debounceTimer.Reset(l.cfg.settings.debounce)
 }
 
 func (l *wakeLoop) onInboxScanRetry() error {

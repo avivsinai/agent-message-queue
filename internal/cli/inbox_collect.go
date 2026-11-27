@@ -433,6 +433,7 @@ func readInboxItem(
 		item.Thread = header.Thread
 		item.Subject = header.Subject
 		item.Created = header.Created
+		item.Notify = header.Notify
 		item.Priority = header.Priority
 		item.Kind = header.Kind
 		item.Labels = header.Labels
