@@ -10,6 +10,7 @@ type inboxItem struct {
 	Subject       string            `json:"subject"`
 	Created       string            `json:"created"`
 	Body          string            `json:"body,omitempty"`
+	Notify        string            `json:"notify,omitempty"`
 	Priority      string            `json:"priority,omitempty"`
 	Kind          string            `json:"kind,omitempty"`
 	Labels        []string          `json:"labels,omitempty"`

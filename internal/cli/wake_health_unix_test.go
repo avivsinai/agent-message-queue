@@ -3,11 +3,14 @@
 package cli
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/fsnotify/fsnotify"
 )
 
 // Regression: the 2026-10-26 machine audit found live wakes whose failed
@@ -68,5 +71,38 @@ func TestWakeHealthDetectsClosedWatcherAndRecoveryDeliversMail(t *testing.T) {
 	}
 	if attention.Len() == 0 {
 		t.Fatal("rearmed wake did not notify for new mail")
+	}
+}
+
+// Issue #1660: passive filesystem arrivals must leave the debounce alone,
+// while urgent mail must release a burst immediately.
+func TestWakeDebounceIgnoresPassiveAndReleasesUrgent(t *testing.T) {
+	h := newWakeHoldHarness(t, wakeHoldPolicy{})
+	l := wakeLoop{cfg: *h.cfg}
+	l.cfg.settings.debounce = time.Hour
+	events := 0
+	l.cfg.onPendingNotify = func() { events++ }
+	defer l.stopTimers()
+	create := func(id, priority, notify string) {
+		h.deliver(id+".md", id, priority, notify, nil)
+		l.onWatcherEvent(fsnotify.Event{
+			Name: filepath.Join(fsq.AgentInboxNew(h.root, "codex"), id+".md"),
+			Op:   fsnotify.Create,
+		})
+	}
+	create("work", format.PriorityNormal, "")
+	timer := l.debounceTimer
+	if timer == nil {
+		t.Fatal("normal mail did not arm debounce")
+	}
+	create("fyi", format.PriorityNormal, format.NotifyPassive)
+	if events != 1 || l.debounceTimer != timer {
+		t.Fatal("passive event rescheduled debounce")
+	}
+	create("urgent", format.PriorityUrgent, "")
+	select {
+	case <-l.debounceTimer.C:
+	case <-time.After(time.Second):
+		t.Fatal("urgent event did not release debounce")
 	}
 }

@@ -236,7 +236,7 @@ func (h *wakePiBridgeHarness) deliver() {
 	h.t.Helper()
 	current := h.pendingFiles()
 	notice := peerWakeNotification("test message")
-	if err := deliverNewMessageNotification(h.cfg, notice, false, current); err != nil {
+	if err := deliverNewMessageNotification(h.cfg, notice, false, wakePendingMessages{eligible: current, physical: current}); err != nil {
 		h.t.Fatalf("deliverNewMessageNotification: %v", err)
 	}
 }
@@ -757,7 +757,7 @@ func TestWakePiBridgePruneKeepsOutstandingGroups(t *testing.T) {
 // where the mail is gone before the wake's next tick.
 func (h *wakePiBridgeHarness) deliverEmpty() {
 	h.t.Helper()
-	if err := deliverNewMessageNotification(h.cfg, peerWakeNotification("drained"), false, map[string]os.FileInfo{}); err != nil {
+	if err := deliverNewMessageNotification(h.cfg, peerWakeNotification("drained"), false, wakePendingMessages{}); err != nil {
 		h.t.Fatalf("deliverNewMessageNotification (empty inbox): %v", err)
 	}
 }

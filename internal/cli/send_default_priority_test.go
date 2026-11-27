@@ -25,6 +25,13 @@ func TestSendStatusKindDefaultsToLowPriority(t *testing.T) {
 	for _, key := range []string{envRoot, envBaseRoot, envSession} {
 		setOptionalEnv(t, key, "", false)
 	}
+	// Issue #1660: invalid intent must fail before delivery.
+	for _, flags := range [][]string{{"--notify", "unknown"}, {"--notify", "passive", "--priority", "urgent"}} {
+		args := append([]string{"--root", root, "--me", "alice", "--to", "bob", "--body", "hello"}, flags...)
+		if err := runSend(args); GetExitCode(err) != ExitUsage {
+			t.Fatalf("send %v: got %v, want usage error", flags, err)
+		}
+	}
 	if _, _, err := captureEnvOutput(t, func() error {
 		return runSend([]string{"--root", root, "--me", "alice", "--to", "bob", "--kind", "status", "--body", "phase 1 done, ETA 10m"})
 	}); err != nil {

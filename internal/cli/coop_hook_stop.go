@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -38,6 +39,7 @@ type coopStopMessage struct {
 	ID       string
 	Created  string
 	Priority string
+	Passive  bool
 	File     os.FileInfo
 }
 
@@ -222,7 +224,7 @@ func freshAttendedIDs(pending []coopStopMessage, noticed, blocked []string) []st
 func decideCoopStop(pending []coopStopMessage, baseline *time.Time, old coopStopState, active bool, where string) (coopStopState, map[string]string) {
 	var ids []string
 	for _, msg := range pending {
-		if msg.ID == "" {
+		if msg.ID == "" || msg.Passive {
 			continue
 		}
 		if baseline != nil {
@@ -327,10 +329,11 @@ func (in *coopInbox) pending(root, me string) ([]coopStopMessage, error) {
 		msg, known := in.seen[name]
 		if !known {
 			header, err := format.ReadHeaderFile(filepath.Join(dir, name))
-			if err != nil {
+			var malformed *json.UnmarshalTypeError
+			if err != nil && (!errors.As(err, &malformed) || malformed.Field != "notify" || header.ID == "") {
 				continue
 			}
-			msg = coopStopMessage{ID: header.ID, Created: header.Created, Priority: header.Priority}
+			msg = coopStopMessage{ID: header.ID, Created: header.Created, Priority: header.Priority, Passive: err == nil && !wakeEligible(header)}
 			if info, err := entry.Info(); err == nil {
 				msg.File = info
 			}

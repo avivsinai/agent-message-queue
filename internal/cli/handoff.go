@@ -231,7 +231,7 @@ func runHandoff(args []string) error {
 		leg1Args = append(leg1Args, "--project", project)
 	}
 	leg1Args = append(leg1Args,
-		"--kind", format.KindReviewRequest,
+		"--kind", format.KindReviewRequest, "--notify", format.NotifyWake,
 		"--subject", subject,
 		"--context", string(reviewContext))
 	if *followUpFlag > 0 {
@@ -240,7 +240,7 @@ func runHandoff(args []string) error {
 	if *newsWithinFlag > 0 {
 		leg1Args = append(leg1Args, "--news-within", newsWithinFlag.String())
 	}
-	leg2Args := append(slices.Clone(stepArgs), "--id", request, "--kind", format.KindStatus, "--labels", handedOffLabel)
+	leg2Args := append(slices.Clone(stepArgs), "--id", request, "--kind", format.KindStatus, "--notify", format.NotifyPassive, "--labels", handedOffLabel)
 
 	ran := false
 	err = runSendStep(leg1Args, nil, func(m1 outgoingMessage) error {

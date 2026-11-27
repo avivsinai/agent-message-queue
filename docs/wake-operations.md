@@ -111,14 +111,26 @@ instead of written again; one timestamped line reports the count before the
 next different notice. The keepalive launcher's detached variant is in
 [the keepalive reference](amq-keepalive.md#detached-wake-diagnostics).
 
+## Passive mail
+
+Send or reply with `--notify passive` for mail the recipient can read on
+their next turn. It has no notification deadline and never rings or blocks
+Stop, including through hook fallback. It still counts on a natural prompt
+and is included in ordinary drains. Missing intent uses wake eligibility.
+Upgrade all live wake and hook binaries before sending passive mail.
+
 ## Hold by priority
+
+Holds delay the first notification for wake-eligible mail. Use
+`--notify passive` for mail that should never ring.
 
 Each doorbell can start a full-context turn, and mail comes in bursts. Two
 opt-in settings let a wake hold its first doorbell.
 
 A hold delays even a single message. It is not burst batching. To combine
-arrivals close together, use `debounce` (default `250ms`); keep both holds at
-`0` when a lone message should ring promptly.
+arrivals close together, use `debounce` (default `250ms`). The burst window
+starts at the first eligible arrival. Keep both holds at `0` when a lone
+message should ring promptly.
 
 For example, to delay the first notification by priority:
 
@@ -152,8 +164,8 @@ running wake. Both write [`.wake.settings`](#live-settings).
   modification time. After the first attempt, holds no longer apply.
 - `urgent` mail skips the priority hold, including when a cohort is parked.
   A distinct urgent message can revive a parked cohort for one further
-  attempt, also when both holds are 0. Ordinary urgent mail still passes through watcher debounce and
-  input-quiet deferral; urgent mail with the configured interrupt label follows
+  attempt, also when both holds are 0. Urgent mail bypasses debounce and
+  still respects input-quiet deferral; urgent mail with the configured interrupt label follows
   the interrupt path. On a plain seat a doorbell can join and submit an idle
   draft after the quiet interval.
 - The hold changes only the first doorbell's timing. After an attempt, the

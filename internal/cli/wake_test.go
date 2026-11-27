@@ -127,7 +127,7 @@ func TestDeliverWithNotificationLedgerDoesNotBlockOnWriteFailure(t *testing.T) {
 	// key is enough to make delivery proceed.
 	currentPending := map[string]os.FileInfo{"msg-best-effort.md": nil}
 
-	deliverErr := deliverWithNotificationLedger(cfg, messageIDs, notice, false, currentPending)
+	deliverErr := deliverWithNotificationLedger(cfg, messageIDs, notice, false, wakePendingMessages{eligible: currentPending, physical: currentPending})
 
 	// (1) Delivery happened despite the ledger write failure: the external
 	// notifier wrote its payload to the capture file. If the ledger error had

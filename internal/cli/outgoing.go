@@ -32,6 +32,7 @@ type outgoingMessage struct {
 	thread     string
 	subject    string
 	refs       []string
+	notify     string
 	priority   string
 	kind       string
 	labels     []string
@@ -157,6 +158,7 @@ func sendOutgoing(m outgoingMessage) (outgoingOutcome, error) {
 			Subject:      m.subject,
 			Created:      now.UTC().Format(time.RFC3339Nano),
 			Refs:         m.refs,
+			Notify:       m.notify,
 			Priority:     priority,
 			Kind:         m.kind,
 			Labels:       m.labels,
@@ -425,6 +427,16 @@ func replyRouteFor(me, sourceSession, targetProject, targetSession string) strin
 		return me
 	}
 	return ""
+}
+
+func validateNotify(notify, priority string) error {
+	if !format.IsValidNotify(notify) {
+		return UsageError("--notify must be one of: wake, passive")
+	}
+	if priority == format.PriorityUrgent && notify == format.NotifyPassive {
+		return UsageError("--priority urgent cannot be combined with --notify passive")
+	}
+	return nil
 }
 
 func validatePriorityKind(priority, kind string) error {

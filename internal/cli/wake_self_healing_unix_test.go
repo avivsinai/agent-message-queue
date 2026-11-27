@@ -111,3 +111,52 @@ func TestRunWakeLoopRecoveryProgressStartsFreshDoorbell(t *testing.T) {
 		t.Fatal("consumer progress left wake permanently recovery-required")
 	}
 }
+
+// Review of a980896e: baseline mail must not keep uncertain input in recovery.
+func TestWakeBaselineOnlyInboxClearsInputRecovery(t *testing.T) {
+	root := secureTempDirForTest(t)
+	ensureCoopWakeMailboxForTest(t, root, "codex")
+	deliverWakeWatcherMessageForTest(t, root, "codex", "baseline", "claude")
+	const filename = "baseline.md"
+	path := filepath.Join(fsq.AgentInboxNew(root, "codex"), filename)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, ok := captureWakeFileIdentity(info)
+	if !ok {
+		t.Fatal("could not capture baseline file identity")
+	}
+
+	wake := wakeLoop{cfg: wakeConfig{
+		root:             root,
+		me:               "codex",
+		injectMode:       wakeInjectModeRaw,
+		baselineExisting: map[string]wakeFileIdentity{filename: identity},
+		inputDelivery:    wakeInputDeliveryState{acceptanceUncertain: true},
+		attentionIsTTY:   func() bool { return false },
+		attentionWrite:   func(data []byte) (int, error) { return len(data), nil },
+		terminalWrite: func(data string) error {
+			t.Fatalf("baseline mail caused terminal input %q", data)
+			return nil
+		},
+	}}
+	defer wake.stopTimers()
+
+	if err := wake.attemptNotification(); err != nil {
+		t.Fatal(err)
+	}
+	if !wake.cfg.inputRecoveryRequired || wake.cfg.doorbell.phase != wakeDoorbellRecoveryRequired {
+		t.Fatal("first scan did not enter input recovery")
+	}
+	if err := wake.attemptNotification(); err != nil {
+		t.Fatal(err)
+	}
+	if wake.cfg.inputRecoveryRequired || wake.cfg.inputDelivery.acceptanceUncertain || wake.cfg.doorbell.phase != wakeDoorbellIdle {
+		t.Fatal("second scan left input recovery stuck with only baseline mail")
+	}
+	info, err = os.Stat(path)
+	if err != nil || !matchesWakeFileIdentity(identity, info) {
+		t.Fatalf("baseline mail did not stay physically unread: %v", err)
+	}
+}

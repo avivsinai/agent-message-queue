@@ -87,6 +87,7 @@ func TestReply_Basic(t *testing.T) {
 			Subject:  "Question about code",
 			Created:  now.UTC().Format(time.RFC3339Nano),
 			Priority: format.PriorityNormal,
+			Notify:   format.NotifyPassive,
 			Kind:     format.KindQuestion,
 		},
 		Body: "How does the parser work?",
@@ -156,6 +157,10 @@ func TestReply_Basic(t *testing.T) {
 		replyMsg, err := format.ReadMessageFile(replyPath)
 		if err != nil {
 			t.Fatalf("read reply: %v", err)
+		}
+
+		if replyMsg.Header.Notify != "" {
+			t.Errorf("reply inherited notification intent %q", replyMsg.Header.Notify)
 		}
 
 		// Verify refs contains original ID

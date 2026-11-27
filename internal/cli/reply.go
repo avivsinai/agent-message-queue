@@ -30,6 +30,7 @@ func runReplyStep(args []string, deliver func(outgoingMessage) error) error {
 	subjectFlag := fs.String("subject", "", "Override subject (default: Re: <original>)")
 
 	// Co-op mode flags
+	notifyFlag := fs.String("notify", "", "Notification intent: wake or passive (default wake)")
 	priorityFlag := fs.String("priority", "", "Message priority: urgent, normal, low")
 	kindFlag := fs.String("kind", "", fmt.Sprintf("Message kind: %s (default: same as original; review_response for review_request, answer for question, status for todo)", format.ValidKindsList()))
 	labelsFlag := fs.String("labels", "", "Comma-separated labels/tags")
@@ -82,6 +83,9 @@ func runReplyStep(args []string, deliver func(outgoingMessage) error) error {
 	priority := strings.TrimSpace(*priorityFlag)
 	kind := strings.TrimSpace(*kindFlag)
 	if err := validatePriorityKind(priority, kind); err != nil {
+		return err
+	}
+	if err := validateNotify(*notifyFlag, priority); err != nil {
 		return err
 	}
 
@@ -357,6 +361,7 @@ func runReplyStep(args []string, deliver func(outgoingMessage) error) error {
 		thread:               originalMsg.Header.Thread,
 		subject:              subject,
 		refs:                 append(originalMsg.Header.Refs, originalMsg.Header.ID),
+		notify:               *notifyFlag,
 		priority:             priority,
 		kind:                 kind,
 		labels:               labels,

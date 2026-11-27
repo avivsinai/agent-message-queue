@@ -92,7 +92,7 @@ func TestHandoffSendsReviewAndTellsRequester(t *testing.T) {
 	}
 
 	reviews := inboxMessages(t, root, "carol")
-	if len(reviews) != 1 || reviews[0].Header.Kind != format.KindReviewRequest || reviews[0].Header.ID != report.Review.ID {
+	if len(reviews) != 1 || reviews[0].Header.Kind != format.KindReviewRequest || reviews[0].Header.Notify != format.NotifyWake || reviews[0].Header.ID != report.Review.ID {
 		t.Fatalf("carol's inbox = %+v, want one review request %s", reviews, report.Review.ID)
 	}
 	if ctx := handoffCtx(reviews[0]); ctx["commit"] != handoffTestCommit || ctx["request"] != request || ctx["requester"] != "alice" {
@@ -105,7 +105,7 @@ func TestHandoffSendsReviewAndTellsRequester(t *testing.T) {
 	}
 	notice := notices[0]
 	wantLine := "Handed to carol for review: " + handoffTestCommit + ". Review request " + report.Review.ID + "."
-	if notice.Header.Kind != format.KindStatus || !slices.Contains(notice.Header.Labels, handedOffLabel) ||
+	if notice.Header.Kind != format.KindStatus || notice.Header.Notify != format.NotifyPassive || !slices.Contains(notice.Header.Labels, handedOffLabel) ||
 		!slices.Contains(notice.Header.Refs, request) || !strings.HasPrefix(notice.Body, wantLine+"\n\nready for review") {
 		t.Fatalf("notice = %+v", notice)
 	}
@@ -159,6 +159,20 @@ func TestHandoffRefusalsAndReruns(t *testing.T) {
 			if _, err := runHandoffAs(t, root, "bob", request, "carol"); err != nil {
 				t.Fatal(err)
 			}
+			// Issue #1660: simulate an outbox written before notify existed.
+			for _, recipient := range []string{"alice", "carol"} {
+				msg := inboxMessages(t, root, recipient)[0]
+				msg.Header.Notify = ""
+				data, err := msg.Marshal()
+				if err != nil {
+					t.Fatal(err)
+				}
+				path := filepath.Join(fsq.AgentOutboxSent(root, "bob"), msg.Header.ID+".md")
+				if err := os.WriteFile(path, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
 			out, err := runHandoffAs(t, root, "bob", request, "carol")
 			if err != nil || strings.Count(out, ": already sent\n") != 2 || strings.Contains(out, handoffTextStands) {
 				t.Fatalf("rerun = %q (err %v), want already sent twice", out, err)

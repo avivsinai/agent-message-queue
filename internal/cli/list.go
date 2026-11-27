@@ -21,6 +21,7 @@ type listItem struct {
 	ReplyBy  string    `json:"reply_by,omitempty"`
 	Box      string    `json:"box"`
 	Path     string    `json:"path"`
+	Notify   string    `json:"notify,omitempty"`
 	Priority string    `json:"priority,omitempty"`
 	Kind     string    `json:"kind,omitempty"`
 	Labels   []string  `json:"labels,omitempty"`
@@ -278,6 +279,7 @@ func runList(args []string) error {
 			ReplyBy:  header.ReplyBy,
 			Box:      box,
 			Path:     path,
+			Notify:   header.Notify,
 			Priority: header.Priority,
 			Kind:     header.Kind,
 			Labels:   header.Labels,

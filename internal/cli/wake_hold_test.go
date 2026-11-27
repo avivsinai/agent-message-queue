@@ -12,6 +12,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -74,22 +75,22 @@ func (h *wakeHoldHarness) send(name, priority string) {
 // leaves the header without one.
 func (h *wakeHoldHarness) sendLabeled(name, priority string, labels []string) {
 	h.t.Helper()
-	h.deliver(name+".md", name, priority, labels)
+	h.deliver(name+".md", name, priority, "", labels)
 }
 
 // sendAs delivers a normal message with header id id in the inbox file
 // file, as a bridge or a DLQ retry can.
 func (h *wakeHoldHarness) sendAs(file, id string) {
 	h.t.Helper()
-	h.deliver(file, id, format.PriorityNormal, nil)
+	h.deliver(file, id, format.PriorityNormal, "", nil)
 }
 
-func (h *wakeHoldHarness) deliver(file, id, priority string, labels []string) {
+func (h *wakeHoldHarness) deliver(file, id, priority, notify string, labels []string) {
 	h.t.Helper()
 	msg := format.Message{
 		Header: format.Header{
 			Schema: 1, ID: id, From: "peer", To: []string{"codex"},
-			Thread: "p2p/codex__peer", Subject: id, Priority: priority,
+			Thread: "p2p/codex__peer", Subject: id, Priority: priority, Notify: notify,
 			Labels:  labels,
 			Created: "2026-07-28T15:00:00Z",
 		},
@@ -139,6 +140,73 @@ func (h *wakeHoldHarness) deadline() time.Time {
 }
 
 var wakeHoldRecommended = wakeHoldPolicy{normal: 5 * time.Minute, low: 30 * time.Minute}
+
+// Issue #1660: informational mail must stay readable without triggering
+// a turn, even when the hook channel has to fall back to terminal input.
+func TestWakePassiveMailStaysQuietAfterHoldAndRestart(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	h := newWakeHoldHarness(t, wakeHoldRecommended)
+	h.deliver("fyi.md", "fyi", format.PriorityLow, format.NotifyPassive, nil)
+	h.cfg.publishedChannel = wakeChannelHook
+	h.scan(h.cfg)
+	if _, armed := h.cfg.doorbell.nextDeadline(); armed {
+		t.Fatal("passive mail armed a deadline")
+	}
+	h.advance(time.Hour)
+	h.cfg = h.newConfig(wakeHoldRecommended)
+	h.cfg.publishedChannel = wakeChannelHook
+	h.scan(h.cfg)
+	if got := h.rings(); got != 0 {
+		t.Fatalf("passive backlog rang %d times through hook fallback", got)
+	}
+
+	// A stored contradictory record is still urgent, including at fallback.
+	h.deliver("urgent.md", "urgent", format.PriorityUrgent, format.NotifyPassive, nil)
+	h.scan(h.cfg)
+	if got := h.rings(); got != 1 {
+		t.Fatalf("urgent mail alongside passive backlog rang %d times", got)
+	}
+	items := runDrainJSON(t, h.root, "codex", 100, true).Drained
+	if len(items) != 2 || items[0].Notify != format.NotifyPassive || items[1].Notify != format.NotifyPassive {
+		t.Fatalf("drain did not include both stored messages and their intent: %+v", items)
+	}
+}
+
+// Issue #1660: passive additions must leave an outstanding notification
+// alone, and passive leftovers must not keep it alive.
+func TestWakePassiveAdditionLeavesCohortUnchanged(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		phase wakeDoorbellPhase
+	}{
+		{"announced", wakeDoorbellAnnounced},
+		{"retrying", wakeDoorbellRetrying},
+		{"parked", wakeDoorbellParked},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newWakeHoldHarness(t, wakeHoldPolicy{})
+			h.send("work", format.PriorityNormal)
+			h.scan(h.cfg)
+			if got := h.rings(); got != 1 {
+				t.Fatalf("legacy message rang %d times", got)
+			}
+			h.cfg.doorbell.phase = tc.phase
+			before := h.cfg.doorbell
+			h.deliver("fyi.md", "fyi", format.PriorityNormal, format.NotifyPassive, nil)
+			h.scan(h.cfg)
+			if got := h.rings(); got != 0 || !reflect.DeepEqual(h.cfg.doorbell, before) {
+				t.Fatalf("passive addition rang %d times and left state %+v, want %+v", got, h.cfg.doorbell, before)
+			}
+			if err := os.Remove(filepath.Join(fsq.AgentInboxNew(h.root, "codex"), "work.md")); err != nil {
+				t.Fatal(err)
+			}
+			h.scan(h.cfg)
+			if got := h.rings(); got != 0 || h.cfg.doorbell.phase != wakeDoorbellIdle {
+				t.Fatalf("passive leftover rang %d times and left phase %v", got, h.cfg.doorbell.phase)
+			}
+		})
+	}
+}
 
 func TestWakeHoldNormalBurstRingsOnceAtFirstDeadline(t *testing.T) {
 	h := newWakeHoldHarness(t, wakeHoldRecommended)
