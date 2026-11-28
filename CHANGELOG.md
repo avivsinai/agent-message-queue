@@ -8,6 +8,24 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.173.0](https://github.com/avivsinai/agent-message-queue/compare/v0.172.0...v0.173.0) (2026-11-28)
+
+
+### Features
+
+* **board:** the board installs as a login service for a project ([#1671](https://github.com/avivsinai/agent-message-queue/issues/1671)) ([2ae50b6](https://github.com/avivsinai/agent-message-queue/commit/2ae50b6ada5ac8674236a56cf5b15e3eba6b9b1a))
+* **board:** the owner's Inbox lists what waits on the owner, with the options of a decision ([#1667](https://github.com/avivsinai/agent-message-queue/issues/1667)) ([695e893](https://github.com/avivsinai/agent-message-queue/commit/695e8936927659502374db1f198854ab3f2f0b1a))
+* **board:** the page has Inbox and Cost views and four primary destinations ([#1670](https://github.com/avivsinai/agent-message-queue/issues/1670)) ([ea552a9](https://github.com/avivsinai/agent-message-queue/commit/ea552a9fc22869ff6812eeb08b468ffe8afd6979))
+* **board:** usage is counted per model and priced at list prices ([#1666](https://github.com/avivsinai/agent-message-queue/issues/1666)) ([6264af4](https://github.com/avivsinai/agent-message-queue/commit/6264af40da128c58ee9b7a6fc53229f1af11e675))
+* **remote:** a link revoke names the grant it ends ([#1672](https://github.com/avivsinai/agent-message-queue/issues/1672)) ([5014abe](https://github.com/avivsinai/agent-message-queue/commit/5014abe87e6629ab24aebcda9db80e1e53d05b8a))
+
+
+### Bug Fixes
+
+* **board:** seat states use the seat's own mail activity, for every harness ([#1668](https://github.com/avivsinai/agent-message-queue/issues/1668)) ([debaf02](https://github.com/avivsinai/agent-message-queue/commit/debaf0249fb6f4ee045bd64e604680bdc02c22aa))
+* **board:** the page header, coverage notice and view headings are consistent ([#1665](https://github.com/avivsinai/agent-message-queue/issues/1665)) ([dcba070](https://github.com/avivsinai/agent-message-queue/commit/dcba070ab827439b06da82410989bdae160a4574))
+* **wake:** a peer doorbell is cancelled when its mail was drained before dispatch ([#1674](https://github.com/avivsinai/agent-message-queue/issues/1674)) ([593097d](https://github.com/avivsinai/agent-message-queue/commit/593097db7cf77101fa56f063ccec9e02087853e5))
+
 ## [0.172.0](https://github.com/avivsinai/agent-message-queue/compare/v0.171.1...v0.172.0) (2026-11-27)
 
 
