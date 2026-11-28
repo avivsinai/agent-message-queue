@@ -261,7 +261,7 @@ func writeWakePiBridgeWithdrawn(dir string, attemptID string) (bool, error) {
 // Fresh liveness and the owner proof gate only the publishing of a NEW
 // ask. A pass with the ask still open returns engaged or holding: the
 // caller types nothing and the ask finishes on a later tick.
-func (cfg *wakeConfig) runPiBridgeDoorbellAttempt() wakePiBridgeDoorbellResult {
+func (cfg *wakeConfig) runPiBridgeDoorbellAttempt(output wakePayload) wakePiBridgeDoorbellResult {
 	if cfg == nil || cfg.wakeOwner == nil || cfg.injectVia != "" ||
 		(cfg.injectMode != wakeInjectModeRaw && cfg.injectMode != wakeInjectModePaste) {
 		return wakePiBridgeDoorbellResult{}
@@ -286,7 +286,7 @@ func (cfg *wakeConfig) runPiBridgeDoorbellAttempt() wakePiBridgeDoorbellResult {
 	// say: reconcile it from disk before any new-ask gate runs.
 	pending, found := newestWakePiBridgeCohortAttempt(doorbellDir, wakePiBridgeAttemptPrefix(ids))
 	if found {
-		return cfg.reconcilePiBridgeAsk(dir, doorbellDir, pending, cohortKey, live, liveFresh, now)
+		return cfg.reconcilePiBridgeAsk(dir, doorbellDir, pending, cohortKey, live, liveFresh, now, output)
 	}
 	if !liveFresh {
 		return wakePiBridgeDoorbellResult{}
@@ -340,7 +340,7 @@ func (cfg *wakeConfig) runPiBridgeDoorbellAttempt() wakePiBridgeDoorbellResult {
 // a claim holds until its result lands or the claim is proven lost, a
 // refusal feeds the busy rules, an expired silence hands the authority to
 // the withdrawn create, and an unreadable decision proves no winner.
-func (cfg *wakeConfig) reconcilePiBridgeAsk(dir, doorbellDir, pending, cohortKey string, live wakePiBridgeLiveness, liveFresh bool, now time.Time) wakePiBridgeDoorbellResult {
+func (cfg *wakeConfig) reconcilePiBridgeAsk(dir, doorbellDir, pending, cohortKey string, live wakePiBridgeLiveness, liveFresh bool, now time.Time, output wakePayload) wakePiBridgeDoorbellResult {
 	engaged := wakePiBridgeDoorbellResult{engaged: true}
 	decision, reason, present := readWakePiBridgeDecisionState(doorbellDir, pending)
 	if !present {
@@ -356,8 +356,7 @@ func (cfg *wakeConfig) reconcilePiBridgeAsk(dir, doorbellDir, pending, cohortKey
 			// Withdrawal settles this ask. The earlier accepted turn can
 			// still own the composer while its bridge misses the deadline.
 			if cfg.piBridgeTurnHoldsBusy(live, liveFresh, now) {
-				_ = writeWakeDiagnostic(cfg, "amq wake: pi turn running; doorbell held, nothing typed\n")
-				return wakePiBridgeDoorbellResult{busyHold: true}
+				return cfg.holdTimedOutPiTurn(output, now)
 			}
 			return wakePiBridgeDoorbellResult{
 				fullLine: true,
@@ -541,7 +540,28 @@ func (cfg *wakeConfig) piBridgeBusyOutcome(cohortKey string, reason string, now 
 // start unrelated work after it — so the busy hold follows pi's own turn
 // attestation for this attempt, not the cohort key.
 type wakePiBridgeAcceptedTurn struct {
-	attemptID string
+	attemptID     string
+	heldSince     time.Time
+	attentionSent bool
+}
+
+// holdTimedOutPiTurn keeps the input hold tied to the accepted turn. New
+// asks and changes in its waiting mail cannot restart the attention bound.
+func (cfg *wakeConfig) holdTimedOutPiTurn(output wakePayload, now time.Time) wakePiBridgeDoorbellResult {
+	turn := cfg.piBridgeLastAccepted
+	if turn.heldSince.IsZero() {
+		turn.heldSince = now
+		_ = writeWakeDiagnostic(cfg, "amq wake: pi turn running; doorbell held, nothing typed\n")
+	}
+	if !turn.attentionSent && !now.Before(turn.heldSince.Add(cfg.settings.inputMaxHold)) {
+		// Attention is the intended non-input channel while Pi owns the
+		// composer. Keep the bridge on its ordinary busy recheck schedule.
+		if err := deliverWakeAttendedNotice(cfg, output); err != nil {
+			return wakePiBridgeDoorbellResult{err: err}
+		}
+		turn.attentionSent = true
+	}
+	return wakePiBridgeDoorbellResult{busyHold: true}
 }
 
 // piBridgeTurnHoldsBusy reports whether pi attests the accepted

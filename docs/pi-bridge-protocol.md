@@ -569,7 +569,9 @@ the request is for, and a deadline.
   `pid`, and `updatedAt` (RFC 3339). The extension rewrites its own file
   atomically (tmp write renamed over it), so a reader sees one whole
   phase. While the turn is active, the serving bridge refreshes its running
-  record on each heartbeat, including during a long tool call. The wake reads
+  record on each heartbeat, including during a long tool call. Renewal stops
+  at `agent_end`. If `agent_settled` never closes the record, its final stamp
+  expires after ten minutes. The wake reads
   it for the busy hold: a running attestation
   addressed to the live generation and process holds the bound open, and
   a missing, ended, stale (past the wake's ask hold), or
@@ -587,8 +589,11 @@ bound at the first refusal; the bound is the wake's `input_max_hold`, and
 while it is open the wake types nothing and asks again on a later tick.
 While fresh liveness and a matching running turn record identify an earlier
 accepted turn, the wake holds even past this bound. The same hold applies
-when the wake wins withdrawal of an unanswered ask. It logs the hold once
-for that withdrawal and rechecks on the busy schedule. The attempt ledger
+when the wake wins withdrawal of an unanswered ask. It logs the first such
+withdrawal per accepted turn and rechecks on the busy schedule. At the
+first timeout recheck at or beyond `input_max_hold` from that withdrawal,
+the wake sends one attention-only notice for the waiting mail and keeps
+holding input. A zero bound gives the notice on the first withdrawal. The attempt ledger
 gets a row only for an actual presentation or delivery. When the evidence
 expires, the ordinary refusal bound or withdrawn-ask fallback applies. The
 terminal fallback starts with the full fixed line and logs its reason. A

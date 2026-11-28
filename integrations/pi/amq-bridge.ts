@@ -178,7 +178,7 @@ type Bridge = {
 	// decided or seen expired, so a poll never re-examines them. turn is the
 	// accepted attempt whose model turn is running, mirrored to its turn
 	// attestation file the wake reads for the busy hold.
-	doorbell: { claimed: Map<string, number>; done: Set<string>; turn: string };
+	doorbell: { claimed: Map<string, number>; done: Set<string>; turn: string; agentEnded: boolean };
 	ownerNotice: { shown: boolean };
 	displaced: (b: Bridge) => void;
 	// sessionId is pi's own session id; "" disables activity records.
@@ -719,6 +719,7 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 						b.doorbell.claimed.delete(attempt);
 						b.doorbell.done.add(attempt);
 						b.doorbell.turn = attempt;
+						b.doorbell.agentEnded = false;
 						writeDoorbellTurn(b, attempt, "running");
 						publishDoorbellResult(b.dir, attempt, { accepted: true });
 						return;
@@ -771,6 +772,9 @@ export function registerAmqBridge(pi: ExtensionAPI, options: AmqBridgeOptions = 
 	activityHooks(pi, () => bridge);
 
 	pi.on("agent_end", (event) => {
+		// Keep the attempt for agent_settled to close. If settlement never
+		// arrives, its last running record ages out.
+		if (bridge?.doorbell.turn) bridge.doorbell.agentEnded = true;
 		const f = active();
 		if (!f?.started) return;
 		const last = [...event.messages].reverse().find((m) => (m as { role?: string }).role === "assistant");
@@ -949,7 +953,7 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOption
 		displaced,
 		orphanRetry: new Set(),
 		revisionNoticeShown: false,
-		doorbell: { claimed: new Map(), done: new Set(), turn: "" },
+		doorbell: { claimed: new Map(), done: new Set(), turn: "", agentEnded: false },
 		sessionId: sessionIdOf(ctx),
 		turn: "",
 		turns: 0,
@@ -965,7 +969,7 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOption
 	const beat = setInterval(() => {
 		if (!owns(b)) return;
 		writeLiveness(b, true);
-		if (b.doorbell.turn) writeDoorbellTurn(b, b.doorbell.turn, "running");
+		if (b.doorbell.turn && !b.doorbell.agentEnded) writeDoorbellTurn(b, b.doorbell.turn, "running");
 	}, HEARTBEAT_MS);
 	const poll = setInterval(() => scanSafely(pi, b), POLL_MS);
 	beat.unref();
@@ -1889,7 +1893,7 @@ function activityHooks(pi: ExtensionAPI, get: () => Bridge | null): void {
 		// agent-loop.ts, before the continuation decision), so a tool call
 		// inside the doorbell's work is not its end: refresh the running
 		// attestation and end it only when the run settles.
-		if (b.doorbell.turn) {
+		if (b.doorbell.turn && !b.doorbell.agentEnded) {
 			writeDoorbellTurn(b, b.doorbell.turn, "running");
 		}
 		b.turn = "";

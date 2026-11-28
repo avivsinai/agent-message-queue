@@ -2125,6 +2125,9 @@ test("an accepted doorbell attests its turn running until the turn ends", async 
 		const stillRunning = JSON.parse(fs.readFileSync(turnFile, "utf8"));
 		assert.equal(stillRunning.phase, "running");
 		assert.ok(Date.parse(stillRunning.updatedAt) >= Date.parse(running.updatedAt));
+		await h.emit("agent_end", { messages: [] });
+		t.mock.timers.tick(4000);
+		assert.deepEqual(JSON.parse(fs.readFileSync(turnFile, "utf8")), stillRunning, "heartbeat after agent_end must let the turn stamp expire");
 		await h.emit("agent_settled", { aborted: false });
 		const ended = JSON.parse(fs.readFileSync(turnFile, "utf8"));
 		assert.equal(ended.phase, "ended");

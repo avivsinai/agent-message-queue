@@ -971,22 +971,34 @@ func TestWakePiBridgeClaimedAskHoldsThroughASlowTurn(t *testing.T) {
 	}
 	unanswered := strings.TrimSuffix(asks[0], ".json")
 	ledger := h.ledgerLog()
-	h.advance(3 * time.Second)
-	diagnostic := captureWakeStderr(t, func() {
-		pending := wakePendingMessages{eligible: h.pending, physical: h.pending}
-		if err := deliverWithNotificationLedger(h.cfg, h.cfg.cohortIDs, peerWakeNotification("test message"), false, pending); err != nil {
-			t.Fatal(err)
+	h.cfg.settings.inputMaxHold = 6 * time.Second
+	// The 03wb review observed a new diagnostic on every withdrawal and
+	// no attention notice even after the busy bound.
+	const holdLine = "pi turn running; doorbell held, nothing typed"
+	for i, want := range []struct{ hold, attention int }{{1, 0}, {0, 1}, {0, 0}} {
+		if i > 0 {
+			h.advance(3 * time.Second)
+			h.deliver() // publish another ask for the same held turn
 		}
-	})
-	if got := h.typedChunks(); len(got) != 0 {
-		t.Fatalf("unanswered ask pasted over the accepted turn: %q", got)
-	}
-	dir := filepath.Join(h.root, "agents", "codex", "extensions", "pi-bridge", "doorbell")
-	if decision, _ := readWakePiBridgeDecision(dir, unanswered); decision != "withdrawn" {
-		t.Fatalf("unanswered ask decision = %q, want withdrawn", decision)
-	}
-	if strings.Count(diagnostic, "pi turn running; doorbell held, nothing typed") != 1 || h.ledgerLog() != ledger {
-		t.Fatalf("withdrawal should log one hold and leave the ledger unchanged: %s", diagnostic)
+		h.advance(3 * time.Second)
+		output := captureWakeStderr(t, func() {
+			pending := wakePendingMessages{eligible: h.pending, physical: h.pending}
+			if err := deliverWithNotificationLedger(h.cfg, h.cfg.cohortIDs, peerWakeNotification("waiting mail"), false, pending); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if got := h.typedChunks(); len(got) != 0 || h.ledgerLog() != ledger {
+			t.Fatalf("unanswered ask changed the ledger or typed into the accepted turn: %q", got)
+		}
+		if strings.Count(output, holdLine) != want.hold || strings.Count(output, "waiting mail") != want.attention {
+			t.Fatalf("withdrawal %d: output %q, want %d hold and %d attention notices", i+1, output, want.hold, want.attention)
+		}
+		if i == 0 {
+			dir := filepath.Join(h.root, "agents", "codex", "extensions", "pi-bridge", "doorbell")
+			if decision, _ := readWakePiBridgeDecision(dir, unanswered); decision != "withdrawn" {
+				t.Fatalf("unanswered ask decision = %q, want withdrawn", decision)
+			}
+		}
 	}
 
 	h.writeBridgeTurn(attemptA, "ended")
