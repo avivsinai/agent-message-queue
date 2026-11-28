@@ -24,10 +24,10 @@ func TestCoopStopCodexReportsAnAttendedSeatOncePerNewMail(t *testing.T) {
 	const thread = "019a1166-dd8e-77c0-bc3b-a4b7e24e91f1"
 	joinCodexThread(t, thread)
 	root := absPath(filepath.Join(defaultCoopRoot, defaultSessionName))
-	send := func(body string) {
+	send := func(body string, flags ...string) {
 		t.Helper()
 		if _, err := captureStdout(t, func() error {
-			return runSend([]string{"--root", root, "--me", "claude", "--to", "codex", "--body", body})
+			return runSend(append([]string{"--root", root, "--me", "claude", "--to", "codex", "--body", body}, flags...))
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -47,15 +47,20 @@ func TestCoopStopCodexReportsAnAttendedSeatOncePerNewMail(t *testing.T) {
 		return out.String()
 	}
 	setAttendedForTest(t, root, "codex")
+	// A passive backlog only informs: it waits for the next drain of a turn.
+	send("fyi", "--notify", "passive")
+	if got, want := stop(), `{"systemMessage":"AMQ: 1 passive message(s) wait; they are read at the next amq drain --for-turn."}`+"\n"; got != want {
+		t.Fatalf("passive turn end = %q, want %q", got, want)
+	}
 	send("first")
-	if got, want := stop(), `{"systemMessage":"AMQ: 1 unread message(s). Run amq drain --include-body."}`+"\n"; got != want {
+	if got, want := stop(), `{"systemMessage":"AMQ: 2 unread message(s). Run amq drain --for-turn."}`+"\n"; got != want {
 		t.Fatalf("first turn end = %q, want %q", got, want)
 	}
 	if got := stop(); got != "" {
 		t.Fatalf("the same mail got %q, want no notice", got)
 	}
 	send("second")
-	if got, want := stop(), `{"systemMessage":"AMQ: 2 unread message(s). Run amq drain --include-body."}`+"\n"; got != want {
+	if got, want := stop(), `{"systemMessage":"AMQ: 3 unread message(s). Run amq drain --for-turn."}`+"\n"; got != want {
 		t.Fatalf("next turn end = %q, want %q", got, want)
 	}
 }

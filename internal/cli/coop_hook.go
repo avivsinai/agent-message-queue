@@ -153,14 +153,14 @@ func writeCoopSessionStart(w io.Writer, now time.Time) error {
 	}
 	b.WriteString(".")
 	if unread > 0 {
-		fmt.Fprintf(&b, "\nInbox: %d unread. Run amq drain --include-body.", unread)
+		fmt.Fprintf(&b, "\nInbox: %d unread. Run amq drain --for-turn.", unread)
 	}
 	seat := readSeatDoorbell(root, me)
 	switch {
 	case seat.ringer == doorbellNone:
 		// An attended seat is never typed into, so no wake mode changes the
 		// wording.
-		b.WriteString("\nThis seat is attended: no doorbell is typed and no hook wakes it. Mail is announced at the person's next prompt and at a turn end; run amq drain --include-body then. Do not run amq watch, amq monitor or a polling loop.")
+		b.WriteString("\nThis seat is attended: no doorbell is typed and no hook wakes it. Mail is announced at the person's next prompt and at a turn end; run amq drain --for-turn then. Do not run amq watch, amq monitor or a polling loop.")
 	case seat.ringer == doorbellTyped:
 		b.WriteString("\nA wake rings this terminal when mail arrives; do not run amq watch, amq monitor or a polling loop.")
 	case seat.hookPublished:
@@ -170,7 +170,7 @@ func writeCoopSessionStart(w io.Writer, now time.Time) error {
 	case coopWaitRings(seat.optIn):
 		b.WriteString("\nA hook wakes this session when mail arrives after a turn ends; do not run amq watch, amq monitor or a polling loop.")
 	default:
-		b.WriteString("\nNo wake: run amq drain --include-body between tasks.")
+		b.WriteString("\nNo wake: run amq drain --for-turn between tasks.")
 	}
 
 	banner := fmt.Sprintf("AMQ coop: %d peer(s)", len(peers))

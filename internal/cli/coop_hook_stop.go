@@ -89,7 +89,7 @@ func writeCoopPromptFor(w io.Writer, prompt, root, me, session string) {
 	_ = writeCoopHookJSON(w, map[string]any{
 		"hookSpecificOutput": map[string]string{
 			"hookEventName":     "UserPromptSubmit",
-			"additionalContext": fmt.Sprintf("You have %d unread AMQ message(s). Run amq drain --include-body. root=%s session=%s.", unread, root, session),
+			"additionalContext": fmt.Sprintf("You have %d unread AMQ message(s). Run amq drain --for-turn. root=%s session=%s.", unread, root, session),
 		},
 	})
 }
@@ -177,8 +177,13 @@ func writeCoopStopAttendedState(w io.Writer, pending []coopStopMessage, old coop
 	if len(fresh) == 0 {
 		return nil
 	}
-	return writeCoopHookJSON(w, map[string]string{"systemMessage": fmt.Sprintf(
-		"AMQ: %d unread message(s). Run amq drain --include-body.", len(pending))})
+	// A backlog of passive mail only informs: it is read at the next drain
+	// of a turn that runs anyway.
+	notice := fmt.Sprintf("AMQ: %d unread message(s). Run amq drain --for-turn.", len(pending))
+	if !slices.ContainsFunc(pending, func(msg coopStopMessage) bool { return msg.ID != "" && !msg.Passive }) {
+		notice = fmt.Sprintf("AMQ: %d passive message(s) wait; they are read at the next amq drain --for-turn.", len(pending))
+	}
+	return writeCoopHookJSON(w, map[string]string{"systemMessage": notice})
 }
 
 // decideCoopStopAttended is the attended-seat Stop state: noticed = the
@@ -283,7 +288,7 @@ func decideCoopStop(pending []coopStopMessage, baseline *time.Time, old coopStop
 		slices.Sort(next.BlockedIDs)
 		next.ChainBlocks++
 		return next, map[string]string{"decision": "block", "reason": fmt.Sprintf(
-			"You have %d pending AMQ message(s), including %d not previously reported. Drain before stopping. %s.",
+			"You have %d pending AMQ message(s), including %d not previously reported. Run amq drain --for-turn before stopping. %s.",
 			len(ids), len(fresh), where)}
 	}
 }

@@ -86,7 +86,7 @@ initiator then assigns work.
 ## Rules
 
 - **Wait on the existing wake.** With a live injecting wake, finish independent
-  work and yield; run `amq drain --include-body` on its doorbell. Do not start
+  work and yield; run `amq drain --for-turn` on its doorbell. Do not start
   `amq watch`, `amq monitor`, or a polling loop. Check
   `amq wake check --me <handle> --json` when the capability is unknown. A
   bounded `watch` is a fallback only without an injecting wake.

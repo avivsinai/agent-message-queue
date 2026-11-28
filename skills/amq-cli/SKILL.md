@@ -40,7 +40,7 @@ Use the first case that applies:
 
    ```bash
    amq_context="$(amq env --me "<handle>" --export)" && eval "$amq_context" &&
-     amq drain --include-body
+     amq drain --for-turn
    ```
 
 For a named session, add `--session <name>` to `amq env`. Treat the evaluated

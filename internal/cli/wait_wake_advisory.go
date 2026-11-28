@@ -20,7 +20,7 @@ func noteLiveWakeBeforeBlockingWait(command, root, me string) {
 		mode = "legacy"
 	}
 	_ = writeStderr(
-		"note: a live wake (pid %d, mode %s) already notifies this terminal; %s is redundant here. Receive with amq drain --include-body.\n",
+		"note: a live wake (pid %d, mode %s) already notifies this terminal; %s is redundant here. Receive with amq drain --for-turn.\n",
 		inspection.PID, mode, command,
 	)
 }
