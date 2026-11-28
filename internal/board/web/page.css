@@ -46,14 +46,22 @@ button.is-failed { color: var(--error); border-color: var(--error); }
 a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: .2em; }
 a:hover { text-decoration-thickness: 2px; }
 :focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+/* A view heading takes focus after a view change; the ring shows only for
+   keyboard focus and hugs the words, not the heading row. */
+.view h1 { width: fit-content; }
 ::selection { background: var(--selected); color: var(--ink); }
+/* Surfaces already on the selected tone select in accent, so a selection stays visible. */
+.tile::selection, .tile ::selection, .flow-card > details[open] > summary ::selection { background: var(--accent); color: var(--surface); }
 [hidden] { display: none !important; }
 h1, h2, h3, p, ul, dl { margin: 0; }
 h1 { font-size: 2rem; font-weight: 700; line-height: 1.1875; letter-spacing: -.03em; text-wrap: balance; }
 h2 { font-size: 1.125rem; font-weight: 600; line-height: 1.4445; }
 ul { padding-left: 1.25rem; }
 code, textarea, .token { font-family: var(--font-code); font-size: .875rem; overflow-wrap: anywhere; }
-time, .stage-count, .gates, .tile-age, .card-age { font-variant-numeric: tabular-nums; }
+/* Counts, times and ages align: every reading surface uses tabular numerals;
+   titles and quoted prose keep proportional figures. */
+main, .mast-gen, footer { font-variant-numeric: tabular-nums; }
+.title, .card-title, .tile-title, .item-summary, .card-summary, .tile-summary, .prose, blockquote, q, .view-description { font-variant-numeric: normal; }
 .sheet, textarea { scrollbar-color: var(--control) var(--surface); }
 .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 .skip-link { position: absolute; left: 1rem; top: -5rem; padding: .75rem; background: var(--surface); z-index: 2; }
@@ -64,15 +72,16 @@ time, .stage-count, .gates, .tile-age, .card-age { font-variant-numeric: tabular
 .brand { font-size: 1.125rem; font-weight: 750; letter-spacing: -.025em; text-decoration: none; color: var(--ink); }
 .project { color: var(--muted); font-size: .875rem; overflow-wrap: anywhere; }
 .snapshot { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: .5rem 1rem; }
-.mast-gen { color: var(--muted); font-size: .875rem; max-width: 23rem; }
+.mast-gen { color: var(--muted); font-size: .875rem; text-align: right; }
 #page-age { margin-left: .375rem; }
+/* The header status is one short sentence beside the time, wrapped as a
+   unit; idle, it is empty. */
+.live-state { display: inline-block; }
+.live-state:not(:empty) { margin-left: .75rem; }
 .is-stale { color: var(--warning); }
 .appearance { font-size: .875rem; display: grid; gap: .5rem; color: var(--muted); margin: 1rem .875rem; }
 select { color: var(--ink); background: var(--surface); border: 1px solid var(--control); border-radius: .5rem; padding: .5rem 1.75rem .5rem .625rem; }
-.live-feedback { display: flex; align-items: center; gap: 1rem; width: 100%; }
-.live-state { color: var(--muted); font-size: .875rem; flex: 1; }
 .live-state.is-error { color: var(--error); }
-#apply-update { margin-left: auto; }
 .workspace { display: grid; grid-template-columns: 11rem minmax(0, 1fr); gap: 2rem; padding-block: 2rem 3rem; }
 .navigation { min-width: 0; }
 .navigation a { display: block; min-height: 2.75rem; padding: .6875rem .875rem; color: var(--muted); font-size: .9375rem; line-height: 1.4667; font-weight: 600; text-decoration: none; border-radius: .5rem; }
@@ -94,11 +103,17 @@ main, .view, .work-list, .item-main { min-width: 0; }
 input[type="search"] { width: 100%; min-height: 2.75rem; padding: .625rem .75rem; color: var(--ink); background: var(--surface); border: 1px solid var(--control); border-radius: .5rem; font-size: 1rem; line-height: 1.5; }
 input::placeholder { color: var(--muted); opacity: 1; }
 .coverage { background: var(--warning-bg); color: var(--warning); padding: .875rem 1rem; border-radius: .5rem; font-size: .875rem; margin-bottom: 1.5rem; }
-/* Coverage is one line that names each gap; the Sources view holds the rest. */
-.coverage-line { margin-bottom: 1.25rem; max-width: 110ch; color: var(--muted); font-size: .875rem; line-height: 1.4286; overflow-wrap: anywhere; }
-.coverage-word { color: var(--warning); font-weight: 600; }
-.gap-name { color: var(--ink); font-weight: 600; white-space: nowrap; }
-.coverage-line a { white-space: nowrap; }
+/* Coverage is a compact warning disclosure: the summary names each gap, the
+   body holds the owner step and the Sources link. */
+details.coverage { width: fit-content; max-width: 100%; padding-block: 0; overflow-wrap: anywhere; }
+details.coverage[open] { width: auto; padding-bottom: 1rem; }
+details.coverage > summary { color: var(--warning); font-size: .875rem; line-height: 1.4286; }
+.coverage-word { font-weight: 600; }
+.gap { display: inline-block; }
+.gap-name { font-weight: 600; }
+.coverage-body { color: var(--ink); line-height: 1.4286; }
+.coverage-body > * + * { margin-top: .75rem; }
+.coverage-gap > .cmd { margin-top: .5rem; }
 .work-list { background: var(--surface); border: 1px solid var(--divider); border-radius: .75rem; overflow: clip; }
 .strip { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 11.5rem); column-gap: 1.5rem; row-gap: .75rem; padding: 1.25rem 1.5rem; }
 .strip + .strip { border-top: 1px solid var(--divider); }
@@ -122,6 +137,7 @@ details:not(.card-sheet) > summary::before { content: ""; display: inline-block;
 details:not(.card-sheet)[open] > summary::before { transform: rotate(45deg); vertical-align: .1875rem; }
 .detail-content { border-radius: .5rem; padding: 1rem; background: var(--subtle); overflow-wrap: anywhere; }
 .detail-content > * + * { margin-top: 1rem; }
+.detail-content > details + details { margin-top: 0; }
 .detail-content p { max-width: 66ch; }
 .prose { white-space: pre-line; }
 dl { display: grid; grid-template-columns: minmax(7rem, 1fr) minmax(0, 3fr); gap: .5rem 1rem; font-size: .875rem; }
@@ -157,6 +173,9 @@ textarea { display: block; width: 100%; min-height: 4.5rem; resize: vertical; co
 .request-summary { margin-bottom: 2rem; max-width: 66ch; }
 .request-headline { font-size: 1.125rem; font-weight: 600; line-height: 1.4445; }
 .request-note { margin-top: .5rem; color: var(--muted); font-size: .875rem; line-height: 1.4286; }
+.request-counting { margin-top: .25rem; }
+.request-counting > summary { font-size: .875rem; }
+.request-counting .request-note:first-child { margin-top: 0; }
 .request-group + .request-group { margin-top: 2rem; }
 .request-group-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: .25rem .75rem; padding-bottom: .75rem; overflow-wrap: anywhere; }
 .request-group-head .stage-count { margin-left: 0; font-size: .875rem; }
@@ -189,7 +208,11 @@ textarea { display: block; width: 100%; min-height: 4.5rem; resize: vertical; co
 .agent-heading strong { font-size: 1rem; }
 .agent-heading span, .agent > p, .muted, .quiet { color: var(--muted); }
 .agent > p { margin-top: .5rem; }
+/* A seat's disclosures share one row; an open one takes the full width. */
+.agent > details { display: inline-block; margin-right: 1.5rem; vertical-align: top; }
+.agent > details[open] { display: block; margin-right: 0; }
 .limit-reached { color: var(--warning); }
+.quiet-sessions .crew { padding-inline: 0; }
 .account { padding-block: 1rem; }
 .account p { margin-top: .5rem; }
 footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: .5rem 1.5rem; border-top: 1px solid var(--divider); padding-block: 1rem 2rem; color: var(--muted); font-size: .875rem; }
@@ -241,8 +264,7 @@ footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: .5
 .mark-flag { width: .5em; height: .5em; margin-inline: .0625em .5em; border-radius: .0625rem; background: currentColor; transform: rotate(45deg); vertical-align: .1em; }
 .mark-replied { background: currentColor; }
 .mark-unknown { border-style: dashed; }
-.view-flow > .coverage-line { max-width: none; margin-bottom: .5rem; }
-.gaps-count { display: none; }
+.view-flow > .coverage { margin-bottom: .75rem; }
 .flow-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem 2rem; margin-bottom: 1rem; }
 .flow-tools > details[open] { flex-basis: 100%; order: 1; }
 .rules-link { color: var(--accent); }
@@ -251,7 +273,7 @@ footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: .5
 .search-inline { display: flex; align-items: center; gap: .75rem; width: auto; }
 .search-inline input { width: 20rem; }
 .flow-notes { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 1.5rem; margin-bottom: 1.5rem; }
-.flow-notes > .coverage-line { flex-basis: 100%; margin-bottom: .25rem; }
+.flow-notes > .coverage { margin-bottom: 0; }
 .flow-notes > details > summary { padding-block: .625rem; }
 .flow-notes > details[open] { flex-basis: 100%; }
 .stage-rules ol { padding-left: 1.25rem; max-width: 66ch; }
@@ -284,7 +306,6 @@ footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: .5
 .card-meta { display: flex; flex-wrap: wrap; gap: .125rem .75rem; margin-top: .375rem; color: var(--muted); font-size: .875rem; line-height: 1.4286; }
 .card-meta > span { min-width: 0; overflow-wrap: anywhere; }
 .card-meta > .c-owner { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.card-age { font-variant-numeric: tabular-nums; }
 .pr { color: var(--ink); font-variant-numeric: tabular-nums; }
 .ci { color: var(--muted); white-space: nowrap; }
 .ci::before { content: ""; display: inline-block; width: .5rem; height: .5rem; margin-right: .3125rem; border-radius: 50%; vertical-align: .0625rem; border: 1.5px solid currentColor; }
@@ -347,10 +368,14 @@ footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: .5
 .self-report q { font-style: italic; }
 @media (max-width: 959px) {
   .shell { width: calc(100% - 2rem); }
-  .mast { align-items: flex-start; }
-  .mast-id { flex-basis: 100%; }
-  .snapshot { justify-content: flex-start; width: 100%; }
-  .mast-gen { flex: 1 1 12rem; }
+  .mast { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .5rem 1rem; }
+  .snapshot { display: contents; }
+  #refresh { grid-row: 1; grid-column: 2; }
+  .mast-gen { grid-column: 1 / -1; text-align: left; }
+  /* The Update label carries a waiting update; its sentence stays for
+     assistive technology only. An error takes its own line. */
+  .live-state:not(.is-error) { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .live-state.is-error { display: block; margin: .25rem 0 0; }
   .workspace { grid-template-columns: minmax(0, 1fr); gap: 1.5rem; padding-top: 1rem; }
   .navigation { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: .5rem; }
   .primary-nav { display: flex; flex-wrap: wrap; gap: .25rem; }
@@ -386,8 +411,7 @@ footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: .5
   .stage { flex-basis: 100%; }
   .is-empty .stage-empty { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
   .is-empty .stage-head { padding-block: .5rem; }
-  .view-flow > .coverage-line .gaps, .flow-legend { display: none; }
-  .view-flow > .coverage-line .gaps-count { display: inline; }
+  .flow-legend { display: none; }
   .floor-session, .station { width: 100%; }
   .enhanced .flow-card > details[open] > .sheet, .enhanced .station > details[open] > .sheet { padding: 1rem; }
 }

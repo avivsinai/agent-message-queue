@@ -176,6 +176,18 @@ func ClaimBead(id string, known map[string]string) (Action, bool) {
 	return Action{Purpose: ActionContext, Label: "claim bead", Argv: append(argv, userLiteral), Command: Quote(argv) + " " + userLiteral}, true
 }
 
+// BindClaudeList builds the command that binds a Claude task list to this
+// project. A home or list that is empty, holds a control character, or
+// starts with "-" yields no action.
+func BindClaudeList(home, list string) (Action, bool) {
+	for _, v := range []string{home, list} {
+		if v == "" || hasControl(v) || strings.HasPrefix(v, "-") {
+			return Action{}, false
+		}
+	}
+	return newOwnerAction("Bind the Claude task list", "amq-board", "bind-claude-list", "--home", home, "--list", list), true
+}
+
 func newOwnerAction(label string, argv ...string) Action {
 	action := newAction(label, argv...)
 	action.Purpose = ActionOwnerMutation

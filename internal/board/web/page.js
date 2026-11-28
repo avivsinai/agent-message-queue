@@ -54,6 +54,12 @@
       showAll.textContent = "Show all " + rows.length + " known next actions";
     }
   }
+  // On compact layouts the primary links scroll sideways; the current one
+  // is kept in view.
+  function showLink(link) {
+    var strip = link.parentElement, box = strip.getBoundingClientRect(), at = link.getBoundingClientRect();
+    if (at.left < box.left || at.right > box.right) { strip.scrollLeft += at.left - box.left; }
+  }
   function selectView(focus) {
     var requested = window.location.hash.replace(/^#view-/, "");
     var chosen = views.find(function (view) { return view.dataset.view === requested; });
@@ -63,7 +69,7 @@
     root.setAttribute("data-view", current);
     views.forEach(function (view) { view.hidden = view !== chosen; });
     links.forEach(function (link) {
-      if (link.dataset.viewLink === current) { link.setAttribute("aria-current", "page"); }
+      if (link.dataset.viewLink === current) { link.setAttribute("aria-current", "page"); showLink(link); }
       else { link.removeAttribute("aria-current"); }
     });
     filter(chosen);
@@ -258,9 +264,13 @@
   }
   var state = document.getElementById("live-state");
   var refresh = document.getElementById("refresh");
-  var update = document.getElementById("apply-update");
   var pending = false;
   var checking = false;
+  // One button refreshes, and applies a newer snapshot once one waits.
+  function setPending(value) {
+    pending = value;
+    refresh.textContent = value ? "Update" : "Refresh";
+  }
   function check() {
     if (checking) { return Promise.resolve(); }
     checking = true;
@@ -271,28 +281,30 @@
       if (typeof model.generated_at !== "string") { throw new Error("invalid snapshot"); }
       var publicationError = (model.sources || []).find(function (source) { return source.name === "board-state" && source.status === "degraded"; });
       if (publicationError) {
-        pending = false; update.hidden = true;
+        setPending(false);
         state.classList.add("is-error"); state.textContent = publicationError.detail;
         return;
       }
-      if (state.classList.contains("is-error")) { state.classList.remove("is-error"); state.textContent = "Published snapshot is available."; }
       if (typeof model.stale !== "boolean" || !Number.isFinite(model.published_age_seconds)) { throw new Error("invalid freshness"); }
       var previousPublication = snapshot.published_at || snapshot.generated_at;
       var newer = model.generation !== snapshot.generation || (model.published_at || model.generated_at) !== previousPublication;
+      state.classList.remove("is-error");
       if (newer) {
-        pending = true; update.hidden = false;
-        state.classList.remove("is-error"); state.textContent = "New snapshot available. Update when you are ready.";
+        setPending(true);
+        state.textContent = "New snapshot available.";
         applyFreshPane(model);
+      } else if (!pending) {
+        // Idle shows no status sentence.
+        state.textContent = "";
       }
     }).catch(function () {
-      pending = false; update.hidden = true;
+      // A failed poll keeps a waiting update: the button still applies it.
       state.classList.add("is-error"); state.textContent = "Refresh failed. Showing the existing snapshot.";
     }).finally(function () { checking = false; });
   }
   function applyUpdate() {
     save(); window.location.reload();
   }
-  update.addEventListener("click", applyUpdate);
   refresh.addEventListener("click", function () {
     if (pending) { applyUpdate(); return; }
     refresh.disabled = true; state.classList.remove("is-error"); state.textContent = "Checking for updates…";
@@ -300,7 +312,7 @@
       if (!response.ok) { throw new Error("refresh failed"); }
       return response.json();
     }).then(function () {
-      state.textContent = "Refresh requested. The current snapshot remains visible.";
+      state.textContent = "";
       return check();
     }).catch(function () {
       state.classList.add("is-error"); state.textContent = "Refresh failed. Showing the existing snapshot.";

@@ -112,6 +112,12 @@ type pageData struct {
 	Requests             pageRequests
 	Suggestions          []pageSuggestion
 	SuggestionDiagnostic string
+
+	// QuietRoster holds the sessions with no seat that has a live wake or
+	// recent presence; the Agents view folds them after the others under
+	// QuietTitle.
+	QuietRoster []pageSession
+	QuietTitle  string
 }
 
 var suggestionLabels = map[SuggestionStatus]string{
@@ -192,21 +198,12 @@ type pageView struct {
 // is a condition the owner can act on.
 type pageGap struct {
 	Name, Status, Gap string
-	Steps             []string
+	Steps             []ownerStep
 	NoStep            bool
 }
 
 // pageGaps are the sources a view rests on that were not fully read.
 type pageGaps []pageGap
-
-// Steps are the owner steps of every gap, in order.
-func (gs pageGaps) Steps() []string {
-	var out []string
-	for _, g := range gs {
-		out = append(out, g.Steps...)
-	}
-	return out
-}
 
 // NothingToDo reports that the board knows no gap has an owner step.
 func (gs pageGaps) NothingToDo() bool {
@@ -317,6 +314,17 @@ type pageSession struct {
 	Note   string
 }
 
+// seen reports whether a seat of the session has a live wake or recent
+// presence.
+func (ps pageSession) seen() bool {
+	for _, a := range ps.Agents {
+		if a.Liveness == "live" || a.Liveness == "recent" {
+			return true
+		}
+	}
+	return false
+}
+
 type pageAgent struct {
 	Handle, Liveness, Counts, Usage, Context string
 	Human, Invalid, Limited                  bool
@@ -414,7 +422,15 @@ func buildPage(m Model, regenerate string) pageData {
 		p.Bays = append(p.Bays, bay)
 	}
 	for _, rs := range m.Roster {
-		p.Roster = append(p.Roster, buildSession(rs, now))
+		ps := buildSession(rs, now)
+		if ps.seen() {
+			p.Roster = append(p.Roster, ps)
+		} else {
+			p.QuietRoster = append(p.QuietRoster, ps)
+		}
+	}
+	if len(p.QuietRoster) > 0 {
+		p.QuietTitle = pluralize(len(p.QuietRoster), "session") + " without recent presence"
 	}
 	p.Views = buildViews(m, now, live)
 	p.Flow = buildFlowPage(m, now, live)
