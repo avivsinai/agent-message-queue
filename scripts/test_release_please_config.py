@@ -8,7 +8,7 @@ import pathlib
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-APP_PIN = "actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510"
+APP_PIN = "actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc"
 
 
 def test_release_please_config() -> None:

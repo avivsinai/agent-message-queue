@@ -69,6 +69,7 @@ func TestApplyEnvelopeIgnoresUntrustedPayloadRoutingHints(t *testing.T) {
 		Header: format.Header{
 			Schema:       1,
 			ID:           "msg-untrusted",
+			Notify:       format.NotifyPassive,
 			From:         "attacker",
 			To:           []string{"attacker"},
 			Thread:       "session/other",
@@ -94,6 +95,10 @@ func TestApplyEnvelopeIgnoresUntrustedPayloadRoutingHints(t *testing.T) {
 	want := filepath.Join(fsq.AgentInboxNew(base, "claude"), TransferFilename(env.SourceHost, env.TransferID))
 	if result.Path != want {
 		t.Fatalf("path = %q, want dest_alias mailbox %q", result.Path, want)
+	}
+	copied, err := format.ReadHeaderFile(result.Path)
+	if err != nil || copied.Notify != format.NotifyPassive {
+		t.Fatalf("copied notify = %q, error %v", copied.Notify, err)
 	}
 	if _, err := os.Stat(filepath.Join(fsq.AgentInboxNew(base, "attacker"), TransferFilename(env.SourceHost, env.TransferID))); !os.IsNotExist(err) {
 		t.Fatalf("payload routed into attacker mailbox: %v", err)

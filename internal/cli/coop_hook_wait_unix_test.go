@@ -54,15 +54,16 @@ func TestCoopWaitRingsOnlyForDueMailNoHookAnnounced(t *testing.T) {
 		{ID: "urgent", Priority: format.PriorityUrgent, File: arrived},
 		{ID: "normal", Priority: format.PriorityNormal, File: arrived},
 		{ID: "low", Priority: format.PriorityLow, File: arrived},
+		{ID: "passive", Priority: format.PriorityLow, File: arrived, Passive: true},
 		{ID: "reported", Priority: format.PriorityUrgent, File: arrived},
 	}
 
 	announced := map[string]time.Time{"reported": now}
-	due, next := decideCoopWait(pending, announced, policy, now)
-	if !slices.Equal(due, []string{"urgent"}) || !next.Equal(now.Add(4*time.Minute)) {
+	due, next, urgent := decideCoopWait(pending, announced, policy, now)
+	if !urgent || !slices.Equal(due, []string{"urgent"}) || !next.Equal(now.Add(4*time.Minute)) {
 		t.Fatalf("due = %v next = %v, want urgent now and normal in 4m", due, next)
 	}
-	due, next = decideCoopWait(pending, announced, wakeHoldPolicy{}, now)
+	due, next, _ = decideCoopWait(pending, announced, wakeHoldPolicy{}, now)
 	if !slices.Equal(due, []string{"low", "normal", "urgent"}) || !next.IsZero() {
 		t.Fatalf("without holds: due = %v next = %v, want all three and nothing held", due, next)
 	}

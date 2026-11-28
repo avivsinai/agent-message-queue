@@ -45,6 +45,7 @@ func runSendStep(args []string, afterBodyRead func(), deliver func(outgoingMessa
 	newsWithinFlag := fs.Duration("news-within", 0, newsWithinHelp)
 
 	// Co-op mode flags
+	notifyFlag := fs.String("notify", "", "Notification intent: wake or passive (default wake)")
 	priorityFlag := fs.String("priority", "", "Message priority: urgent, normal, low (default when --kind is set: low for status, normal otherwise)")
 	kindFlag := fs.String("kind", "", "Message kind: "+format.ValidKindsList())
 	labelsFlag := fs.String("labels", "", "Comma-separated labels/tags")
@@ -440,6 +441,9 @@ func runSendStep(args []string, afterBodyRead func(), deliver func(outgoingMessa
 	if err := validatePriorityKind(priority, kind); err != nil {
 		return err
 	}
+	if err := validateNotify(*notifyFlag, priority); err != nil {
+		return err
+	}
 	context, err := parseContext(*contextFlag)
 	if err != nil {
 		return err
@@ -524,6 +528,7 @@ func runSendStep(args []string, afterBodyRead func(), deliver func(outgoingMessa
 		thread:                   threadID,
 		subject:                  strings.TrimSpace(*subjectFlag),
 		refs:                     splitList(*refsFlag),
+		notify:                   *notifyFlag,
 		priority:                 priority,
 		kind:                     kind,
 		labels:                   splitList(*labelsFlag),

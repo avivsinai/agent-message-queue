@@ -8,6 +8,26 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.172.0](https://github.com/avivsinai/agent-message-queue/compare/v0.171.1...v0.172.0) (2026-11-27)
+
+
+### Features
+
+* **init:** add --add for incremental agent registration ([#1619](https://github.com/avivsinai/agent-message-queue/issues/1619)) ([90d4489](https://github.com/avivsinai/agent-message-queue/commit/90d448983338514a1b58338f07d7cc23e5481717))
+* **wake:** passive notifications that never start a turn ([#1662](https://github.com/avivsinai/agent-message-queue/issues/1662)) ([f68131c](https://github.com/avivsinai/agent-message-queue/commit/f68131c0e41560843974c563573b1fef9c572b5d))
+
+
+### Bug Fixes
+
+* **board:** a watch pass gives GitHub the source deadline, not the one-shot two seconds ([#1653](https://github.com/avivsinai/agent-message-queue/issues/1653)) ([7043f97](https://github.com/avivsinai/agent-message-queue/commit/7043f97ce7ff21834504f0e215d52b6119f68641))
+* **coop:** honor Cursor's configured chat store ([#1657](https://github.com/avivsinai/agent-message-queue/issues/1657)) ([18b74e6](https://github.com/avivsinai/agent-message-queue/commit/18b74e618bb070fc2bb82a1ba38981cd69e825f2))
+
+
+### Dependencies
+
+* bump actions/create-github-app-token from 3.3.0 to 3.4.0 ([#1659](https://github.com/avivsinai/agent-message-queue/issues/1659)) ([e7cb19c](https://github.com/avivsinai/agent-message-queue/commit/e7cb19cb1e67516a81670a130eee6296ce6f560f))
+* bump actions/setup-go from 7.0.0 to 7.1.0 ([#1658](https://github.com/avivsinai/agent-message-queue/issues/1658)) ([006ccd9](https://github.com/avivsinai/agent-message-queue/commit/006ccd9a8293f816b7d51770ccd57ecdc7284935))
+
 ## [0.171.1](https://github.com/avivsinai/agent-message-queue/compare/v0.171.0...v0.171.1) (2026-11-25)
 
 

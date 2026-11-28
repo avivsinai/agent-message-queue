@@ -34,7 +34,7 @@ func TestAttentionOnlyFallbackPersistsDegraded(t *testing.T) {
 	current := wakeDoorbellTestFiles(t, "pending.md")
 	notice := peerWakeNotification("test message")
 
-	err := deliverNewMessageNotification(cfg, notice, false, current)
+	err := deliverNewMessageNotification(cfg, notice, false, wakePendingMessages{eligible: current, physical: current})
 	if err != nil {
 		t.Fatalf("delivery error = %v, want attention-only success", err)
 	}
@@ -75,7 +75,7 @@ func TestSuccessfulInjectDoesNotPersistDegraded(t *testing.T) {
 	current := wakeDoorbellTestFiles(t, "pending.md")
 	notice := peerWakeNotification("test message")
 
-	err := deliverNewMessageNotification(cfg, notice, false, current)
+	err := deliverNewMessageNotification(cfg, notice, false, wakePendingMessages{eligible: current, physical: current})
 	if err != nil {
 		t.Fatalf("delivery error = %v, want inject success", err)
 	}
@@ -108,7 +108,7 @@ func TestSuccessfulInjectClearsDegradedAfterFallback(t *testing.T) {
 	current := wakeDoorbellTestFiles(t, "pending.md")
 	notice := peerWakeNotification("test message")
 
-	if err := deliverNewMessageNotification(cfg, notice, false, current); err != nil {
+	if err := deliverNewMessageNotification(cfg, notice, false, wakePendingMessages{eligible: current, physical: current}); err != nil {
 		t.Fatalf("first delivery error = %v", err)
 	}
 	if cfg.lastPersistedNotifierStatus != "degraded" {
@@ -126,7 +126,7 @@ func TestSuccessfulInjectClearsDegradedAfterFallback(t *testing.T) {
 	// Fresh pending files so the doorbell plan attempts delivery again
 	current2 := wakeDoorbellTestFiles(t, "pending2.md")
 	notice2 := peerWakeNotification("second message")
-	if err := deliverNewMessageNotification(cfg, notice2, false, current2); err != nil {
+	if err := deliverNewMessageNotification(cfg, notice2, false, wakePendingMessages{eligible: current2, physical: current2}); err != nil {
 		t.Fatalf("second delivery error = %v, outcome=%v", err, cfg.lastInjectorOutcome)
 	}
 	t.Logf("after second delivery: outcome=%v status=%q lastAttemptAttention=%v", cfg.lastInjectorOutcome, cfg.lastPersistedNotifierStatus, cfg.lastAttemptAttention)
@@ -174,7 +174,7 @@ func TestFailedSpecificStatusWriteRetainsPendingIntent(t *testing.T) {
 	}
 
 	// Now deliver via attention-only (injectMode=none).
-	if err := deliverNewMessageNotification(cfg, notice, false, current); err != nil {
+	if err := deliverNewMessageNotification(cfg, notice, false, wakePendingMessages{eligible: current, physical: current}); err != nil {
 		t.Fatalf("delivery error = %v", err)
 	}
 
@@ -209,7 +209,7 @@ func TestNativeInjectionClearsDegradedAfterFallback(t *testing.T) {
 	notice := peerWakeNotification("test message")
 
 	// First delivery: injectMode=none forces attention-only → "degraded"
-	if err := deliverNewMessageNotification(cfg, notice, false, current); err != nil {
+	if err := deliverNewMessageNotification(cfg, notice, false, wakePendingMessages{eligible: current, physical: current}); err != nil {
 		t.Fatalf("first delivery error = %v", err)
 	}
 	if cfg.lastPersistedNotifierStatus != "degraded" {
@@ -225,7 +225,7 @@ func TestNativeInjectionClearsDegradedAfterFallback(t *testing.T) {
 	// Fresh pending files so the doorbell plan attempts delivery again
 	current2 := wakeDoorbellTestFiles(t, "pending2.md")
 	notice2 := peerWakeNotification("second message")
-	if err := deliverNewMessageNotification(cfg, notice2, false, current2); err != nil {
+	if err := deliverNewMessageNotification(cfg, notice2, false, wakePendingMessages{eligible: current2, physical: current2}); err != nil {
 		t.Fatalf("second delivery error = %v", err)
 	}
 	if cfg.lastPersistedNotifierStatus == "degraded" {

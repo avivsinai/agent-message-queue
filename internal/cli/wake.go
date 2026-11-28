@@ -622,6 +622,13 @@ func shouldDeferBeforeInject(cfg *wakeConfig, deferForInput bool) bool {
 	return deferForInput && cfg.settings.deferWhileInput && cfg.injectVia == "" && cfg.injectMode != wakeInjectModeNone
 }
 
+// wakePendingMessages separates notification scheduling from evidence of
+// what physically remains in the inbox.
+type wakePendingMessages struct {
+	eligible map[string]os.FileInfo
+	physical map[string]os.FileInfo
+}
+
 func notifyNewMessages(cfg *wakeConfig) error {
 	inboxNew := fsq.AgentInboxNew(cfg.root, cfg.me)
 
@@ -657,6 +664,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 	var messages []wakeMsgInfo
 	var interruptMessages []wakeMsgInfo
 	interruptCounts := make(map[string]int)
+	physicalPending := make(map[string]os.FileInfo)
 	currentPending := make(map[string]os.FileInfo)
 	unreadable := false
 	// Every message gets a hold, priority holds or not: the doorbell reads
@@ -691,6 +699,9 @@ func notifyNewMessages(cfg *wakeConfig) error {
 			}
 			delete(cfg.baselineExisting, name)
 		}
+		// Baseline mail is in neither view: it never triggered a notice, so
+		// it is no evidence about recovery either (as before passive mail).
+		physicalPending[name] = pendingInfo
 
 		var header format.Header
 		if cfg.retainedInbox != nil {
@@ -699,6 +710,10 @@ func notifyNewMessages(cfg *wakeConfig) error {
 			header, err = format.ReadHeaderFile(filepath.Join(inboxNew, name))
 		}
 		if err != nil && os.IsNotExist(err) {
+			delete(physicalPending, name)
+			continue
+		}
+		if err == nil && !wakeEligible(header) {
 			continue
 		}
 		currentPending[name] = pendingInfo
@@ -768,24 +783,23 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		// A live attended change reset the cohort: this scan delivers one
 		// notice for what waits under the new setting even with no inbox
 		// event; the recorded cohort makes every later scan quiet again.
-		// The normal path below delivers it: every pending file is a
-		// message here, so an empty messages slice with pending files
-		// cannot happen.
+		// The normal path below delivers it if eligible mail waits.
 		cfg.attendedChanged = false
 	}
 	if cfg.inputRecoveryRequired &&
-		dischargeWakeInputRecoveryAfterProgress(cfg, currentPending) &&
+		dischargeWakeInputRecoveryAfterProgress(cfg, physicalPending) &&
 		len(messages) == 0 {
 		return nil
 	}
 	if len(messages) == 0 {
 		if cfg.inputRecoveryRequired {
-			return deliverWakeInputRecoveryAttention(
-				cfg,
-				currentPending,
-			)
+			// Filtering a still-present trigger is no evidence that the
+			// consumer cleared uncertain input. Keep the recovery cohort
+			// without scheduling attention for an ineligible backlog.
+			cfg.doorbell.recoveryPending = false
+			return nil
 		}
-		if cfg.doorbell.phase != wakeDoorbellIdle && cfg.startupReleaseAttempted {
+		if cfg.startupReleaseAttempted && wakeCohortDrained(cfg.doorbell.cohort, physicalPending) {
 			cfg.startupInputProven = true
 		}
 		cfg.doorbell.reset()
@@ -793,6 +807,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		return reconcileWakeInputAfterInboxDrain(cfg)
 	}
 
+	pending := wakePendingMessages{eligible: currentPending, physical: physicalPending}
 	if cfg.injectMode != wakeInjectModeClaudeNative && cfg.settings.interrupt && len(interruptMessages) > 0 {
 		interruptText := buildInterruptText(cfg.session, interruptMessages, interruptCounts, cfg.settings.previewLen, cfg.settings.interruptNotice)
 		notice := peerWakeNotification(interruptText)
@@ -800,15 +815,15 @@ func notifyNewMessages(cfg *wakeConfig) error {
 			notice = operatorWakeNotification(interruptText)
 		}
 		if cfg.inputRecoveryRequired {
-			return deliverWithNotificationLedger(cfg, wakeMessageIDs(interruptMessages), notice, false, currentPending)
+			return deliverWithNotificationLedger(cfg, wakeMessageIDs(interruptMessages), notice, false, pending)
 		}
 		if cfg.injectMode == wakeInjectModeNone {
-			return deliverWithNotificationLedger(cfg, wakeMessageIDs(interruptMessages), notice, false, currentPending)
+			return deliverWithNotificationLedger(cfg, wakeMessageIDs(interruptMessages), notice, false, pending)
 		}
 		if done, err := injectWakeInterruptKey(cfg, wakeMessageIDs(interruptMessages), currentPending); done {
 			return err
 		}
-		return deliverWithNotificationLedger(cfg, wakeMessageIDs(interruptMessages), notice, false, currentPending)
+		return deliverWithNotificationLedger(cfg, wakeMessageIDs(interruptMessages), notice, false, pending)
 	}
 
 	var notice wakeNotification
@@ -822,7 +837,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		)
 	}
 
-	return deliverWithNotificationLedger(cfg, wakeMessageIDs(messages), notice, true, currentPending)
+	return deliverWithNotificationLedger(cfg, wakeMessageIDs(messages), notice, true, pending)
 }
 
 // injectWakeInterruptKey sends the configured interrupt key ahead of an
@@ -935,22 +950,23 @@ func deliverWithNotificationLedger(
 	messageIDs []string,
 	notice wakeNotification,
 	deferForInput bool,
-	currentPending map[string]os.FileInfo,
+	pending wakePendingMessages,
 ) error {
+	currentPending := pending.eligible
 	if cfg.injectMode == wakeInjectModeClaudeNative {
 		// Native delivery owns its strict pre-write uncertainty record.
-		return deliverNewMessageNotification(cfg, notice, deferForInput, currentPending)
+		return deliverNewMessageNotification(cfg, notice, deferForInput, pending)
 	}
 	if len(messageIDs) == 0 {
 		// No message IDs (e.g. an operator-injected command with no parsed
 		// messages) — deliver without recording. The ledger records attempts
 		// to notify about specific messages.
-		return deliverNewMessageNotification(cfg, notice, deferForInput, currentPending)
+		return deliverNewMessageNotification(cfg, notice, deferForInput, pending)
 	}
 	if cfg.inputRecoveryRequired && cfg.notificationAttempt == nil {
 		// Recovery attention is not a new provider attempt. Avoid creating an
 		// orphaned prepared record while the exact terminal-input debt is held.
-		return deliverNewMessageNotification(cfg, notice, deferForInput, currentPending)
+		return deliverNewMessageNotification(cfg, notice, deferForInput, pending)
 	}
 	if terminalInjectorForCohort(cfg, messageIDs, currentPending) {
 		// A provider failure is terminal for the injector, but the existing
@@ -960,7 +976,7 @@ func deliverWithNotificationLedger(
 		previousSkip := cfg.skipExternalInjector
 		cfg.skipExternalInjector = true
 		defer func() { cfg.skipExternalInjector = previousSkip }()
-		return deliverNewMessageNotification(cfg, notice, deferForInput, currentPending)
+		return deliverNewMessageNotification(cfg, notice, deferForInput, pending)
 	}
 	writer := notificationattempt.NewWriter(cfg.root, cfg.me)
 	if cfg.injectVia == "" || cfg.injectMode == wakeInjectModeNone {
@@ -989,7 +1005,7 @@ func deliverWithNotificationLedger(
 			}
 		}
 		defer func() { cfg.onNotificationAttemptStart = previousAttemptStart }()
-		deliverErr := deliverNewMessageNotification(cfg, notice, deferForInput, currentPending)
+		deliverErr := deliverNewMessageNotification(cfg, notice, deferForInput, pending)
 		if !attempted {
 			return deliverErr
 		}
@@ -1028,7 +1044,7 @@ func deliverWithNotificationLedger(
 		lifecycle, prepareErr = ensureNotificationAttempt(cfg, writer, messageIDs, currentPending)
 	}
 	defer func() { cfg.onNotificationAttemptStart = previousAttemptStart }()
-	deliverErr := deliverNewMessageNotification(cfg, notice, deferForInput, currentPending)
+	deliverErr := deliverNewMessageNotification(cfg, notice, deferForInput, pending)
 	if isTerminalInjectorOutcome(cfg.lastInjectorOutcome) {
 		cfg.terminalInjectorCohort = append([]string{}, messageIDs...)
 		cfg.terminalInjectorMode = notificationAttemptMode(cfg)
@@ -1224,14 +1240,15 @@ func deliverNewMessageNotification(
 	cfg *wakeConfig,
 	notice wakeNotification,
 	deferForInput bool,
-	currentPending map[string]os.FileInfo,
+	pending wakePendingMessages,
 ) error {
+	currentPending := pending.eligible
 	// Doorbell results are evidence that arrives later and is recorded on
 	// ordinary ticks; the delivery path collects too, before any early
 	// return, so a delivery tick never skips a result that already landed.
 	cfg.collectPiBridgeResults()
 	if cfg.inputRecoveryRequired {
-		if !dischargeWakeInputRecoveryAfterProgress(cfg, currentPending) {
+		if !dischargeWakeInputRecoveryAfterProgress(cfg, pending.physical) {
 			return deliverWakeInputRecoveryAttention(cfg, currentPending)
 		}
 		if len(currentPending) == 0 {
@@ -1247,8 +1264,9 @@ func deliverNewMessageNotification(
 		clearWakeInputState(cfg)
 	}
 	now := cfg.wakeDoorbellNow()
+	previousCohort := cfg.doorbell.cohort
 	plan := cfg.doorbell.planHeld(now, currentPending, cfg.holds)
-	if plan.drained && cfg.startupReleaseAttempted {
+	if plan.progress && cfg.startupReleaseAttempted && wakeCohortDrained(previousCohort, pending.physical) {
 		cfg.startupInputProven = true
 	}
 	persistWakeDoorbellStatusBestEffort(cfg)
@@ -1263,7 +1281,7 @@ func deliverNewMessageNotification(
 	if !plan.attempt {
 		return nil
 	}
-	if plan.progress && cfg.inputDelivery.pending() {
+	if plan.progress && cfg.inputDelivery.pending() && wakeCohortProgressed(previousCohort, pending.physical) {
 		if err := reconcileWakeInputAfterInboxDrain(cfg); err != nil {
 			return err
 		}

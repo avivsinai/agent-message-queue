@@ -182,16 +182,17 @@ func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 				seen := coopAnnounced(agent, w.session, false)
 				now := time.Now()
 				var next time.Time
-				due, next = decideCoopWait(pending, seen.ids, settings.holdPolicy(), now)
+				var urgent bool
+				due, next, urgent = decideCoopWait(pending, seen.ids, settings.holdPolicy(), now)
 				if wake.ringer(settings.attended) != doorbellHook {
 					due, next = nil, time.Time{}
 				}
-				if len(due) > 0 && debounce.IsZero() {
+				if len(due) > 0 && !urgent && debounce.IsZero() {
 					debounce = now.Add(settings.debounce)
 					debouncing = true
 				}
 				switch {
-				case len(due) > 0 && (debouncing || now.Before(debounce)):
+				case len(due) > 0 && !urgent && (debouncing || now.Before(debounce)):
 					// The Stop guard of the same turn end may be about to
 					// report this mail; let it, and batch a burst. A newer
 					// waiter takes the doorbell within one poll, so the
@@ -265,15 +266,16 @@ func coopWaitOwns(path, owner string) bool {
 // announced, and the earliest time a held message is due (zero when none
 // is held). A message is due when its hold has passed; the hold runs from
 // the inbox file's time, as the wake's does.
-func decideCoopWait(pending []coopStopMessage, announced map[string]time.Time, policy wakeHoldPolicy, now time.Time) (due []string, next time.Time) {
+func decideCoopWait(pending []coopStopMessage, announced map[string]time.Time, policy wakeHoldPolicy, now time.Time) (due []string, next time.Time, urgent bool) {
 	taken := make(map[string]bool)
 	for _, msg := range pending {
-		if _, ok := announced[msg.ID]; msg.ID == "" || ok || taken[msg.ID] {
+		if _, ok := announced[msg.ID]; msg.ID == "" || ok || taken[msg.ID] || msg.Passive {
 			continue
 		}
 		hold := newWakeHold(policy, msg.Priority, msg.File, now)
 		if !hold.due.After(now) {
 			due = append(due, msg.ID)
+			urgent = urgent || hold.urgent
 			taken[msg.ID] = true
 			continue
 		}
@@ -282,7 +284,7 @@ func decideCoopWait(pending []coopStopMessage, announced map[string]time.Time, p
 		}
 	}
 	slices.Sort(due)
-	return due, next
+	return due, next, urgent
 }
 
 // nextCoopWaitState keeps the rang ids that are still unread and adds due.

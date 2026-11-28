@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 )
@@ -328,7 +329,7 @@ func TestCoopPromptAddsUnreadContextOnlyForAHumanPrompt(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := captureStdout(t, func() error {
-		return runSend([]string{"--root", root, "--me", "codex", "--to", "claude", "--body", "hi"})
+		return runSend([]string{"--root", root, "--me", "codex", "--to", "claude", "--body", "hi", "--notify", "passive"})
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -336,6 +337,13 @@ func TestCoopPromptAddsUnreadContextOnlyForAHumanPrompt(t *testing.T) {
 	t.Setenv(envRoot, root)
 	t.Setenv(envBaseRoot, base)
 	t.Setenv(envSession, "collab")
+
+	// Issue #1660: the same unread passive message counts on a human
+	// prompt but cannot block Stop.
+	var stop bytes.Buffer
+	if err := writeCoopStop(strings.NewReader(`{}`), &stop); err != nil || stop.Len() != 0 {
+		t.Fatalf("passive-only Stop: output %q, error %v", stop.String(), err)
+	}
 
 	var out bytes.Buffer
 	if err := writeCoopPrompt(strings.NewReader(`{"prompt":"hello"}`), &out); err != nil {
@@ -364,10 +372,43 @@ func TestCoopPromptAddsUnreadContextOnlyForAHumanPrompt(t *testing.T) {
 	if err := writeCoopPrompt(strings.NewReader(`{"prompt":"`+harness.Doorbell+`"}`), &out); err != nil || out.Len() != 0 {
 		t.Fatalf("own doorbell: output %q, error %v", out.String(), err)
 	}
-	runDrainJSON(t, root, "claude", 100, false)
+	listed, err := captureStdout(t, func() error {
+		return runList([]string{"--new", "--json"})
+	})
+	if err != nil || !strings.Contains(listed, `"notify": "passive"`) {
+		t.Fatalf("passive list: output %q, error %v", listed, err)
+	}
+	drained := runDrainJSON(t, root, "claude", 100, false)
+	if len(drained.Drained) != 1 || drained.Drained[0].Notify != format.NotifyPassive {
+		t.Fatalf("passive drain = %+v", drained)
+	}
+	read, err := captureStdout(t, func() error {
+		return runRead([]string{"--id", drained.Drained[0].ID, "--json"})
+	})
+	if err != nil || !strings.Contains(read, `"notify": "passive"`) {
+		t.Fatalf("passive read: output %q, error %v", read, err)
+	}
 	out.Reset()
 	if err := writeCoopPrompt(strings.NewReader(`{"prompt":"hello"}`), &out); err != nil || out.Len() != 0 {
 		t.Fatalf("empty inbox: output %q, error %v", out.String(), err)
+	}
+
+	// Issue #1660: malformed intent still reaches Stop so drain can
+	// diagnose the corrupt message and move it to the DLQ.
+	original, err := os.ReadFile(filepath.Join(fsq.AgentInboxCur(root, "claude"), drained.Drained[0].ID+".md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	malformed := bytes.Replace(original, []byte(`"passive"`), []byte(`false`), 1)
+	if _, err := deliverToInboxForTest(t, root, "claude", "malformed.md", malformed); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCoopStop(strings.NewReader(`{}`), &stop); err != nil || !strings.Contains(stop.String(), `"decision":"block"`) {
+		t.Fatalf("malformed notify Stop: output %q, error %v", stop.String(), err)
+	}
+	invalid := runDrainJSON(t, root, "claude", 100, true)
+	if len(invalid.Drained) != 1 || !invalid.Drained[0].MovedToDLQ {
+		t.Fatalf("malformed notify drain = %+v", invalid)
 	}
 }
 

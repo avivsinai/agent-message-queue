@@ -109,6 +109,9 @@ func validateHeaderFieldsWithHandleValidation(
 	if _, err := time.Parse(time.RFC3339Nano, header.Created); err != nil {
 		return fmt.Errorf("invalid created timestamp: %w", err)
 	}
+	if !format.IsValidNotify(header.Notify) {
+		return fmt.Errorf("invalid notify: %q", header.Notify)
+	}
 	if !format.IsValidPriority(header.Priority) {
 		return fmt.Errorf("invalid priority: %s", header.Priority)
 	}
@@ -116,6 +119,11 @@ func validateHeaderFieldsWithHandleValidation(
 		return fmt.Errorf("invalid kind: %s", header.Kind)
 	}
 	return nil
+}
+
+// wakeEligible preserves legacy and malformed messages for notification.
+func wakeEligible(header format.Header) bool {
+	return header.Notify != format.NotifyPassive || header.Priority == format.PriorityUrgent || validateHeaderFields(header) != nil
 }
 
 func validateLegacyInspectionHandleValue(label, handle string) error {
