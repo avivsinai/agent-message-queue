@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- written by amq-remote service install -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>io.github.avivsinai.amq-remote</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/homebrew/bin/amq-remote</string>
+		<string>up</string>
+		<string>--root</string>
+		<string>/var/a/ro&#34;ot$x</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>/var/a/ro&#34;ot$x/extensions/remote/up.log</string>
+	<key>StandardErrorPath</key>
+	<string>/var/a/ro&#34;ot$x/extensions/remote/up.log</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+</dict>
+</plist>

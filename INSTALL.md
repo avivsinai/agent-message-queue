@@ -357,6 +357,9 @@ Windows contracts. Direct submitted injection via `amq-keepalive.exe` is the sup
 injection path. Use WSL with a Linux asset for the complete co-op workflow.
 `amq-bridge`, `amq-acp`, `amq-remote`, `amq-owner-sign`, and `amq-board` are
 published for Linux and macOS, not Windows.
+On macOS and Linux, `amq-board service install` writes a per-store login
+service (a launchd user agent or a systemd user unit) that publishes the
+board with `sync --watch` at each login; see [the board guide](cmd/amq-board/README.md).
 
 ## Verify and upgrade
 

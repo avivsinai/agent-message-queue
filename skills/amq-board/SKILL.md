@@ -47,8 +47,10 @@ Never use a working seat as the sender because its unread notice affects
 later stall analysis. Every distinct handle resolves live before sending.
 This is an explicit optional broadcast; plain check output is unchanged.
 
-For a continuously published board, run `amq-board sync --watch --notify lead,alt
---as floor`. The watch goes on after a failed pass, tries again each minute, and
+For a continuously published board, run `amq-board service install --notify
+lead,alt --as floor` once. This installs one service per board store that runs
+`amq-board sync --watch` with the same notices at every login and starts it
+now. See “Login service” in the board README. The watch retries a failed pass each minute and
 ends on Ctrl-C or TERM, or when the project was replaced. Each new floor problem
 is sent once after every pass; a board that stops being published is reported by
 the existing stale notice after the liveness window.

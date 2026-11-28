@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/board"
+	"github.com/avivsinai/agent-message-queue/internal/exitcode"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
@@ -23,11 +25,34 @@ type boardContext struct {
 	BaseRoot   string `json:"base_root"`
 	BaseRootID string `json:"base_root_id"`
 	Session    string `json:"session_name"`
+	Project    string `json:"project"`
 	Me         string `json:"me"`
 }
 
+// The AMQ resolver validates nonempty names. Distinguish an explicitly
+// empty argument from an omitted session, which selects the project route.
+func sessionFlag(flags *flag.FlagSet, usage string) *string {
+	var name string
+	flags.Func("session", usage, func(value string) error {
+		if value == "" {
+			return errors.New("session name cannot be empty")
+		}
+		name = value
+		return nil
+	})
+	return &name
+}
+
 func readBoardContext(ctx context.Context, env board.Env) (boardContext, error) {
-	raw, err := env.Run.Run(ctx, env.Dir, []string{"amq", "env", "--json"})
+	return readBoardRoute(ctx, env, "")
+}
+
+func readBoardRoute(ctx context.Context, env board.Env, session string) (boardContext, error) {
+	args := []string{"amq", "env", "--json"}
+	if session != "" {
+		args = append(args, "--session", session)
+	}
+	raw, err := env.Run.Run(ctx, env.Dir, args)
 	if err != nil {
 		return boardContext{}, err
 	}
@@ -36,6 +61,11 @@ func readBoardContext(ctx context.Context, env board.Env) (boardContext, error) 
 		return result, err
 	}
 	if result.Root == "" || result.RootID == "" || result.BaseRoot == "" || result.BaseRootID == "" {
+		if session != "" && result.Session == session && result.Root != "" {
+			if _, err := os.Lstat(result.Root); errors.Is(err, os.ErrNotExist) {
+				return result, exitcode.NotFoundError("no session named %q in this project", session)
+			}
+		}
 		return result, errors.New("AMQ full authenticated context unavailable")
 	}
 	return result, nil
@@ -46,7 +76,11 @@ func resolveStore(ctx context.Context, env board.Env) (board.Store, error) {
 	return store, err
 }
 func resolveBoardContext(ctx context.Context, env board.Env) (board.Store, board.Env, error) {
-	initial, err := readBoardContext(ctx, env)
+	return resolveBoardSession(ctx, env, "")
+}
+
+func resolveBoardSession(ctx context.Context, env board.Env, session string) (board.Store, board.Env, error) {
+	initial, err := readBoardRoute(ctx, env, session)
 	if err != nil {
 		return board.Store{}, env, err
 	}
@@ -59,8 +93,12 @@ func resolveBoardContext(ctx context.Context, env board.Env) (board.Store, board
 		return board.Store{}, env, errors.New("board context requires the production command runner")
 	}
 	pin := map[string]string{"AM_ROOT": initial.Root, "AM_ROOT_ID": initial.RootID, "AM_BASE_ROOT": initial.BaseRoot, "AM_BASE_ROOT_ID": initial.BaseRootID, "AM_SESSION": initial.Session, "AM_ME": initial.Me}
+	environ := runner.amqEnv
+	if environ == nil {
+		environ = os.Environ()
+	}
 	runner.amqEnv = []string{}
-	for _, entry := range os.Environ() {
+	for _, entry := range environ {
 		key, _, _ := strings.Cut(entry, "=")
 		if _, replace := pin[key]; !replace {
 			runner.amqEnv = append(runner.amqEnv, entry)
@@ -74,8 +112,11 @@ func resolveBoardContext(ctx context.Context, env board.Env) (board.Store, board
 	validate := func(ctx context.Context) error {
 		// The original resolver detects a changed project route. The pinned resolver
 		// separately checks the identities on disk rather than trusting stored IDs.
-		for _, candidate := range []board.Env{env, pinned} {
-			actual, err := readBoardContext(ctx, candidate)
+		for _, route := range []struct {
+			env     board.Env
+			session string
+		}{{env, session}, {pinned, ""}} {
+			actual, err := readBoardRoute(ctx, route.env, route.session)
 			if err != nil {
 				return err
 			}
