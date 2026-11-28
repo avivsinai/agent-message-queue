@@ -26,6 +26,12 @@ func TestTmuxRealBinaryFreshServerRestartResumeLoop(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux is not installed")
 	}
+	// The test's server is the one under its own socket directory. A caller
+	// that runs inside tmux names its own server in TMUX, and both the tmux
+	// client and the launcher prefer that name, so the test would launch
+	// into the caller's server and then kill it. Observed 2026-11-28: a run
+	// from a tmux pane ended that pane's server.
+	leaveCallerTmux(t)
 	repo, err := cliTestRepoRoot()
 	if err != nil {
 		t.Fatal(err)
@@ -232,6 +238,18 @@ func waitForProviderLog(t *testing.T, path, needle string) {
 type hermeticTmuxProcess struct {
 	pid  int
 	role string
+}
+
+// leaveCallerTmux removes the caller's tmux server from the environment for
+// the rest of the test and restores it afterwards.
+func leaveCallerTmux(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{"TMUX", "TMUX_PANE"} {
+		t.Setenv(name, "")
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func stopHermeticTmuxServer(t *testing.T, socketDir, sessionRoot, handle string, requireServer bool) {

@@ -136,6 +136,7 @@ func TestCompatibilityFloorAndEndToEndMatrix(t *testing.T) {
 		if _, err := exec.LookPath("tmux"); err != nil {
 			t.Skip("tmux is not installed")
 		}
+		leaveCallerTmux(t)
 		fixture := newPublicLaunchE2EFixture(t, binDir, launch.LauncherTMux)
 		intent := fixture.intent(launchapi.ResumePolicyFresh, false)
 		intent.Participants[0].Execution = &launchapi.ExecutionOptionsV1{Wake: launchapi.WakeOptionsV1{
