@@ -107,15 +107,19 @@
   root.classList.add("enhanced");
   selectView(false);
   // A click on a view link opens the view itself and keeps the page at the
-  // top; the anchor jump never runs.
+  // top. pushState records the address without a fragment navigation: a
+  // young document keeps retrying the jump for a fragment set through
+  // location.hash, which lands after this scroll and moves the bar off
+  // screen.
   document.addEventListener("click", function (event) {
     var link = event.target.closest("[data-view-link]");
     if (!link) { return; }
     event.preventDefault();
     var id = link.getAttribute("href").slice(1);
-    if (window.location.hash === "#" + id) { selectView(true); }
-    else { window.location.hash = id; }
+    if (window.location.hash !== "#" + id) { history.pushState(null, "", "#" + id); }
+    selectView(true);
   });
+  window.addEventListener("popstate", function () { selectView(true); });
   window.addEventListener("hashchange", function () { selectView(true); });
   // The browser scrolls to the fragment after load, so the view opens from
   // the top once that scroll has happened.
