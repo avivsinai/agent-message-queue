@@ -443,7 +443,7 @@ are a separate owner-adopted surface.
 
 Configuration uses `~/.amq/board.json` and `.amq/board.json`. Settings include
 `sources`, `humans`, `forges`, `providers`, `liveness_window`, `stale_after`,
-`shipped_window` (default `7d`), `obligation_max_age`, and user-only `usage`. Sync and serve reload configuration;
+`ready_grace` (default `15m`), `shipped_window` (default `7d`), `obligation_max_age`, and user-only `usage`. Sync and serve reload configuration;
 a refused edit keeps the last good value. Source identity is restart-only.
 Usage collection can be disabled with `{"usage":{"enabled":false}}`. Enabled
 usage reads numeric harness usage facts; Codex plan limits use its installed
@@ -527,10 +527,16 @@ neither the seat nor any session of that account was active after the limit
 was read: a limit is account-wide), Stalled (mail older than
 `liveness_window` waits and the last activity is older than that mail; unread
 ages date from the AMQ read),
-Working (activity inside `liveness_window`), Idle (the wake is live and the
-inbox is counted; no mail waits without an activity record), Off (no wake and
-no recent activity; the inbox is counted), and Unknown (the inbox was not
-counted, or mail waits and no activity was observed). Activity is the newest
+Working (measured activity inside `liveness_window`: a usage record, or fresh
+mail when the seat's work is measured), Not measured (the board has no
+work-evidence source for the seat — its harness has no usage reader, or no
+record maps a read home's sessions to it; the reason line gives the mail
+facts and the fix is to add the harness home under `usage.homes`; a seat
+whose only fact is that it was started reads "Started N min ago, no work seen
+yet."), Quiet (the wake is live, work is measured, and nothing was seen
+inside `liveness_window`), Off (no wake and no recent activity; the inbox is
+counted), and Unknown (the inbox was not counted, or mail waits and no
+activity was observed). Activity is the newest
 of the seat's last sent message and its last read of mail (both from
 `amq doctor --ops`, the same for every harness), the worker's newest usage
 record, and presence last seen when no wake is live: a live wake refreshes
@@ -545,7 +551,14 @@ handle without a session is listed under each seat of that handle with
 "handle in N sessions". The Floor ages a presence note from its own `note_at`, not wake activity. It prints the age, removes the note at the liveness bound, and reports `age unknown` if the original record has no timestamp. `amq presence list` preserves the old note and labels the same age.
 
 The agent's presence note (Says) and free-text status
-are quoted, never treated as facts. A limit read before later activity shows
+are quoted, never treated as facts, and each shows its age; either is hidden
+once older than the freshness window, and a status with no recorded age stays
+hidden. `ready_not_started` is raised only when the seat's work is measured
+and the card has been ready with the seat past `ready_grace` (default 15m)
+with no usage, sent mail or read receipt in that time; a seat whose work is
+not measured never raises it, and its unread-mail stall stands on its own.
+The handle `amq-board sync --watch --as` sends floor notices from is not a
+seat: its own sent mail is alarm traffic. A limit read before later activity shows
 as "limit reported N ago; active since" (or "the account was active since");
 a limit with no reset time shows when it was read. Claude Code error turns
 (`isApiErrorMessage`, model `<synthetic>`) are not spend or activity. `--json` carries `stations` and
