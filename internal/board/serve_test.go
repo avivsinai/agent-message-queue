@@ -153,6 +153,8 @@ func TestLiveRoutesNeedTheToken(t *testing.T) {
 	for i := 0; i < 101; i++ {
 		model.Columns[0].Cards = append(model.Columns[0].Cards, Card{ID: "task-a", Title: strings.Repeat("title", 50), Reason: Reason{Text: strings.Repeat("reason", 50)}, Actions: []Action{{Purpose: ActionOwnerMutation, Command: "amq-board cancel --task task-a"}, {Purpose: ActionContext, Command: exact}}})
 	}
+	// The projection gives one Inbox item per Needs you card.
+	model.Inbox.Items = make([]OwnerItem, len(model.Columns[0].Cards))
 	model.Columns[0].Cards[1].Actions = []Action{{Purpose: ActionContext, Command: "read\nmutate"}, {Purpose: ActionContext, Command: exact}}
 	model.Columns[0].Cards[2].Actions = []Action{{Purpose: ActionContext, Command: strings.Repeat("a", 4097)}}
 	for i := 0; i < 34; i++ {

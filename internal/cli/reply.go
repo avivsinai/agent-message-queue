@@ -109,6 +109,9 @@ func runReplyStep(args []string, deliver func(outgoingMessage) error) error {
 	if err != nil {
 		return err
 	}
+	if _, _, err := format.ParseDecision(context); err != nil {
+		return UsageError("%v", err)
+	}
 
 	// Pin the source tree before reading the original. Its contents determine
 	// the reply recipient and routing destination.

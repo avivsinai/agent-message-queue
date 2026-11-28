@@ -6,6 +6,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/avivsinai/agent-message-queue/internal/format"
 )
 
 // Ref kinds. Every ref in the board is built by one constructor below; no
@@ -219,8 +221,5 @@ func hasControl(s string) bool {
 	return false
 }
 
-// isControl reports C0, DEL, C1, and the Unicode line and paragraph
-// separators.
-func isControl(r rune) bool {
-	return r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) || r == 0x2028 || r == 0x2029
-}
+// isControl is the one control-character rule, format.IsControl.
+func isControl(r rune) bool { return format.IsControl(r) }

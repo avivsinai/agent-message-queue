@@ -1472,6 +1472,14 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 		sortCards(m.Columns[i].ID, m.Columns[i].Cards)
 	}
 	m.Next = selectNext(m.Columns)
+	var amqCtx *AMQContext
+	for _, nr := range input.Results {
+		if nr.Name == "amq" && nr.Result.AMQ != nil {
+			amqCtx = nr.Result.AMQ
+		}
+	}
+	sessionPaths, peers := amqRoutes(amqCtx)
+	buildInbox(&m, s.Messages, sessionPaths, peers)
 	buildFlow(&m, forge, input, observed)
 	buildFloor(&m, observed["amq"], cfg, now)
 	return m
