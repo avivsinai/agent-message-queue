@@ -70,6 +70,9 @@ type outgoingMessage struct {
 	// newsWithin, when positive, arms a news timer in the sender's mailbox
 	// for the one recipient.
 	newsWithin time.Duration
+	// reminderNotify is the notification intent of those clocks' notices;
+	// empty is wake.
+	reminderNotify string
 
 	waitFor     string
 	waitTimeout time.Duration
@@ -348,20 +351,28 @@ func printOutgoing(m outgoingMessage, o outgoingOutcome) error {
 // printClockLines prints the due time of each clock sendOutgoing armed.
 func printClockLines(m outgoingMessage, o outgoingOutcome) error {
 	if o.FollowUp != nil && o.FollowUp.Due != "" {
-		line := "Follow-up due %s if %s has not replied.\n"
+		line := "Follow-up due %s%s if %s has not replied.\n"
 		if slices.Contains(thread.OpenerKinds, m.kind) {
-			line = "Follow-up due %s unless %s closes it.\n"
+			line = "Follow-up due %s%s unless %s closes it.\n"
 		}
-		if err := writeStdout(line, o.FollowUp.Due, m.recipients[0]); err != nil {
+		if err := writeStdout(line, o.FollowUp.Due, passiveSuffix(o.FollowUp), m.recipients[0]); err != nil {
 			return err
 		}
 	}
 	if o.News != nil && o.News.Due != "" {
-		if err := writeStdout("News notice due %s if %s has sent no reply.\n", o.News.Due, m.recipients[0]); err != nil {
+		if err := writeStdout("News notice due %s%s if %s has sent no reply.\n", o.News.Due, passiveSuffix(o.News), m.recipients[0]); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// passiveSuffix marks a clock whose notice does not wake the sender.
+func passiveSuffix(r *followUpResult) string {
+	if r.Notify == format.NotifyPassive {
+		return " (passive)"
+	}
+	return ""
 }
 
 // followUpResult reports an armed follow-up, or why a delivered message has
@@ -370,6 +381,7 @@ type followUpResult struct {
 	Due      string `json:"due,omitempty"`
 	After    string `json:"after,omitempty"`
 	NoticeID string `json:"notice_id,omitempty"`
+	Notify   string `json:"notify,omitempty"`
 	Error    string `json:"error,omitempty"`
 }
 
@@ -392,6 +404,7 @@ func armNews(m outgoingMessage, id string, now time.Time) (*followUpResult, erro
 func armTimer(m outgoingMessage, id string, timer followup.Timer, err error, after time.Duration, clock string) (*followUpResult, error) {
 	if err == nil {
 		timer.TargetSession, timer.TargetProject = m.targetSession, m.targetProject
+		timer.Notify = m.reminderNotify
 		err = followup.Write(m.sourceFS, m.me, timer)
 	}
 	var committed *fsq.CommittedDurabilityError
@@ -402,6 +415,7 @@ func armTimer(m outgoingMessage, id string, timer followup.Timer, err error, aft
 		Due:      timer.Due.Format(time.RFC3339),
 		After:    after.String(),
 		NoticeID: timer.NoticeID,
+		Notify:   m.reminderNotify,
 	}
 	if err != nil {
 		// The timer file is in place and fires; only its durability is
@@ -435,6 +449,16 @@ func validateNotify(notify, priority string) error {
 	}
 	if priority == format.PriorityUrgent && notify == format.NotifyPassive {
 		return UsageError("--priority urgent cannot be combined with --notify passive")
+	}
+	return nil
+}
+
+func validateReminderNotify(reminderNotify string, followUp, newsWithin time.Duration) error {
+	if !format.IsValidNotify(reminderNotify) {
+		return UsageError("--reminder-notify must be one of: wake, passive")
+	}
+	if reminderNotify != "" && followUp <= 0 && newsWithin <= 0 {
+		return UsageError("--reminder-notify needs --follow-up or --news-within")
 	}
 	return nil
 }

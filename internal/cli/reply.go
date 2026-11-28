@@ -39,6 +39,7 @@ func runReplyStep(args []string, deliver func(outgoingMessage) error) error {
 	waitTimeoutFlag := fs.Duration("wait-timeout", 120*time.Second, "Timeout for --wait-for")
 	followUpFlag := fs.Duration("follow-up", 0, followUpHelp)
 	newsWithinFlag := fs.Duration("news-within", 0, newsWithinHelp)
+	reminderNotifyFlag := fs.String("reminder-notify", "", "Notification intent of the --follow-up and --news-within notices: wake or passive (default wake)")
 	ignoreSessionPinFlag := fs.Bool("ignore-session-pin", false, "With explicit --root, ignore a conflicting AM_SESSION source pin")
 
 	usage := usageWithFlags(fs, "amq reply --me <agent> --id <msg_id> [options]",
@@ -86,6 +87,9 @@ func runReplyStep(args []string, deliver func(outgoingMessage) error) error {
 		return err
 	}
 	if err := validateNotify(*notifyFlag, priority); err != nil {
+		return err
+	}
+	if err := validateReminderNotify(*reminderNotifyFlag, *followUpFlag, *newsWithinFlag); err != nil {
 		return err
 	}
 
@@ -387,6 +391,7 @@ func runReplyStep(args []string, deliver func(outgoingMessage) error) error {
 		waitTimeout:          *waitTimeoutFlag,
 		followUp:             *followUpFlag,
 		newsWithin:           *newsWithinFlag,
+		reminderNotify:       *reminderNotifyFlag,
 		json:                 common.JSON,
 		displaySession:       targetDisplay,
 		sourceSessionDisplay: session,

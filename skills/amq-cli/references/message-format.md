@@ -38,7 +38,7 @@ Field notes:
 - `created`: RFC3339 timestamp.
 - `refs`: optional list of related message ids (e.g., replies).
 - `priority`: optional (`urgent`, `normal`, `low`).
-- `notify`: optional (`wake` or `passive`). Missing or empty uses normal wake eligibility. Passive mail stays readable and drains normally, but never starts or extends a turn. Sends refuse urgent plus passive, and stored urgent messages remain eligible. A reply chooses its own intent.
+- `notify`: optional (`wake` or `passive`). Missing or empty uses normal wake eligibility. Passive mail stays readable and drains normally, but never starts or extends a turn. Sends refuse urgent plus passive, and stored urgent messages remain eligible. A reply chooses its own intent. A follow-up or news notice carries the intent the sender chose with `--reminder-notify`.
 - `kind`: optional; one of the kinds below.
 - `labels`: optional list of tags for filtering.
 - `context`: optional JSON object for structured metadata.

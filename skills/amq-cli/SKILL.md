@@ -144,6 +144,11 @@ after yours. Any message counts, also a report on other work: the clock asks
 whether the recipient is heard from. Use `--follow-up` for each request's completion. Closing a request ends both clocks.
 The recipient sees the news deadline as `News by:` in its drain.
 
+`--reminder-notify wake|passive` chooses whether the notice of `--follow-up` or
+`--news-within` wakes you (the default) or only waits in your inbox. Use
+`passive` for an advisory check you will read later and `wake` for a deadline
+that needs you to act.
+
 When the brief names a reviewer and a candidate is ready, hand it off with one
 command: `amq handoff --id <request> --to <reviewer> --commit <full sha> --body @<file>`.
 The reviewer gets a wake-eligible `review_request` for that commit, and the

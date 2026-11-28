@@ -987,6 +987,7 @@ func (h *Host) deliverReply(root *fsq.DeliveryRoot, rec *turnRecord) error {
 			Subject:  subject,
 			Created:  rec.ReplyCreated,
 			Refs:     []string{rec.MessageID},
+			Notify:   format.NotifyWake,
 			Priority: format.DefaultPriority(kind),
 			Kind:     kind,
 			Labels:   []string{Label, "acp-stop:" + rec.StopReason},

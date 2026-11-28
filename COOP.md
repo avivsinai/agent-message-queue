@@ -504,7 +504,9 @@ question or review request, the reply that closes it cancels the timer. A
 progress reply leaves it armed. For any other message, any reply from the
 recipient cancels it. A live wake, the wait hook, or the next `drain`,
 `read` or `monitor` checks the timer. The recipient sees the due time in
-drain output as `Reply by:`.
+drain output as `Reply by:`. `--reminder-notify passive` makes the notice an
+advisory one that never starts a turn; the default `wake` suits a deadline
+that needs the sender to act.
 
 Use `watch` only when no live wake is delivering notifications:
 
