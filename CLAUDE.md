@@ -209,6 +209,8 @@ a message from the recipient that was created after the original or that
 references it. The clock asks whether the recipient is heard from: a report
 on other work ends it too. Each completion timer still follows its own
 request. Closing a request also ends its news clock. The recipient sees `News by:`.
+`--reminder-notify wake|passive` sets the notification intent of either notice; the
+default is wake.
 
 **Sessions**: Named sessions are child queue roots. A participating shell is
 pinned by `AM_ROOT`, `AM_BASE_ROOT`, and `AM_SESSION`; AMQ-managed identity

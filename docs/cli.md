@@ -302,6 +302,8 @@ Options:
         Target peer project name (delivers to a peer project's inbox)
   -refs string
         Comma-separated related message ids
+  -reminder-notify string
+        Notification intent of the --follow-up and --news-within notices: wake or passive (default wake)
   -root string
         Root directory for the queue (default ".agent-mail")
   -session string
@@ -689,6 +691,8 @@ Options:
         Notification intent: wake or passive (default wake)
   -priority string
         Message priority: urgent, normal, low
+  -reminder-notify string
+        Notification intent of the --follow-up and --news-within notices: wake or passive (default wake)
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
@@ -737,6 +741,8 @@ Options:
         One notice if the reviewer sends no reply about the review request within this time (e.g. 20m)
   -project string
         Reviewer's peer project, as on send
+  -reminder-notify string
+        Notification intent of the --follow-up and --news-within notices: wake or passive (default wake)
   -root string
         Root directory for the queue (default ".agent-mail")
   -session string

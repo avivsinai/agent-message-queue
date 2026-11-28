@@ -69,6 +69,8 @@ type Timer struct {
 	Sent          time.Time `json:"sent"`
 	Due           time.Time `json:"due"`
 	NoticeID      string    `json:"notice_id"`
+	// Notify is the notification intent of the notice; empty is wake.
+	Notify string `json:"notify,omitempty"`
 }
 
 // New builds the timer for request id, sent at sent to one recipient, due
@@ -123,6 +125,8 @@ func (t Timer) validate() error {
 		return fmt.Errorf("invalid to %q", t.To)
 	case fsq.ValidateMessageFilename(t.NoticeID+".md") != nil:
 		return fmt.Errorf("invalid notice_id %q", t.NoticeID)
+	case !format.IsValidNotify(t.Notify):
+		return fmt.Errorf("invalid notify %q", t.Notify)
 	case t.Thread == "":
 		return errors.New("missing thread")
 	case t.Due.IsZero():
@@ -188,6 +192,7 @@ func Notice(t Timer, me string) format.Message {
 			To:       []string{me},
 			Thread:   t.Thread,
 			Subject:  subject,
+			Notify:   t.Notify,
 			Created:  t.Due.UTC().Format(time.RFC3339Nano),
 			Refs:     []string{t.RequestID},
 			Priority: format.PriorityNormal,

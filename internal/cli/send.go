@@ -43,6 +43,7 @@ func runSendStep(args []string, afterBodyRead func(), deliver func(outgoingMessa
 	waitTimeoutFlag := fs.Duration("wait-timeout", 120*time.Second, "Timeout for --wait-for (0 = wait forever)")
 	followUpFlag := fs.Duration("follow-up", 0, followUpHelp)
 	newsWithinFlag := fs.Duration("news-within", 0, newsWithinHelp)
+	reminderNotifyFlag := fs.String("reminder-notify", "", "Notification intent of the --follow-up and --news-within notices: wake or passive (default wake)")
 
 	// Co-op mode flags
 	notifyFlag := fs.String("notify", "", "Notification intent: wake or passive (default wake)")
@@ -444,6 +445,9 @@ func runSendStep(args []string, afterBodyRead func(), deliver func(outgoingMessa
 	if err := validateNotify(*notifyFlag, priority); err != nil {
 		return err
 	}
+	if err := validateReminderNotify(*reminderNotifyFlag, *followUpFlag, *newsWithinFlag); err != nil {
+		return err
+	}
 	context, err := parseContext(*contextFlag)
 	if err != nil {
 		return err
@@ -549,6 +553,7 @@ func runSendStep(args []string, afterBodyRead func(), deliver func(outgoingMessa
 		waitTimeout:              *waitTimeoutFlag,
 		followUp:                 *followUpFlag,
 		newsWithin:               *newsWithinFlag,
+		reminderNotify:           *reminderNotifyFlag,
 		waitTimeoutHint: fmt.Sprintf(" (delivery session %s, root %s); run %s to diagnose mailbox divergence",
 			targetDisplay, deliveryRoot, doctorRootCommandForOS(deliveryRoot, configAuthorityBaseRoot, runtime.GOOS, "--ops")),
 		json:                       common.JSON,
