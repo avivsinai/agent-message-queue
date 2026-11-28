@@ -59,7 +59,7 @@ scan mailboxes itself or fall back to a different source.
 - `seat_at_limit`: a seat is at its plan limit and owns current work.
 - `account_near_cap`: a harness account's freshest cap reading shows 90 percent or more of a cap used. A reading stays current until its future reset time; without one, its timestamp must be within the 15-minute limit bound. It needs no mapped worker and no card. Codex reports the pre-limit figures; Claude Code and pi report nothing before the limit, so they give no line.
 - `ready_not_started`: a seat with nothing in progress is idle or off and has ready work assigned.
-- `in_progress_not_worked`: a card is in progress longer than the liveness window, and its owner's last observed activity is older than that window. A seat with no observed activity is not listed.
+- `in_progress_not_worked`: a card is in progress longer than the liveness window, and its owner's last observed work (a usage record, or presence when no wake is live) is older than that window. Sent and read mail do not count as work. A seat with no observed work is not listed.
 - `reply_overdue` covers overdue agent replies, owner questions and owner rulings. For owner questions and rulings the sender reads the thread before taking the default or closing the ruling. Owner todos and review requests stay under Needs you.
 
 An unclosed request older than `obligation_max_age` (14 days by default) expires, as in `amq thread open`. It leaves Needs you and the overdue check. Set `obligation_max_age` to `0` to disable expiry.
@@ -506,8 +506,8 @@ omitted count) and `forge_cards`; each card carries `stage`, `stage_since`,
 Requests remain.
 
 Floor is a page view and a `== Floor ==` text section with one station per
-agent seat of the AMQ roster. A seat is shown when its wake is live, presence
-or usage shows activity inside `liveness_window`, it has unread mail newer than
+agent seat of the AMQ roster. A seat is shown when its wake is live, it shows
+activity inside `liveness_window`, it has unread mail newer than
 `stale_after`, or a current card names it; the other mailboxes fold into one
 dormant count per session, and so does a mailbox whose fresh mail arrived after
 more than `stale_after` without activity. The state is the first that matches:
@@ -519,10 +519,15 @@ ages date from the AMQ read),
 Working (activity inside `liveness_window`), Idle (the wake is live and the
 inbox is counted; no mail waits without an activity record), Off (no wake and
 no recent activity; the inbox is counted), and Unknown (the inbox was not
-counted, or mail waits and no activity was observed). Activity is the
-worker's newest usage record, or presence last seen when no wake is live: a
-live wake refreshes presence itself, so it proves only the wake. The plate
-names the fact it used. The board cannot see processes and never says a
+counted, or mail waits and no activity was observed). Activity is the newest
+of the seat's last sent message and its last read of mail (both from
+`amq doctor --ops`, the same for every harness), the worker's newest usage
+record, and presence last seen when no wake is live: a live wake refreshes
+presence itself, so it proves only the wake. The last sent message is dated
+by its id; the last read of mail is the seat's newest drained or dlq receipt,
+which every consumer writes when it moves mail out of `inbox/new`. The plate
+names the fact it used: sent, read mail, usage, or presence. A harness AMQ
+does not know prints no harness label. The board cannot see processes and never says a
 worker is running or has stopped. A seat lists the current cards that name
 it, In progress first, then In review, Ready, and Blocked; a card that names a
 handle without a session is listed under each seat of that handle with

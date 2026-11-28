@@ -18,6 +18,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/notificationattempt"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
+	"github.com/avivsinai/agent-message-queue/internal/receipt"
 	"github.com/avivsinai/agent-message-queue/internal/roster"
 )
 
@@ -77,6 +78,16 @@ type opsAgent struct {
 	OldestDLQAgeSeconds float64 `json:"oldest_dlq_age_seconds"`
 	// DLQCountError is UnreadCountError for the DLQ.
 	DLQCountError string `json:"dlq_count_error,omitempty"`
+	// LastSentAgeSeconds is the age of the newest message in the agent's
+	// outbox/sent, from the send time its id carries; a time ahead of now is
+	// ignored. Absent when none remains.
+	LastSentAgeSeconds *float64 `json:"last_sent_age_seconds,omitempty"`
+	// LastReadAgeSeconds is the age of the agent's newest drained or dlq
+	// receipt: every consumer writes one when it moves mail out of
+	// inbox/new, so its file time is the last read. Other records in
+	// receipts/ do not count, and removing old receipts does not move it; a
+	// time ahead of now is ignored. Absent when none remains.
+	LastReadAgeSeconds *float64 `json:"last_read_age_seconds,omitempty"`
 	// Follow-ups this agent armed as a sender: all of them, those already
 	// due, and the earliest due time.
 	FollowUpsPending int    `json:"follow_ups_pending,omitempty"`
@@ -267,6 +278,8 @@ func runOpsChecksWithSchema(
 		mailboxPresent := dirExists(fsq.AgentBase(root, handle))
 		agent.UnreadCount, agent.OldestUnreadAgeSeconds, agent.UnreadCountError = opsMailboxCount(fsq.AgentInboxNew(root, handle), mailboxPresent, now)
 		agent.DLQCount, agent.OldestDLQAgeSeconds, agent.DLQCountError = opsMailboxCount(fsq.AgentDLQNew(root, handle), mailboxPresent, now)
+		agent.LastSentAgeSeconds = opsLastSentAge(fsq.AgentOutboxSent(root, handle), now)
+		agent.LastReadAgeSeconds = opsLastReadAge(fsq.AgentReceipts(root, handle), handle, now)
 		opsFollowUps(&agent, root, now)
 
 		// Presence
@@ -597,6 +610,62 @@ func opsMailboxCount(dir string, mailboxPresent bool, now time.Time) (int, float
 		}
 	}
 	return count, oldest, ""
+}
+
+// opsLastSentAge is the age of the newest send time among the ids that
+// name an outbox's message files, as opsMailboxCount counts them. A time
+// ahead of now (clock skew, a restored copy) is no evidence; nil when no
+// other remains.
+func opsLastSentAge(dir string, now time.Time) *float64 {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var newest time.Time
+	for _, e := range entries {
+		if !opsMessageEntry(e) {
+			continue
+		}
+		if at, ok := fsq.IDTime(strings.TrimSuffix(e.Name(), ".md")); ok && at.After(newest) && !at.After(now) {
+			newest = at
+		}
+	}
+	return opsAge(newest, now)
+}
+
+// opsLastReadAge is the age of the newest receipt agent wrote as a consumer:
+// a regular, non-hidden file named for a drained or dlq stage. The directory
+// also holds other records, such as the wake's notification attempts, which
+// are not reads. A time ahead of now is no evidence; nil when no other
+// remains.
+func opsLastReadAge(dir, agent string, now time.Time) *float64 {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	drained := receipt.Filename("", agent, receipt.StageDrained)
+	dlq := receipt.Filename("", agent, receipt.StageDLQ)
+	var newest time.Time
+	for _, e := range entries {
+		name := e.Name()
+		if !e.Type().IsRegular() || strings.HasPrefix(name, ".") || !strings.HasSuffix(name, drained) && !strings.HasSuffix(name, dlq) {
+			continue
+		}
+		if info, err := e.Info(); err == nil && info.ModTime().After(newest) && !info.ModTime().After(now) {
+			newest = info.ModTime()
+		}
+	}
+	return opsAge(newest, now)
+}
+
+// opsAge is the age of at in whole seconds. A missing time, or one ahead of
+// now (clock skew, a restored copy), is no evidence: nil.
+func opsAge(at, now time.Time) *float64 {
+	if at.IsZero() || at.After(now) {
+		return nil
+	}
+	age := math.Round(now.Sub(at).Seconds())
+	return &age
 }
 
 // opsMessageEntry reports whether a mailbox entry is a message file: a
