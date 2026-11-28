@@ -82,6 +82,7 @@ type rawConfig struct {
 	StaleAfter       *string `json:"stale_after"`
 	ShippedWindow    *string `json:"shipped_window"`
 	ObligationMaxAge *string `json:"obligation_max_age"`
+	DecidedWindow    *string `json:"decided_window"`
 	Sources          *struct {
 		Beads  *bool `json:"beads"`
 		GitHub *bool `json:"github"`
@@ -271,6 +272,13 @@ func applyShared(cfg *FileConfig, raw rawConfig, path string, warn func(string, 
 			warn("%s: obligation_max_age %q is not a duration; ignored", path, *v)
 		} else {
 			cfg.Board.ObligationMaxAge = *v
+		}
+	}
+	if v := raw.DecidedWindow; v != nil {
+		if d, err := ParseDuration(*v); err != nil || d <= 0 {
+			warn("%s: decided_window %q is not a positive duration; ignored", path, *v)
+		} else {
+			cfg.Board.DecidedWindow = d
 		}
 	}
 	if s := raw.Sources; s != nil {

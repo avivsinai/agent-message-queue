@@ -20,11 +20,15 @@ type Config struct {
 	// ShippedWindow is how long finished work stays in the Flow Shipped
 	// stage before it is only in History.
 	ShippedWindow time.Duration
+	// DecidedWindow is how long a recorded decision stays in the Inbox's
+	// "Decided without you" list, from its recorded creation time. Zero
+	// selects the default.
+	DecidedWindow time.Duration
 }
 
 // DefaultConfig is the configuration when no file sets one.
 func DefaultConfig() Config {
-	return Config{LivenessWindow: 30 * time.Minute, StaleAfter: 36 * time.Hour, ShippedWindow: 7 * 24 * time.Hour}
+	return Config{LivenessWindow: 30 * time.Minute, StaleAfter: 36 * time.Hour, ShippedWindow: 7 * 24 * time.Hour, DecidedWindow: 24 * time.Hour}
 }
 
 // NamedResult is one source's read, in source order.
@@ -291,7 +295,7 @@ func Build(in Input) Model {
 
 	m.Roster = buildRoster(amqCtx, roster, items, in.Config)
 	m.Next = selectNext(m.Columns)
-	buildInbox(&m, nil, sessionPaths, peers)
+	buildInbox(&m, nil, sessionPaths, peers, in.Now, decidedWindow(in.Config))
 	return m
 }
 

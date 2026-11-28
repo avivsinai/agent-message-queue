@@ -27,15 +27,27 @@ const (
 	decisionContextPath = "context." + DecisionKey
 )
 
+// Door values: whether what the decision changes can be undone.
+const (
+	DoorTwoWay = "two-way"
+	DoorOneWay = "one-way"
+)
+
 // Decision is one decision a question asks for: its options, the option the
 // sender recommends, whether work waits on it, and what happens if the
-// answer comes later.
+// answer comes later. Door names what the decision changes (two-way can be
+// undone, one-way cannot); a record of the option taken carries Decided.
 type Decision struct {
 	Options     []DecisionOption `json:"options"`
 	Recommended string           `json:"recommended,omitempty"`
 	Blocking    bool             `json:"blocking"`
 	IfLater     string           `json:"if_later,omitempty"`
+	Door        string           `json:"door,omitempty"`
+	Decided     string           `json:"decided,omitempty"`
 }
+
+// IsOneWayDoor reports whether the decision names a one-way door.
+func (d Decision) IsOneWayDoor() bool { return d.Door == DoorOneWay }
 
 // DecisionOption is one answer the owner can give.
 type DecisionOption struct {
@@ -154,6 +166,18 @@ func (d Decision) validate() error {
 	}
 	if utf8.RuneCountInString(d.IfLater) > decisionIfLaterMax {
 		return fmt.Errorf("%s.if_later: longer than %d characters", decisionContextPath, decisionIfLaterMax)
+	}
+	switch d.Door {
+	case "":
+	case DoorTwoWay, DoorOneWay:
+	default:
+		return fmt.Errorf("%s.door: want %s or %s, got %q", decisionContextPath, DoorTwoWay, DoorOneWay, d.Door)
+	}
+	if d.Door == DoorOneWay && !d.Blocking {
+		return fmt.Errorf("%s: a one-way door is always blocking; set %s.blocking to true", decisionContextPath, decisionContextPath)
+	}
+	if d.Decided != "" && !labels[d.Decided] {
+		return fmt.Errorf("%s.decided: %q is not one of the option labels", decisionContextPath, d.Decided)
 	}
 	return nil
 }

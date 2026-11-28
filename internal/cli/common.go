@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/route"
 	"github.com/avivsinai/agent-message-queue/internal/thread"
@@ -929,6 +930,20 @@ func parseContext(raw string) (map[string]any, error) {
 		return nil, fmt.Errorf("parse context JSON: %w", err)
 	}
 	return result, nil
+}
+
+// validateDecisionContext checks context.decision by the rule writers and
+// readers share. A decision that records the option taken (decided) is a
+// record, not a request, and an agent never decides a one-way door.
+func validateDecisionContext(context map[string]any) error {
+	d, _, err := format.ParseDecision(context)
+	if err != nil {
+		return UsageError("%v", err)
+	}
+	if d.Decided != "" && d.IsOneWayDoor() {
+		return UsageError("context.decision.decided: a one-way door waits for the owner; send a question instead")
+	}
+	return nil
 }
 
 // ensureGitignore adds the root directory and .amqrc to .gitignore, creating the file if needed.
