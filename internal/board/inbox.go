@@ -40,22 +40,25 @@ type OwnerOption struct {
 }
 
 // DecidedRecord is one decision an agent recorded and the owner can still
-// overrule, inside the decided window.
+// overrule, inside the decided window. A record asks for nothing: it never
+// counts as waiting.
 type DecidedRecord struct {
-	ID          string        `json:"id"`
-	Title       string        `json:"title"`
-	Summary     string        `json:"summary,omitempty"`
-	From        string        `json:"from,omitempty"`
-	Since       time.Time     `json:"since"`
-	Door        string        `json:"door,omitempty"`
-	Options     []OwnerOption `json:"options,omitempty"`
-	Decided     string        `json:"decided,omitempty"`
-	NotTaken    []string      `json:"not_taken,omitempty"`
-	IfLater     string        `json:"if_later,omitempty"`
-	// Overrule is the reply to the decider that reverses the decision; it
-	// opens a todo the decider owes.
-	Overrule *Action `json:"overrule,omitempty"`
-	Read     *Action `json:"read,omitempty"`
+	ID      string    `json:"id"`
+	Title   string    `json:"title"`
+	Summary string    `json:"summary,omitempty"`
+	From    string    `json:"from,omitempty"`
+	Since   time.Time `json:"since"`
+
+	Options []OwnerOption `json:"options,omitempty"`
+	// Decided is the option taken; NotTaken holds the options the owner can
+	// still choose instead.
+	Decided  string   `json:"decided,omitempty"`
+	NotTaken []string `json:"not_taken,omitempty"`
+	IfLater  string   `json:"if_later,omitempty"`
+	// Overrule is one reply per option not taken that reverses the decision;
+	// it opens a todo the decider owes. Keeping the decision needs no action.
+	Overrule []Action `json:"overrule,omitempty"`
+	Read     *Action  `json:"read,omitempty"`
 }
 
 // OwnerMail is the owner's unread mail in one session. It is never an item.
@@ -72,7 +75,10 @@ type OwnerMail struct {
 type Inbox struct {
 	Items   []OwnerItem     `json:"items"`
 	Decided []DecidedRecord `json:"decided,omitempty"`
-	Mail    []OwnerMail     `json:"mail,omitempty"`
+	// DecidedWindow is the window the list was built with, so a face can
+	// label it without reading the configuration.
+	DecidedWindow time.Duration `json:"-"`
+	Mail          []OwnerMail   `json:"mail,omitempty"`
 }
 
 // buildInbox fills m.Inbox from the one rule of what waits on the owner: the
@@ -137,6 +143,7 @@ func buildInbox(m *Model, messages map[string]Message, sessionPaths map[string]s
 		inbox.Mail = append(inbox.Mail, mail)
 	}
 	inbox.Decided = decidedRecords(messages, now, decidedWindow, peers)
+	inbox.DecidedWindow = decidedWindow
 	m.Inbox = inbox
 }
 
@@ -165,7 +172,7 @@ func decidedRecords(messages map[string]Message, now time.Time, window time.Dura
 		}
 		rec := DecidedRecord{
 			ID: key, Title: m.Subject, Summary: Sentence(m.Body), Since: created,
-			Door: d.Door, Decided: d.Decided, IfLater: d.IfLater,
+			Decided: d.Decided, IfLater: d.IfLater,
 		}
 		if rec.Title == "" {
 			rec.Title = "decision by " + m.From
@@ -179,9 +186,7 @@ func decidedRecords(messages map[string]Message, now time.Time, window time.Dura
 				rec.NotTaken = append(rec.NotTaken, o.Label)
 			}
 		}
-		if overrule, ok := OverruleAction(m, peers); ok {
-			rec.Overrule = &overrule
-		}
+		rec.Overrule = OverruleActions(m, rec.NotTaken)
 		for _, a := range messageActions(m) {
 			read := a
 			rec.Read = &read
@@ -260,4 +265,14 @@ func decidedWindow(cfg Config) time.Duration {
 		return cfg.DecidedWindow
 	}
 	return DefaultConfig().DecidedWindow
+}
+
+// decidedWindowFor reads the window the list was built with: the difference
+// between the newest record's age and the window end is not stored, so the
+// header prints the configuration default or value as configured.
+func decidedWindowFor(inbox Inbox) string {
+	if inbox.DecidedWindow <= 0 {
+		return (24 * time.Hour).String()
+	}
+	return inbox.DecidedWindow.String()
 }

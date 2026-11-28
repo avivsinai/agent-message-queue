@@ -70,7 +70,7 @@ Notes:
 | `review_response` | - | normal | Return review findings. |
 | `question` | `answer` | normal | Ask for a decision or fact. |
 | `answer` | - | normal | Answer a question. |
-| `decision` | - | normal | Record a decision. |
+| `decision` | - | low | Record a decision. |
 | `brainstorm` | - | normal | Explore options. |
 | `status` | - | low | Report progress or state. |
 | `todo` | `status` | normal | Assign work. |
@@ -108,9 +108,25 @@ a control character (C0, DEL, C1, or the Unicode line and paragraph
 separators U+2028 and U+2029); a summary longer than 200 characters; more than 5 pros or 5 cons,
 or one longer than 120 characters; a `recommended` that is not one of the
 labels; a `blocking` that is present and not `true` or `false`; an `if_later` longer than 200
-characters; or an unknown field. A message with no `decision` key is not
-checked. The board reads the decision by the same rule and shows a message
-whose decision breaks it as a plain question.
+characters; a `door` that is not `two-way` or `one-way`; a `door: "one-way"` with
+`blocking: false`; a `decided` that is not one of the labels or sits on a
+one-way door; a `bead` that is not a task id; or an unknown field. A message
+with no `decision` key is not checked. The board reads the decision by the
+same rule and shows a message whose decision breaks it as a plain question.
+
+### Door and record
+
+`door` names what the decision changes. `two-way` can be undone; `one-way`
+cannot, so it is always blocking and never decided by an agent: ask the
+question and wait.
+
+`decided` turns the message into a record of the option taken: send it as
+`--kind decision`; send and reply force that kind, priority `low`, and
+passive delivery, and refuse `--notify wake`, because a record asks for
+nothing and starts no turn. Decide two-way doors yourself and record them;
+ask one-way doors and wait; never batch several decisions in one record.
+`bead` names the task the question or record is about, so the board folds
+that task's own row into the message that names it.
 
 ## Verified Buzz event
 

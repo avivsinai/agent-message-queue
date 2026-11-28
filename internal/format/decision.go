@@ -15,6 +15,10 @@ import (
 // question to the owner.
 const DecisionKey = "decision"
 
+// BeadKey is the header context key that names the task a question or a
+// decision record is about.
+const BeadKey = "bead"
+
 // Limits of a decision object.
 const (
 	decisionMinOptions  = 2
@@ -24,6 +28,7 @@ const (
 	decisionPointsMax   = 5
 	decisionPointMax    = 120
 	decisionIfLaterMax  = 200
+	decisionBeadMax     = 64
 	decisionContextPath = "context." + DecisionKey
 )
 
@@ -37,6 +42,8 @@ const (
 // sender recommends, whether work waits on it, and what happens if the
 // answer comes later. Door names what the decision changes (two-way can be
 // undone, one-way cannot); a record of the option taken carries Decided.
+// Bead names the task the question or record is about; the board folds that
+// task's own row into the question that names it.
 type Decision struct {
 	Options     []DecisionOption `json:"options"`
 	Recommended string           `json:"recommended,omitempty"`
@@ -44,6 +51,7 @@ type Decision struct {
 	IfLater     string           `json:"if_later,omitempty"`
 	Door        string           `json:"door,omitempty"`
 	Decided     string           `json:"decided,omitempty"`
+	Bead        string           `json:"bead,omitempty"`
 }
 
 // IsOneWayDoor reports whether the decision names a one-way door.
@@ -118,6 +126,11 @@ func ParseDecision(context map[string]any) (Decision, bool, error) {
 	return d, true, nil
 }
 
+// beadIDShape accepts a task id by shape only, by the same rule the board's
+// bead vocabulary uses (project prefix, hyphen, the id's own token, optional
+// dot-separated numbers). Shape never proves the task exists.
+var beadIDShape = regexp.MustCompile(`^[a-z][a-z0-9-]*-[0-9a-z]+(\.[0-9]+)*$`)
+
 func (d Decision) validate() error {
 	if n := len(d.Options); n < decisionMinOptions || n > decisionMaxOptions {
 		return fmt.Errorf("%s.options: want %d to %d options, got %d", decisionContextPath, decisionMinOptions, decisionMaxOptions, n)
@@ -179,5 +192,21 @@ func (d Decision) validate() error {
 	if d.Decided != "" && !labels[d.Decided] {
 		return fmt.Errorf("%s.decided: %q is not one of the option labels", decisionContextPath, d.Decided)
 	}
+	if d.Decided != "" && d.IsOneWayDoor() {
+		return fmt.Errorf("%s.decided: a one-way door waits for the owner; send a question instead", decisionContextPath)
+	}
+	if utf8.RuneCountInString(d.Bead) > decisionBeadMax {
+		return fmt.Errorf("%s.bead: longer than %d characters", decisionContextPath, decisionBeadMax)
+	}
+	if d.Bead != "" && !beadIDShape.MatchString(d.Bead) {
+		return fmt.Errorf("%s.bead: %q is not a task id", decisionContextPath, d.Bead)
+	}
 	return nil
+}
+
+// IsDecisionRecord reports whether the context carries a taken option: such
+// a message records a decision instead of asking for one.
+func IsDecisionRecord(context map[string]any) bool {
+	d, ok, _ := ParseDecision(context)
+	return ok && d.Decided != ""
 }

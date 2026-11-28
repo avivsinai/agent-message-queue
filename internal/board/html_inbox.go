@@ -16,9 +16,22 @@ type pageInbox struct {
 	Headline, More string
 	Count          int
 	Items          []pageInboxItem
+	Decided        []pageDecided
+	DecidedMore    string
 	Mail           []pageMail
 	// shown holds the anchors of the rendered items.
 	shown map[string]bool
+}
+
+// pageDecided is one row of "Decided without you": what an agent chose, what
+// it did not, how to undo it, and one overrule command per option not taken.
+type pageDecided struct {
+	ID, Title, Summary, From string
+	Chose, NotChosen         string
+	Age, AgeAt               string
+	IfLater                  string
+	Buttons                  []pageButton
+	Commands                 []Action
 }
 
 type pageInboxItem struct {
@@ -59,6 +72,10 @@ func inboxAnchor(id string) string {
 	return "inbox-" + base64.RawURLEncoding.EncodeToString(sum[:12])
 }
 
+// decidedViewLimit bounds the "Decided without you" group: the newest rows,
+// then one line for the rest.
+const decidedViewLimit = 10
+
 func buildInboxPage(inbox Inbox, now time.Time) pageInbox {
 	p := pageInbox{Count: len(inbox.Items), Headline: "Nothing waits on you.", shown: map[string]bool{}}
 	blocking := 0
@@ -74,6 +91,34 @@ func buildInboxPage(inbox Inbox, now time.Time) pageInbox {
 	}
 	if n := len(inbox.Items) - len(p.Items); n > 0 {
 		p.More = omittedLine(n, "item")
+	}
+	// The decided rows are the newest 10; the rest stay one line away in
+	// History, so the group never grows with it.
+	shownDecided := inbox.Decided[:min(len(inbox.Decided), decidedViewLimit)]
+	for _, rec := range shownDecided {
+		pd := pageDecided{ID: inboxAnchor("decided/" + rec.ID), Title: cleanTitle(rec.Title), Summary: clean(rec.Summary), From: clean(rec.From), Chose: clean(rec.Decided), IfLater: clean(rec.IfLater)}
+		if pd.Title == "" {
+			pd.Title = pd.From + " decided"
+		}
+		if !rec.Since.IsZero() {
+			pd.Age, pd.AgeAt = age(now.Sub(rec.Since))+" ago", rec.Since.Format(time.RFC3339)
+		}
+		var notChosen []string
+		for _, label := range rec.NotTaken {
+			notChosen = append(notChosen, "\""+clean(label)+"\"")
+		}
+		pd.NotChosen = strings.Join(notChosen, ", ")
+		for _, a := range rec.Overrule {
+			pd.Buttons = append(pd.Buttons, pageButton{Label: a.Label, Command: a.Command})
+			pd.Commands = append(pd.Commands, a)
+		}
+		if rec.Read != nil {
+			pd.Commands = append(pd.Commands, *rec.Read)
+		}
+		p.Decided = append(p.Decided, pd)
+	}
+	if n := len(inbox.Decided) - len(shownDecided); n > 0 {
+		p.DecidedMore = pluralize(n, "more record") + " inside the window: amq-board --json"
 	}
 	if n := len(inbox.Items); n > 0 {
 		p.Headline = pluralize(n, "item") + map[bool]string{true: " waits", false: " wait"}[n == 1] + " on you"

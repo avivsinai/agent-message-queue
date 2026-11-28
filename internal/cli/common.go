@@ -933,15 +933,35 @@ func parseContext(raw string) (map[string]any, error) {
 }
 
 // validateDecisionContext checks context.decision by the rule writers and
-// readers share. A decision that records the option taken (decided) is a
-// record, not a request, and an agent never decides a one-way door.
+// readers share; ParseDecision holds the rule. A record (decided) is a
+// message, not a request; the one-way rules live in the format.
 func validateDecisionContext(context map[string]any) error {
-	d, _, err := format.ParseDecision(context)
-	if err != nil {
+	if _, _, err := format.ParseDecision(context); err != nil {
 		return UsageError("%v", err)
 	}
-	if d.Decided != "" && d.IsOneWayDoor() {
-		return UsageError("context.decision.decided: a one-way door waits for the owner; send a question instead")
+	return nil
+}
+
+// applyDecisionRecord forces the envelope of a decision record: kind
+// decision, low priority, and passive delivery, so a record asks for
+// nothing and starts no turn. An explicit --notify wake on a record is a
+// usage error, not a silent downgrade.
+func applyDecisionRecord(context map[string]any, kind, priority, notify *string) error {
+	if !format.IsDecisionRecord(context) {
+		return nil
+	}
+	if *kind != "" && *kind != format.KindDecision {
+		return UsageError("--kind %s: a message with context.decision.decided is a record; send it as --kind %s", *kind, format.KindDecision)
+	}
+	if *notify == format.NotifyWake {
+		return UsageError("--notify wake: a decision record starts no turn; drop --notify or set passive")
+	}
+	*kind = format.KindDecision
+	if *priority == "" {
+		*priority = format.PriorityLow
+	}
+	if *notify == "" {
+		*notify = format.NotifyPassive
 	}
 	return nil
 }

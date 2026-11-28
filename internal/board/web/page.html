@@ -63,6 +63,23 @@
   <div class="empty"><h2>Nothing waits on you.</h2><p>Agents ask here when a decision is yours.</p></div>{{end}}
   </div>
   {{if .More}}<p class="request-note">{{.More}}</p>{{end}}
+  {{if .Decided}}<section class="inbox-decided" aria-labelledby="inbox-decided">
+    <h2 class="request-group-head" id="inbox-decided">Decided without you</h2>
+    <p class="request-note">Agents recorded these inside the last day. Keeping one needs no action; the row leaves the list when the window closes and stays in History.</p>
+    <div class="work-list">{{range .Decided}}
+    <article class="strip decided-row" id="{{.ID}}" aria-labelledby="{{.ID}}-title">
+      <div class="item-main">
+        <div class="owner-head"><h3 class="title" id="{{.ID}}-title">{{.Title}}</h3>{{if .Age}}<span>{{if .AgeAt}}<time datetime="{{.AgeAt}}">{{.Age}}</time>{{else}}{{.Age}}{{end}}</span>{{end}}</div>
+        {{if .Summary}}<p class="owner-summary">{{.Summary}}</p>{{end}}
+        <p class="decided-line">{{if .From}}{{.From}} chose{{end}}{{if not .From}}Chose{{end}} "{{.Chose}}".{{if .NotChosen}} Not chosen: {{.NotChosen}}.{{end}}</p>
+        {{if .IfLater}}<p class="if-later">To undo: {{.IfLater}}</p>{{end}}
+      </div>
+      {{if .Buttons}}<div class="owner-actions">{{range .Buttons}}<button type="button" class="copy" data-command="{{.Command}}">{{.Label}}</button>{{end}}</div>{{end}}
+      {{if .Commands}}<details class="item-details" id="{{.ID}}-details"><summary>Details</summary><div class="detail-content">{{range .Commands}}{{template "cmd" .}}{{end}}</div></details>{{end}}
+    </article>{{end}}
+    </div>
+    {{if .DecidedMore}}<p class="request-note">{{.DecidedMore}}</p>{{end}}
+  </section>{{end}}
   {{if .Mail}}<section class="inbox-mail" aria-labelledby="inbox-mail">
     <h2 class="request-group-head" id="inbox-mail">Mail for you</h2>
     <p class="request-note">Unread mail is not counted as a decision.</p>

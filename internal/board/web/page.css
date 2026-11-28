@@ -502,3 +502,7 @@ footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: .5
   .stage { flex-basis: 30%; }
   .flow-card > details > .sheet, .station > details > .sheet { display: none; }
 }
+
+.inbox-decided { margin-top: 2rem; }
+.inbox-decided > .request-note { margin: -.5rem 0 .75rem; }
+.decided-line { margin: .25rem 0 0; }

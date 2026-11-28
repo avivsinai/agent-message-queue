@@ -100,6 +100,16 @@ commands are in the amq-cli skill, "Ask the owner without stopping".
   comes, read the thread first: an answer may have come. No answer: take the
   default, and close the question with a line that says it was a default,
   not the owner's decision.
+- **A two-way door** — a decision that can be undone — you decide yourself
+  and record: one message of kind `decision` whose `context.decision` carries
+  `decided`, `door: two-way`, and `bead: <task id>`, before you act. The
+  board lists it under "Decided without you" for the decided window (24
+  hours) and the owner can overrule it with one reply, which reaches you as
+  an open todo. Never batch several decisions in one record.
+- **A one-way door** — an action that cannot be undone — waits for the
+  owner: a question with `door: one-way` (always blocking) and
+  `bead: <task id>`. An agent never sends `decided` on one; send and reply
+  refuse it.
 - **A decision only the owner can make** is such a question or a bead of
   type `decision`, never a Backlog task: both wait on the owner in the Inbox.
 - **A ruling** is a question that you answer yourself first. Take it when

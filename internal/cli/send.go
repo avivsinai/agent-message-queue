@@ -455,6 +455,9 @@ func runSendStep(args []string, afterBodyRead func(), deliver func(outgoingMessa
 	if err := validateDecisionContext(context); err != nil {
 		return err
 	}
+	if err := applyDecisionRecord(context, &kind, &priority, notifyFlag); err != nil {
+		return err
+	}
 
 	// Detect whether sender is inside a session (needed for reply_to and thread IDs).
 	senderInSession := sourceSession != "" || classifyRoot(root) != ""

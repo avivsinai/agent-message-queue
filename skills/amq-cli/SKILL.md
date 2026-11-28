@@ -198,6 +198,14 @@ recommend, what happens if the answer comes late, and `Default: <option>`
 (`Default: none` for a question with no default).
 The body of a ruling says what you decided, why, and how to undo it.
 
+Decide two-way doors yourself and record them; ask one-way doors and wait;
+never batch several decisions in one record. A two-way decision you take is
+one message of kind `decision` whose `context.decision` carries `decided:
+<the option taken>`, `door: two-way`, and `bead: <task id>`; the board lists
+it under "Decided without you" for 24 hours, where the owner can overrule it
+with one reply. A one-way door (a thing that cannot be undone) is always a
+blocking `question` with `door: one-way` and no `decided`.
+
 The follow-up time is the default time: the board shows it on the card, and
 when it passes with no answer you get one notice. Read the thread first: an
 answer may have come. No answer: take the default (a ruling stands) and close

@@ -116,6 +116,9 @@ func runReplyStep(args []string, deliver func(outgoingMessage) error) error {
 	if err := validateDecisionContext(context); err != nil {
 		return err
 	}
+	if err := applyDecisionRecord(context, &kind, &priority, notifyFlag); err != nil {
+		return err
+	}
 
 	// Pin the source tree before reading the original. Its contents determine
 	// the reply recipient and routing destination.

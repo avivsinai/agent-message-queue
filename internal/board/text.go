@@ -166,6 +166,40 @@ func writeInbox(b *strings.Builder, inbox Inbox, now time.Time) {
 		}
 	}
 	writeOmitted(b, len(inbox.Items)-len(shown), "item")
+	if len(inbox.Decided) > 0 {
+		fmt.Fprintf(b, "\nDecided without you · last %s\n", decidedWindowFor(inbox))
+		shownDecided := inbox.Decided[:min(len(inbox.Decided), viewLimit)]
+		for _, rec := range shownDecided {
+			line := cleanTitle(rec.Title)
+			if rec.From != "" {
+				line = fmt.Sprintf("%s chose \"%s\"", clean(rec.From), clean(rec.Decided))
+				if line2 := cleanTitle(rec.Title); line2 != "" {
+					line = line2 + " · " + line
+				}
+			}
+			if !rec.Since.IsZero() {
+				line += " · " + age(now.Sub(rec.Since))
+			}
+			fmt.Fprintf(b, "  %s\n", line)
+			if len(rec.NotTaken) > 0 {
+				quoted := make([]string, len(rec.NotTaken))
+				for i, o := range rec.NotTaken {
+					quoted[i] = fmt.Sprintf("%q", clean(o))
+				}
+				fmt.Fprintf(b, "    Not chosen: %s.\n", strings.Join(quoted, ", "))
+			}
+			if rec.IfLater != "" {
+				fmt.Fprintf(b, "    To undo: %s\n", clean(rec.IfLater))
+			}
+			for _, a := range rec.Overrule {
+				fmt.Fprintf(b, "    %s: %s\n", a.Label, a.Command)
+			}
+			if rec.Read != nil {
+				fmt.Fprintf(b, "    read: %s\n", rec.Read.Command)
+			}
+		}
+		writeOmitted(b, len(inbox.Decided)-len(shownDecided), "record")
+	}
 	for _, mail := range inbox.Mail {
 		line := fmt.Sprintf("mail: %s %d unread, oldest %s", clean(mail.Session), mail.Unread, age(seconds(mail.OldestAgeSeconds)))
 		if mail.Read != nil {

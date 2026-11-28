@@ -1596,15 +1596,19 @@ func messageActions(message Message) []Action {
 	return []Action{newAction("Read exact thread", "amq", "thread", "--id", message.Thread, "--include-body", "--json", "--root", message.Root)}
 }
 
-// OverruleAction builds the reply that reverses a recorded decision: a todo
-// to the decider on the record's thread, quoting the taken option. Keeping
-// the decision needs no action.
-func OverruleAction(m Message, peers map[string]bool) (Action, bool) {
-	if !validHandle(m.From) || !validMessageID(m.ID) || !validThread(m.Thread) {
-		return Action{}, false
+// OverruleActions builds the replies that reverse a recorded decision: one
+// todo to the decider per option not taken, quoting the option. Keeping the
+// decision needs no action.
+func OverruleActions(m Message, notTaken []string) []Action {
+	if !validHandle(m.From) || !validMessageID(m.ID) || !validThread(m.Thread) || len(notTaken) == 0 {
+		return nil
 	}
-	argv := []string{"amq", "reply", "--id", m.ID, "--me", reservedHuman, "--kind", format.KindTodo, "--body", "Overrule: " + m.Subject}
-	return newOwnerAction("Overrule", argv...), true
+	out := make([]Action, 0, len(notTaken))
+	for _, label := range notTaken {
+		argv := []string{"amq", "reply", "--id", m.ID, "--me", reservedHuman, "--kind", format.KindTodo, "--body", "Overrule: choose " + label}
+		out = append(out, newOwnerAction("Overrule: choose "+label, argv...))
+	}
+	return out
 }
 
 // MessageFromEntry preserves the complete exported source facts. Root/session
