@@ -78,18 +78,20 @@ type pageFlow struct {
 	Legend   string
 	Coverage pageGaps
 	Stages   []pageStage
-	NeedsYou []pageStrip
-	// Gates are the unread messages for the owner, one line per session
-	// with its oldest age, kept apart from the cards.
-	Gates []string
-	// AskRows are the owner's open requests, each linking to its item in
-	// the Inbox view.
-	AskRows        []pageAsk
-	AskMore        string
-	AttentionCount int
+	// Attention is the one line that says what waits on the owner and
+	// links to the Inbox; it replaces the Needs you tiles and the unread
+	// gates.
+	Attention pageAttention
 }
 
-type pageAsk struct{ Text, Anchor string }
+// pageAttention is the Flow attention line: the same number as the Inbox
+// headline and the navigation count, plus the age of the oldest item.
+type pageAttention struct {
+	Count     int
+	Blocking  int
+	Oldest    string
+	InboxLink string
+}
 
 type pageStage struct {
 	ID, Title, Empty, More string
@@ -106,13 +108,10 @@ var stageEmpty = map[Stage]string{
 	StageShipped:    "Nothing finished recently. Older work is in History.",
 }
 
-// buildFlowPage renders Flow: one column per stage, plus the attention strip
-// of cards that need the owner and the unread messages for the owner.
+// buildFlowPage renders Flow: one column per stage, with one attention line
+// that links to the Inbox, where what waits on the owner lives.
 func buildFlowPage(m Model, now time.Time, live map[[2]string]string, inboxLink func(string) string) pageFlow {
 	f := pageFlow{Legend: flowLegend}
-	for _, g := range m.Gates {
-		f.Gates = append(f.Gates, clean(g.Session)+": "+pluralize(g.OpenCount, "unread message")+", oldest "+age(seconds(g.OldestAgeSeconds)))
-	}
 	cards := m.FlowCards()
 	for _, v := range m.Flow {
 		st := pageStage{ID: string(v.ID), Title: v.Title, Count: len(v.CardIDs) + v.Omitted, Empty: stageEmpty[v.ID]}
@@ -127,20 +126,22 @@ func buildFlowPage(m Model, now time.Time, live map[[2]string]string, inboxLink 
 		f.Stages = append(f.Stages, st)
 	}
 	attention := needsYou(m)
-	f.AskMore, f.AttentionCount = attention.more, attention.count
-	// needsYou words the first rows of the owner's asks in model order.
-	i := 0
-	for _, a := range m.Asks {
-		if !a.Human || i >= len(attention.rows) {
-			continue
+	f.Attention = pageAttention{Count: attention.count, InboxLink: inboxLink("")}
+	for _, it := range m.Inbox.Items {
+		if it.Blocking {
+			f.Attention.Blocking++
 		}
-		f.AskRows = append(f.AskRows, pageAsk{Text: attention.rows[i], Anchor: inboxLink(a.Key)})
-		i++
 	}
-	for _, c := range attention.cards {
-		s := flowStrip(c, now, live)
-		s.Anchor = inboxLink(c.ID)
-		f.NeedsYou = append(f.NeedsYou, s)
+	if len(m.Inbox.Items) > 0 {
+		oldest := m.Inbox.Items[0].Since
+		for _, it := range m.Inbox.Items {
+			if it.Since.Before(oldest) {
+				oldest = it.Since
+			}
+		}
+		if !oldest.IsZero() {
+			f.Attention.Oldest = age(now.Sub(oldest))
+		}
 	}
 	f.Coverage = coverageGaps(m.Sources, func(SourceView) bool { return true })
 	return f

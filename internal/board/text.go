@@ -41,12 +41,13 @@ func requestDeadline(r Request) string {
 	return deadlineSuffix(kindWord(r.Message.Kind, r.Ruling), human, r.ReplyBy)
 }
 
-// ownerAttention holds the waiting cards and a bounded display of human asks.
+// needsYou reads the Inbox: its item count is the one "needs you" number,
+// and its rows are the first items in the Inbox's order (blocking first,
+// then oldest).
 type ownerAttention struct {
-	cards []Card
+	count int
 	rows  []string
 	more  string
-	count int
 }
 
 func (v ownerAttention) columnCount(c ColumnView) int {
@@ -58,26 +59,36 @@ func (v ownerAttention) columnCount(c ColumnView) int {
 
 func needsYou(m Model) ownerAttention {
 	var view ownerAttention
-	for _, col := range m.Columns {
-		if col.ID == ColumnWaiting {
-			view.cards = col.Cards
+	view.count = len(m.Inbox.Items)
+	for _, it := range m.Inbox.Items {
+		if len(view.rows) >= viewLimit {
+			view.more = omittedLine(view.count-len(view.rows), "item")
 			break
 		}
-	}
-	human := 0
-	for _, a := range m.Asks {
-		if !a.Human {
-			continue
+		line := cleanTitle(it.Title)
+		if it.Blocking {
+			line = "[blocking] " + line
 		}
-		human++
-		if human <= viewLimit {
-			kind := kindWord(a.Kind, a.Ruling)
-			view.rows = append(view.rows, clean(kind)+" · "+cleanTitle(a.Subject)+" · from "+clean(participantLabel(a.From))+deadlineSuffix(kind, true, a.ReplyBy))
+		switch {
+		case it.Bead != "":
+			line += " · bead " + clean(it.Bead)
+		case it.Kind == "review_request":
+			line += " · review " + clean(it.ID)
+		case it.Kind == "task":
+			line += " · task " + clean(it.ID)
+		case it.From != "":
+			line += " · from " + clean(it.From)
 		}
-	}
-	view.count = len(m.Inbox.Items)
-	if human > viewLimit {
-		view.more = omittedLine(human-viewLimit, "open request")
+		if !it.Since.IsZero() {
+			line += " · " + age(time.Since(it.Since))
+		}
+		if it.ReplyBy != nil {
+			line += " · reply by " + it.ReplyBy.UTC().Format(time.RFC3339)
+			if it.ReplyBy.Before(m.GeneratedAt) {
+				line += " (overdue)"
+			}
+		}
+		view.rows = append(view.rows, line)
 	}
 	return view
 }
@@ -172,6 +183,9 @@ func writeInbox(b *strings.Builder, inbox Inbox, now time.Time) {
 			line += " · " + mail.Read.Command
 		}
 		fmt.Fprintf(b, "  %s\n", line)
+	}
+	if om := inbox.OldMail; om != nil {
+		fmt.Fprintf(b, "  mail older than the obligation age: %d unread in %d sessions, oldest %s\n", om.Unread, om.Sessions, age(seconds(om.OldestAgeSeconds)))
 	}
 }
 

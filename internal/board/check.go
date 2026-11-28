@@ -19,6 +19,10 @@ const (
 	ProblemNewsOverdue    ProblemKind = "news_overdue"
 	ProblemBoardStale     ProblemKind = "board_stale"
 	ProblemSourceFailed   ProblemKind = "source_failed"
+	// ProblemDecisionWithoutOptions: a decision task waits on the owner and
+	// no question carries its options, so the owner cannot decide. The
+	// notifier tells the lead once per task.
+	ProblemDecisionWithoutOptions ProblemKind = "decision_without_options"
 )
 
 // Incident identifies one delivered observation. Changing rendered prose,
@@ -34,7 +38,7 @@ func (p Problem) Incident() string {
 		parts = append(parts, p.Account)
 	case ProblemSourceFailed:
 		parts = append(parts, p.Source)
-	case ProblemReadyNotBegun, ProblemNotWorked:
+	case ProblemReadyNotBegun, ProblemNotWorked, ProblemDecisionWithoutOptions:
 		parts = append(parts, p.Session, p.Handle, p.CardID)
 	case ProblemReplyOverdue, ProblemNewsOverdue:
 		parts = append(parts, p.Request)
@@ -63,6 +67,27 @@ type Problem struct {
 	Account  string     `json:"account,omitempty"`
 	ResetsAt *time.Time `json:"resets_at,omitempty"`
 	Text     string     `json:"text"`
+}
+
+// decisionOwnerItem says a decision task is the owner's to make: a human
+// assignee, or no assignee at all. An agent-owned decision is that agent's
+// work.
+func decisionOwnerItem(c Card) bool {
+	if len(c.Owners) == 0 {
+		return true
+	}
+	for _, o := range c.Owners {
+		if o.Kind == OwnerHuman {
+			return true
+		}
+	}
+	return false
+}
+
+// seenDecisionQuestions collects the bead ids open questions name in
+// context.bead; Check has no message map, so the model's asks carry it.
+func seenDecisionQuestions(m Model) map[string]bool {
+	return m.SeenQuestions
 }
 
 // Check lists the floor problems of a projected model. It is pure.
@@ -172,6 +197,30 @@ func Check(m Model, cfg Config, now time.Time) ([]Problem, error) {
 			continue
 		}
 		problems = append(problems, problem)
+	}
+	for _, col := range m.Columns {
+		if col.ID != ColumnWaiting {
+			continue
+		}
+		for _, card := range col.Cards {
+			// One predicate with the Inbox fold: a question that names the
+			// task carries the decision, so there is nothing to raise. The
+			// problem is a decision the owner must make: only an owner item
+			// (human-assigned, or no assignee) qualifies; a decision an
+			// agent owns is that agent's work.
+			if !decisionOwnerItem(card) || !decisionNeedsOptions(card, seenDecisionQuestions(m)) {
+				continue
+			}
+			handle, session := "", ""
+			if len(card.Owners) > 0 {
+				handle = card.Owners[0].Handle
+				session = card.Owners[0].Session
+			}
+			problems = append(problems, Problem{
+				Kind: ProblemDecisionWithoutOptions, CardID: card.ID, Handle: handle, Session: session,
+				Text: fmt.Sprintf("%s waits on a decision, and no question carries its options: the owner cannot answer it", cleanTitle(card.Title)),
+			})
+		}
 	}
 	for _, ask := range m.Asks {
 		if ask.NewsBy.IsZero() || !ask.NewsBy.Before(now) || ask.OwnerReplied {

@@ -70,3 +70,221 @@ func TestInboxListsADecisionForTheOwner(t *testing.T) {
 		})
 	}
 }
+
+// Live board 2026-11-28: PR #1664 asked for the owner's review, was flagged
+// Needs you on Flow, and appeared in neither the Inbox nor the count: the
+// Inbox read only the Waiting column and needsYou only task cards. The Flow
+// attention line, the Inbox headline and the navigation count must read the
+// same number, and the PR must be an Inbox row.
+func TestInboxCountsAFlaggedPullRequestTheSameAsTheHeadline(t *testing.T) {
+	now := requestNow
+	ref, _ := GitHubRepoRef("acme/app", 1664)
+	pr := Item{Ref: ref, Title: "fix(wake): cancel a peer doorbell", State: StateNeedsHuman,
+		WaitsOn: []Owner{{Kind: OwnerHuman, Display: "owner"}},
+		Reason:  Reason{Field: "reviewRequests", Text: "your review requested", Since: now.Add(-15 * time.Hour)},
+		Evidence: []Evidence{
+			{Field: "type", Value: ForgePullRequest, Text: "PR #1664", URL: "https://github.com/acme/app/pull/1664"},
+			{Field: "summary", Value: "A peer doorbell is cancelled twice."},
+		}}
+	s := requestSnapshot()
+	s.Input.Results = append(s.Input.Results, NamedResult{Name: "github", Result: Result{Status: StatusOK, ObservedAt: now, Items: []Item{pr}}})
+	m := s.Project(DefaultConfig(), now, "test")
+	if len(m.Inbox.Items) != 1 {
+		t.Fatalf("inbox items = %+v, want the flagged PR", m.Inbox.Items)
+	}
+	it := m.Inbox.Items[0]
+	if it.Kind != "review_request" || it.Title != "Review #1664: fix(wake): cancel a peer doorbell" || it.Link != "https://github.com/acme/app/pull/1664" || it.Since.IsZero() {
+		t.Fatalf("PR item = %+v", it)
+	}
+	headline := needsYou(m).count
+	var text strings.Builder
+	if err := WriteText(&text, m); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text.String(), "needs you 1") {
+		t.Errorf("text header lacks \"needs you 1\":\n%s", text.String())
+	}
+	nav := buildInboxPage(m.Inbox, now).Count
+	if headline != 1 || nav != 1 {
+		t.Fatalf("attention=%d nav=%d, want 1 and 1", headline, nav)
+	}
+	page := buildInboxPage(m.Inbox, now)
+	if len(page.Items) != 1 || page.Items[0].Link == "" {
+		t.Fatalf("page items = %+v", page.Items)
+	}
+}
+
+// A decision bead that no question names is an Inbox row that says the
+// options have not been sent, with no answer command; the notifier reports
+// it once as decision_without_options. A question whose context.bead names
+// the task folds the task into the question row.
+func TestInboxDecisionWithoutOptionsAndQuestionFold(t *testing.T) {
+	const withBead = `{"decision":{"options":[{"label":"Go"},{"label":"Not yet"}],"recommended":"Go","blocking":true},"bead":"demo-9"}`
+	for _, tc := range []struct {
+		name, context string
+		items         int
+		wantSummary   string
+		wantProblems  int
+	}{
+		{"no question names the task", "", 1, "The options have not been sent yet.", 1},
+		{"a question names the task", withBead, 1, "", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := requestNow
+			s := requestSnapshot()
+			ref, _ := Bead("demo-9")
+			alias := "beads:/work/.beads:demo-9"
+			// Owner items only: an unassigned decision is the owner's to
+			// make (review point 10).
+			fact := Item{Source: "beads", Namespace: "/work/.beads", Ref: ref, Title: "demo-9", State: StateNeedsHuman, Structural: true,
+				Owner:    Owner{Kind: OwnerNone},
+				Reason:   Reason{Field: "issue_type", Text: "decision waits on you", Since: now.Add(-time.Hour)},
+				Evidence: []Evidence{{Field: "issue_type", Value: "decision"}}}
+			s.Tasks["task-decision"] = Task{ID: "task-decision", Title: "demo-9", Authority: alias, Aliases: []string{alias}}
+			s.Facts[alias] = AliasFact{Alias: alias, Fact: fact, ObservedAt: now}
+			if tc.context != "" {
+				ask := requestMessage("ask", "question", "p2p/lead__user", "lead", []string{reservedHuman}, "s1", now.Add(-time.Hour))
+				if err := json.Unmarshal([]byte(tc.context), &ask.Context); err != nil {
+					t.Fatal(err)
+				}
+				s.Messages[ask.Key] = ask
+			}
+			m := s.Project(DefaultConfig(), now, "test")
+			m.PublishedAt = now
+			m.Stale = false
+			if len(m.Inbox.Items) != tc.items {
+				t.Fatalf("inbox items = %+v, want %d", m.Inbox.Items, tc.items)
+			}
+			problems, err := Check(m, DefaultConfig(), now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			withoutOptions := 0
+			for _, p := range problems {
+				if p.Kind == ProblemDecisionWithoutOptions {
+					withoutOptions++
+				}
+			}
+			if withoutOptions != tc.wantProblems {
+				t.Fatalf("decision_without_options problems = %d, want %d (%+v)", withoutOptions, tc.wantProblems, problems)
+			}
+			if tc.wantSummary != "" {
+				var found bool
+				for _, it := range m.Inbox.Items {
+					if it.Summary == tc.wantSummary && len(it.Options) == 0 {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("no item reads %q: %+v", tc.wantSummary, m.Inbox.Items)
+				}
+			}
+		})
+	}
+}
+
+// Mail for you splits at the obligation age: newer mail is one row per
+// session with its read command, older mail is one folded line with no
+// command, so old mail never shouts.
+func TestInboxMailSplitsAtObligationAge(t *testing.T) {
+	now := requestNow
+	s := requestSnapshot()
+	s.Input.Results[0].Result.AMQ.Gates = []Gate{
+		{Session: "s1", OpenCount: 4, OldestAgeSeconds: (20 * time.Minute).Seconds()},
+		{Session: "s2", OpenCount: 12, OldestAgeSeconds: (127 * 24 * time.Hour).Seconds()},
+		{Session: "s3", OpenCount: 21, OldestAgeSeconds: (130 * 24 * time.Hour).Seconds()},
+	}
+	m := s.Project(DefaultConfig(), now, "test")
+	in := m.Inbox
+	if len(in.Mail) != 1 || in.Mail[0].Session != "s1" {
+		t.Fatalf("mail rows = %+v, want only s1", in.Mail)
+	}
+	if in.OldMail == nil || in.OldMail.Sessions != 2 || in.OldMail.Unread != 33 {
+		t.Fatalf("old mail = %+v, want 2 sessions, 33 unread", in.OldMail)
+	}
+	page := buildInboxPage(in, now)
+	if page.OldMail == nil || page.OldMail.Oldest == "" || page.MaxAge == "" {
+		t.Fatalf("page old mail = %+v max age %q", page.OldMail, page.MaxAge)
+	}
+	var text strings.Builder
+	if err := WriteText(&text, m); err != nil {
+		t.Fatal(err)
+	}
+	out := text.String()
+	if !strings.Contains(out, "mail: s1 4 unread") {
+		t.Errorf("text lacks the s1 mail row:\n%s", out)
+	}
+	if strings.Contains(out, "mail: s2") || strings.Contains(out, "mail: s3") {
+		t.Errorf("old sessions still have their own mail lines:\n%s", out)
+	}
+}
+
+// Review 1500a966 point 1: the mail split re-parsed obligation_max_age as
+// seconds-of-seconds, so "1h" folded nothing and printed an absurd max age.
+// The split uses the ask cutoff's rule exactly: "1h" folds 3601 s, keeps
+// 3599 s, and "0" (expiry disabled) folds nothing with no max-age line.
+func TestInboxMailSplitUsesTheObligationRuleUnits(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ObligationMaxAge = "1h"
+	s := requestSnapshot()
+	s.Input.Results[0].Result.AMQ.Gates = []Gate{
+		{Session: "s1", OpenCount: 2, OldestAgeSeconds: 3599},
+		{Session: "s2", OpenCount: 2, OldestAgeSeconds: 3601},
+	}
+	in := s.Project(cfg, requestNow, "test").Inbox
+	if len(in.Mail) != 1 || in.Mail[0].Session != "s1" {
+		t.Fatalf("mail rows = %+v, want only s1 (3599s)", in.Mail)
+	}
+	if in.OldMail == nil || in.OldMail.Sessions != 1 || in.OldMail.Unread != 2 {
+		t.Fatalf("old mail = %+v, want s2 folded", in.OldMail)
+	}
+	if in.MaxAge != "1h0m0s" {
+		t.Fatalf("max age = %q, want 1h0m0s", in.MaxAge)
+	}
+	if len(in.OldMail.Rows) != 1 || in.OldMail.Rows[0].Session != "s2" || in.OldMail.Rows[0].Read == nil {
+		t.Fatalf("old mail rows = %+v, want s2 with its read command", in.OldMail.Rows)
+	}
+	page := buildInboxPage(in, requestNow)
+	if page.OldMail == nil || len(page.OldMail.Rows) != 1 || page.OldMail.Rows[0].Read == nil {
+		t.Fatalf("page old mail rows = %+v, want s2 with its read command", page.OldMail)
+	}
+	cfg.ObligationMaxAge = "0"
+	in = requestSnapshot().Project(cfg, requestNow, "test").Inbox
+	in.Mail = []OwnerMail{{Session: "s2", Unread: 2, OldestAgeSeconds: 127 * 24 * 3600}}
+	// A zero cutoff disables expiry: nothing folds, nothing to show.
+	if in.MaxAge != "" {
+		t.Fatalf("max age for \"0\" = %q, want empty", in.MaxAge)
+	}
+}
+
+// Review 1500a966 point 3: the review row was "Review #1664" with no age,
+// and the Flow attention line's oldest was empty. The row carries the PR's
+// title and its opened time.
+func TestInboxReviewRowCarriesTitleAndAge(t *testing.T) {
+	now := requestNow
+	ref, _ := GitHubRepoRef("acme/app", 1664)
+	created := now.Add(-15 * time.Hour)
+	pr := Item{Ref: ref, Title: "fix(wake): cancel a peer doorbell", State: StateNeedsHuman,
+		WaitsOn: []Owner{{Kind: OwnerHuman, Display: "owner"}},
+		Evidence: []Evidence{
+			{Field: "type", Value: ForgePullRequest, Text: "PR #1664", URL: "https://github.com/acme/app/pull/1664"},
+			{Field: "createdAt", At: created},
+		}}
+	s := requestSnapshot()
+	s.Input.Results = append(s.Input.Results, NamedResult{Name: "github", Result: Result{Status: StatusOK, ObservedAt: now, Items: []Item{pr}}})
+	m := s.Project(DefaultConfig(), now, "test")
+	if len(m.Inbox.Items) != 1 {
+		t.Fatalf("inbox items = %+v", m.Inbox.Items)
+	}
+	it := m.Inbox.Items[0]
+	if it.Title != "Review #1664: fix(wake): cancel a peer doorbell" {
+		t.Fatalf("title = %q, want the PR's title after the number", it.Title)
+	}
+	if !it.Since.Equal(created) {
+		t.Fatalf("since = %v, want the PR's opened time %v", it.Since, created)
+	}
+	page := buildInboxPage(m.Inbox, now)
+	if len(page.Items) != 1 || page.Items[0].Age == "" {
+		t.Fatalf("the review row has no age: %+v", page.Items)
+	}
+}
