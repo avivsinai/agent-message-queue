@@ -357,16 +357,20 @@ func TestRequestHeadlineCountsOnlyRequestsToTheOwner(t *testing.T) {
 	toAgent := requestMessage("ask-agent", "review_request", "", "lead", []string{"worker"}, "s1", requestNow.Add(-time.Hour))
 	m := requestSnapshot(toOwner, toAgent).Project(DefaultConfig(), requestNow, "test")
 	text, page := renderFaces(t, m)
-	if !strings.Contains(page, "ruling · subject ask-owner · from lead in s1 · default at 2026-11-09T10:00:00Z") {
-		t.Error("the HTML Needs you panel lacks the open ruling and its default time")
+	// The HTML attention line counts the Inbox item; the Inbox row carries
+	// the ruling and its default time on both faces.
+	if !strings.Contains(page, "1 thing waits on you in the Inbox") {
+		t.Error("the HTML attention line lacks the counted open ruling")
+	}
+	if !strings.Contains(text, "subject ask-owner") || !strings.Contains(text, "reply by 2026-11-09T10:00:00Z") {
+		t.Errorf("the Inbox row does not show its ruling and clock:\n%s", text)
 	}
 	agents := "1 recent request to agents has no direct reply observed. Agents often answer with a new message instead of a reply, so this is their bookkeeping, not work for you."
 	if !strings.Contains(page, `<p class="request-note">`+agents+`</p>`) || !strings.Contains(text, "== Requests (outside task counts) ==\n  1 item waits on you in the Inbox\n    "+agents+"\n") {
 		t.Errorf("the Requests section does not keep the agents' count apart from the owner's")
 	}
-	row := "ruling · subject ask-owner · from lead in s1 · 1h ago · default at 2026-11-09T10:00:00Z"
-	if !strings.Contains(text, row) || !strings.Contains(text, "== Needs you (") || !strings.Contains(text, "    ruling · subject ask-owner · from lead in s1 · default at 2026-11-09T10:00:00Z") {
-		t.Errorf("the owner request does not show its ruling and clock under Needs you and Requests:\n%s", text)
+	if !strings.Contains(text, "== Needs you (") {
+		t.Errorf("the Needs you section is missing:\n%s", text)
 	}
 }
 
@@ -392,11 +396,24 @@ func TestOwnerProgressKeepsQuestionInNeedsYou(t *testing.T) {
 	q := requestMessage("pending", "question", "work", "lead", []string{reservedHuman}, "s1", requestNow.Add(-time.Hour))
 	progress := requestMessage("progress", "status", "work", reservedHuman, []string{"lead"}, "s1", requestNow, q.ID)
 	m := requestSnapshot(q, progress).Project(DefaultConfig(), requestNow, "test")
-	for _, panel := range renderedOwnerPanels(t, m) {
-		if !strings.Contains(panel, "question · subject pending · from lead in s1 · no default") {
-			t.Errorf("open owner question missing: %s", panel)
-		}
+	// The attention line links to the Inbox; the Inbox holds the question
+	// row and the count both faces read is the Inbox's item count.
+	text, html := renderFaces(t, m)
+	if !strings.Contains(text, "subject pending · from lead in s1") {
+		t.Errorf("open owner question missing from the Inbox rows:\n%s", text)
 	}
+	if !strings.Contains(html, `1 thing waits on you in the Inbox`) {
+		t.Errorf("attention line missing:\n%s", cutNeedsYou(html))
+	}
+}
+
+func cutNeedsYou(html string) string {
+	_, panel, found := strings.Cut(html, `id="needs-you"`)
+	if !found {
+		return ""
+	}
+	panel, _, _ = strings.Cut(panel, "</section>")
+	return panel
 }
 
 func renderedOwnerPanels(t *testing.T, m Model) []string {

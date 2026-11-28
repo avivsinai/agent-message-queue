@@ -1479,9 +1479,9 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 		}
 	}
 	sessionPaths, peers := amqRoutes(amqCtx)
-	buildInbox(&m, s.Messages, sessionPaths, peers)
 	buildFlow(&m, forge, input, observed)
 	buildFloor(&m, observed["amq"], cfg, now)
+	buildInbox(&m, s.Messages, sessionPaths, peers, cfg)
 	return m
 }
 

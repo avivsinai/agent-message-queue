@@ -291,7 +291,7 @@ func Build(in Input) Model {
 
 	m.Roster = buildRoster(amqCtx, roster, items, in.Config)
 	m.Next = selectNext(m.Columns)
-	buildInbox(&m, nil, sessionPaths, peers)
+	buildInbox(&m, nil, sessionPaths, peers, in.Config)
 	return m
 }
 

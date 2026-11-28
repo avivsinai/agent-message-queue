@@ -3,6 +3,7 @@ package board
 import (
 	"cmp"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
@@ -29,6 +30,9 @@ type OwnerItem struct {
 	// NoAnswer says why a request has no answer command.
 	NoAnswer string  `json:"no_answer,omitempty"`
 	Read     *Action `json:"read,omitempty"`
+	// Link is the URL the owner acts through, set for a pull request that
+	// asks for the owner's review.
+	Link string `json:"link,omitempty"`
 }
 
 // OwnerOption is one option of a decision.
@@ -47,25 +51,55 @@ type OwnerMail struct {
 	Read             *Action `json:"read,omitempty"`
 }
 
+// OwnerOldMail is the unread mail older than the obligation age, folded to
+// one line so old mail never shouts.
+type OwnerOldMail struct {
+	Sessions          int     `json:"sessions"`
+	Unread            int     `json:"unread"`
+	OldestAgeSeconds  float64 `json:"oldest_age_seconds"`
+	OldestSessionList string  `json:"oldest_sessions"`
+}
+
 // Inbox is the owner's queue: items, blocking first, then oldest first; then
-// the mail lines.
+// the mail lines, split at the obligation age into per-session rows and one
+// folded line for older mail.
 type Inbox struct {
-	Items []OwnerItem `json:"items"`
-	Mail  []OwnerMail `json:"mail,omitempty"`
+	Items   []OwnerItem   `json:"items"`
+	Mail    []OwnerMail   `json:"mail,omitempty"`
+	OldMail *OwnerOldMail `json:"old_mail,omitempty"`
+	MaxAge  string        `json:"mail_max_age,omitempty"`
 }
 
 // buildInbox fills m.Inbox from the one rule of what waits on the owner: the
-// cards in Needs you and the open obligations owed by the owner handle. A
+// cards in Needs you (including an unclaimed pull request whose open item
+// waits on the human) and the open obligations owed by the owner handle. A
 // question's options come from its opener's context.decision, parsed by the
 // rule send applies; an invalid or absent decision gives a plain item.
-func buildInbox(m *Model, messages map[string]Message, sessionPaths map[string]string, peers map[string]bool) {
+func buildInbox(m *Model, messages map[string]Message, sessionPaths map[string]string, peers map[string]bool, cfg Config) {
 	inbox := Inbox{Items: []OwnerItem{}}
+	seenQuestions := map[string]bool{}
+	for _, a := range m.Asks {
+		if !a.Human || messages == nil {
+			continue
+		}
+		if bead, ok := questionBead(messages[a.Key]); ok {
+			seenQuestions[bead] = true
+		}
+	}
 	for _, col := range m.Columns {
 		if col.ID != ColumnWaiting {
 			continue
 		}
 		for _, c := range col.Cards {
-			inbox.Items = append(inbox.Items, cardItem(c, peers))
+			it := cardItem(c, peers, seenQuestions)
+			if it.Kind != "hidden" {
+				inbox.Items = append(inbox.Items, it)
+			}
+		}
+	}
+	for _, c := range m.Forge {
+		if cardFlags(c) != nil {
+			inbox.Items = append(inbox.Items, forgeItem(c))
 		}
 	}
 	for _, a := range m.Asks {
@@ -106,6 +140,7 @@ func buildInbox(m *Model, messages map[string]Message, sessionPaths map[string]s
 		}
 		return cmp.Or(a.Since.Compare(b.Since), cmp.Compare(a.ID, b.ID))
 	})
+	inbox.MaxAge = obligationMaxAgeString(cfg)
 	for _, g := range m.Gates {
 		mail := OwnerMail{Session: g.Session, Unread: g.OpenCount, OldestAgeSeconds: g.OldestAgeSeconds}
 		if read, ok := ReadOwnerMail(g.Session, g.OpenCount); ok {
@@ -113,12 +148,91 @@ func buildInbox(m *Model, messages map[string]Message, sessionPaths map[string]s
 		}
 		inbox.Mail = append(inbox.Mail, mail)
 	}
+	if len(inbox.Mail) > 0 {
+		maxSeconds := obligationMaxAgeSeconds(cfg)
+		var old []OwnerMail
+		kept := inbox.Mail[:0]
+		for _, mail := range inbox.Mail {
+			if mail.OldestAgeSeconds >= maxSeconds {
+				old = append(old, mail)
+			} else {
+				kept = append(kept, mail)
+			}
+		}
+		inbox.Mail = kept
+		if len(old) > 0 {
+			om := OwnerOldMail{}
+			var names []string
+			for _, mail := range old {
+				om.Sessions++
+				om.Unread += mail.Unread
+				if mail.OldestAgeSeconds > om.OldestAgeSeconds {
+					om.OldestAgeSeconds = mail.OldestAgeSeconds
+					names = append([]string(nil), mail.Session)
+				} else if mail.OldestAgeSeconds == om.OldestAgeSeconds {
+					names = append(names, mail.Session)
+				}
+			}
+			om.OldestSessionList = strings.Join(names, ", ")
+			inbox.OldMail = &om
+		}
+	}
 	m.Inbox = inbox
 }
 
-// cardItem is a Needs you card as an owner item: a bead shows its show-bead
-// command; an obligation card answers through AnswerActions.
-func cardItem(c Card, peers map[string]bool) OwnerItem {
+// obligationMaxAgeSeconds is the mail split age in seconds: the configured
+// obligation age, else the default. An unparsable value selects the default,
+// as the ask cutoff does.
+func obligationMaxAgeSeconds(cfg Config) float64 {
+	age := thread.DefaultObligationMaxAge
+	if cfg.ObligationMaxAge != "" {
+		if d, err := ParseDuration(cfg.ObligationMaxAge); err == nil && d > 0 {
+			age = time.Duration(d) * time.Second
+		}
+	}
+	return age.Seconds()
+}
+
+// obligationMaxAgeString is the mail split age as a duration string, for the
+// JSON model and the page note.
+func obligationMaxAgeString(cfg Config) string {
+	return (time.Duration(obligationMaxAgeSeconds(cfg)) * time.Second).String()
+}
+
+// forgeItem is an unclaimed forge card flagged Needs you as an owner item: a
+// pull request that asks for the owner's review is the owner's work even
+// though no task claims it. Its title reads "Review #N" and its link is the
+// pull request's web URL, so the owner opens it in one step.
+func forgeItem(c Card) OwnerItem {
+	it := OwnerItem{ID: c.ID, Kind: "review_request", Title: c.Title, Summary: c.Summary, Since: c.Reason.Since}
+	for _, ref := range c.Refs {
+		if ref.Kind != RefForge {
+			continue
+		}
+		if _, n, ok := strings.Cut(ref.ID, "#"); ok {
+			it.Title = "Review #" + n
+		}
+	}
+	for _, i := range c.Items {
+		for _, e := range i.Evidence {
+			if e.Field == "type" && e.Value == ForgePullRequest && e.Text != "" {
+				it.Title = "Review " + strings.TrimPrefix(e.Text, "PR ")
+			}
+			if e.Field == FieldSummary && it.Summary == "" {
+				it.Summary = Sentence(e.Text)
+			}
+			if e.URL != "" && it.Link == "" {
+				it.Link = e.URL
+			}
+		}
+	}
+	return it
+}
+
+// cardItem is a Needs you card as an owner item: a decision task with no
+// question that names it says the options have not been sent; a bead shows
+// its show-bead command; an obligation card answers through AnswerActions.
+func cardItem(c Card, peers map[string]bool, seenQuestions map[string]bool) OwnerItem {
 	it := OwnerItem{ID: c.ID, Kind: "task", Title: c.Title, Summary: c.Summary, Since: c.Reason.Since}
 	if c.Requester != nil {
 		it.From = ownerLabel(*c.Requester, nil)
@@ -128,6 +242,18 @@ func cardItem(c Card, peers map[string]bool) OwnerItem {
 			it.Kind, it.Bead = "bead", ref.ID
 			break
 		}
+	}
+	if it.Bead != "" && seenQuestions[it.Bead] {
+		// A question with context.bead names this task; the question's row
+		// carries the decision, so the task folds into it.
+		it.Kind = "hidden"
+		return it
+	}
+	if isDecisionItem(c) {
+		it.Kind = "decision"
+		it.Summary = "The options have not been sent yet."
+		it.NoAnswer = "no question carries this decision's options"
+		return it
 	}
 	for _, i := range c.Items {
 		if i.Obligation == nil {
@@ -150,6 +276,29 @@ func cardItem(c Card, peers map[string]bool) OwnerItem {
 		}
 	}
 	return it
+}
+
+// questionBead reads context.bead of a question: the task a question asks
+// about, when it names one. The value must be shaped like a bead id; any
+// other text never joins a task.
+func questionBead(m Message) (string, bool) {
+	bead, ok := m.Context["bead"].(string)
+	if !ok || !beadShapeRe.MatchString(bead) {
+		return "", false
+	}
+	return bead, true
+}
+
+// isDecisionItem says whether a Needs you card is a decision the owner must
+// make with no question that carries its options: the tracker records the
+// item as a decision that waits on the human.
+func isDecisionItem(c Card) bool {
+	for _, i := range c.Items {
+		if i.State == StateNeedsHuman && evidenceValue(i, "issue_type") == "decision" {
+			return true
+		}
+	}
+	return false
 }
 
 // answerItem is the answer commands of a request, or why it has none.

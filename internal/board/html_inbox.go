@@ -17,8 +17,18 @@ type pageInbox struct {
 	Count          int
 	Items          []pageInboxItem
 	Mail           []pageMail
+	// OldMail is the unread mail older than the mail split age, folded to
+	// one line; MaxAge names that age.
+	OldMail *pageOldMail
+	MaxAge  string
 	// shown holds the anchors of the rendered items.
 	shown map[string]bool
+}
+
+// pageOldMail is the folded line for unread mail older than the split age.
+type pageOldMail struct {
+	Sessions, Unread int
+	Oldest           string
 }
 
 type pageInboxItem struct {
@@ -27,8 +37,11 @@ type pageInboxItem struct {
 	Age, AgeAt                 string
 	ReplyBy, ReplyByAt         string
 	Overdue, Blocking          bool
-	Options                    []pageOption
-	IfLater                    string
+	// Link is the URL the owner acts through (a pull request's web page);
+	// the row shows "Open pull request" instead of copy buttons.
+	Link    string
+	Options []pageOption
+	IfLater string
 	// Buttons are the visible copy actions: one per option, the recommended
 	// first, then the free answer; a request without answers shows its read
 	// command instead.
@@ -86,6 +99,14 @@ func buildInboxPage(inbox Inbox, now time.Time) pageInbox {
 		pm := pageMail{ID: inboxAnchor("mail/" + mail.Session), Session: clean(mail.Session), Counts: pluralize(mail.Unread, "unread message") + ", oldest " + age(seconds(mail.OldestAgeSeconds)), Read: mail.Read}
 		p.Mail = append(p.Mail, pm)
 	}
+	if inbox.OldMail != nil {
+		p.OldMail = &pageOldMail{
+			Sessions: inbox.OldMail.Sessions,
+			Unread:   inbox.OldMail.Unread,
+			Oldest:   age(seconds(inbox.OldMail.OldestAgeSeconds)),
+		}
+	}
+	p.MaxAge = inbox.MaxAge
 	return p
 }
 
@@ -162,8 +183,11 @@ func buildInboxItem(it OwnerItem, now time.Time) pageInboxItem {
 		pi.Commands = append(pi.Commands, a)
 	}
 	pi.Commands = append(pi.Commands, acknowledge...)
+	if it.Link != "" {
+		pi.Link = it.Link
+	}
 	if it.Read != nil {
-		if len(pi.Buttons) == 0 {
+		if len(pi.Buttons) == 0 && pi.Link == "" {
 			pi.Buttons = append(pi.Buttons, pageButton{Label: "Copy " + clean(it.Read.Label), Command: it.Read.Command})
 		}
 		pi.Commands = append(pi.Commands, *it.Read)

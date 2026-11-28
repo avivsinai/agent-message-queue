@@ -54,24 +54,26 @@
       <div class="owner-head"><h2 class="title" id="{{.ID}}-title">{{template "title" .}}</h2>{{if .Blocking}}<span class="flag flag-you"><span class="mark mark-flag" aria-hidden="true"></span>Blocks work</span>{{end}}</div>
       <div class="item-meta"><span class="item-state">{{.Kind}}</span>{{if .From}}<span class="c-owner">from {{.From}}</span>{{end}}<span>{{if .AgeAt}}<time datetime="{{.AgeAt}}">{{.Age}}</time>{{else}}{{.Age}}{{end}}</span>{{if .ReplyBy}}<span{{if .Overdue}} class="is-overdue"{{end}}>reply by <time datetime="{{.ReplyByAt}}">{{.ReplyBy}}</time>{{if .Overdue}} (overdue){{end}}</span>{{end}}</div>
       {{if .Summary}}<p class="owner-summary">{{.Summary}}</p>{{end}}
+      {{if .Link}}<p class="owner-link"><a href="{{.Link}}" rel="noreferrer">Open pull request</a></p>{{end}}
       {{if .Options}}<dl class="options">{{range .Options}}<dt>{{.Label}}{{if .Recommended}} <span class="recommended">Recommended</span>{{end}}</dt><dd>{{if .Summary}}<p>{{.Summary}}</p>{{end}}{{if .Pros}}<div class="tradeoff"><p class="tradeoff-head">For:</p><ul>{{range .Pros}}<li>{{.}}</li>{{end}}</ul></div>{{end}}{{if .Cons}}<div class="tradeoff"><p class="tradeoff-head">Against:</p><ul>{{range .Cons}}<li>{{.}}</li>{{end}}</ul></div>{{end}}</dd>{{end}}</dl>{{end}}
       {{if .IfLater}}<p class="if-later">If you answer later: {{.IfLater}}</p>{{end}}
     </div>
-    {{if or .Buttons .NoAnswer}}<div class="owner-actions">{{range .Buttons}}<button type="button" class="copy" data-command="{{.Command}}">{{.Label}}</button>{{end}}{{if .NoAnswer}}<p class="command-unavailable">No answer command: {{.NoAnswer}}.</p>{{end}}</div>{{end}}
+    {{if or .Buttons .NoAnswer .Link}}<div class="owner-actions">{{range .Buttons}}<button type="button" class="copy" data-command="{{.Command}}">{{.Label}}</button>{{end}}{{if .NoAnswer}}<p class="command-unavailable">No answer command: {{.NoAnswer}}.</p>{{end}}</div>{{end}}
     {{if .Commands}}<details class="item-details" id="{{.ID}}-details"><summary>Details</summary><div class="detail-content">{{range .Commands}}{{template "cmd" .}}{{end}}</div></details>{{end}}
   </article>{{else}}
   <div class="empty"><h2>Nothing waits on you.</h2><p>Agents ask here when a decision is yours.</p></div>{{end}}
   </div>
   {{if .More}}<p class="request-note">{{.More}}</p>{{end}}
-  {{if .Mail}}<section class="inbox-mail" aria-labelledby="inbox-mail">
+  {{if or .Mail .OldMail}}<section class="inbox-mail" aria-labelledby="inbox-mail">
     <h2 class="request-group-head" id="inbox-mail">Mail for you</h2>
-    <p class="request-note">Unread mail is not counted as a decision.</p>
+    <p class="request-note">Unread mail is not counted as a decision. Mail older than the obligation age{{if .MaxAge}} ({{.MaxAge}}){{end}} folds into one line.</p>
     <div class="work-list">{{range .Mail}}
     <article class="strip mail-row" aria-labelledby="{{.ID}}">
       <div class="item-main"><h3 class="title" id="{{.ID}}">{{.Session}}</h3><div class="item-meta"><span>{{.Counts}}</span></div></div>
       {{with .Read}}<div class="item-action"><button type="button" class="copy primary-copy" data-command="{{.Command}}">Copy read command</button></div>
       <details class="item-details"><summary>Details</summary><div class="detail-content">{{template "cmd" .}}</div></details>{{end}}
     </article>{{end}}
+    {{if .OldMail}}<p class="request-note old-mail">{{.OldMail.Unread}} older unread {{if eq .OldMail.Unread 1}}message{{else}}messages{{end}} in {{.OldMail.Sessions}} {{if eq .OldMail.Sessions 1}}session{{else}}sessions{{end}}, oldest {{.OldMail.Oldest}}. ▸ Show</p>{{end}}
     </div>
   </section>{{end}}
 </section>
@@ -80,11 +82,7 @@
 <section class="view view-flow" id="view-flow" data-view="flow" aria-labelledby="heading-flow">
   <div class="view-heading"><h1 id="heading-flow">Flow</h1></div>
   <section class="attention" aria-labelledby="needs-you">
-    <h2 class="attention-head" id="needs-you"><span class="flag flag-you"><span class="mark mark-flag" aria-hidden="true"></span>Needs you</span> <span class="stage-count">{{.AttentionCount}}</span></h2>
-    {{if .NeedsYou}}<ul class="tiles">{{range .NeedsYou}}<li class="tile"><a class="tile-title" href="#{{.Anchor}}">{{template "title" .}}</a>{{if .Summary}}<p class="tile-summary">{{.Summary}}</p>{{end}}<p class="tile-why"><span>{{.Reason}}</span> <span class="tile-age">{{if .SinceAt}}<time datetime="{{.SinceAt}}">{{.Waited}}</time>{{else}}{{.Waited}}{{end}}</span></p></li>{{end}}</ul>{{else if not .AttentionCount}}<p class="attention-empty">No card waits on you.</p>{{end}}
-    {{if .AskRows}}<ul class="tiles">{{range .AskRows}}<li class="tile"><a class="tile-ask" href="#{{.Anchor}}">{{.Text}}</a></li>{{end}}</ul>{{end}}
-    {{if .AskMore}}<p class="request-note">{{.AskMore}}</p>{{end}}
-    {{if .Gates}}<div class="attention-foot"><p class="gates"><span class="gates-head">Unread for you</span>{{range .Gates}} <span>{{.}}</span>{{end}}</p></div>{{end}}
+    <h2 class="attention-head" id="needs-you">{{if .Attention.Count}}<a class="attention-line" href="#{{.Attention.InboxLink}}"><span class="flag flag-you"><span class="mark mark-flag" aria-hidden="true"></span>{{.Attention.Count}} {{if eq .Attention.Count 1}}thing waits{{else}}things wait{{end}} on you in the Inbox</a>{{if .Attention.Oldest}} <span class="attention-age">oldest {{.Attention.Oldest}}</span>{{end}} <span class="attention-go" aria-hidden="true">→</span>{{else}}<span class="attention-none">Nothing waits on you.</span>{{end}}</h2>
   </section>
   {{template "coverage" .Coverage}}
   <div class="flow-tools">

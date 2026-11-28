@@ -205,8 +205,12 @@ func TestBoardPlacesCapturedAMQAndBeadsPayloads(t *testing.T) {
 			t.Error("unassigned blocked work appears in Next without a named blocker")
 		}
 	}
-	if i := slices.IndexFunc(m.Inbox.Items, func(it board.OwnerItem) bool { return it.ID == "bead:demo-b11" }); i < 0 || m.Inbox.Items[i].Kind != "bead" || m.Inbox.Items[i].Read == nil {
-		t.Errorf("the decision bead is not an Inbox item with its show-bead command: %+v", m.Inbox.Items)
+	// A decision bead that no question names is a decision row that says
+	// the options have not been sent, with no answer command; its show-bead
+	// command stays on the columns.
+	i := slices.IndexFunc(m.Inbox.Items, func(it board.OwnerItem) bool { return it.ID == "bead:demo-b11" })
+	if i < 0 || m.Inbox.Items[i].Kind != "decision" || m.Inbox.Items[i].Read != nil || m.Inbox.Items[i].Summary != "The options have not been sent yet." {
+		t.Errorf("the decision bead is not an Inbox decision row without options: %+v", m.Inbox.Items)
 	}
 	if _, ok := cards["bead:demo-b9"]; ok {
 		t.Error("deferred bead is shown on the columns")

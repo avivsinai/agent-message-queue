@@ -19,6 +19,10 @@ const (
 	ProblemNewsOverdue    ProblemKind = "news_overdue"
 	ProblemBoardStale     ProblemKind = "board_stale"
 	ProblemSourceFailed   ProblemKind = "source_failed"
+	// ProblemDecisionWithoutOptions: a decision task waits on the owner and
+	// no question carries its options, so the owner cannot decide. The
+	// notifier tells the lead once per task.
+	ProblemDecisionWithoutOptions ProblemKind = "decision_without_options"
 )
 
 // Incident identifies one delivered observation. Changing rendered prose,
@@ -34,7 +38,7 @@ func (p Problem) Incident() string {
 		parts = append(parts, p.Account)
 	case ProblemSourceFailed:
 		parts = append(parts, p.Source)
-	case ProblemReadyNotBegun, ProblemNotWorked:
+	case ProblemReadyNotBegun, ProblemNotWorked, ProblemDecisionWithoutOptions:
 		parts = append(parts, p.Session, p.Handle, p.CardID)
 	case ProblemReplyOverdue, ProblemNewsOverdue:
 		parts = append(parts, p.Request)
@@ -172,6 +176,25 @@ func Check(m Model, cfg Config, now time.Time) ([]Problem, error) {
 			continue
 		}
 		problems = append(problems, problem)
+	}
+	for _, col := range m.Columns {
+		if col.ID != ColumnWaiting {
+			continue
+		}
+		for _, card := range col.Cards {
+			if !isDecisionItem(card) {
+				continue
+			}
+			handle, session := "", ""
+			if len(card.Owners) > 0 {
+				handle = card.Owners[0].Handle
+				session = card.Owners[0].Session
+			}
+			problems = append(problems, Problem{
+				Kind: ProblemDecisionWithoutOptions, CardID: card.ID, Handle: handle, Session: session,
+				Text: fmt.Sprintf("%s waits on a decision, and no question carries its options: the owner cannot answer it", cleanTitle(card.Title)),
+			})
+		}
 	}
 	for _, ask := range m.Asks {
 		if ask.NewsBy.IsZero() || !ask.NewsBy.Before(now) || ask.OwnerReplied {
