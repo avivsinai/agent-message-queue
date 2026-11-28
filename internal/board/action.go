@@ -2,6 +2,7 @@ package board
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
@@ -71,37 +72,15 @@ func validThread(t string) bool {
 // AnswerActions builds "complete" and "acknowledge" for an obligation owed by
 // the reserved human (design 9.2). The route is the obligation's reply
 // destination, never its own session. peers is the project's .amqrc peer set.
-func AnswerActions(o *ObligationFacts, peers map[string]bool) []Action {
-	if o == nil || o.Destination == nil {
+// Each option, a label format.ParseDecision accepted, adds first one
+// "complete" whose body is the label.
+func AnswerActions(o *ObligationFacts, peers map[string]bool, options ...string) []Action {
+	route, blocked := answerRoute(o, peers)
+	if blocked != "" {
 		return nil
 	}
 	d := o.Destination
-	if !validHandle(d.Handle) || !validMessageID(o.OpenerID) || !validThread(o.Thread) {
-		return nil
-	}
-	route := []string{}
-	switch {
-	case d.Project != "":
-		if !peers[d.Project] {
-			return nil
-		}
-		route = append(route, "--project", d.Project)
-		if d.Session != "" {
-			if !validHandle(d.Session) {
-				return nil
-			}
-			route = append(route, "--session", d.Session)
-		}
-	case d.Session == "":
-		// A local destination at the base root: --session cannot name it.
-		return nil
-	default:
-		if !validHandle(d.Session) {
-			return nil
-		}
-		route = append(route, "--session", d.Session)
-	}
-	build := func(label, kind string, labels []string) (Action, bool) {
+	build := func(label, kind string, labels []string, body string) (Action, bool) {
 		if !format.IsValidKind(kind) {
 			return Action{}, false
 		}
@@ -115,17 +94,59 @@ func AnswerActions(o *ObligationFacts, peers map[string]bool) []Action {
 			}
 			argv = append(argv, "--labels", strings.Join(labels, ","))
 		}
-		argv = append(argv, "--body", "-")
+		argv = append(argv, "--body", body)
 		return newAction(label, argv...), true
 	}
 	var out []Action
-	if a, ok := build("complete: answer "+d.Handle, o.CompletionKind, o.CompletionLabels); ok {
+	for _, option := range options {
+		if a, ok := build("answer "+option, o.CompletionKind, o.CompletionLabels, option); ok {
+			out = append(out, a)
+		}
+	}
+	if a, ok := build("complete: answer "+d.Handle, o.CompletionKind, o.CompletionLabels, "-"); ok {
 		out = append(out, a)
 	}
-	if a, ok := build("acknowledge: the card stays", o.AcknowledgeKind, nil); ok {
+	if a, ok := build("acknowledge: the card stays", o.AcknowledgeKind, nil, "-"); ok {
 		out = append(out, a)
 	}
 	return out
+}
+
+// answerRoute is the --project/--session route of an answer to o, or why no
+// command can carry one.
+func answerRoute(o *ObligationFacts, peers map[string]bool) ([]string, string) {
+	if o == nil {
+		return nil, "no reply route is recorded"
+	}
+	d := o.Destination
+	if d == nil {
+		return nil, "the request's reply route is unreadable"
+	}
+	if !validHandle(d.Handle) || !validMessageID(o.OpenerID) || !validThread(o.Thread) {
+		return nil, "the requester's handle, the message id or the thread cannot go in a command"
+	}
+	route := []string{}
+	switch {
+	case d.Project != "":
+		if !peers[d.Project] {
+			return nil, "the requester's project " + clean(d.Project) + " is not a configured peer"
+		}
+		route = append(route, "--project", d.Project)
+		if d.Session != "" {
+			if !validHandle(d.Session) {
+				return nil, "the requester's session name cannot go in a command"
+			}
+			route = append(route, "--session", d.Session)
+		}
+	case d.Session == "":
+		return nil, "the requester is in the base root, which --session cannot name"
+	default:
+		if !validHandle(d.Session) {
+			return nil, "the requester's session name cannot go in a command"
+		}
+		route = append(route, "--session", d.Session)
+	}
+	return route, ""
 }
 
 // MessageAgent builds a send to one agent of a session of this project.
@@ -134,6 +155,16 @@ func MessageAgent(session, handle string) (Action, bool) {
 		return Action{}, false
 	}
 	return newAction("message "+handle, "amq", "send", "--session", session, "--me", reservedHuman, "--to", handle, "--body", "-"), true
+}
+
+// ReadOwnerMail builds the drain of the owner's unread mail in one session,
+// with a limit that covers the unread count. The base root has no session
+// name to route by, so it has no command.
+func ReadOwnerMail(session string, unread int) (Action, bool) {
+	if !validHandle(session) || unread < 1 {
+		return Action{}, false
+	}
+	return newAction("read mail", "amq", "drain", "--me", reservedHuman, "--session", session, "--limit", strconv.Itoa(unread), "--include-body"), true
 }
 
 // ShowThread builds the read-only thread inspection command.
@@ -174,6 +205,18 @@ func ClaimBead(id string, known map[string]string) (Action, bool) {
 	}
 	argv := []string{"bd", "update", id, "--assignee"}
 	return Action{Purpose: ActionContext, Label: "claim bead", Argv: append(argv, userLiteral), Command: Quote(argv) + " " + userLiteral}, true
+}
+
+// BindClaudeList builds the command that binds a Claude task list to this
+// project. A home or list that is empty, holds a control character, or
+// starts with "-" yields no action.
+func BindClaudeList(home, list string) (Action, bool) {
+	for _, v := range []string{home, list} {
+		if v == "" || hasControl(v) || strings.HasPrefix(v, "-") {
+			return Action{}, false
+		}
+	}
+	return newOwnerAction("Bind the Claude task list", "amq-board", "bind-claude-list", "--home", home, "--list", list), true
 }
 
 func newOwnerAction(label string, argv ...string) Action {

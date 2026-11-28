@@ -54,16 +54,31 @@
       showAll.textContent = "Show all " + rows.length + " known next actions";
     }
   }
+  // On compact layouts the primary links scroll sideways; the current one
+  // is kept in view.
+  function showLink(link) {
+    var strip = link.parentElement, box = strip.getBoundingClientRect(), at = link.getBoundingClientRect();
+    if (at.left < box.left || at.right > box.right) { strip.scrollLeft += at.left - box.left; }
+  }
+  // A fragment names a view (#view-inbox) or a record inside one, such as
+  // an Inbox item a Needs you tile links to; a record opens its view.
+  function hashTarget() {
+    var id = "";
+    try { id = decodeURIComponent(window.location.hash.slice(1)); } catch (e) { return null; }
+    var node = id ? document.getElementById(id) : null;
+    return node && !node.matches(".view") && node.closest(".view") ? node : null;
+  }
   function selectView(focus) {
     var requested = window.location.hash.replace(/^#view-/, "");
-    var chosen = views.find(function (view) { return view.dataset.view === requested; });
+    var target = hashTarget();
+    var chosen = target ? target.closest(".view") : views.find(function (view) { return view.dataset.view === requested; });
     if (!chosen) { chosen = views.find(function (view) { return view.dataset.view === (saved.view || "flow"); }) || views[0]; }
     if (!chosen) { return; }
     current = chosen.dataset.view;
     root.setAttribute("data-view", current);
     views.forEach(function (view) { view.hidden = view !== chosen; });
     links.forEach(function (link) {
-      if (link.dataset.viewLink === current) { link.setAttribute("aria-current", "page"); }
+      if (link.dataset.viewLink === current) { link.setAttribute("aria-current", "page"); showLink(link); }
       else { link.removeAttribute("aria-current"); }
     });
     filter(chosen);
@@ -71,7 +86,11 @@
     // One view shows at a time, so a view link opens it from the top with
     // the masthead and navigation in place instead of jumping to its anchor.
     if (requested === current) { window.scrollTo(0, 0); }
-    if (focus) {
+    if (target) {
+      var title = target.querySelector("h2") || target;
+      target.scrollIntoView({block:"start"});
+      title.tabIndex = -1; title.focus({preventScroll:true});
+    } else if (focus) {
       var heading = chosen.querySelector("h1");
       if (heading) { heading.tabIndex = -1; heading.focus({preventScroll:true}); }
     }
@@ -135,15 +154,7 @@
   });
   document.addEventListener("click", function (event) {
     var close = event.target.closest(".sheet-close");
-    if (close) { closeSheet(close.closest(".card-sheet"), true); return; }
-    var opener = event.target.closest("[data-open]");
-    if (!opener) { return; }
-    var target = document.getElementById(opener.getAttribute("data-open"));
-    if (!target) { return; }
-    event.preventDefault();
-    var row = target.closest(".flow-card");
-    if (row) { row.hidden = false; }
-    target.open = true;
+    if (close) { closeSheet(close.closest(".card-sheet"), true); }
   });
 
   var appearance = document.getElementById("appearance");
@@ -163,7 +174,8 @@
 
   function manualCopy(button, command) {
     var row = button.closest(".strip");
-    if (row) { row.querySelector(".item-details").open = true; }
+    var details = row && row.querySelector(".item-details");
+    if (details) { details.open = true; }
     var scope = row || button.closest(".cmd") || button.closest(".sheet");
     var field = scope && Array.prototype.slice.call(scope.querySelectorAll("textarea")).find(function (node) { return node.value === command; });
     button.classList.add("is-failed");
@@ -258,9 +270,13 @@
   }
   var state = document.getElementById("live-state");
   var refresh = document.getElementById("refresh");
-  var update = document.getElementById("apply-update");
   var pending = false;
   var checking = false;
+  // One button refreshes, and applies a newer snapshot once one waits.
+  function setPending(value) {
+    pending = value;
+    refresh.textContent = value ? "Update" : "Refresh";
+  }
   function check() {
     if (checking) { return Promise.resolve(); }
     checking = true;
@@ -271,28 +287,30 @@
       if (typeof model.generated_at !== "string") { throw new Error("invalid snapshot"); }
       var publicationError = (model.sources || []).find(function (source) { return source.name === "board-state" && source.status === "degraded"; });
       if (publicationError) {
-        pending = false; update.hidden = true;
+        setPending(false);
         state.classList.add("is-error"); state.textContent = publicationError.detail;
         return;
       }
-      if (state.classList.contains("is-error")) { state.classList.remove("is-error"); state.textContent = "Published snapshot is available."; }
       if (typeof model.stale !== "boolean" || !Number.isFinite(model.published_age_seconds)) { throw new Error("invalid freshness"); }
       var previousPublication = snapshot.published_at || snapshot.generated_at;
       var newer = model.generation !== snapshot.generation || (model.published_at || model.generated_at) !== previousPublication;
+      state.classList.remove("is-error");
       if (newer) {
-        pending = true; update.hidden = false;
-        state.classList.remove("is-error"); state.textContent = "New snapshot available. Update when you are ready.";
+        setPending(true);
+        state.textContent = "New snapshot available.";
         applyFreshPane(model);
+      } else if (!pending) {
+        // Idle shows no status sentence.
+        state.textContent = "";
       }
     }).catch(function () {
-      pending = false; update.hidden = true;
+      // A failed poll keeps a waiting update: the button still applies it.
       state.classList.add("is-error"); state.textContent = "Refresh failed. Showing the existing snapshot.";
     }).finally(function () { checking = false; });
   }
   function applyUpdate() {
     save(); window.location.reload();
   }
-  update.addEventListener("click", applyUpdate);
   refresh.addEventListener("click", function () {
     if (pending) { applyUpdate(); return; }
     refresh.disabled = true; state.classList.remove("is-error"); state.textContent = "Checking for updates…";
@@ -300,7 +318,7 @@
       if (!response.ok) { throw new Error("refresh failed"); }
       return response.json();
     }).then(function () {
-      state.textContent = "Refresh requested. The current snapshot remains visible.";
+      state.textContent = "";
       return check();
     }).catch(function () {
       state.classList.add("is-error"); state.textContent = "Refresh failed. Showing the existing snapshot.";

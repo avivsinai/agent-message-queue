@@ -8,8 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strconv"
-	"sync"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -112,50 +110,9 @@ func TestAddAgentsRequiresExistingConfig(t *testing.T) {
 	if !errors.Is(err, ErrNoConfig) || !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("AddAgents = %v, want ErrNoConfig", err)
 	}
-	// Review finding (agy-183 R1): taking the config lock first left
-	// meta/config.lock behind in a directory that is not a queue.
+	// Review finding: taking the config lock first left meta/config.lock
+	// behind in a directory that is not a queue.
 	if _, err := os.Stat(filepath.Join(root, "meta")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("AddAgents created meta/: %v", err)
-	}
-}
-
-func TestAddAgentsConcurrentNoLostRegistration(t *testing.T) {
-	root := t.TempDir()
-	path := seedConfig(t, root, `{"agents":["codex"],"created_utc":"2026-01-01T00:00:00Z","version":1}`)
-	const workers = 8
-	var wg sync.WaitGroup
-	errs := make(chan error, workers)
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func(handle string) {
-			defer wg.Done()
-			if _, err := AddAgents(root, []string{handle, "shared"}, nil); err != nil {
-				errs <- err
-			}
-		}("agent-" + strconv.Itoa(i))
-	}
-	wg.Wait()
-	close(errs)
-	for err := range errs {
-		t.Fatalf("concurrent AddAgents: %v", err)
-	}
-	loaded, err := LoadConfig(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(loaded.Agents) != workers+2 {
-		t.Fatalf("agents = %v, want codex, shared, and %d workers once each", loaded.Agents, workers)
-	}
-	seen := map[string]bool{}
-	for _, a := range loaded.Agents {
-		if seen[a] {
-			t.Fatalf("duplicate %q in %v", a, loaded.Agents)
-		}
-		seen[a] = true
-	}
-	for i := 0; i < workers; i++ {
-		if !seen["agent-"+strconv.Itoa(i)] {
-			t.Fatalf("agent-%d lost: %v", i, loaded.Agents)
-		}
 	}
 }

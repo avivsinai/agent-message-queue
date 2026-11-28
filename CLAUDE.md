@@ -141,6 +141,7 @@ internal/hookfile/            Byte-surgery hooks-file editor with a per-file loc
 internal/integration/         Shared adapter support for Symphony and Kanban
 internal/keepalive/           Companion registry, adapters, hooks, and supervision
 internal/launch/              Plans, adapters, trust, leases, bindings, and resume state
+internal/loginservice/        Neutral login-service unit render, manager calls, and log sink (amq-remote, amq-board)
 internal/lock/                Advisory file locks
 internal/notificationattempt/ Durable log of wake notification attempts
 internal/presence/            Agent presence metadata
@@ -344,8 +345,10 @@ AMQ messages to a teammate still require the team leader to relay them.
 ## Testing
 
 Run the tests of the packages you changed, narrowest first. The pre-push hook
-runs `make check`; CI runs the full `make ci` suite. Useful focused commands
-include:
+runs `make check`; CI runs the full `make ci` suite. `make test` runs with a
+scratch HOME. A child fixture takes its write destination from its parent and
+refuses without it, so a test run by hand with a child selector needs no scratch
+HOME. Useful focused commands include:
 
 ```bash
 go test ./internal/fsq -run TestMaildir

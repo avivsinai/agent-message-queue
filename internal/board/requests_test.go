@@ -361,7 +361,7 @@ func TestRequestHeadlineCountsOnlyRequestsToTheOwner(t *testing.T) {
 		t.Error("the HTML Needs you panel lacks the open ruling and its default time")
 	}
 	agents := "1 recent request to agents has no direct reply observed. Agents often answer with a new message instead of a reply, so this is their bookkeeping, not work for you."
-	if !strings.Contains(page, `<p class="request-note">`+agents+`</p>`) || !strings.Contains(text, "== Requests (outside task counts) ==\n  1 recent request to you with no direct reply observed\n    "+agents+"\n") {
+	if !strings.Contains(page, `<p class="request-note">`+agents+`</p>`) || !strings.Contains(text, "== Requests (outside task counts) ==\n  1 item waits on you in the Inbox\n    "+agents+"\n") {
 		t.Errorf("the Requests section does not keep the agents' count apart from the owner's")
 	}
 	row := "ruling · subject ask-owner · from lead in s1 · 1h ago · default at 2026-11-09T10:00:00Z"

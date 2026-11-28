@@ -141,8 +141,8 @@ func Check(m Model, cfg Config, now time.Time) ([]Problem, error) {
 						add(st, ProblemReadyNotBegun, id, fmt.Sprintf("%s is %s and has ready work that is not started: %s", seat, state, title))
 					}
 				case StageInProgress:
-					if !st.LastActivity.IsZero() && !card.StageSince.IsZero() && now.Sub(card.StageSince) > cfg.LivenessWindow {
-						add(st, ProblemNotWorked, id, fmt.Sprintf("%s is in progress for %s, and its owner %s shows no activity for %s (%s)", title, age(now.Sub(card.StageSince)), seat, age(now.Sub(st.LastActivity)), st.StateWhy))
+					if st.workObserved() && !card.StageSince.IsZero() && now.Sub(card.StageSince) > cfg.LivenessWindow {
+						add(st, ProblemNotWorked, id, fmt.Sprintf("%s is in progress for %s, and its owner %s shows no work for %s (%s)", title, age(now.Sub(card.StageSince)), seat, age(now.Sub(st.WorkActivity)), st.StateWhy))
 					}
 				}
 			}

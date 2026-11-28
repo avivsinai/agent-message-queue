@@ -279,7 +279,7 @@ func nativeDoorbellFrame(id string) ([]byte, error) {
 	return raw, nil
 }
 
-func (n *claudeNativeNotifier) Notify(pending map[string]os.FileInfo, observedAt time.Time) (bool, error) {
+func (n *claudeNativeNotifier) Notify(pending map[string]os.FileInfo, observedAt time.Time, checkPeerDispatch func() error) (bool, error) {
 	if n.state.Disabled != "" {
 		return false, fmt.Errorf("native wake disabled until relaunch: %s", n.state.Disabled)
 	}
@@ -367,6 +367,10 @@ func (n *claudeNativeNotifier) Notify(pending map[string]os.FileInfo, observedAt
 		cohort = append(cohort, name)
 	}
 	sort.Strings(cohort)
+	if err := checkPeerDispatch(); err != nil {
+		return false, err
+	}
+	previous := n.state
 	n.state.Socket, n.state.MessageID, n.state.Cohort = registry.Socket, id, cohort
 	// A consumer can drain between the scan and the socket connection.
 	// Its receipt must count even when it precedes this persistence step.
@@ -388,6 +392,17 @@ func (n *claudeNativeNotifier) Notify(pending map[string]os.FileInfo, observedAt
 	closed := make(chan struct{})
 	go func() { defer close(closed); <-ctx.Done(); _ = conn.Close() }()
 	defer func() { cancel(); <-closed }()
+	if err := checkPeerDispatch(); err != nil {
+		// No byte was sent. Restore the pre-dispatch state durably before
+		// releasing the uncertainty fence for a future attempt.
+		unconfirmed := n.state
+		n.state = previous
+		if saveErr := n.save(); saveErr != nil {
+			n.state = unconfirmed
+			return true, fmt.Errorf("restore native attempt after %v: %w", err, saveErr)
+		}
+		return false, err
+	}
 	for len(wire) > 0 {
 		written, err := conn.Write(wire)
 		wire = wire[written:]

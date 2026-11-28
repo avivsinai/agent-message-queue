@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"regexp"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,11 +26,11 @@ const noticeTitle = "AMQ Remote"
 // cannot be read. Such a read ends no grant.
 const grantKeysUnread = "the link's key list cannot be read now"
 
-// handleGrantRequest answers the four grant requests. grant_revoke takes
-// effect here on the reader, before the next frame is read; every disk read
-// and write runs on the dispatcher. grant_info, signed_grant and grant_revoke
-// queue per binding, granted_submit per request id, so a cancel of a granted
-// request runs after its submit.
+// handleGrantRequest answers the grant requests. Both grant_revoke versions
+// take effect here on the reader, before the next frame is read; every disk
+// read and write runs on the dispatcher. grant_info, signed_grant and both
+// grant_revoke versions queue per binding, granted_submit per request id, so
+// a cancel of a granted request runs after its submit.
 func (c *Carrier) handleGrantRequest(sess *session, f Frame) {
 	switch bodySchema(f.Body) {
 	case SchemaGrantInfo:
@@ -48,6 +51,9 @@ func (c *Carrier) handleGrantRequest(sess *session, f Frame) {
 		binding := signedGrantBinding(m)
 		if binding == "" {
 			c.refuse(sess, f.ID, ErrorBody{Code: CodeConsentInvalid, Message: "the signed grant names no binding"})
+			return
+		}
+		if c.refuseRetiringGrant(sess, f, binding, "") {
 			return
 		}
 		c.enqueue(sess, f, "grant:"+binding, func() (any, error) { return c.acceptGrant(m, binding) })
@@ -81,8 +87,85 @@ func (c *Carrier) handleGrantRequest(sess *session, f Frame) {
 		// new generation is written on the dispatcher, then the reply.
 		mark := c.markBindingRevoked(m.Binding)
 		c.enqueue(sess, f, "grant:"+m.Binding, func() (any, error) { return c.revokeGrant(m.Binding, mark) })
+	case SchemaGrantRevokeV2:
+		var m GrantRevokeV2Request
+		if err := decodeStrict(f.Body, SchemaGrantRevokeV2, &m); err != nil || m.Binding == "" || !grantDigestRE.MatchString(m.GrantDigest) {
+			c.refuse(sess, f.ID, ErrorBody{Code: string(protocol.CodeInvalid), Message: "grant_revoke/2 needs one binding and the grant_digest of its accepted grant"})
+			return
+		}
+		if shared := c.shared.Load(); shared == nil || !(*shared)[m.Binding] {
+			c.refuse(sess, f.ID, ErrorBody{Code: string(protocol.CodeUnshared), Message: fmt.Sprintf("binding %q is not shared with this link", m.Binding)})
+			return
+		}
+		// The named grant stops counting once the job has its place, before
+		// any later frame is read; the store decides on the dispatcher, in
+		// order with signed grants, also when the connection ends first.
+		if c.refuseRetiringGrant(sess, f, m.Binding, m.GrantDigest) {
+			return
+		}
+		p := namedRevoke{binding: m.Binding, digest: m.GrantDigest}
+		c.enqueueJob(&job{
+			sess: sess, f: f, key: "grant:" + m.Binding, keep: true,
+			run:   func() (any, error) { return c.revokeNamed(p) },
+			admit: func() error { return c.holdNamed(p, false) },
+		})
 	}
 }
+
+// retireGrantQueues records unfinished grant keys before the next reader
+// starts. Several retired connections can have legacy grant work for the
+// same binding. The last worker for each key releases only its own count.
+func (c *Carrier) retireGrantQueues(d *dispatcher) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for key, queue := range d.queues {
+		if !strings.HasPrefix(key, "grant:") {
+			continue
+		}
+		for _, j := range slices.Backward(queue) {
+			if j.keep {
+				c.retiringGrants[key]++
+				j.onFinish = func() { c.finishRetiringKey(key) }
+				break
+			}
+		}
+	}
+}
+
+func (c *Carrier) finishRetiringKey(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.retiringGrants[key] > 1 {
+		c.retiringGrants[key]--
+	} else {
+		delete(c.retiringGrants, key)
+	}
+}
+
+// A signed acceptance or named revoke cannot pass an earlier connection's
+// unfinished work for the binding. The reader can still serve other keys.
+// A revoke carries a digest; a signed acceptance has no revoke to hold.
+func (c *Carrier) refuseRetiringGrant(sess *session, f Frame, binding, revokeDigest string) bool {
+	c.mu.Lock()
+	pending := c.retiringGrants["grant:"+binding] != 0
+	message := "a previous connection is finishing work for this binding"
+	if pending && revokeDigest != "" {
+		if err := c.holdNamed(namedRevoke{binding, revokeDigest}, true); err != nil {
+			message = err.Error()
+		}
+	}
+	c.mu.Unlock()
+	if pending {
+		c.refuse(sess, f.ID, ErrorBody{Code: string(protocol.CodeBusy), Message: message, RetryAfterMS: busyRetryAfterMS})
+	}
+	return pending
+}
+
+// grantDigestRE is the spelling of a grant's digest: "sha256:" and the hex
+// of the signed document bytes.
+var grantDigestRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 // signedGrantBinding reads the binding a signed grant names, unverified.
 func signedGrantBinding(m SignedGrant) string {
@@ -184,6 +267,9 @@ func (c *Carrier) acceptGrant(m SignedGrant, binding string) (any, error) {
 			return nil, refuse(CodeGrantStale, "binding %q holds another grant; sign again", sg.Binding)
 		}
 		return nil, refuse(e.code, "%s; ask grant_info and sign again", e.why)
+	}
+	if named := c.named.Load(); named != nil && (*named)[namedRevoke{sg.Binding, sg.Digest}].unsettled {
+		return nil, refuse(string(protocol.CodeStorageFull), "the revoke of this grant is unresolved; retry the named revoke")
 	}
 	reply := GrantReply{Grant: GrantAccepted{Digest: sg.Digest, GrantID: sg.GrantID, Binding: sg.Binding, NotAfter: sg.NotAfter}}
 	if st.Stored != nil && st.Stored.Digest == sg.Digest {
@@ -319,6 +405,155 @@ func (c *Carrier) revokeGrant(binding string, mark uint64) (any, error) {
 	return RevokedReply{Revoked: GrantRevoked{Binding: binding, GrantGeneration: gen}}, nil
 }
 
+// namedRevoke is the grant a grant_revoke/2 names: its binding and digest.
+type namedRevoke struct{ binding, digest string }
+
+// namedHold is how revokes hold one named grant. held counts the revokes
+// whose job is queued or running; each job releases its own. unsettled
+// marks a revoke whose decision failed; the next decision of the store for
+// this exact grant settles it. awaitingReplay holds a busy revoke that has
+// no job. An admitted replay takes over that hold in the same publication.
+type namedHold struct {
+	held           int
+	unsettled      bool
+	awaitingReplay bool
+}
+
+// holdNamed holds the grant p names without I/O, within the dispatch bound.
+// Another revoke of a grant already held takes no new place.
+func (c *Carrier) holdNamed(p namedRevoke, awaitingReplay bool) error {
+	c.namedMu.Lock()
+	defer c.namedMu.Unlock()
+	next := map[namedRevoke]namedHold{}
+	if old := c.named.Load(); old != nil {
+		h, known := (*old)[p]
+		if awaitingReplay && h.awaitingReplay {
+			return nil
+		}
+		if !known && len(*old) >= dispatchQueued {
+			return errors.New("the named revoke set is full; no hold was added for this grant")
+		}
+		next = maps.Clone(*old)
+	}
+	h := next[p]
+	h.awaitingReplay = awaitingReplay
+	if !awaitingReplay {
+		h.held++
+	}
+	next[p] = h
+	c.named.Store(&next)
+	return nil
+}
+
+// updateNamed publishes the remaining obligations for p, dropping the entry
+// once the admitted jobs, storage retries and replay hold are all settled.
+func (c *Carrier) updateNamed(p namedRevoke, change func(*namedHold)) {
+	c.namedMu.Lock()
+	defer c.namedMu.Unlock()
+	old := c.named.Load()
+	if old == nil {
+		return
+	}
+	h, ok := (*old)[p]
+	if !ok {
+		return
+	}
+	next := maps.Clone(*old)
+	change(&h)
+	if h == (namedHold{}) {
+		delete(next, p)
+	} else {
+		next[p] = h
+	}
+	c.named.Store(&next)
+}
+
+// namedHeld reports whether a grant_revoke/2 holds the grant with digest of
+// binding. It does no I/O.
+func (c *Carrier) namedHeld(binding, digest string) bool {
+	named := c.named.Load()
+	if named == nil {
+		return false
+	}
+	_, ok := (*named)[namedRevoke{binding: binding, digest: digest}]
+	return ok
+}
+
+// revokeNamed is the job of a grant_revoke/2: the store's decision for the
+// named grant, then the answer. When the decision fails the answer is
+// storage_full and the grant stays held.
+func (c *Carrier) revokeNamed(p namedRevoke) (any, error) {
+	ended, err := c.decideNamed(p, true)
+	if err != nil {
+		return nil, refuse(string(protocol.CodeStorageFull), "the revoke of grant %s of binding %q is not decided: %v; send grant_revoke again", p.digest, p.binding, err)
+	}
+	return RevokedV2Reply{Revoked: GrantRevokedV2{Binding: p.binding, GrantDigest: p.digest, Ended: ended}}, nil
+}
+
+// decideNamed decides a named revoke under gmu: it reads the store, which
+// ends what a check finds ended, then clears the named grant only if the
+// store still holds it, under the store's own lock, and reads the store
+// again into the snapshot. Only then does it release the revoke's hold (own)
+// and settle the grant. Ended is true when this clear removed a grant that
+// had not already ended. On any failure the grant stays held, unsettled. A
+// retry (not own) runs only while the grant is unsettled and no revoke job
+// of it is queued, which would decide in its place.
+func (c *Carrier) decideNamed(p namedRevoke, own bool) (bool, error) {
+	c.gmu.Lock()
+	defer c.gmu.Unlock()
+	if !own {
+		named := c.named.Load()
+		if named == nil {
+			return false, nil
+		}
+		if h, ok := (*named)[p]; !ok || !h.unsettled || h.held > 0 || h.awaitingReplay {
+			return false, nil
+		}
+	}
+	var changed, endedBefore bool
+	_, err := c.readGrantsLocked(p.binding)
+	if err == nil {
+		_, endedBefore = c.endedGrant(p.digest)
+		changed, err = c.cfg.Grants.Revoke(p.binding, p.digest)
+		c.logStore("clear the revoked grant of "+p.binding, err)
+	}
+	if err == nil {
+		_, err = c.readGrantsLocked(p.binding)
+	}
+	c.updateNamed(p, func(h *namedHold) {
+		if own {
+			h.held--
+		}
+		h.unsettled = err != nil
+	})
+	return changed && !endedBefore, err
+}
+
+// readGrantsLocked reads the store into the snapshot, or says it cannot.
+func (c *Carrier) readGrantsLocked(binding string) (Grants, error) {
+	g, read := c.refreshGrantsRead()
+	if !read {
+		return nil, fmt.Errorf("the grants of binding %q cannot be read", binding)
+	}
+	return g, nil
+}
+
+// settleNamedRevokes retries the decision of each named grant whose revoke
+// is unsettled and has no job queued. The carrier's tick runs it, so a
+// failed decision is tried again at every tick until it succeeds;
+// decideNamed checks again under gmu that it is still owed.
+func (c *Carrier) settleNamedRevokes() {
+	named := c.named.Load()
+	if c.cfg.Grants == nil || named == nil {
+		return
+	}
+	for p, h := range *named {
+		if h.unsettled && h.held == 0 && !h.awaitingReplay {
+			_, _ = c.decideNamed(p, false)
+		}
+	}
+}
+
 // markBindingRevoked stops the binding's grant at once, with no I/O: the
 // binding joins the revoked set, copy-on-write, under a new mark, which it
 // returns.
@@ -433,7 +668,31 @@ func (c *Carrier) RefreshGrants() {
 	}
 	c.gmu.Lock()
 	defer c.gmu.Unlock()
-	c.refreshGrantsLocked()
+	g, ok := c.refreshGrantsRead()
+	if ok {
+		c.releaseAbsentReplayHolds(g)
+	}
+}
+
+// A busy revoke of a still-stored grant needs an admitted replay. If the
+// old work finished and the exact grant is absent, there is nothing left to
+// fence. The caller holds gmu across the read and this check. The reader's
+// retirement check and hold publication are ordered with this scan by mu.
+func (c *Carrier) releaseAbsentReplayHolds(g Grants) {
+	named := c.named.Load()
+	if named == nil || len(*named) == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for p, h := range *named {
+		if !h.awaitingReplay || c.retiringGrants["grant:"+p.binding] != 0 {
+			continue
+		}
+		if sg := g[p.binding].Grant; sg == nil || sg.Digest != p.digest {
+			c.updateNamed(p, func(h *namedHold) { h.awaitingReplay = false })
+		}
+	}
 }
 
 // refreshGrantsLocked reads the store, stores the snapshot and returns it.
@@ -447,10 +706,17 @@ func (c *Carrier) RefreshGrants() {
 // revoked, replaced or expired. A key list that could not be read ends no
 // grant.
 func (c *Carrier) refreshGrantsLocked() Grants {
+	g, _ := c.refreshGrantsRead()
+	return g
+}
+
+// refreshGrantsRead is refreshGrantsLocked, and reports whether the store
+// was read.
+func (c *Carrier) refreshGrantsRead() (Grants, bool) {
 	g, ok := c.loadGrantsLocked()
 	if !ok {
 		c.grants.Store(&g)
-		return g
+		return g, false
 	}
 	now, mono := c.cfg.Now(), c.cfg.Mono()
 	var known map[string]time.Duration
@@ -484,7 +750,7 @@ func (c *Carrier) refreshGrantsLocked() Grants {
 	if cleared {
 		if g, ok = c.loadGrantsLocked(); !ok {
 			c.grants.Store(&g)
-			return g
+			return g, false
 		}
 	}
 	c.grants.Store(&g)
@@ -524,7 +790,7 @@ func (c *Carrier) refreshGrantsLocked() Grants {
 			c.grantSeen[d] = sg
 		}
 	}
-	return g
+	return g, true
 }
 
 // loadGrantsLocked reads the store; an unreadable store is no grant and not
@@ -554,14 +820,23 @@ func findGrant(g Grants, targetID, digest string) (GrantRecord, *StoredGrant) {
 }
 
 // grantEnd is "" while the grant sg stored in record r still admits a task
-// under the key list kl: no end is known (grantEndSeen), and kl is the
-// latest read of the key list. Else it is the grant code and why. It reads
-// only snapshots and does no I/O.
+// under the key list kl: no end is known (grantEndSeen), kl is the latest
+// read of the key list, and no grant_revoke/2 holds the grant. Else it is
+// the grant code and why. It reads only snapshots and does no I/O.
 func (c *Carrier) grantEnd(r GrantRecord, sg *StoredGrant, now time.Time, kl keyListNow) (code, why string) {
-	if code, why = c.grantEndSeen(r, sg, now, kl); code == "" && !kl.current {
+	// Read the temporary hold before the permanent end. A reader using an
+	// older grant snapshot must see the end once the decision drops its hold.
+	held := c.namedHeld(sg.Binding, sg.Digest)
+	code, why = c.grantEndSeen(r, sg, now, kl)
+	switch {
+	case code != "":
+		return code, why
+	case !kl.current:
 		return CodeGrantRevoked, grantKeysUnread
+	case held:
+		return CodeGrantRevoked, "a revoke of this grant is in progress"
 	}
-	return code, why
+	return "", ""
 }
 
 // grantEndSeen is the end of a grant: the end a check of this run already

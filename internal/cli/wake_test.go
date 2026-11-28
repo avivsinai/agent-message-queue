@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -15,6 +16,15 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/notificationattempt"
 )
+
+func checkedTerminalWriter(write func(string) error) func(string, func() error) error {
+	return func(text string, check func() error) error {
+		if err := check(); err != nil {
+			return err
+		}
+		return write(text)
+	}
+}
 
 func deliverPartialWakeMessageForTest(t *testing.T, root, me, id string) {
 	t.Helper()
@@ -238,10 +248,10 @@ func TestOwnerBoundNotificationUsesFixedDoorbellAndGuardsEveryChunk(t *testing.T
 					guardCalls++
 					return nil
 				},
-				terminalWrite: func(chunk string) error {
+				terminalWrite: checkedTerminalWriter(func(chunk string) error {
 					writes = append(writes, chunk)
 					return nil
-				},
+				}),
 			}
 
 			dynamic := "session=$(touch /tmp/pwned) subject=\x1b[31m body=untrusted"
@@ -286,10 +296,10 @@ func TestCursorPasteDoorbellSubmitsOnceAfterThePasteSettles(t *testing.T) {
 			guardCalls++
 			return nil
 		},
-		terminalWrite: func(chunk string) error {
+		terminalWrite: checkedTerminalWriter(func(chunk string) error {
 			timeline = append(timeline, "write:"+chunk)
 			return nil
-		},
+		}),
 	}
 	if err := injectNotification(cfg, "dynamic text", false); err != nil {
 		t.Fatal(err)
@@ -436,10 +446,10 @@ func TestInjectNotificationUnsupportedDegradesOnceAndPersistsReason(t *testing.T
 	cfg := &wakeConfig{
 		injectMode:   wakeInjectModeRaw,
 		fallbackWarn: true,
-		terminalWrite: func(string) error {
+		terminalWrite: checkedTerminalWriter(func(string) error {
 			writes++
 			return newWakeInjectorUnsupportedError(syscall.EIO)
-		},
+		}),
 		recordNotifierStatus: func(status, mode, reason string) error {
 			statuses = append(statuses, struct {
 				status string
@@ -614,10 +624,10 @@ func TestNotifyNewMessagesCoalescesAdditionsUntilRetryOrProgress(t *testing.T) {
 		injectMode:     wakeInjectModeRaw,
 		doorbellNow:    func() time.Time { return now },
 		attentionIsTTY: func() bool { return false },
-		terminalWrite: func(text string) error {
+		terminalWrite: checkedTerminalWriter(func(text string) error {
 			injected = append(injected, text)
 			return nil
-		},
+		}),
 	}
 
 	writeMessage("first.md", "first", "first review")
@@ -750,10 +760,10 @@ func TestNotifyNewMessagesReminderUsesSubmitOnlyAfterConfirmedPresentation(t *te
 				wakeOwner:   &wakeOwner{},
 				injectMode:  tc.mode,
 				doorbellNow: func() time.Time { return now },
-				terminalWrite: func(text string) error {
+				terminalWrite: checkedTerminalWriter(func(text string) error {
 					injected.WriteString(text)
 					return nil
-				},
+				}),
 			}
 
 			if err := notifyNewMessages(cfg); err != nil {
@@ -1216,6 +1226,50 @@ func TestWakeHoldRecordsOnlyAttemptedNotifications(t *testing.T) {
 			}
 			if mode == wakeInjectModeNone && attentionWrites != 1 {
 				t.Fatalf("attention writes = %d, want 1", attentionWrites)
+			}
+		})
+	}
+}
+
+// Issue #1660 and its ledger review: a running turn can drain between any
+// two writes. Stop there and record whether the primary submit was written.
+func TestDoorbellDrainStopsRemainingInput(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		drainAfter string
+		writes     []string
+		outcome    string
+	}{
+		{"before submit", coopWakeDoorbell, []string{coopWakeDoorbell}, notificationattempt.StateCancelled},
+		{"before rescue", "\r", []string{coopWakeDoorbell, "\r"}, notificationattempt.OutcomeWritten},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newWakeHoldHarness(t, wakeHoldPolicy{})
+			h.cfg.harness = harness.Claude
+			h.send("trigger", format.PriorityNormal)
+			h.cfg.terminalWrite = checkedTerminalWriter(func(chunk string) error {
+				h.injected = append(h.injected, chunk)
+				if chunk == tc.drainAfter {
+					if got := runDrainJSON(t, h.root, "codex", 1, false); got.Count != 1 {
+						t.Fatalf("drained %d messages, want one", got.Count)
+					}
+					h.deliver("passive.md", "passive", format.PriorityNormal, format.NotifyPassive, nil)
+				}
+				return nil
+			})
+			h.scan(h.cfg)
+			if !slices.Equal(h.injected, tc.writes) {
+				t.Fatalf("terminal writes = %q, want %q", h.injected, tc.writes)
+			}
+			if _, armed := h.cfg.doorbell.nextDeadline(); armed || h.cfg.doorbell.reminderAttempts != 0 {
+				t.Fatal("stale doorbell retained a deadline or spent an input attempt")
+			}
+			attempts, err := notificationattempt.List(h.root, "codex", "trigger")
+			if err != nil || len(attempts) != 1 {
+				t.Fatalf("attempts = %+v, err %v", attempts, err)
+			}
+			if attempts[0].State != tc.outcome {
+				t.Fatalf("ledger outcome = %s, want %s", attempts[0].State, tc.outcome)
 			}
 		})
 	}

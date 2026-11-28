@@ -71,10 +71,10 @@ func TestRunWakeWithLoopSeparatesInheritedAttentionFromDiagnostics(t *testing.T)
 			}
 			cfg.session = "session1"
 			cfg.settings.previewLen = 80
-			cfg.terminalWrite = func(string) error {
+			cfg.terminalWrite = checkedTerminalWriter(func(string) error {
 				inputWrites++
 				return nil
-			}
+			})
 			if err := notifyNewMessages(&cfg); err != nil {
 				t.Fatalf("emit peer notice to inherited attention FD: %v", err)
 			}

@@ -22,6 +22,8 @@ type Ask struct {
 	Opened       time.Time   `json:"opened,omitzero"`
 	ReplyBy      time.Time   `json:"reply_by,omitzero"`
 	NewsBy       time.Time   `json:"news_by,omitzero"`
+	// answer is the route of an ask owed by the owner handle.
+	answer *ObligationFacts
 }
 
 func (cfg Config) obligationCutoff(now time.Time) time.Time {
@@ -55,6 +57,9 @@ func (s Snapshot) projectAsks(cutoff time.Time) (map[string]bool, []Ask) {
 			From: Participant(ob.Requester), Owner: Participant(ob.Owner), Human: human,
 			Opened: ob.Opener.RawTime.UTC(), ReplyBy: due, NewsBy: news, OwnerReplied: ob.OwnerReplied,
 		})
+		if human {
+			asks[len(asks)-1].answer = obligationAnswer(ob)
+		}
 	}
 	slices.SortFunc(asks, func(a, b Ask) int {
 		if a.Human != b.Human {

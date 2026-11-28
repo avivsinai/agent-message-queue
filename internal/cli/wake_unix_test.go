@@ -282,10 +282,10 @@ func TestNotifyNewMessagesForegroundPGRPResumesAtFirstMissingChunk(t *testing.T)
 					}
 					return nil
 				},
-				terminalWrite: func(text string) error {
+				terminalWrite: checkedTerminalWriter(func(text string) error {
 					writes = append(writes, text)
 					return nil
-				},
+				}),
 			}
 
 			err := notifyNewMessages(cfg)
@@ -1518,7 +1518,7 @@ func TestRunWakeLoopRetriesPendingDoorbellWithSubmitOnlyNudge(t *testing.T) {
 			preconditionCheck: func(*wakeConfig) error {
 				return nil
 			},
-			terminalWrite: func(text string) error {
+			terminalWrite: checkedTerminalWriter(func(text string) error {
 				if text == coopWakeDoorbell {
 					doorbellPayloads++
 					if doorbellPayloads == 1 {
@@ -1537,7 +1537,7 @@ func TestRunWakeLoopRetriesPendingDoorbellWithSubmitOnlyNudge(t *testing.T) {
 					preludeLFs++
 				}
 				return nil
-			},
+			}),
 			attentionIsTTY: func() bool { return false },
 			attentionWrite: func(data []byte) (int, error) {
 				attention <- string(data)
@@ -1700,12 +1700,12 @@ func TestRunWakeLoopCoalescesAdditionThenRearmsAfterDrain(t *testing.T) {
 				close(baselineReady)
 				return nil
 			},
-			terminalWrite: func(text string) error {
+			terminalWrite: checkedTerminalWriter(func(text string) error {
 				if strings.Contains(text, coopWakeDoorbell) {
 					doorbells <- struct{}{}
 				}
 				return nil
-			},
+			}),
 			attentionIsTTY: func() bool { return false },
 			onPendingNotify: func() {
 				select {
@@ -1933,7 +1933,7 @@ func TestRunWakeLoopMaintenanceDemotionTransfersDormantDoorbellRetry(t *testing.
 				}
 				return nil
 			},
-			terminalWrite: func(text string) error {
+			terminalWrite: checkedTerminalWriter(func(text string) error {
 				if strings.Contains(text, coopWakeDoorbell) {
 					promptWrites.Add(1)
 				}
@@ -1944,7 +1944,7 @@ func TestRunWakeLoopMaintenanceDemotionTransfersDormantDoorbellRetry(t *testing.
 					initial <- struct{}{}
 				}
 				return nil
-			},
+			}),
 			attentionIsTTY: func() bool { return false },
 			attentionWrite: func(data []byte) (int, error) {
 				select {
@@ -2563,10 +2563,10 @@ func TestRawTIOCSTIRecordsWrittenWithoutAcceptanceClaim(t *testing.T) {
 		root:       root,
 		wakeOwner:  &wakeOwner{},
 		injectMode: wakeInjectModeRaw,
-		terminalWrite: func(chunk string) error {
+		terminalWrite: checkedTerminalWriter(func(chunk string) error {
 			writes = append(writes, chunk)
 			return nil
-		},
+		}),
 	}
 	current := wakeDoorbellTestFiles(t, "pending.md")
 	if err := deliverWithNotificationLedger(cfg, []string{"msg-raw"}, peerWakeNotification("pending message"), false, wakePendingMessages{eligible: current, physical: current}); err != nil {

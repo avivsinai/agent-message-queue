@@ -76,10 +76,10 @@ func TestRunWakeLoopRecoveryProgressStartsFreshDoorbell(t *testing.T) {
 				attempts:    1,
 				nextAttempt: time.Now().Add(time.Hour),
 			},
-			terminalWrite: func(data string) error {
+			terminalWrite: checkedTerminalWriter(func(data string) error {
 				writes <- data
 				return nil
-			},
+			}),
 			attentionIsTTY: func() bool { return false },
 		})
 	}()
@@ -136,10 +136,10 @@ func TestWakeBaselineOnlyInboxClearsInputRecovery(t *testing.T) {
 		inputDelivery:    wakeInputDeliveryState{acceptanceUncertain: true},
 		attentionIsTTY:   func() bool { return false },
 		attentionWrite:   func(data []byte) (int, error) { return len(data), nil },
-		terminalWrite: func(data string) error {
+		terminalWrite: checkedTerminalWriter(func(data string) error {
 			t.Fatalf("baseline mail caused terminal input %q", data)
 			return nil
-		},
+		}),
 	}}
 	defer wake.stopTimers()
 

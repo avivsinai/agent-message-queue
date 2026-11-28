@@ -68,9 +68,9 @@ Source anchors: `wake_target.go` and `wake_owner_storage_unix.go`.
 **Owns:** the audit of one AMQ notification attempt for one message cohort.
 It does not own inbox delivery, provider consumption, terminal ownership, or
 the in-memory doorbell schedule. Schema 2 writes one prepared `attempt` event
-followed by ordered result states: `deferred`, `retried`, `accepted`, or
-`failed`. A deferred/retried sequence keeps the same AttemptID and cohort;
-`accepted` and `failed` are terminal. A later unread notification gets a new
+followed by ordered result states: `deferred`, `retried`, `accepted`,
+`failed`, or `cancelled`. A deferred/retried sequence keeps the same AttemptID and cohort;
+`accepted`, `failed`, and `cancelled` are terminal. A later unread notification gets a new
 AttemptID. Schema 1 prepared/result records remain readable.
 
 **Commit domain:** each event is one O_APPEND JSON line in the single journal,

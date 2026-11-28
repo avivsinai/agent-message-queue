@@ -91,7 +91,7 @@ type coopWaiter struct {
 	// ring rings for the due mail, after the rang record is stored. undo
 	// puts the record back: the ring did not reach the session, so the next
 	// waiter rings again. err is what the waiter returns.
-	ring func() (undo bool, err error)
+	ring func(checkMail func() error) (undo bool, err error)
 }
 
 // claudeWaiter is the waiter of a Claude Code session whose Claude Code
@@ -105,7 +105,12 @@ func claudeWaiter(claudeSession string, parent int, claude launch.HolderIdentity
 			state, _ := launch.InspectHolder(claude)
 			return state == launch.LeaseStale
 		},
-		ring: func() (bool, error) { return false, errCoopWaitRing },
+		ring: func(checkMail func() error) (bool, error) {
+			if err := checkMail(); err != nil {
+				return true, err
+			}
+			return false, errCoopWaitRing
+		},
 	}
 }
 
@@ -206,11 +211,26 @@ func waitCoopMail(ctx context.Context, root, me string, w coopWaiter) error {
 					if err := writeCoopHookState(statePath, nextCoopWaitState(seen.rang, pending, due)); err != nil {
 						return nil
 					}
-					undo, err := w.ring()
+					members := make(map[string]os.FileInfo)
+					dueIDs := coopIDSet(due)
+					for _, msg := range pending {
+						if dueIDs[msg.ID] && !msg.Passive && msg.File != nil {
+							members[msg.File.Name()] = msg.File
+						}
+					}
+					undo, err := w.ring(func() error {
+						return checkDoorbellFiles(fsq.AgentInboxNew(root, me), nil, members)
+					})
 					if undo {
 						undoCoopWaitRing(statePath, seen.rang, before, beforeErr)
 					}
-					return err
+					if !isWakeDispatchRefusal(err) {
+						return err
+					}
+					// A stale ring owns no announcement or debounce. This
+					// waiter still serves the next arrival in the same chat.
+					inbox = coopInbox{}
+					debounce = time.Time{}
 				default:
 					wait = boundWait(wait, next, now)
 				}

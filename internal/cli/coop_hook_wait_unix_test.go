@@ -170,7 +170,7 @@ func TestCoopWaitRingsOnceForNewMail(t *testing.T) {
 		t.Fatal(err)
 	}
 	undone := claudeWaiter(claudeSession, os.Getppid(), launch.HolderIdentity{})
-	undone.ring = func() (bool, error) { return true, nil }
+	undone.ring = func(func() error) (bool, error) { return true, nil }
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 	if err := waitCoopMail(ctx, root, "claude", undone); err != nil {
@@ -308,7 +308,7 @@ func TestCoopWaitLeavesItsDebounceForANewerWaiter(t *testing.T) {
 	}
 	older := claudeWaiter("7c29e148-77eb-47c0-8984-10c13b4700b1", os.Getppid(), launch.HolderIdentity{})
 	rang := false
-	older.ring = func() (bool, error) { rang = true; return false, errCoopWaitRing }
+	older.ring = func(func() error) (bool, error) { rang = true; return false, errCoopWaitRing }
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 	done := make(chan error, 1)

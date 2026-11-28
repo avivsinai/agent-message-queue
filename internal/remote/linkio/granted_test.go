@@ -97,6 +97,21 @@ func (m *memGrants) Clear(binding, digest string) error {
 	return nil
 }
 
+func (m *memGrants) Revoke(binding, digest string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.clearErr != nil {
+		return false, m.clearErr
+	}
+	rec := m.g[binding]
+	if rec.Grant == nil || rec.Grant.Digest != digest {
+		return false, nil
+	}
+	rec.Grant = nil
+	m.g[binding] = rec
+	return true, nil
+}
+
 // goldenFrame is the frame of testdata/link/frames/<file>.
 func goldenFrame(t *testing.T, file string) Frame {
 	t.Helper()
@@ -393,6 +408,27 @@ func TestRevokedKeyEndsTheGrantOfAnotherKey(t *testing.T) {
 	}
 }
 
+// olderSignedGrant is a grant for binding b in generation gen, issued 20 s
+// before now for one hour and signed by key, and its digest.
+func olderSignedGrant(t *testing.T, view *ConsentView, key ConsentKey, b Binding, gen string, now time.Time) (SignedGrant, string) {
+	t.Helper()
+	issued := now.Add(-20 * time.Second)
+	doc, err := jcs.Marshal(GrantDocument{
+		Schema: SchemaGrant, ServerID: view.ServerID, StoreID: view.StoreID,
+		GrantID: "7f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7", Binding: b.Binding, TargetID: b.TargetID,
+		Epoch: b.Epoch, NativeSessionID: b.NativeSessionID, Labels: b.Labels, GrantGeneration: gen,
+		IssuedAt: issued.UTC().Format(time.RFC3339), NotAfter: issued.Add(time.Hour).UTC().Format(time.RFC3339),
+		Input: GrantInput{Busy: "reject", Deliver: "turn", MinEvidence: "submitted"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := SignedGrant(signDoc(t, key, doc))
+	m.Schema = SchemaSignedGrant
+	sum := sha256.Sum256(doc)
+	return m, "sha256:" + hex.EncodeToString(sum[:])
+}
+
 // goldenSignedGrant is the signed grant of the golden frame 44.
 func goldenSignedGrant(t *testing.T) SignedGrant {
 	var m SignedGrant
@@ -587,19 +623,7 @@ func TestEndedGrantIsStaleAfterARestart(t *testing.T) {
 		}
 	}
 	// An older grant: issued 20 s before the golden one, for the same binding.
-	issued := clk.now().Add(-20 * time.Second)
-	doc, err := jcs.Marshal(GrantDocument{
-		Schema: SchemaGrant, ServerID: view.ServerID, StoreID: view.StoreID,
-		GrantID: "7f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7", Binding: b.Binding, TargetID: b.TargetID,
-		Epoch: b.Epoch, NativeSessionID: b.NativeSessionID, Labels: b.Labels, GrantGeneration: gen,
-		IssuedAt: issued.UTC().Format(time.RFC3339), NotAfter: issued.Add(time.Hour).UTC().Format(time.RFC3339),
-		Input: GrantInput{Busy: "reject", Deliver: "turn", MinEvidence: "submitted"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	older := SignedGrant(signDoc(t, key, doc))
-	older.Schema = SchemaSignedGrant
+	older, _ := olderSignedGrant(t, view, key, b, gen, clk.now())
 
 	c := carrier()
 	if _, err := c.acceptGrant(goldenSignedGrant(t), b.Binding); err != nil {
