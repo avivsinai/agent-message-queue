@@ -962,7 +962,11 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext, options: AmqBridgeOption
 	};
 	writeLiveness(b, true);
 	closeOrphanedReceipts(b);
-	const beat = setInterval(() => owns(b) && writeLiveness(b, true), HEARTBEAT_MS);
+	const beat = setInterval(() => {
+		if (!owns(b)) return;
+		writeLiveness(b, true);
+		if (b.doorbell.turn) writeDoorbellTurn(b, b.doorbell.turn, "running");
+	}, HEARTBEAT_MS);
 	const poll = setInterval(() => scanSafely(pi, b), POLL_MS);
 	beat.unref();
 	poll.unref();

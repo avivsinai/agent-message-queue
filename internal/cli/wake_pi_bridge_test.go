@@ -942,6 +942,7 @@ func TestWakePiBridgeClaimedAskHoldsThroughASlowTurn(t *testing.T) {
 	// The second physical message lands mid-turn; the addition pulls the
 	// ladder forward and the next ask covers the grown cohort.
 	h.pending = wakeDoorbellTestFiles(h.t, "pending.md", "second.md")
+	h.cfg.cohortIDs = []string{"m1", "second"}
 	h.advance(3 * time.Second)
 	h.deliver() // publish B
 	if got := len(h.publishedRequests()); got != 1 {
@@ -962,9 +963,46 @@ func TestWakePiBridgeClaimedAskHoldsThroughASlowTurn(t *testing.T) {
 		t.Fatalf("the terminal pasted over the accepted turn: %q", got)
 	}
 
-	// The turn attests its end and drains the mail once; the hold is spent
-	// and nothing types. The unsent draft was never touched.
+	// 03wb: Pi kept running but missed the next ask's deadline. The wake
+	// withdrew it and pasted into the occupied composer.
+	asks := h.publishedRequests()
+	if len(asks) != 1 {
+		t.Fatalf("asks before unanswered deadline = %v, want one", asks)
+	}
+	unanswered := strings.TrimSuffix(asks[0], ".json")
+	ledger := h.ledgerLog()
+	h.advance(3 * time.Second)
+	diagnostic := captureWakeStderr(t, func() {
+		pending := wakePendingMessages{eligible: h.pending, physical: h.pending}
+		if err := deliverWithNotificationLedger(h.cfg, h.cfg.cohortIDs, peerWakeNotification("test message"), false, pending); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if got := h.typedChunks(); len(got) != 0 {
+		t.Fatalf("unanswered ask pasted over the accepted turn: %q", got)
+	}
+	dir := filepath.Join(h.root, "agents", "codex", "extensions", "pi-bridge", "doorbell")
+	if decision, _ := readWakePiBridgeDecision(dir, unanswered); decision != "withdrawn" {
+		t.Fatalf("unanswered ask decision = %q, want withdrawn", decision)
+	}
+	if strings.Count(diagnostic, "pi turn running; doorbell held, nothing typed") != 1 || h.ledgerLog() != ledger {
+		t.Fatalf("withdrawal should log one hold and leave the ledger unchanged: %s", diagnostic)
+	}
+
 	h.writeBridgeTurn(attemptA, "ended")
+	h.advance(3 * time.Second)
+	h.deliver()
+	asks = h.publishedRequests()
+	if len(asks) != 1 {
+		t.Fatalf("asks after the turn ended = %v, want one", asks)
+	}
+	h.bridgeDecision = "claimed"
+	h.respond()
+	h.writeBridgeResult(strings.TrimSuffix(asks[0], ".json"), true)
+	h.deliver()
+	if got := strings.Count(strings.Join(h.ledgerDetailsFor("second"), "\n"), "accepted by pi (message_start)"); got != 1 {
+		t.Fatalf("second message has %d accepted deliveries, want one", got)
+	}
 	h.deliverEmpty()
 	if got := h.typedChunks(); len(got) != 0 {
 		t.Fatalf("the doorbell typed during the turn: %q", got)

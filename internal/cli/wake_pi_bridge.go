@@ -33,8 +33,7 @@ const (
 	// The bridge replaces bridge.liveness every 2 seconds; 5 seconds of age
 	// is the adapter's staleness bound, and the wake uses the same.
 	wakePiBridgeHeartbeatMaxAge = 5 * time.Second
-	// One decision deadline per published attempt: the bridge claims or
-	// refuses at once, so anything past this is no bridge serving.
+	// After the decision deadline the wake may withdraw an unanswered ask.
 	wakePiBridgeDecisionDeadline = 2 * time.Second
 	// The ledger mode label that tells a bridge attempt from a typed one.
 	wakePiBridgeAttemptMode = "pi-bridge"
@@ -67,9 +66,8 @@ type wakePiBridgeDoorbellResult struct {
 	// presented: the bridge claimed the attempt, so the fixed doorbell is on
 	// its way to pi; the wake types nothing and records the presentation.
 	presented bool
-	// busyHold: the bridge refused busy and the cohort's input_max_hold
-	// bound is still open; the wake types nothing and asks again on a later
-	// tick, with a new attempt and a fresh deadline.
+	// busyHold: a busy refusal is within its bound, a claim is held, or
+	// Pi attests that an accepted turn still runs. Recheck on a later tick.
 	busyHold bool
 	// fullLine: the wake ran the bridge and it did not present, so a
 	// terminal fallback this attempt must write the full fixed line, never a
@@ -347,14 +345,20 @@ func (cfg *wakeConfig) reconcilePiBridgeAsk(dir, doorbellDir, pending, cohortKey
 	decision, reason, present := readWakePiBridgeDecisionState(doorbellDir, pending)
 	if !present {
 		// The ask is still open. Past the request deadline the exclusive
-		// create of "withdrawn" is the only authority to type; when it
-		// loses to an existing decision, that decision decides.
+		// create of "withdrawn" settles this attempt. If it loses the
+		// race, honor the bridge's decision.
 		if !wakePiBridgeRequestExpired(filepath.Join(doorbellDir, pending+".json"), now) {
 			return engaged
 		}
 		created, err := writeWakePiBridgeWithdrawn(dir, pending)
 		if created {
 			cfg.piBridgeAttemptsProcessed[pending] = true
+			// Withdrawal settles this ask. The earlier accepted turn can
+			// still own the composer while its bridge misses the deadline.
+			if cfg.piBridgeTurnHoldsBusy(live, liveFresh, now) {
+				_ = writeWakeDiagnostic(cfg, "amq wake: pi turn running; doorbell held, nothing typed\n")
+				return wakePiBridgeDoorbellResult{busyHold: true}
+			}
 			return wakePiBridgeDoorbellResult{
 				fullLine: true,
 				reason:   "pi bridge did not answer the doorbell in time",

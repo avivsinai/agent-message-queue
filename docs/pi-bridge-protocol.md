@@ -568,7 +568,9 @@ the request is for, and a deadline.
   completes; each write also carries `protocol`, `attempt`, `generation`,
   `pid`, and `updatedAt` (RFC 3339). The extension rewrites its own file
   atomically (tmp write renamed over it), so a reader sees one whole
-  phase. The wake reads it for the busy hold: a running attestation
+  phase. While the turn is active, the serving bridge refreshes its running
+  record on each heartbeat, including during a long tool call. The wake reads
+  it for the busy hold: a running attestation
   addressed to the live generation and process holds the bound open, and
   a missing, ended, stale (past the wake's ask hold), or
   foreign-generation attestation releases it.
@@ -583,8 +585,13 @@ the bridge generation, re-reads the mail, and publishes one new attempt
 with a fresh decision deadline. A busy refusal starts the cohort's busy
 bound at the first refusal; the bound is the wake's `input_max_hold`, and
 while it is open the wake types nothing and asks again on a later tick.
-When the bound passes, the terminal path runs, its first write is the full
-fixed line, and a diagnostic line says why the bridge did not present. A
+While fresh liveness and a matching running turn record identify an earlier
+accepted turn, the wake holds even past this bound. The same hold applies
+when the wake wins withdrawal of an unanswered ask. It logs the hold once
+for that withdrawal and rechecks on the busy schedule. The attempt ledger
+gets a row only for an actual presentation or delivery. When the evidence
+expires, the ordinary refusal bound or withdrawn-ask fallback applies. The
+terminal fallback starts with the full fixed line and logs its reason. A
 claim presents the cohort (the cadence and caps advance, the submit-only
 state stays false); the wake records the presentation in its attempt
 ledger and records the acceptance later, when the result file arrives on
