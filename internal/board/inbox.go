@@ -2,6 +2,7 @@ package board
 
 import (
 	"cmp"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -52,12 +53,15 @@ type OwnerMail struct {
 }
 
 // OwnerOldMail is the unread mail older than the obligation age, folded to
-// one line so old mail never shouts.
+// one line so old mail never shouts; Sessions keeps one row per old session
+// with its read command, so nothing the open mail rows gave becomes
+// unreachable.
 type OwnerOldMail struct {
-	Sessions          int     `json:"sessions"`
-	Unread            int     `json:"unread"`
-	OldestAgeSeconds  float64 `json:"oldest_age_seconds"`
-	OldestSessionList string  `json:"oldest_sessions"`
+	Sessions          int         `json:"sessions"`
+	Unread            int         `json:"unread"`
+	OldestAgeSeconds  float64     `json:"oldest_age_seconds"`
+	OldestSessionList string      `json:"oldest_sessions"`
+	Rows              []OwnerMail `json:"rows,omitempty"`
 }
 
 // Inbox is the owner's queue: items, blocking first, then oldest first; then
@@ -77,14 +81,9 @@ type Inbox struct {
 // rule send applies; an invalid or absent decision gives a plain item.
 func buildInbox(m *Model, messages map[string]Message, sessionPaths map[string]string, peers map[string]bool, cfg Config) {
 	inbox := Inbox{Items: []OwnerItem{}}
-	seenQuestions := map[string]bool{}
-	for _, a := range m.Asks {
-		if !a.Human || messages == nil {
-			continue
-		}
-		if bead, ok := questionBead(messages[a.Key]); ok {
-			seenQuestions[bead] = true
-		}
+	seenQuestions := m.SeenQuestions
+	if seenQuestions == nil {
+		seenQuestions = map[string]bool{}
 	}
 	for _, col := range m.Columns {
 		if col.ID != ColumnWaiting {
@@ -153,7 +152,10 @@ func buildInbox(m *Model, messages map[string]Message, sessionPaths map[string]s
 		var old []OwnerMail
 		kept := inbox.Mail[:0]
 		for _, mail := range inbox.Mail {
-			if mail.OldestAgeSeconds >= maxSeconds {
+			// The same boundary as the ask cutoff: mail whose oldest
+			// message is past the obligation age folds (a zero cutoff
+			// folds nothing).
+			if maxSeconds > 0 && mail.OldestAgeSeconds > maxSeconds {
 				old = append(old, mail)
 			} else {
 				kept = append(kept, mail)
@@ -161,7 +163,7 @@ func buildInbox(m *Model, messages map[string]Message, sessionPaths map[string]s
 		}
 		inbox.Mail = kept
 		if len(old) > 0 {
-			om := OwnerOldMail{}
+			om := OwnerOldMail{Rows: old}
 			var names []string
 			for _, mail := range old {
 				om.Sessions++
@@ -180,49 +182,62 @@ func buildInbox(m *Model, messages map[string]Message, sessionPaths map[string]s
 	m.Inbox = inbox
 }
 
-// obligationMaxAgeSeconds is the mail split age in seconds: the configured
-// obligation age, else the default. An unparsable value selects the default,
-// as the ask cutoff does.
+// obligationMaxAgeSeconds is the mail split age in seconds: the same
+// obligation rule the ask cutoff applies, so the two rules cannot differ in
+// unit, boundary or meaning. A zero or unparsable value means expiry is
+// disabled and nothing folds.
 func obligationMaxAgeSeconds(cfg Config) float64 {
-	age := thread.DefaultObligationMaxAge
+	maxAge := thread.DefaultObligationMaxAge
 	if cfg.ObligationMaxAge != "" {
-		if d, err := ParseDuration(cfg.ObligationMaxAge); err == nil && d > 0 {
-			age = time.Duration(d) * time.Second
+		if age, err := ParseDuration(cfg.ObligationMaxAge); err == nil {
+			maxAge = age
 		}
 	}
-	return age.Seconds()
+	return maxAge.Seconds()
 }
 
 // obligationMaxAgeString is the mail split age as a duration string, for the
-// JSON model and the page note.
+// JSON model and the page note; empty when expiry is disabled.
 func obligationMaxAgeString(cfg Config) string {
-	return (time.Duration(obligationMaxAgeSeconds(cfg)) * time.Second).String()
+	if d := time.Duration(obligationMaxAgeSeconds(cfg) * float64(time.Second)); d > 0 {
+		return d.String()
+	}
+	return ""
 }
 
 // forgeItem is an unclaimed forge card flagged Needs you as an owner item: a
 // pull request that asks for the owner's review is the owner's work even
-// though no task claims it. Its title reads "Review #N" and its link is the
-// pull request's web URL, so the owner opens it in one step.
+// though no task claims it. Its title reads "Review #N: <the PR title>", its
+// age starts at the pull request's opened time, and its link is the pull
+// request's web URL, so the owner opens it in one step. A link that is not
+// https is refused: the row then has no link and Details says why.
 func forgeItem(c Card) OwnerItem {
-	it := OwnerItem{ID: c.ID, Kind: "review_request", Title: c.Title, Summary: c.Summary, Since: c.Reason.Since}
+	it := OwnerItem{ID: c.ID, Kind: "review_request", Title: c.Title, Summary: c.Summary, Since: c.OpenedAt}
+	if it.Since.IsZero() {
+		it.Since = c.Reason.Since
+	}
 	for _, ref := range c.Refs {
 		if ref.Kind != RefForge {
 			continue
 		}
 		if _, n, ok := strings.Cut(ref.ID, "#"); ok {
-			it.Title = "Review #" + n
+			it.Title = "Review #" + n + ": " + c.Title
 		}
 	}
 	for _, i := range c.Items {
 		for _, e := range i.Evidence {
 			if e.Field == "type" && e.Value == ForgePullRequest && e.Text != "" {
-				it.Title = "Review " + strings.TrimPrefix(e.Text, "PR ")
+				it.Title = "Review " + strings.TrimPrefix(e.Text, "PR ") + ": " + i.Title
 			}
 			if e.Field == FieldSummary && it.Summary == "" {
 				it.Summary = Sentence(e.Text)
 			}
 			if e.URL != "" && it.Link == "" {
-				it.Link = e.URL
+				if u, err := url.Parse(e.URL); err == nil && u.Scheme == "https" {
+					it.Link = e.URL
+				} else {
+					it.NoAnswer = "the pull request link is not https: " + e.URL
+				}
 			}
 		}
 	}
@@ -243,16 +258,25 @@ func cardItem(c Card, peers map[string]bool, seenQuestions map[string]bool) Owne
 			break
 		}
 	}
-	if it.Bead != "" && seenQuestions[it.Bead] {
+	if decisionJoined(c, seenQuestions) {
 		// A question with context.bead names this task; the question's row
 		// carries the decision, so the task folds into it.
 		it.Kind = "hidden"
 		return it
 	}
 	if isDecisionItem(c) {
-		it.Kind = "decision"
+		// The row keeps its kind and its show command: the facts are the
+		// added fields, not a new kind. No answer button — the options have
+		// not been sent yet.
 		it.Summary = "The options have not been sent yet."
 		it.NoAnswer = "no question carries this decision's options"
+		for _, a := range c.Actions {
+			if a.Label == "show bead" || a.Label == "show thread" {
+				read := a
+				it.Read = &read
+				break
+			}
+		}
 		return it
 	}
 	for _, i := range c.Items {
@@ -278,6 +302,32 @@ func cardItem(c Card, peers map[string]bool, seenQuestions map[string]bool) Owne
 	return it
 }
 
+// seenQuestionBeads collects the bead ids open questions name in
+// context.bead, the shared record of which decisions a question carries.
+func seenQuestionBeads(messages map[string]Message) map[string]bool {
+	seen := map[string]bool{}
+	if messages == nil {
+		return seen
+	}
+	for _, a := range humanAsks(messages) {
+		if bead, ok := questionBead(a); ok {
+			seen[bead] = true
+		}
+	}
+	return seen
+}
+
+// humanAsks lists the messages that are open questions to the owner handle.
+func humanAsks(messages map[string]Message) []Message {
+	var out []Message
+	for _, msg := range messages {
+		if msg.Kind == "question" && len(msg.To) == 1 && msg.To[0] == reservedHuman {
+			out = append(out, msg)
+		}
+	}
+	return out
+}
+
 // questionBead reads context.bead of a question: the task a question asks
 // about, when it names one. The value must be shaped like a bead id; any
 // other text never joins a task.
@@ -299,6 +349,29 @@ func isDecisionItem(c Card) bool {
 		}
 	}
 	return false
+}
+
+// decisionJoined says an open question with context.bead names the task, so
+// the question's row carries the decision.
+func decisionJoined(c Card, seenQuestions map[string]bool) bool {
+	return cardBead(c) != "" && seenQuestions[cardBead(c)]
+}
+
+// decisionNeedsOptions is the one predicate for "this decision task is named
+// by an open question". buildInbox folds the task into the question's row;
+// Check does not raise decision_without_options for it.
+func decisionNeedsOptions(c Card, seenQuestions map[string]bool) bool {
+	return isDecisionItem(c) && !seenQuestions[cardBead(c)]
+}
+
+// cardBead is the bead id a card stands for, or "".
+func cardBead(c Card) string {
+	for _, ref := range c.Refs {
+		if ref.Kind == RefBead {
+			return ref.ID
+		}
+	}
+	return ""
 }
 
 // answerItem is the answer commands of a request, or why it has none.

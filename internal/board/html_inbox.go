@@ -25,10 +25,18 @@ type pageInbox struct {
 	shown map[string]bool
 }
 
-// pageOldMail is the folded line for unread mail older than the split age.
+// pageOldMail is the folded line for unread mail older than the split age;
+// Rows holds one row per old session with its read command.
 type pageOldMail struct {
 	Sessions, Unread int
 	Oldest           string
+	Rows             []pageOldMailRow
+}
+
+// pageOldMailRow is one old session's folded mail line.
+type pageOldMailRow struct {
+	Session, Oldest string
+	Read            *Action
 }
 
 type pageInboxItem struct {
@@ -100,11 +108,16 @@ func buildInboxPage(inbox Inbox, now time.Time) pageInbox {
 		p.Mail = append(p.Mail, pm)
 	}
 	if inbox.OldMail != nil {
-		p.OldMail = &pageOldMail{
+		om := &pageOldMail{
 			Sessions: inbox.OldMail.Sessions,
 			Unread:   inbox.OldMail.Unread,
 			Oldest:   age(seconds(inbox.OldMail.OldestAgeSeconds)),
 		}
+		for _, mail := range inbox.OldMail.Rows {
+			row := pageOldMailRow{Session: clean(mail.Session), Oldest: age(seconds(mail.OldestAgeSeconds)), Read: mail.Read}
+			om.Rows = append(om.Rows, row)
+		}
+		p.OldMail = om
 	}
 	p.MaxAge = inbox.MaxAge
 	return p

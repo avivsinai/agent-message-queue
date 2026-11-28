@@ -69,6 +69,27 @@ type Problem struct {
 	Text     string     `json:"text"`
 }
 
+// decisionOwnerItem says a decision task is the owner's to make: a human
+// assignee, or no assignee at all. An agent-owned decision is that agent's
+// work.
+func decisionOwnerItem(c Card) bool {
+	if len(c.Owners) == 0 {
+		return true
+	}
+	for _, o := range c.Owners {
+		if o.Kind == OwnerHuman {
+			return true
+		}
+	}
+	return false
+}
+
+// seenDecisionQuestions collects the bead ids open questions name in
+// context.bead; Check has no message map, so the model's asks carry it.
+func seenDecisionQuestions(m Model) map[string]bool {
+	return m.SeenQuestions
+}
+
 // Check lists the floor problems of a projected model. It is pure.
 func Check(m Model, cfg Config, now time.Time) ([]Problem, error) {
 	if err := CheckFreshness(Snapshot{PublishedAt: m.PublishedAt}, cfg, now); err != nil {
@@ -182,7 +203,12 @@ func Check(m Model, cfg Config, now time.Time) ([]Problem, error) {
 			continue
 		}
 		for _, card := range col.Cards {
-			if !isDecisionItem(card) {
+			// One predicate with the Inbox fold: a question that names the
+			// task carries the decision, so there is nothing to raise. The
+			// problem is a decision the owner must make: only an owner item
+			// (human-assigned, or no assignee) qualifies; a decision an
+			// agent owns is that agent's work.
+			if !decisionOwnerItem(card) || !decisionNeedsOptions(card, seenDecisionQuestions(m)) {
 				continue
 			}
 			handle, session := "", ""

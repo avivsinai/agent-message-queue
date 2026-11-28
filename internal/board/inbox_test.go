@@ -93,7 +93,7 @@ func TestInboxCountsAFlaggedPullRequestTheSameAsTheHeadline(t *testing.T) {
 		t.Fatalf("inbox items = %+v, want the flagged PR", m.Inbox.Items)
 	}
 	it := m.Inbox.Items[0]
-	if it.Kind != "review_request" || it.Title != "Review #1664" || it.Link != "https://github.com/acme/app/pull/1664" {
+	if it.Kind != "review_request" || it.Title != "Review #1664: fix(wake): cancel a peer doorbell" || it.Link != "https://github.com/acme/app/pull/1664" || it.Since.IsZero() {
 		t.Fatalf("PR item = %+v", it)
 	}
 	headline := needsYou(m).count
@@ -134,8 +134,10 @@ func TestInboxDecisionWithoutOptionsAndQuestionFold(t *testing.T) {
 			s := requestSnapshot()
 			ref, _ := Bead("demo-9")
 			alias := "beads:/work/.beads:demo-9"
+			// Owner items only: an unassigned decision is the owner's to
+			// make (review point 10).
 			fact := Item{Source: "beads", Namespace: "/work/.beads", Ref: ref, Title: "demo-9", State: StateNeedsHuman, Structural: true,
-				Owner:    Owner{Kind: OwnerAgent, Handle: "claude"},
+				Owner:    Owner{Kind: OwnerNone},
 				Reason:   Reason{Field: "issue_type", Text: "decision waits on you", Since: now.Add(-time.Hour)},
 				Evidence: []Evidence{{Field: "issue_type", Value: "decision"}}}
 			s.Tasks["task-decision"] = Task{ID: "task-decision", Title: "demo-9", Authority: alias, Aliases: []string{alias}}
@@ -148,23 +150,23 @@ func TestInboxDecisionWithoutOptionsAndQuestionFold(t *testing.T) {
 				s.Messages[ask.Key] = ask
 			}
 			m := s.Project(DefaultConfig(), now, "test")
+			m.PublishedAt = now
+			m.Stale = false
 			if len(m.Inbox.Items) != tc.items {
 				t.Fatalf("inbox items = %+v, want %d", m.Inbox.Items, tc.items)
 			}
 			problems, err := Check(m, DefaultConfig(), now)
-			if err != nil && tc.wantProblems == 0 && !strings.Contains(err.Error(), "no published snapshot") {
+			if err != nil {
 				t.Fatal(err)
 			}
-			if err == nil {
-				withoutOptions := 0
-				for _, p := range problems {
-					if p.Kind == ProblemDecisionWithoutOptions {
-						withoutOptions++
-					}
+			withoutOptions := 0
+			for _, p := range problems {
+				if p.Kind == ProblemDecisionWithoutOptions {
+					withoutOptions++
 				}
-				if withoutOptions != tc.wantProblems {
-					t.Fatalf("decision_without_options problems = %d, want %d (%+v)", withoutOptions, tc.wantProblems, problems)
-				}
+			}
+			if withoutOptions != tc.wantProblems {
+				t.Fatalf("decision_without_options problems = %d, want %d (%+v)", withoutOptions, tc.wantProblems, problems)
 			}
 			if tc.wantSummary != "" {
 				var found bool
@@ -214,5 +216,75 @@ func TestInboxMailSplitsAtObligationAge(t *testing.T) {
 	}
 	if strings.Contains(out, "mail: s2") || strings.Contains(out, "mail: s3") {
 		t.Errorf("old sessions still have their own mail lines:\n%s", out)
+	}
+}
+
+// Review 1500a966 point 1: the mail split re-parsed obligation_max_age as
+// seconds-of-seconds, so "1h" folded nothing and printed an absurd max age.
+// The split uses the ask cutoff's rule exactly: "1h" folds 3601 s, keeps
+// 3599 s, and "0" (expiry disabled) folds nothing with no max-age line.
+func TestInboxMailSplitUsesTheObligationRuleUnits(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ObligationMaxAge = "1h"
+	s := requestSnapshot()
+	s.Input.Results[0].Result.AMQ.Gates = []Gate{
+		{Session: "s1", OpenCount: 2, OldestAgeSeconds: 3599},
+		{Session: "s2", OpenCount: 2, OldestAgeSeconds: 3601},
+	}
+	in := s.Project(cfg, requestNow, "test").Inbox
+	if len(in.Mail) != 1 || in.Mail[0].Session != "s1" {
+		t.Fatalf("mail rows = %+v, want only s1 (3599s)", in.Mail)
+	}
+	if in.OldMail == nil || in.OldMail.Sessions != 1 || in.OldMail.Unread != 2 {
+		t.Fatalf("old mail = %+v, want s2 folded", in.OldMail)
+	}
+	if in.MaxAge != "1h0m0s" {
+		t.Fatalf("max age = %q, want 1h0m0s", in.MaxAge)
+	}
+	if len(in.OldMail.Rows) != 1 || in.OldMail.Rows[0].Session != "s2" || in.OldMail.Rows[0].Read == nil {
+		t.Fatalf("old mail rows = %+v, want s2 with its read command", in.OldMail.Rows)
+	}
+	page := buildInboxPage(in, requestNow)
+	if page.OldMail == nil || len(page.OldMail.Rows) != 1 || page.OldMail.Rows[0].Read == nil {
+		t.Fatalf("page old mail rows = %+v, want s2 with its read command", page.OldMail)
+	}
+	cfg.ObligationMaxAge = "0"
+	in = requestSnapshot().Project(cfg, requestNow, "test").Inbox
+	in.Mail = []OwnerMail{{Session: "s2", Unread: 2, OldestAgeSeconds: 127 * 24 * 3600}}
+	// A zero cutoff disables expiry: nothing folds, nothing to show.
+	if in.MaxAge != "" {
+		t.Fatalf("max age for \"0\" = %q, want empty", in.MaxAge)
+	}
+}
+
+// Review 1500a966 point 3: the review row was "Review #1664" with no age,
+// and the Flow attention line's oldest was empty. The row carries the PR's
+// title and its opened time.
+func TestInboxReviewRowCarriesTitleAndAge(t *testing.T) {
+	now := requestNow
+	ref, _ := GitHubRepoRef("acme/app", 1664)
+	created := now.Add(-15 * time.Hour)
+	pr := Item{Ref: ref, Title: "fix(wake): cancel a peer doorbell", State: StateNeedsHuman,
+		WaitsOn: []Owner{{Kind: OwnerHuman, Display: "owner"}},
+		Evidence: []Evidence{
+			{Field: "type", Value: ForgePullRequest, Text: "PR #1664", URL: "https://github.com/acme/app/pull/1664"},
+			{Field: "createdAt", At: created},
+		}}
+	s := requestSnapshot()
+	s.Input.Results = append(s.Input.Results, NamedResult{Name: "github", Result: Result{Status: StatusOK, ObservedAt: now, Items: []Item{pr}}})
+	m := s.Project(DefaultConfig(), now, "test")
+	if len(m.Inbox.Items) != 1 {
+		t.Fatalf("inbox items = %+v", m.Inbox.Items)
+	}
+	it := m.Inbox.Items[0]
+	if it.Title != "Review #1664: fix(wake): cancel a peer doorbell" {
+		t.Fatalf("title = %q, want the PR's title after the number", it.Title)
+	}
+	if !it.Since.Equal(created) {
+		t.Fatalf("since = %v, want the PR's opened time %v", it.Since, created)
+	}
+	page := buildInboxPage(m.Inbox, now)
+	if len(page.Items) != 1 || page.Items[0].Age == "" {
+		t.Fatalf("the review row has no age: %+v", page.Items)
 	}
 }

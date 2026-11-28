@@ -184,6 +184,9 @@ func writeInbox(b *strings.Builder, inbox Inbox, now time.Time) {
 		}
 		fmt.Fprintf(b, "  %s\n", line)
 	}
+	if om := inbox.OldMail; om != nil {
+		fmt.Fprintf(b, "  mail older than the obligation age: %d unread in %d sessions, oldest %s\n", om.Unread, om.Sessions, age(seconds(om.OldestAgeSeconds)))
+	}
 }
 
 func optionLetter(i int) string { return string(rune('A' + i)) }

@@ -62,6 +62,9 @@ type Model struct {
 	Config              Config `json:"-"`
 	// Asks are the open human obligations and timed agent obligations.
 	Asks []Ask `json:"asks"`
+	// SeenQuestions holds the bead ids open questions name in context.bead;
+	// the Inbox fold and the decision_without_options rule share it.
+	SeenQuestions map[string]bool `json:"-"`
 	// Inbox is what waits on the owner; Needs you counts its items.
 	Inbox Inbox `json:"inbox"`
 	// Requests are the recorded request messages with their observations
@@ -291,6 +294,7 @@ func Build(in Input) Model {
 
 	m.Roster = buildRoster(amqCtx, roster, items, in.Config)
 	m.Next = selectNext(m.Columns)
+	m.SeenQuestions = seenQuestionBeads(nil)
 	buildInbox(&m, nil, sessionPaths, peers, in.Config)
 	return m
 }

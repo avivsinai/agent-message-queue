@@ -73,7 +73,9 @@
       {{with .Read}}<div class="item-action"><button type="button" class="copy primary-copy" data-command="{{.Command}}">Copy read command</button></div>
       <details class="item-details"><summary>Details</summary><div class="detail-content">{{template "cmd" .}}</div></details>{{end}}
     </article>{{end}}
-    {{if .OldMail}}<p class="request-note old-mail">{{.OldMail.Unread}} older unread {{if eq .OldMail.Unread 1}}message{{else}}messages{{end}} in {{.OldMail.Sessions}} {{if eq .OldMail.Sessions 1}}session{{else}}sessions{{end}}, oldest {{.OldMail.Oldest}}. ▸ Show</p>{{end}}
+    {{if .OldMail}}<details class="item-details old-mail"><summary>{{.OldMail.Unread}} older unread {{if eq .OldMail.Unread 1}}message{{else}}messages{{end}} in {{.OldMail.Sessions}} {{if eq .OldMail.Sessions 1}}session{{else}}sessions{{end}}, oldest {{.OldMail.Oldest}}</summary><div class="detail-content">{{range .OldMail.Rows}}
+      <article class="strip mail-row"><div class="item-main"><h3 class="title">{{.Session}}</h3><div class="item-meta"><span>{{.Unread}} unread, oldest {{.Oldest}}</span></div></div>{{with .Read}}<div class="item-action"><button type="button" class="copy primary-copy" data-command="{{.Command}}">Copy read command</button></div>{{end}}</article>{{end}}
+      </div></details>{{end}}
     </div>
   </section>{{end}}
 </section>
@@ -82,7 +84,7 @@
 <section class="view view-flow" id="view-flow" data-view="flow" aria-labelledby="heading-flow">
   <div class="view-heading"><h1 id="heading-flow">Flow</h1></div>
   <section class="attention" aria-labelledby="needs-you">
-    <h2 class="attention-head" id="needs-you">{{if .Attention.Count}}<a class="attention-line" href="#{{.Attention.InboxLink}}"><span class="flag flag-you"><span class="mark mark-flag" aria-hidden="true"></span>{{.Attention.Count}} {{if eq .Attention.Count 1}}thing waits{{else}}things wait{{end}} on you in the Inbox</a>{{if .Attention.Oldest}} <span class="attention-age">oldest {{.Attention.Oldest}}</span>{{end}} <span class="attention-go" aria-hidden="true">→</span>{{else}}<span class="attention-none">Nothing waits on you.</span>{{end}}</h2>
+    <h2 class="attention-head" id="needs-you">{{if .Attention.Count}}<a class="attention-line" href="#{{.Attention.InboxLink}}"><span class="flag flag-you"><span class="mark mark-flag" aria-hidden="true"></span>{{.Attention.Count}} {{if eq .Attention.Count 1}}thing waits{{else}}things wait{{end}} on you in the Inbox</span></a>{{if .Attention.Oldest}} <span class="attention-age">oldest {{.Attention.Oldest}}</span>{{end}} <span class="attention-go" aria-hidden="true">→</span>{{else}}<span class="attention-none">Nothing waits on you.</span>{{end}}</h2>
   </section>
   {{template "coverage" .Coverage}}
   <div class="flow-tools">

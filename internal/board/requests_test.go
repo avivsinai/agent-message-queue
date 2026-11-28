@@ -358,12 +358,17 @@ func TestRequestHeadlineCountsOnlyRequestsToTheOwner(t *testing.T) {
 	m := requestSnapshot(toOwner, toAgent).Project(DefaultConfig(), requestNow, "test")
 	text, page := renderFaces(t, m)
 	// The HTML attention line counts the Inbox item; the Inbox row carries
-	// the ruling and its default time on both faces.
+	// the ruling label and its default time (old format: "ruling · subject
+	// ask-owner · from lead in s1 · default at 2026-11-09T10:00:00Z"; the
+	// row moved into the Inbox and the clock reads "reply by").
 	if !strings.Contains(page, "1 thing waits on you in the Inbox") {
 		t.Error("the HTML attention line lacks the counted open ruling")
 	}
-	if !strings.Contains(text, "subject ask-owner") || !strings.Contains(text, "reply by 2026-11-09T10:00:00Z") {
+	if !strings.Contains(text, "subject ask-owner · from lead in s1 · 1h · reply by 2026-11-09T10:00:00Z") {
 		t.Errorf("the Inbox row does not show its ruling and clock:\n%s", text)
+	}
+	if !strings.Contains(text, "    subject ask-owner · from lead in s1 · 27d · reply by 2026-11-09T10:00:00Z") {
+		t.Errorf("the Needs you section does not repeat the ruling with its clock:\n%s", text)
 	}
 	agents := "1 recent request to agents has no direct reply observed. Agents often answer with a new message instead of a reply, so this is their bookkeeping, not work for you."
 	if !strings.Contains(page, `<p class="request-note">`+agents+`</p>`) || !strings.Contains(text, "== Requests (outside task counts) ==\n  1 item waits on you in the Inbox\n    "+agents+"\n") {
@@ -397,10 +402,14 @@ func TestOwnerProgressKeepsQuestionInNeedsYou(t *testing.T) {
 	progress := requestMessage("progress", "status", "work", reservedHuman, []string{"lead"}, "s1", requestNow, q.ID)
 	m := requestSnapshot(q, progress).Project(DefaultConfig(), requestNow, "test")
 	// The attention line links to the Inbox; the Inbox holds the question
-	// row and the count both faces read is the Inbox's item count.
+	// row (old format: "question · subject pending · from lead in s1 · no
+	// default") and the count both faces read is the Inbox's item count.
 	text, html := renderFaces(t, m)
-	if !strings.Contains(text, "subject pending · from lead in s1") {
+	if !strings.Contains(text, "== Inbox ==") || !strings.Contains(text, "subject pending · from lead in s1 · 1h") {
 		t.Errorf("open owner question missing from the Inbox rows:\n%s", text)
+	}
+	if !strings.Contains(text, "== Needs you (1) ==") || !strings.Contains(text, "    subject pending · from lead in s1 · 27d") {
+		t.Errorf("the Needs you section does not keep the open question:\n%s", text)
 	}
 	if !strings.Contains(html, `1 thing waits on you in the Inbox`) {
 		t.Errorf("attention line missing:\n%s", cutNeedsYou(html))
