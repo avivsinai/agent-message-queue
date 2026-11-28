@@ -448,6 +448,9 @@ func runSendStep(args []string, afterBodyRead func(), deliver func(outgoingMessa
 	if err != nil {
 		return err
 	}
+	if _, _, err := format.ParseDecision(context); err != nil {
+		return UsageError("%v", err)
+	}
 
 	// Detect whether sender is inside a session (needed for reply_to and thread IDs).
 	senderInSession := sourceSession != "" || classifyRoot(root) != ""

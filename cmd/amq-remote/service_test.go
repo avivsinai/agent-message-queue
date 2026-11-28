@@ -8,14 +8,22 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	neutral "github.com/avivsinai/agent-message-queue/internal/loginservice"
 	"github.com/avivsinai/agent-message-queue/internal/remote/loginservice"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
+
+// testLaunchdTarget is the launchd target amq-remote's service uses, as
+// `launchctl print` names it.
+func testLaunchdTarget() string {
+	return "gui/" + strconv.Itoa(os.Getuid()) + "/io.github.avivsinai.amq-remote"
+}
 
 // serviceSandbox gives a test a temporary HOME, an installed-looking
 // amq-remote outside the temporary directory, and a service manager that
@@ -38,26 +46,28 @@ func serviceSandbox(t *testing.T) *[]string {
 	}
 	t.Setenv("PATH", filepath.Dir(exe)+string(os.PathListSeparator)+os.Getenv("PATH"))
 	calls := &[]string{}
-	savedRun, savedRunOutput, savedExe := serviceRun, serviceRunOutput, serviceExecutable
-	t.Cleanup(func() { serviceRun, serviceRunOutput, serviceExecutable = savedRun, savedRunOutput, savedExe })
+	savedRun, savedRunOutput, savedExe := neutral.Run, neutral.RunOutput, serviceExecutable
+	t.Cleanup(func() {
+		neutral.Run, neutral.RunOutput, serviceExecutable = savedRun, savedRunOutput, savedExe
+	})
 	serviceExecutable = func() (string, error) { return exe, nil }
-	// TestMain installs a refusing serviceRun guard; restore the delegating
+	// TestMain installs a refusing Run guard; restore the delegating
 	// default so every service manager call flows through the recorded
-	// serviceRunOutput stub below.
-	serviceRun = func(name string, args ...string) error {
-		_, err := serviceRunOutput(name, args...)
+	// RunOutput stub below.
+	neutral.Run = func(name string, args ...string) error {
+		_, err := neutral.RunOutput(name, args...)
 		return err
 	}
-	savedSleep, savedNow := serviceStartSleep, serviceStartNow
-	t.Cleanup(func() { serviceStartSleep, serviceStartNow = savedSleep, savedNow })
+	savedSleep, savedNow := neutral.StartSleep, neutral.StartNow
+	t.Cleanup(func() { neutral.StartSleep, neutral.StartNow = savedSleep, savedNow })
 	now := time.Now()
-	serviceStartNow = func() time.Time { return now }
-	serviceStartSleep = func(d time.Duration) { now = now.Add(d) }
+	neutral.StartNow = func() time.Time { return now }
+	neutral.StartSleep = func(d time.Duration) { now = now.Add(d) }
 	started := false
-	serviceRunOutput = func(name string, args ...string) (string, error) {
+	neutral.RunOutput = func(name string, args ...string) (string, error) {
 		call := name + " " + strings.Join(args, " ")
 		*calls = append(*calls, call)
-		if call == "launchctl print "+launchdTarget() {
+		if call == "launchctl print "+testLaunchdTarget() {
 			if started {
 				return "\tstate = running\n\tpid = 7337\n", nil
 			}
@@ -90,10 +100,10 @@ func TestServiceInstallClaimsStartedOnlyWhenItSeesTheJobRun(t *testing.T) {
 			calls := serviceSandbox(t)
 			kickstarts := 0
 			bootstrapped := false
-			serviceRunOutput = func(name string, args ...string) (string, error) {
+			neutral.RunOutput = func(name string, args ...string) (string, error) {
 				call := name + " " + strings.Join(args, " ")
 				*calls = append(*calls, call)
-				if call == "launchctl print "+launchdTarget() {
+				if call == "launchctl print "+testLaunchdTarget() {
 					if !bootstrapped {
 						return "", errors.New("not loaded")
 					}
@@ -105,7 +115,7 @@ func TestServiceInstallClaimsStartedOnlyWhenItSeesTheJobRun(t *testing.T) {
 				if strings.HasPrefix(call, "launchctl bootstrap ") {
 					bootstrapped = true
 				}
-				if call == "launchctl kickstart "+launchdTarget() {
+				if call == "launchctl kickstart "+testLaunchdTarget() {
 					kickstarts++
 				}
 				return "", nil
@@ -229,12 +239,12 @@ func TestServiceStatusReportsAStoppedLoadedJobAsNotRunning(t *testing.T) {
 			if code := run([]string{"service", "install", "--root", root}, nil, io.Discard, io.Discard); code != 0 {
 				t.Fatalf("service install exit %d", code)
 			}
-			savedOutput := serviceRunOutput
-			t.Cleanup(func() { serviceRunOutput = savedOutput })
-			serviceRunOutput = func(name string, args ...string) (string, error) {
+			savedOutput := neutral.RunOutput
+			t.Cleanup(func() { neutral.RunOutput = savedOutput })
+			neutral.RunOutput = func(name string, args ...string) (string, error) {
 				call := name + " " + strings.Join(args, " ")
 				*calls = append(*calls, call)
-				if call == "launchctl print "+launchdTarget() {
+				if call == "launchctl print "+testLaunchdTarget() {
 					return tc.printOut, nil
 				}
 				return "", nil
@@ -262,5 +272,27 @@ func TestServiceStatusReportsAStoppedLoadedJobAsNotRunning(t *testing.T) {
 				t.Fatalf("service status JSON %s; want %s", jsonOut.String(), wantJSON)
 			}
 		})
+	}
+}
+
+// A changed Linux ExecStart made existing installs look stale during review.
+// These fixtures were rendered by amq-remote before the shared renderer moved.
+func TestServiceUnitPreservesInstalledBytes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix service paths")
+	}
+	for name, root := range map[string]string{"plain": "/Users/a/proj", "space": "/var/folders/a/root two", "percent": "/var/a/root%two", "quotes": `/var/a/ro"ot$x`} {
+		for platform, ext := range map[string]string{"darwin": ".plist", "linux": ".service"} {
+			t.Run(platform+"/"+name, func(t *testing.T) {
+				want, err := os.ReadFile(filepath.Join("testdata", "login-service", platform+"-"+name+ext))
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := neutral.Render(platform, serviceUnit("/opt/homebrew/bin/amq-remote", root))
+				if err != nil || !bytes.Equal(got, want) {
+					t.Fatalf("unit: %v\n%s\nwant\n%s", err, got, want)
+				}
+			})
+		}
 	}
 }

@@ -31,6 +31,7 @@ const (
 	SchemaSignedGrant   = "amq.remote.link.signed_grant/1"
 	SchemaGrantedSubmit = "amq.remote.link.granted_submit/1"
 	SchemaGrantRevoke   = "amq.remote.link.grant_revoke/1"
+	SchemaGrantRevokeV2 = "amq.remote.link.grant_revoke/2"
 )
 
 // Frame is the envelope. id names a frame that expects a reply, re answers
@@ -42,6 +43,14 @@ type Frame struct {
 	Re     string          `json:"re,omitempty"`
 	Gen    int64           `json:"gen,omitempty"`
 	Body   json.RawMessage `json:"body"`
+}
+
+// helloFrame is the envelope of hello. GrantRevokeV2 is true only from a
+// machine that answers grant_revoke/2 on this link. It is transport metadata
+// outside the signed hello, and the hello body keeps its shape.
+type helloFrame struct {
+	Frame
+	GrantRevokeV2 bool `json:"grant_revoke_v2,omitempty"`
 }
 
 // Labels are the machine's own names for a binding. A consent document
@@ -134,6 +143,14 @@ type GrantRevokeRequest struct {
 	Binding string `json:"binding"`
 }
 
+// GrantRevokeV2Request is amq.remote.link.grant_revoke/2: it names one
+// accepted grant of a binding by the digest grant_reply gave.
+type GrantRevokeV2Request struct {
+	Schema      string `json:"schema"`
+	Binding     string `json:"binding"`
+	GrantDigest string `json:"grant_digest"`
+}
+
 // SignedGrant is the body of amq.remote.link.signed_grant/1: the keys of a
 // signed submit, over a grant document.
 type SignedGrant struct {
@@ -198,6 +215,19 @@ type RevokedReply struct {
 type GrantRevoked struct {
 	Binding         string `json:"binding"`
 	GrantGeneration string `json:"grant_generation"`
+}
+
+// RevokedV2Reply answers grant_revoke/2 after the store decided. Ended is
+// true when this revoke removed the named grant, false when that grant had
+// already ended or another grant is current.
+type RevokedV2Reply struct {
+	Revoked GrantRevokedV2 `json:"revoked"`
+}
+
+type GrantRevokedV2 struct {
+	Binding     string `json:"binding"`
+	GrantDigest string `json:"grant_digest"`
+	Ended       bool   `json:"ended"`
 }
 
 // ErrorBody is a typed refusal. busy carries retry_after_ms.

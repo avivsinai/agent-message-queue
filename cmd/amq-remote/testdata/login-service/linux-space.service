@@ -1,0 +1,12 @@
+# written by amq-remote service install
+[Unit]
+Description=AMQ Remote endpoint for /var/folders/a/root two
+
+[Service]
+ExecStart="/opt/homebrew/bin/amq-remote" up --root "/var/folders/a/root two"
+Environment="PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

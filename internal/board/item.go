@@ -199,6 +199,11 @@ type RosterEntry struct {
 	NotifierMode           string  `json:"notifier_mode,omitempty"`
 	NotifierReason         string  `json:"notifier_reason,omitempty"`
 	DoorbellParked         bool    `json:"doorbell_parked,omitempty"`
+	// LastSentAt is when the seat last sent a message, and LastReadAt when
+	// it last read mail, as doctor --ops dated them at the AMQ read; zero
+	// when doctor reports none.
+	LastSentAt time.Time `json:"last_sent_at,omitzero"`
+	LastReadAt time.Time `json:"last_read_at,omitzero"`
 	// Harness is the harness AMQ recorded for the mailbox's identity; empty
 	// when none is recorded.
 	Harness string `json:"harness,omitempty"`

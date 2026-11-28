@@ -148,7 +148,7 @@ func BuildAMQ(c AMQCapture) (res board.Result) {
 		counted := map[string]board.RosterEntry{}
 		if err := c.DoctorErr[s.Name]; err != nil {
 			fail("doctor failed for session %s: %s", s.Name, errLine(err))
-		} else if entries, gate, err := parseDoctorOps(s.Name, c.Doctor[s.Name]); err != nil {
+		} else if entries, gate, err := parseDoctorOps(s.Name, c.Doctor[s.Name], c.ObservedAt); err != nil {
 			fail("doctor output unreadable for session %s: %v", s.Name, err)
 		} else {
 			for _, e := range entries {
@@ -295,7 +295,9 @@ func parseWho(data []byte) (map[[2]string]whoAgent, error) {
 	return m, nil
 }
 
-func parseDoctorOps(session string, data []byte) ([]board.RosterEntry, *board.Gate, error) {
+// parseDoctorOps maps doctor --ops --json into roster entries. Ages are
+// dated from observed, when AMQ was read; without it no time is derived.
+func parseDoctorOps(session string, data []byte, observed time.Time) ([]board.RosterEntry, *board.Gate, error) {
 	var out struct {
 		Ops *struct {
 			Agents []struct {
@@ -312,6 +314,8 @@ func parseDoctorOps(session string, data []byte) ([]board.RosterEntry, *board.Ga
 				NotifierMode           string    `json:"notifier_mode"`
 				NotifierReason         string    `json:"notifier_reason"`
 				DoorbellParked         bool      `json:"doorbell_parked"`
+				LastSentAgeSeconds     *float64  `json:"last_sent_age_seconds"`
+				LastReadAgeSeconds     *float64  `json:"last_read_age_seconds"`
 				Identity               *identity `json:"identity"`
 			} `json:"agents"`
 			OperatorGate *struct {
@@ -353,6 +357,8 @@ func parseDoctorOps(session string, data []byte) ([]board.RosterEntry, *board.Ga
 			NotifierMode:           a.NotifierMode,
 			NotifierReason:         a.NotifierReason,
 			DoorbellParked:         a.DoorbellParked,
+			LastSentAt:             agedFrom(observed, a.LastSentAgeSeconds),
+			LastReadAt:             agedFrom(observed, a.LastReadAgeSeconds),
 		})
 		if a.Identity != nil {
 			entries[len(entries)-1].Harness = a.Identity.Harness
@@ -363,6 +369,16 @@ func parseDoctorOps(session string, data []byte) ([]board.RosterEntry, *board.Ga
 		gate = &board.Gate{Session: session, OpenCount: g.OpenCount, OldestAgeSeconds: g.OldestGateAgeSeconds}
 	}
 	return entries, gate, nil
+}
+
+// agedFrom is the time an age reported at observed names; zero when either
+// is missing. A negative age (a time ahead of the reader's clock) is no
+// evidence: it would keep the seat active and never let it read Stalled.
+func agedFrom(observed time.Time, ageSeconds *float64) time.Time {
+	if observed.IsZero() || ageSeconds == nil || *ageSeconds < 0 {
+		return time.Time{}
+	}
+	return observed.Add(-time.Duration(*ageSeconds * float64(time.Second)))
 }
 
 const reservedHuman = thread.HumanHandle

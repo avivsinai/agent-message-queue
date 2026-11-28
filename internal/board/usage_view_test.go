@@ -186,3 +186,94 @@ func TestHTMLSeatContextIsItsOwnParagraph(t *testing.T) {
 		t.Errorf("the context line is not its own paragraph after the spend line:\n%s", html)
 	}
 }
+
+// twoModelUsage reads one mapped Claude session that used a priced model
+// and an unpriced one; the unpriced model spent more tokens. The priced
+// request's prompt is over its model's tier, and half of its cache writes
+// are 1-hour writes.
+func twoModelUsage(t *testing.T, extra ...usage.Account) Model {
+	t.Helper()
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	const sid = "aaaaaaaa-0000-4000-8000-000000000001"
+	row := func(id, model string, in, read, write, out int) string {
+		return `{"type":"assistant","timestamp":"2026-11-26T11:00:00.000Z","sessionId":"` + sid + `","cwd":"/work/demo","version":"2.1.300","message":{"id":"` + id + `","model":"` + model + `","usage":{"input_tokens":` + strconv.Itoa(in) + `,"cache_creation_input_tokens":` + strconv.Itoa(write) + `,"cache_creation":{"ephemeral_5m_input_tokens":` + strconv.Itoa(write-write/2) + `,"ephemeral_1h_input_tokens":` + strconv.Itoa(write/2) + `},"cache_read_input_tokens":` + strconv.Itoa(read) + `,"output_tokens":` + strconv.Itoa(out) + `}}}`
+	}
+	home := t.TempDir()
+	path := filepath.Join(home, "projects", "-work-demo", sid+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lines := row("msg_a", "model-priced-1", 1_000_000, 10_000_000, 2_000_000, 500_000) + "\n" + row("msg_b", "model-unpriced-1", 3_000_000, 90_000_000, 0, 1_000_000) + "\n"
+	if err := os.WriteFile(path, []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prices := usage.Prices{AsOf: "2026-11-26", Models: []usage.Price{{Match: "model-priced", Rates: usage.Rates{Input: 4, CacheRead: 0.2, CacheWrite: 5, CacheWrite1h: 8, Output: 20},
+		OverPromptTokens: 12_000_000, Over: &usage.Rates{Input: 8, CacheRead: 0.4, CacheWrite: 10, CacheWrite1h: 16, Output: 40}}}}
+	mapping := usage.Mapping{{Harness: usage.Claude, ID: sid}: {Session: "s1", Handle: "w"}}
+	rep := usage.Read(usage.Config{Homes: map[string][]string{usage.Claude: {home}}, Prices: prices}, now, []string{"/work/demo"}, mapping)
+	rep.Accounts = append(rep.Accounts, extra...)
+	m := Model{GeneratedAt: now, Roster: []RosterSession{{Session: "s1", Agents: []RosterAgent{{RosterEntry: RosterEntry{Session: "s1", Handle: "w", ValidHandle: true}}}}}}
+	return WithUsage(m, rep, mapping)
+}
+
+// A row's cost is its priced tokens at list prices, the whole request at
+// the tier of its prompt size and each cache write at its recorded
+// lifetime; the tokens of a model with no price are counted beside it,
+// never priced at zero, and per-model rows list the largest cost first
+// (field, 2026-11-26: the board printed tokens only, with no common unit
+// across harnesses and no model; 43 percent of cache writes were 1-hour).
+func TestCostPricesEachModelAndCountsTheUnpriced(t *testing.T) {
+	m := twoModelUsage(t)
+	// A 13M prompt is over the 12M tier: 1M × $8 + 10M × $0.40 + 1M × $10
+	// (5-minute writes) + 1M × $16 (1-hour writes) + 0.5M × $40.
+	const want = 8 + 4 + 10 + 16 + 20.0
+	w := m.Usage.Accounts[0].Workers[0].Usage[1]
+	if w.CostUSD == nil || *w.CostUSD != want || w.CostKind != usage.ListPrice || w.Unpriced != 3_000_000+90_000_000+1_000_000 {
+		t.Fatalf("worker 7 d cost = %v %q with %d unpriced tokens, want $%v list price with 94M unpriced", w.CostUSD, w.CostKind, w.Unpriced, want)
+	}
+	models := m.Usage.Accounts[0].Models
+	if len(models) != 2 || models[0].Model != "model-priced-1" || models[1].Model != "model-unpriced-1" || models[1].Usage[1].CostUSD != nil {
+		t.Fatalf("models = %+v, want the priced model first and the unpriced one without a cost", models)
+	}
+	// Review of the cost follow-up: a partial account that never used the
+	// model made every fleet model row "at least".
+	partial := twoModelUsage(t, usage.Account{Key: "codex:~/.codex", Harness: usage.Codex, Files: 2, Read: 1})
+	if f, fm := partial.Usage.Fleet[1], partial.Usage.FleetModels[0]; !f.Partial || fm.Model != "model-priced-1" || fm.Usage[1].Partial {
+		t.Fatalf("fleet partial %v, %s row partial %v; want a partial fleet and a complete row for a model only the complete account used", f.Partial, fm.Model, fm.Usage[1].Partial)
+	}
+}
+
+// The text view prints the cost block: the fleet per window with the
+// unpriced tokens, the models, and the seats (field, 2026-11-26).
+func TestTextPrintsTheCostBlock(t *testing.T) {
+	var b strings.Builder
+	writeUsage(&b, twoModelUsage(t))
+	for _, want := range []string{
+		"cost (list-price equivalent, prices as of 2026-11-26):\n",
+		"  fleet: 5 h $58.00 · 7 d $58.00 · 94.0M tokens of an unpriced model not counted\n",
+		"  by model, 7 d: model-priced-1 $58.00 (10.0M cached, 500.0K out) · model-unpriced-1 no price (90.0M cached, 1.0M out)\n",
+		"  by seat, 7 d: w $58.00 + 94.0M tokens unpriced\n",
+	} {
+		if !strings.Contains(b.String(), want) {
+			t.Errorf("text lacks %q:\n%s", want, b.String())
+		}
+	}
+}
+
+// A plan window used faster than its clock says it is on pace to reach the
+// limit before the reset; a window used slower says nothing more (field,
+// 2026-11-26: the board had no burn rate for a known limit).
+func TestWindowPaceNamesALimitReachedBeforeItsReset(t *testing.T) {
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	resets := now.Add(3 * time.Hour) // 40% of a 5 h window has passed
+	const pace = "5 h 62% used at 40% of the window: on pace to reach the limit before it resets"
+	for _, tc := range []struct {
+		used float64
+		want bool
+	}{{62, true}, {30, false}} {
+		l := usage.Limit{Kind: "window", Name: "5h", UsedPercent: &tc.used, WindowMinutes: 300, ResetsAt: &resets, AsOf: now}
+		if got := limitsLine([]usage.Limit{l}, now); strings.Contains(got, "on pace") != tc.want || tc.want && !strings.Contains(got, pace) {
+			t.Errorf("used %v%%: limitsLine = %q, want pace sentence %v", tc.used, got, tc.want)
+		}
+	}
+}

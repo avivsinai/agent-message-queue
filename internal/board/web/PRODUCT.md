@@ -50,6 +50,10 @@ the owner adopts them.
 
 ## Capabilities and Constraints
 
+- Inbox lists what waits on the owner: each decision with its options, pros
+  and cons, the recommended option, whether it blocks work, what happens if
+  the answer comes later, and one copied answer command per option; then the
+  owner's unread mail per session, which is never counted as a decision.
 - Flow, the default view, shows every current card in one lifecycle stage:
   Backlog, Ready, In progress, In review, Blocked, or recently Shipped. Open
   GitHub pull requests and issues are Flow cards too; one joins a task card
@@ -66,11 +70,14 @@ the owner adopts them.
   body. Each recipient carries an observation (direct
   reply or none, with later thread messages as secondary context, or not
   assessed); a classifier's opinion is shown apart, with its name, an exact
-  quote, and the quoted sender and age. The owner's count is recent requests
-  to the owner with no direct reply observed; the count for requests to
-  agents stays in the Requests view as the agents' bookkeeping. Neither is
-  unfinished work. Older requests are a separate, searchable view of the
+  quote, and the quoted sender and age. The headline counts the Inbox items
+  and links to the Inbox; the count for requests to agents stays in the
+  Requests view as the agents' bookkeeping, and is not unfinished work. Older requests are a separate, searchable view of the
   newest 200.
+- Cost shows the fleet's list-price equivalent for the last 5 h and 7 d, a
+  table of spend per model and one per seat, and each account's limits with
+  the pace sentence. A subscription is not billed this way; tokens of a model
+  with no price are named, never counted.
 - Work categories distinguish needs-you items, declared in-progress work, blocked work, and backlog. A source
   strip (ok, degraded, unavailable, disabled, plus "partial" with what was not
   assessed), a roster per session, per-session "N unread for user" lines kept
@@ -91,9 +98,12 @@ the owner adopts them.
 
 ## Brand Commitments
 
-- Flow leads with where all work stands and what needs the owner. Next lists
-  supported useful actions. Floor shows the agent seats. Work, Backlog, Requests,
-  Older requests, Suggestions, and History are separate views; Sources and Agents provide secondary context.
+- Inbox, Flow, Floor, and Cost are the primary destinations. Inbox holds what
+  waits on the owner. Flow, the default, leads with where all work stands and
+  what needs the owner. Floor shows the agent seats. Cost shows spend and
+  limits. Next, Work, Backlog, Requests, Older requests, Suggestions, and
+  History are separate views under More; Sources and Agents provide secondary
+  context.
 - Do not hardcode personal or organization data into product assets or
   fixtures. Live source records can contain owner names and paths.
 
@@ -107,8 +117,9 @@ the owner adopts them.
 
 ## Product Principles
 
-1. The owner's queue first: Needs you leads on every viewport, above the Flow
-   board and as a flag on each card that needs the owner.
+1. The owner's queue first: Inbox is the first destination and carries its
+   count; Needs you leads above the Flow board, each tile links to its Inbox
+   item, and a flag marks each card that needs the owner.
 2. Structure places, text informs.
 3. No silent source: coverage and age are always visible.
 4. Show commands only for supported actions; the owner chooses whether to run

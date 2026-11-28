@@ -10,10 +10,12 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
+	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
 	"github.com/avivsinai/agent-message-queue/internal/notificationattempt"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
+	"github.com/avivsinai/agent-message-queue/internal/receipt"
 )
 
 func TestRunOpsChecks_BasicAgentStats(t *testing.T) {
@@ -432,6 +434,70 @@ func TestOpsMailboxCountCountsOnlyMessageFiles(t *testing.T) {
 	}
 	if count, _, errText := opsMailboxCount(dir, true, time.Now()); count != 1 || errText != "" {
 		t.Fatalf("count = %d (%q), want 1", count, errText)
+	}
+}
+
+// Doctor dates a seat's newest sent message from its id and its last read
+// of mail from the receipt the drain writes, not from the mail's delivery.
+func TestRunOpsChecksReportsLastSentAndLastRead(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.WriteConfig(filepath.Join(root, "meta", "config.json"), config.Config{Version: 1, Agents: []string{"alice"}}, true); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	// Review of the first build: a send time ahead of the clock gave a
+	// negative age, so the seat read Working and never Stalled.
+	for _, at := range []time.Time{now.Add(-2 * time.Hour), now.Add(time.Hour)} {
+		id, err := format.NewMessageID(at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(fsq.AgentOutboxSent(root, "alice"), id+".md"), []byte("sent"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	id, err := format.NewMessageID(now.Add(-2 * time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliverGuardMessage(t, root, "alice", id)
+	delivered := filepath.Join(fsq.AgentInboxNew(root, "alice"), id+".md")
+	if err := os.Chtimes(delivered, now.Add(-3*time.Hour), now.Add(-3*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := drainInboxItems(openDeliveryRootForCLITest(t, root), root, "alice", false, 0, &headerValidator{}); err != nil {
+		t.Fatal(err)
+	}
+	drainedAt := now.Add(-time.Hour)
+	if err := os.Chtimes(filepath.Join(fsq.AgentReceipts(root, "alice"), receipt.Filename(id, "alice", receipt.StageDrained)), drainedAt, drainedAt); err != nil {
+		t.Fatal(err)
+	}
+	// Live run of the first receipt build: the wake's notification ledger
+	// in receipts/ read as a read of mail seconds old on a seat with 57
+	// unread messages.
+	if err := os.WriteFile(filepath.Join(fsq.AgentReceipts(root, "alice"), "notification-attempts.jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result := runOpsChecks(root, "test_source", false)
+	if len(result.Agents) != 1 {
+		t.Fatalf("agents = %+v, want alice only", result.Agents)
+	}
+	a := result.Agents[0]
+	if a.LastSentAgeSeconds == nil || a.LastReadAgeSeconds == nil {
+		t.Fatalf("last sent age = %v, last read age = %v; want both", a.LastSentAgeSeconds, a.LastReadAgeSeconds)
+	}
+	if sent := *a.LastSentAgeSeconds; sent < 7100 || sent > 7300 {
+		t.Fatalf("last sent age = %v, want about 7200", sent)
+	}
+	if read := *a.LastReadAgeSeconds; read < 3500 || read > 3700 {
+		t.Fatalf("last read age = %v, want about 3600: the drain's receipt, not the delivery or another record", read)
 	}
 }
 

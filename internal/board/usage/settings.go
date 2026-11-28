@@ -18,6 +18,8 @@ import (
 type Settings struct {
 	Enabled bool
 	Config  Config
+	// Warnings name the refused price entries, which are ignored.
+	Warnings []string
 }
 
 // LoadSettings reads the "usage" key of the board configuration at path.
@@ -26,7 +28,9 @@ type Settings struct {
 // own account; a home listed twice, or the default listed again, is read
 // once. A home is absolute or starts with "~/". The budget takes a
 // Go duration ("5s") and a byte size ("512MB"; KB, MB and GB are 1024-based,
-// so the default 512MB is 512 << 20 bytes).
+// so the default 512MB is 512 << 20 bytes). Entries under "prices"."models"
+// replace the shipped entry with the same match or add one; a refused entry
+// is a warning and is ignored, and never turns usage off.
 func LoadSettings(path, home string) (Settings, error) {
 	st := Settings{Enabled: true, Config: DefaultConfig(home)}
 	data, err := os.ReadFile(path)
@@ -44,6 +48,7 @@ func LoadSettings(path, home string) (Settings, error) {
 				Wall  string `json:"wall"`
 				Bytes string `json:"bytes"`
 			} `json:"budget"`
+			Prices json.RawMessage `json:"prices"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(data, &file); err != nil {
@@ -55,6 +60,11 @@ func LoadSettings(path, home string) (Settings, error) {
 	}
 	if u.Enabled != nil {
 		st.Enabled = *u.Enabled
+	}
+	if len(u.Prices) > 0 {
+		var user []Price
+		user, st.Warnings = userPrices(path, u.Prices)
+		st.Config.Prices = st.Config.Prices.with(user)
 	}
 	for harness, list := range u.Homes {
 		if harness != Claude && harness != Codex && harness != Pi {
@@ -87,6 +97,33 @@ func LoadSettings(path, home string) (Settings, error) {
 		}
 	}
 	return st, nil
+}
+
+// userPrices reads the user's price entries, each on its own: a refused
+// entry is named in a warning and left out.
+func userPrices(path string, raw json.RawMessage) ([]Price, []string) {
+	var p struct {
+		Models []json.RawMessage `json:"models"`
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, []string{fmt.Sprintf("%s: usage.prices: %v; ignored", path, err)}
+	}
+	var out []Price
+	var warnings []string
+	seen := map[string]bool{}
+	for i, m := range p.Models {
+		e, err := parsePrice(m)
+		if err == nil && seen[e.Match] {
+			err = fmt.Errorf("match %q is listed earlier", e.Match)
+		}
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("%s: usage.prices.models[%d] %s: %v; ignored", path, i, strings.TrimSpace(string(m)), err))
+			continue
+		}
+		seen[e.Match] = true
+		out = append(out, e)
+	}
+	return out, warnings
 }
 
 func expandHome(p, home string) (string, error) {

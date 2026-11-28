@@ -632,22 +632,26 @@ func participantLabel(p Participant) string {
 	return s
 }
 
-// requestHeadline is the request count the owner can act on: Recent
-// requests addressed to the owner handle with no direct reply from the
-// owner observed. It is never a count of unfinished work.
-func requestHeadline(v RequestView) string {
-	owner, _ := requestCounts(v)
-	if owner == 0 {
-		return "No recent request to you without a direct reply"
+// requestHeadline counts what waits on the owner by the Inbox rule, so the
+// Requests view and Needs you never disagree; where names the place that
+// lists the items. The refs-based observations below it are never a count of
+// unfinished work.
+func requestHeadline(inbox Inbox, where string) string {
+	switch n := len(inbox.Items); n {
+	case 0:
+		return "Nothing waits on you"
+	case 1:
+		return "1 item waits on you " + where
+	default:
+		return strconv.Itoa(n) + " items wait on you " + where
 	}
-	return pluralize(owner, "recent request") + " to you with no direct reply observed"
 }
 
 // requestBookkeeping is the Requests section's account of requests to
 // agents, with its coverage notes. Agents often answer with a new message
 // instead of a reply, so the count is their bookkeeping, not owner work.
 func requestBookkeeping(v RequestView) []string {
-	_, agents := requestCounts(v)
+	agents := agentRequests(v)
 	notes := []string{pluralize(agents, "recent request") + " to agents " + map[bool]string{true: "has", false: "have"}[agents == 1] + " no direct reply observed. Agents often answer with a new message instead of a reply, so this is their bookkeeping, not work for you."}
 	if !v.Coverage.Complete {
 		notes = append(notes, "History coverage incomplete; see Sources")
@@ -658,25 +662,21 @@ func requestBookkeeping(v RequestView) []string {
 	return notes
 }
 
-// requestCounts splits the Recent requests without a direct reply: those
-// addressed to the owner handle that the owner has not answered directly,
-// and the rest, which some agent recipient has not answered directly. The
-// owner is one person in every root, so an owner recipient counts whether
-// or not its session scope is known.
-func requestCounts(v RequestView) (owner, agents int) {
+// agentRequests counts the Recent requests that some agent recipient has
+// not answered directly. A request addressed to the owner handle is the
+// owner's, never the agents' bookkeeping.
+func agentRequests(v RequestView) int {
+	agents := 0
 	for _, r := range v.Recent {
 		toOwner := false
 		for _, rec := range r.Recipients {
 			toOwner = toOwner || rec.Handle == reservedHuman && len(rec.DirectReplies) == 0
 		}
-		switch {
-		case toOwner:
-			owner++
-		case r.NoDirectReply:
+		if !toOwner && r.NoDirectReply {
 			agents++
 		}
 	}
-	return owner, agents
+	return agents
 }
 
 // requestFact is one recipient's observations in words. State is unreplied

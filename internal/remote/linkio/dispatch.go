@@ -27,32 +27,55 @@ type job struct {
 	f    Frame
 	key  string // request identity: commands for one request run in order
 	run  func() (any, error)
+	// admit, when set, runs under the dispatcher's lock once the job has a
+	// place, and before any worker can run it; an error refuses the job, which
+	// then takes no place.
+	admit func() error
+	// keep means the job must finish after disconnect. A named revoke earns
+	// it on admission; an ordinary job earns it only when a worker claims it.
+	keep bool
+	// onFinish releases a retiring queue's binding after its last kept job.
+	// The dispatcher lock orders registration with completion.
+	onFinish func()
 }
 
 // dispatcher runs server requests on bounded workers, in arrival order per
 // request, and never makes the reader wait: a full queue answers busy.
 type dispatcher struct {
+	ctx     context.Context
 	mu      sync.Mutex
 	queues  map[string][]*job // per request key, head is running or next
 	ready   chan string       // keys whose head may run
 	queued  int
 	stopped bool
+	// drained is closed once the dispatcher stopped and no job is queued or
+	// running; the workers then return.
+	drained  chan struct{}
+	isClosed bool
 }
 
 func newDispatcher(ctx context.Context) *dispatcher {
-	d := &dispatcher{queues: map[string][]*job{}, ready: make(chan string, dispatchQueued)}
+	d := &dispatcher{ctx: ctx, queues: map[string][]*job{}, ready: make(chan string, dispatchQueued), drained: make(chan struct{})}
 	for range dispatchWorkers {
-		go d.work(ctx)
+		go d.work()
 	}
 	return d
 }
 
-// enqueue adds a job; false means the dispatcher is full.
-func (d *dispatcher) enqueue(j *job) bool {
+// enqueue reserves a place or returns the reason for the busy reply.
+func (d *dispatcher) enqueue(j *job) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.stopped || d.queued >= dispatchQueued {
-		return false
+	if err := d.ctx.Err(); err != nil {
+		return err
+	}
+	if d.queued >= dispatchQueued {
+		return errors.New("too many requests in progress")
+	}
+	if j.admit != nil {
+		if err := j.admit(); err != nil {
+			return err
+		}
 	}
 	d.queued++
 	q := d.queues[j.key]
@@ -60,33 +83,63 @@ func (d *dispatcher) enqueue(j *job) bool {
 	if len(q) == 0 {
 		d.ready <- j.key // cannot block: ready holds at most dispatchQueued keys
 	}
-	return true
+	return nil
 }
 
-func (d *dispatcher) work(ctx context.Context) {
+// Each ready key has exactly one worker until that worker publishes its
+// successor. Cancellation wakes idle workers even when there is no work.
+func (d *dispatcher) work() {
+	done := d.ctx.Done()
 	for {
 		select {
-		case <-ctx.Done():
+		case <-done:
 			d.mu.Lock()
 			d.stopped = true
+			d.closeIfDrainedLocked()
 			d.mu.Unlock()
+			done = nil
+		case <-d.drained:
 			return
 		case key := <-d.ready:
-			d.mu.Lock()
-			j := d.queues[key][0]
-			d.mu.Unlock()
-			out, err := j.run()
-			answer(ctx, j.sess, j.f.ID, out, err)
-			d.mu.Lock()
-			d.queued--
-			if q := d.queues[key][1:]; len(q) > 0 {
-				d.queues[key] = q
-				d.ready <- key
-			} else {
-				delete(d.queues, key)
-			}
-			d.mu.Unlock()
+			d.runHead(key)
 		}
+	}
+}
+
+// runHead runs the head of key's queue and readies the next job of key.
+func (d *dispatcher) runHead(key string) {
+	d.mu.Lock()
+	j := d.queues[key][0]
+	// Receiving a ready key reserves the queue. Checking the connection
+	// here claims its head; only a retained job can be claimed after cancel.
+	if d.ctx.Err() == nil {
+		j.keep = true
+	}
+	run := j.keep
+	d.mu.Unlock()
+	if run {
+		out, err := j.run()
+		answer(d.ctx, j.sess, j.f.ID, out, err)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.queued--
+	if j.onFinish != nil {
+		j.onFinish()
+	}
+	if q := d.queues[key][1:]; len(q) > 0 {
+		d.queues[key] = q
+		d.ready <- key
+	} else {
+		delete(d.queues, key)
+	}
+	d.closeIfDrainedLocked()
+}
+
+func (d *dispatcher) closeIfDrainedLocked() {
+	if d.stopped && len(d.queues) == 0 && !d.isClosed {
+		d.isClosed = true
+		close(d.drained)
 	}
 }
 

@@ -90,8 +90,8 @@ type Config struct {
 	ConsentKeys func() ([]ConsentKey, error)
 	// LocalKey returns this link's local confirmation passkey, if any.
 	LocalKey func() (ConsentKey, bool)
-	// Grants is this link's grant store. With none, the four grant requests
-	// answer unsupported.
+	// Grants is this link's grant store. With none, the grant requests
+	// answer unsupported and hello does not offer grant_revoke/2.
 	Grants GrantStore
 	// GrantInfoFor reports whether a binding's session takes a grant now:
 	// its harness reports a mode that asks before a tool acts. reason is a
@@ -184,8 +184,15 @@ type Carrier struct {
 	// mintLocks holds one lock per binding, taken around a binding's
 	// generation mint and its leaving revokedBindings, so two mints of
 	// one binding never run at once. mintLocksMu guards the map.
-	mintLocksMu sync.Mutex
-	mintLocks   map[string]*sync.Mutex
+	mintLocksMu    sync.Mutex
+	mintLocks      map[string]*sync.Mutex
+	retiringGrants map[string]int // under mu: earlier connections still finishing work for each grant key
+	// namedMu serializes writers of named, which holds each grant a
+	// grant_revoke/2 names from the frame that named it until the store
+	// decided and the snapshot was published. A grant in it admits no task
+	// and passes no hand-over check. It never marks a grant as ended.
+	namedMu sync.Mutex
+	named   atomic.Pointer[map[namedRevoke]namedHold]
 	// endedMu serializes writers of ended, which maps the digest of every
 	// grant a check of this run saw end to how it ended. A digest in it
 	// admits nothing for the rest of the run, whatever the files say.
@@ -260,6 +267,7 @@ func New(cfg Config) (*Carrier, error) {
 		status:     Status{State: "offline"},
 		waiters:    map[string]waiter{},
 	}
+	c.retiringGrants = make(map[string]int)
 	c.held.tasks = map[string]*HeldTask{}
 	c.held.confirmed = map[string]time.Time{}
 	c.grantSeen, c.storeErr, c.mintLocks = map[string]StoredGrant{}, map[string]string{}, map[string]*sync.Mutex{}
@@ -508,6 +516,7 @@ func (c *Carrier) Request(ctx context.Context, body any) (json.RawMessage, error
 // next session sends the bindings as they are then.
 func (c *Carrier) Tick() {
 	c.writeRevokedGenerations() // a revoke whose new generation is not yet written
+	c.settleNamedRevokes()      // a named revoke whose decision failed
 	c.refreshKeys()             // a key list the CLI changed is seen here
 	c.RefreshGrants()           // and a grant ended by it, by the owner or by its expiry
 	c.mu.Lock()
@@ -662,7 +671,6 @@ func (c *Carrier) serveOnce(ctx context.Context) error {
 		frameLimit = l
 	}
 	connCtx, connCancel := context.WithCancel(ctx)
-	defer connCancel()
 	sess := &session{
 		ws: ws, gen: gen, prefix: newPrefix(), frameLimit: frameLimit,
 		control: make(chan []byte, controlQueue), data: make(chan []byte, dataQueue),
@@ -691,6 +699,8 @@ func (c *Carrier) serveOnce(ctx context.Context) error {
 		c.cfg.Logf("link %s: online", c.cfg.Name)
 	}
 	defer func() {
+		connCancel()
+		c.retireGrantQueues(sess.dispatch)
 		c.mu.Lock()
 		if c.sess == sess {
 			c.sess = nil
@@ -766,7 +776,10 @@ func (c *Carrier) handshake(ctx context.Context, ws *websocket.Conn) (welcomeBod
 	if err != nil {
 		return welcomeBody{}, nil, err
 	}
-	frame, err := json.Marshal(Frame{Schema: SchemaFrame, ID: helloID, Re: ch.ID, Body: raw})
+	frame, err := json.Marshal(helloFrame{
+		Frame:         Frame{Schema: SchemaFrame, ID: helloID, Re: ch.ID, Body: raw},
+		GrantRevokeV2: c.cfg.Grants != nil,
+	})
 	if err != nil {
 		return welcomeBody{}, nil, err
 	}
@@ -979,7 +992,7 @@ func (c *Carrier) handleRequest(sess *session, f Frame) {
 	case SchemaAnswerInfo, SchemaSignedAnswer:
 		c.handleAnswerRequest(sess, f)
 		return
-	case SchemaGrantInfo, SchemaSignedGrant, SchemaGrantedSubmit, SchemaGrantRevoke:
+	case SchemaGrantInfo, SchemaSignedGrant, SchemaGrantedSubmit, SchemaGrantRevoke, SchemaGrantRevokeV2:
 		if c.cfg.Grants != nil {
 			c.handleGrantRequest(sess, f)
 			return
@@ -989,11 +1002,17 @@ func (c *Carrier) handleRequest(sess *session, f Frame) {
 }
 
 // enqueue queues one server request behind earlier ones with the same key,
-// or answers busy when the queue is full.
-func (c *Carrier) enqueue(sess *session, f Frame, key string, run func() (any, error)) {
-	if !sess.dispatch.enqueue(&job{sess: sess, f: f, key: key, run: run}) {
-		c.refuse(sess, f.ID, ErrorBody{Code: string(protocol.CodeBusy), Message: "too many requests in progress", RetryAfterMS: busyRetryAfterMS})
+// or answers busy when the queue is full and reports false.
+func (c *Carrier) enqueue(sess *session, f Frame, key string, run func() (any, error)) bool {
+	return c.enqueueJob(&job{sess: sess, f: f, key: key, run: run})
+}
+
+func (c *Carrier) enqueueJob(j *job) bool {
+	if err := j.sess.dispatch.enqueue(j); err != nil {
+		c.refuse(j.sess, j.f.ID, ErrorBody{Code: string(protocol.CodeBusy), Message: err.Error(), RetryAfterMS: busyRetryAfterMS})
+		return false
 	}
+	return true
 }
 
 // runCommand runs a get, cancel, session list or inspect from the server as

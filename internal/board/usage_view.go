@@ -23,7 +23,10 @@ type Usage struct {
 	Fresh      int64     `json:"fresh"`
 	CostUSD    *float64  `json:"cost_usd,omitempty"`
 	CostKind   string    `json:"cost_kind,omitempty"`
-	AsOf       time.Time `json:"as_of,omitzero"`
+	// Unpriced is the tokens with no cost behind CostUSD: no recorded cost
+	// and no price for their model. A cost beside it is partial.
+	Unpriced int64     `json:"unpriced_tokens,omitzero"`
+	AsOf     time.Time `json:"as_of,omitzero"`
 	// Partial means some session files were not read: the figures are
 	// "at least".
 	Partial bool `json:"partial"`
@@ -44,6 +47,19 @@ type Usage struct {
 type UsageView struct {
 	Fleet    []Usage        `json:"fleet"`
 	Accounts []AccountUsage `json:"accounts"`
+	// FleetModels is the fleet's spend per harness and model over the
+	// trailing windows.
+	FleetModels []ModelUsage `json:"fleet_models"`
+	// PricesAsOf dates the price table behind every list-price figure.
+	PricesAsOf string `json:"prices_as_of,omitempty"`
+}
+
+// ModelUsage is the spend of one model in each window. Model "" is the
+// spend whose record names no model.
+type ModelUsage struct {
+	Model   string  `json:"model"`
+	Harness string  `json:"harness"`
+	Usage   []Usage `json:"usage"`
 }
 
 // AccountUsage is one harness account. Limits are account facts and never
@@ -57,8 +73,10 @@ type AccountUsage struct {
 	// a worker.
 	Other         []Usage `json:"other"`
 	OtherSessions int     `json:"other_sessions"`
-	Partial       bool    `json:"partial"`
-	Detail        string  `json:"detail,omitempty"`
+	// Models is the account's spend per model, largest 7 d cost first.
+	Models  []ModelUsage `json:"models"`
+	Partial bool         `json:"partial"`
+	Detail  string       `json:"detail,omitempty"`
 }
 
 // WorkerUsage is one worker's spend on one account and the harness session
@@ -100,8 +118,9 @@ func UsageMapping(convs []Conversation) usage.Mapping {
 // the fleet sums every session over the trailing windows instead: a sum
 // never mixes window definitions. It is pure; r.Now dates the windows.
 func WithUsage(m Model, r usage.Report, mapping usage.Mapping) Model {
-	view := &UsageView{Accounts: []AccountUsage{}}
+	view := &UsageView{Accounts: []AccountUsage{}, FleetModels: []ModelUsage{}, PricesAsOf: r.PricesAsOf}
 	trailing := trailingWindows(r.Now)
+	fleetModels := modelSums{}
 	fleet := make([]usage.Counts, len(trailing))
 	fleetAsOf := make([]time.Time, len(trailing))
 	fleetSpend := spendState{}
@@ -120,7 +139,10 @@ func WithUsage(m Model, r usage.Report, mapping usage.Mapping) Model {
 		workerCounts := map[usage.RosterKey][]usage.Counts{}
 		workerAsOf := map[usage.RosterKey][]time.Time{}
 		workerLast := map[usage.RosterKey]*lastCounts{}
+		models := modelSums{}
 		for _, s := range a.Sessions {
+			models.add(s, windows, au.Partial)
+			fleetModels.add(s, trailing, au.Partial)
 			key, mapped := mapping[usage.SessionRef{Harness: s.Harness, ID: s.ID}]
 			if mapped {
 				w := workers[key]
@@ -179,6 +201,7 @@ func WithUsage(m Model, r usage.Report, mapping usage.Mapping) Model {
 		for i, win := range windows {
 			au.Other = append(au.Other, makeUsage(win, other[i], otherAsOf[i], au.Partial, otherSpend.unknown()))
 		}
+		au.Models = models.view(windows)
 		fleetPartial = fleetPartial || au.Partial
 		view.Accounts = append(view.Accounts, au)
 	}
@@ -186,6 +209,7 @@ func WithUsage(m Model, r usage.Report, mapping usage.Mapping) Model {
 		for i, win := range trailing {
 			view.Fleet = append(view.Fleet, makeUsage(win, fleet[i], fleetAsOf[i], fleetPartial, fleetSpend.unknown()))
 		}
+		view.FleetModels = fleetModels.view(trailing)
 	}
 	m.Usage = view
 	attachUsage(&m)
@@ -326,8 +350,65 @@ func makeUsage(w window, c usage.Counts, asOf time.Time, partial bool, unknown s
 	return Usage{
 		Window: w.name, WindowFrom: w.from.UTC(), Label: w.label,
 		In: c.In, CacheRead: c.CacheRead, CacheWrite: c.CacheWrite, Out: c.Out, Fresh: c.Fresh(),
-		CostUSD: c.Cost, CostKind: c.CostKind, AsOf: asOf, Partial: partial || unknown != "", Unknown: unknown,
+		CostUSD: c.Cost, CostKind: c.CostKind, Unpriced: c.Unpriced, AsOf: asOf, Partial: partial || unknown != "", Unknown: unknown,
 	}
+}
+
+// modelSums sums sessions per harness and model, window by window. A sum
+// is partial only when an account that spent that model is partial.
+type modelSums map[modelKey]*modelSum
+
+type modelKey struct{ harness, model string }
+
+type modelSum struct {
+	counts  []usage.Counts
+	partial bool
+}
+
+func (ms modelSums) add(s usage.Session, windows []window, partial bool) {
+	for i, win := range windows {
+		for model, c := range s.ByModel(win.from) {
+			k := modelKey{harness: s.Harness, model: model}
+			if ms[k] == nil {
+				ms[k] = &modelSum{counts: make([]usage.Counts, len(windows))}
+			}
+			ms[k].counts[i] = usage.Add(ms[k].counts[i], c)
+			ms[k].partial = ms[k].partial || partial
+		}
+	}
+}
+
+// view lists the models with spend, largest cost in the last window first,
+// then most tokens, so every face lists them in one order.
+func (ms modelSums) view(windows []window) []ModelUsage {
+	out := []ModelUsage{}
+	for k, sum := range ms {
+		mu := ModelUsage{Model: k.model, Harness: k.harness}
+		for i, win := range windows {
+			mu.Usage = append(mu.Usage, makeUsage(win, sum.counts[i], time.Time{}, sum.partial, ""))
+		}
+		out = append(out, mu)
+	}
+	last := len(windows) - 1
+	cost := func(u Usage) float64 {
+		if u.CostUSD == nil {
+			return 0
+		}
+		return *u.CostUSD
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i].Usage[last], out[j].Usage[last]
+		switch {
+		case cost(a) != cost(b):
+			return cost(a) > cost(b)
+		case a.Fresh+a.CacheRead != b.Fresh+b.CacheRead:
+			return a.Fresh+a.CacheRead > b.Fresh+b.CacheRead
+		case out[i].Harness != out[j].Harness:
+			return out[i].Harness < out[j].Harness
+		}
+		return out[i].Model < out[j].Model
+	})
+	return out
 }
 
 // lastCounts keeps the newest counted response across sessions: the one
@@ -367,6 +448,7 @@ func sumUsage(a, b []Usage) []Usage {
 		x.CacheWrite += y.CacheWrite
 		x.Out += y.Out
 		x.Fresh += y.Fresh
+		x.Unpriced += y.Unpriced
 		if y.CostUSD != nil {
 			sum := *y.CostUSD
 			if x.CostUSD != nil {

@@ -80,6 +80,37 @@ Messages emitted by `amq integration ...` commands carry orchestrator metadata
 under `context.orchestrator`; the shape and labels are in
 [integrations](integrations.md#message-shape).
 
+## Decision for the owner
+
+A question to the owner (`user`) may carry its options under
+`context.decision`; the board's Inbox shows it as one card with one answer
+command per option:
+
+```json
+{"decision": {
+  "options": [
+    {"label": "Opt-in", "summary": "Off unless the user turns it on.", "pros": ["no surprise for current users"], "cons": ["few will find it"]},
+    {"label": "On by default", "summary": "On for every wake.", "pros": ["protects everyone"], "cons": ["changes behaviour for current users"]}
+  ],
+  "recommended": "Opt-in",
+  "blocking": false,
+  "if_later": "The guard stays opt-in; nothing waits."
+}}
+```
+
+Send it with `amq send --to user --kind question --subject "..." --body @file
+--context @decision.json`. `send` and `reply` refuse, as a usage error that
+names the field, a decision that is not an object with 2 to 6 options; a
+label that is empty, longer than 40 characters, starts or ends with white
+space, starts with `-` or `@`, repeats another label (ignoring case), or holds
+a control character (C0, DEL, C1, or the Unicode line and paragraph
+separators U+2028 and U+2029); a summary longer than 200 characters; more than 5 pros or 5 cons,
+or one longer than 120 characters; a `recommended` that is not one of the
+labels; a `blocking` that is present and not `true` or `false`; an `if_later` longer than 200
+characters; or an unknown field. A message with no `decision` key is not
+checked. The board reads the decision by the same rule and shows a message
+whose decision breaks it as a plain question.
+
 ## Verified Buzz event
 
 A message that the machine agent inside `amq-remote serve` delivers from the

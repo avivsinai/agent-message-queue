@@ -59,7 +59,7 @@ scan mailboxes itself or fall back to a different source.
 - `seat_at_limit`: a seat is at its plan limit and owns current work.
 - `account_near_cap`: a harness account's freshest cap reading shows 90 percent or more of a cap used. A reading stays current until its future reset time; without one, its timestamp must be within the 15-minute limit bound. It needs no mapped worker and no card. Codex reports the pre-limit figures; Claude Code and pi report nothing before the limit, so they give no line.
 - `ready_not_started`: a seat with nothing in progress is idle or off and has ready work assigned.
-- `in_progress_not_worked`: a card is in progress longer than the liveness window, and its owner's last observed activity is older than that window. A seat with no observed activity is not listed.
+- `in_progress_not_worked`: a card is in progress longer than the liveness window, and its owner's last observed work (a usage record, or presence when no wake is live) is older than that window. Sent and read mail do not count as work. A seat with no observed work is not listed.
 - `reply_overdue` covers overdue agent replies, owner questions and owner rulings. For owner questions and rulings the sender reads the thread before taking the default or closing the ruling. Owner todos and review requests stay under Needs you.
 
 An unclosed request older than `obligation_max_age` (14 days by default) expires, as in `amq thread open`. It leaves Needs you and the overdue check. Set `obligation_max_age` to `0` to disable expiry.
@@ -181,15 +181,13 @@ handle.
 Requests from the last 14 days, by recorded message time, are Recent; the
 rest are Older, or Undated when the time is missing, unreadable, or in the
 future. Age never completes a request. Recent requests are grouped by scoped
-addressee, with requests that have no direct reply first. Needs you lists open
-obligations owed by the owner across the retained history, alongside waiting cards.
-The Requests headline is "N recent requests to you with no direct reply observed": a
-request addressed to the owner handle `user`, in any root, with no direct
-reply from it. The Requests section states the rest in one sentence, "N
+addressee, with requests that have no direct reply first. The Requests
+headline counts the Inbox items (see Inbox), so it always equals Needs you.
+The Requests section states the requests to agents in one sentence, "N
 recent requests to agents have no direct reply observed", and calls it the
 agents' bookkeeping: agents often answer with a new message instead of a
-reply. A request counts once, as the owner's when the owner has not replied
-directly, otherwise when any scoped recipient sent no direct reply; later
+reply. A request addressed to the owner handle `user` never counts there; any
+other request counts once when any scoped recipient sent no direct reply; later
 thread activity is a secondary observation on the row. In a `p2p/` thread
 every message between the pair shares the thread, so later activity there is
 weak evidence. Requests with an unknown recipient scope are listed and
@@ -239,6 +237,37 @@ classifier]`. An identical label is accepted again; a different value for
 the same key is refused, so a revised classifier uses a revised name. The
 board runs no model and schedules nothing; the `amq-board` skill describes
 the classification loop for a harness model.
+
+## Inbox
+
+The Inbox is what waits on the owner, by one rule:
+
+1. an open obligation owed by the owner handle `user`: a question, review
+   request, or todo addressed to `user` that no closer closed, by the rule of
+   `amq thread open`, opened within `obligation_max_age` (14 days by default);
+2. a card under Needs you: a bead of type `decision` that is open, or in
+   progress with a human assignee, or work whose blocker or blocked state
+   needs a human.
+
+Nothing else is an item. Needs you in the text headline and section, the
+Flow strip, the pane's `waiting_total`, and the Requests headline count these
+items. On the page, the Requests headline links to the Inbox view, and each
+tile of the Flow view's Needs you strip links to its item there. Items are
+listed blocking first, then
+oldest first. A question whose header carries a valid `context.decision`
+shows its options with pros and cons, the recommended option, whether it
+blocks, what happens if the answer comes later, and one copy command per
+option that answers with the option label as the body; the free-text answer
+and the acknowledgement follow. A decision that breaks the `send` rule shows
+as a plain question. A request with no answer command says why (for
+example, the requester is in the base root, or its project is not a
+configured peer); a reply-by time in the past is marked overdue. A bead shows
+its `bd show` command. After the items, the owner's unread mail is one line
+per session with its count, oldest age, and the `amq drain` command whose
+`--limit` covers that count; mail is never an item.
+
+The first section of the text view is `== Inbox ==`; it shows at most 25
+items; `--json` carries every item under `inbox` (`items`, `mail`).
 
 ## Withdrawals
 
@@ -420,9 +449,50 @@ Usage collection can be disabled with `{"usage":{"enabled":false}}`. Enabled
 usage reads numeric harness usage facts; Codex plan limits use its installed
 app-server interface and the existing bounded collector cache.
 
+Each counted response keeps its model (Claude `message.model`, the Codex
+`turn_context` model before the token count, pi `message.model`; a record
+with none is `unknown model`). A Codex token count read before the first
+`turn_context` of the part of a rollout the reader reads has no model, so it
+counts as `unknown model` with no price. Cost is the list-price equivalent in
+US dollars: each token class times that model's list price per million
+tokens. It is a list-price equivalent for comparison: a subscription is not
+billed this way. Fast-mode, batch and regional (data residency) multipliers
+are not applied. Prompt-length tiers and the recorded cache-write split are
+applied: a request whose prompt is over an entry's `over_prompt_tokens` is
+priced whole at its `over` rates (a Codex request's prompt is its
+`last_token_usage` input), and cache writes Claude Code records as 1-hour
+writes are priced at `cache_write_1h`, the rest at `cache_write`. A cost pi
+recorded keeps its own kind. The shipped price table
+(`internal/board/usage/prices.json`) holds only prices read from the
+vendors' pricing pages, each with its source and date; an entry's `match` is
+a model id or id prefix, and the longest match wins. Add or replace entries
+with `{"usage":{"prices":{"models":[{"match":"<id>","input":0,"cache_read":0,"cache_write":0,"output":0}]}}}`
+in `~/.amq/board.json`. Every class except `cache_write_1h` (default
+`cache_write`) needs a price from 0 to 1,000,000; a refused entry, or a later
+entry with a match already listed, is a warning and is ignored. Tokens of a
+model with no price are never priced at zero: a figure that leaves them out
+says so (`unpriced_tokens` in `--json`). `--json` carries `models` per account
+and `fleet_models`, each with the 5 h and 7 d rows, largest 7 d cost first,
+and `prices_as_of`. Money is printed in the text view's `cost` block, after
+`limits` (the fleet per window, the five largest models and seats over 7 d,
+and the other sessions; a model id spent under more than one harness names
+the harness), and as a seat's 5 h cost on its roster line. A plan window that is at least half
+used and used faster than its clock reads, for example, `5 h 62% used at 40%
+of the window: on pace to reach the limit before it resets`.
+
 ## Views
 
 Text, JSON, static HTML, and the live page use the same pure task projection.
+
+The page's primary destinations are Inbox, Flow, Floor, and Cost; Next, Work,
+Backlog, Requests, Older requests, Suggestions, History, Sources, and Agents
+are under More. Inbox lists each owner item with its options, the recommended
+one first, and a copy button per answer command, then the owner's unread mail
+per session; the Inbox tab shows the item count. Cost shows the list-price
+sentence, a table per model and a table per seat over 7 d with each row's
+share, and each account's limit sentences. Every figure comes from the
+published usage view in the text view's words; a share is the row's part of
+its table's priced total.
 
 Flow is the default page view and a `== Flow ==` text section. It puts every
 current card in one stage, first match wins: In review (a linked pull request
@@ -440,15 +510,15 @@ Forge cards are never tasks: they have no task ID, cannot take attachments,
 and stay outside task counts. Needs you (a structured field waits on you) is a
 flag on the card, not a stage; the strip above the board lists the cards that
 need you, the unread messages for you, and the requests to you that have no
-direct reply. A pull request card shows its checks as CI green, CI red,
+direct reply; on the page each tile links to its item in the Inbox view. A pull request card shows its checks as CI green, CI red,
 CI running, or no CI. `--json` carries `flow` (stage, title, card IDs,
 omitted count) and `forge_cards`; each card carries `stage`, `stage_since`,
 `flags`, and `ci`. Pane task rows carry `stage`. Next, Work, Backlog, and
 Requests remain.
 
 Floor is a page view and a `== Floor ==` text section with one station per
-agent seat of the AMQ roster. A seat is shown when its wake is live, presence
-or usage shows activity inside `liveness_window`, it has unread mail newer than
+agent seat of the AMQ roster. A seat is shown when its wake is live, it shows
+activity inside `liveness_window`, it has unread mail newer than
 `stale_after`, or a current card names it; the other mailboxes fold into one
 dormant count per session, and so does a mailbox whose fresh mail arrived after
 more than `stale_after` without activity. The state is the first that matches:
@@ -460,10 +530,15 @@ ages date from the AMQ read),
 Working (activity inside `liveness_window`), Idle (the wake is live and the
 inbox is counted; no mail waits without an activity record), Off (no wake and
 no recent activity; the inbox is counted), and Unknown (the inbox was not
-counted, or mail waits and no activity was observed). Activity is the
-worker's newest usage record, or presence last seen when no wake is live: a
-live wake refreshes presence itself, so it proves only the wake. The plate
-names the fact it used. The board cannot see processes and never says a
+counted, or mail waits and no activity was observed). Activity is the newest
+of the seat's last sent message and its last read of mail (both from
+`amq doctor --ops`, the same for every harness), the worker's newest usage
+record, and presence last seen when no wake is live: a live wake refreshes
+presence itself, so it proves only the wake. The last sent message is dated
+by its id; the last read of mail is the seat's newest drained or dlq receipt,
+which every consumer writes when it moves mail out of `inbox/new`. The plate
+names the fact it used: sent, read mail, usage, or presence. A harness AMQ
+does not know prints no harness label. The board cannot see processes and never says a
 worker is running or has stopped. A seat lists the current cards that name
 it, In progress first, then In review, Ready, and Blocked; a card that names a
 handle without a session is listed under each seat of that handle with
@@ -537,3 +612,41 @@ again each minute. It ends on Ctrl-C or TERM, or when the project it serves was
 replaced. With `--notify <handles> --as <observer>` it sends each new floor
 problem once after every pass; a board that stops being published is reported
 by the existing stale notice after the liveness window.
+
+### Login service
+
+After initializing the board with `amq-board sync --init`, run the following
+from the project directory to publish it every minute and send floor notices.
+
+```sh
+amq-board service install --session review --notify lead,alt --as floor
+amq-board service status --json
+amq-board service uninstall
+```
+
+Omit both notice flags to publish without sending notices. Install starts
+`amq-board sync --watch` and configures it to start at login. If macOS has no
+GUI login session, the service starts at the next login. Each canonical board store has one service, named by the first eight hex digits
+of its path's SHA-256 digest; reinstalling from another directory using the
+same store replaces the service and updates its working directory.
+Install resolves the login route without the shell's AMQ pins, prints the
+session and project, and checks every notice handle against that session's
+roster. Select a named session with `--session NAME`. An invalid name exits 2
+and a missing session exits 3. Install looks up `amq` on the service PATH.
+
+- On macOS the agent is `~/Library/LaunchAgents/io.github.avivsinai.amq-board.HASH.plist`.
+  The installed `BASE_ROOT/extensions/board/watch.log` receives startup errors
+  and watch output, with one rotated copy. Each file holds at most 1 MiB.
+- On Linux the unit is `$XDG_CONFIG_HOME/systemd/user/amq-board-HASH.service`.
+  The default configuration directory is `~/.config`. Read the log with
+  `journalctl --user -u amq-board-HASH.service`.
+
+Status reports whether the installed unit is current, stale or missing,
+whether it is running, its executable and version, and its notice recipients
+and observer. Status and uninstall work after the board store is removed.
+After pointing a project at another store, run `amq-board service install` again.
+Uninstall before moving a project. On macOS uninstall also removes the watch
+log, rotated copy and lock. A refused stop leaves the unit in place for a retry.
+
+After upgrading the binary, rerun the install command with the desired notice
+flags to restart the service on the new version.

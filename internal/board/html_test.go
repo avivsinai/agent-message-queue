@@ -207,24 +207,30 @@ func TestHTMLCardShowsSummaryAndPrefixChip(t *testing.T) {
 	}
 }
 
-// Every view names its coverage gaps in one plain line that links to
-// Sources. It says "Nothing for you to do" only when the board knows no
-// owner step exists, names a step it detects, and otherwise says neither.
-func TestHTMLCoverageLineNamesTheGaps(t *testing.T) {
+// Every view names its coverage gaps in one compact disclosure whose body
+// links to Sources. It says "Nothing for you to do" only when the board knows
+// no owner step exists, offers a step it detects (a command as a copyable
+// field), and otherwise says neither.
+func TestHTMLCoverageNamesTheGaps(t *testing.T) {
 	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	sources := `<p><a href="#view-sources">Sources</a> says why.</p></div></details>`
 	rows := []struct {
 		name   string
 		result Result
 		want   string
 	}{
 		{"beads", Result{Status: StatusOK, Coverage: Coverage{Unresolved: 238, Detail: "238 mentioned bead ids over the lookup cap"}},
-			`<span class="gap"><span class="gap-name">beads</span> partly read</span>.</span> <span class="gaps-count">1 source.</span> Nothing for you to do. <a href="#view-sources">Sources</a> says why.</p>`},
+			`<span class="gap"><span class="gap-name">beads</span> partly read</span></summary><div class="coverage-body"><div class="coverage-gap"><p><span class="gap-name">beads</span> partly read: 238 mentioned bead ids over the lookup cap.</p></div><p>Nothing for you to do.</p>` + sources},
 		{"claude-tasks", Result{Status: StatusOK, Coverage: Coverage{Unresolved: 1, Detail: UnboundClaudeListGap("/h/.claude", "team-a")}},
-			`<span class="gaps-count">1 source.</span> Run amq-board bind-claude-list --home /h/.claude --list team-a. <a href="#view-sources">Sources</a> says why.</p>`},
+			`<label class="cmd-label">Bind the Claude task list<textarea readonly rows="2" spellcheck="false">amq-board bind-claude-list --home /h/.claude --list team-a</textarea>`},
+		// Review of the polish pass: a list or home holding a separator gave a
+		// wrong copy-ready command; it now gets none and its gap still shows.
+		{"claude-tasks", Result{Status: StatusOK, Coverage: Coverage{Unresolved: 1, Detail: UnboundClaudeListGap("/h/.claude", "a in b")}},
+			`partly read: unbound native task list a in b in /h/.claude.</p></div>` + sources},
 		{"codex-goals", Result{Status: StatusUnavailable, Detail: SQLite3Missing},
-			`<span class="gaps-count">1 source.</span> Install sqlite3. <a href="#view-sources">Sources</a> says why.</p>`},
+			`<p><span class="gap-name">codex-goals</span> unavailable.</p><p>Install sqlite3.</p></div>` + sources},
 		{"github", Result{Status: StatusDegraded, Detail: "gh api graphql failed: HTTP 401"},
-			`<span class="gaps-count">1 source.</span> <a href="#view-sources">Sources</a> says why.</p>`},
+			`<p><span class="gap-name">github</span> read failed.</p></div>` + sources},
 	}
 	for _, row := range rows {
 		row.result.ObservedAt = now
@@ -234,8 +240,28 @@ func TestHTMLCoverageLineNamesTheGaps(t *testing.T) {
 			t.Fatal(err)
 		}
 		if !strings.Contains(page.String(), row.want) {
-			t.Errorf("%s: the coverage line lacks %s", row.name, row.want)
+			t.Errorf("%s: the coverage disclosure lacks %s", row.name, row.want)
 		}
+	}
+}
+
+// The Agents view lists sessions with a live wake or recent presence first
+// and folds the rest into one closed disclosure at its end.
+func TestHTMLAgentsFoldSessionsWithoutRecentPresence(t *testing.T) {
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	m := Build(Input{Config: DefaultConfig(), Now: now})
+	m.Roster = []RosterSession{
+		{Session: "s1", Agents: []RosterAgent{{RosterEntry: RosterEntry{Session: "s1", Handle: "quietone"}, Liveness: "quiet"}}},
+		{Session: "s2", Agents: []RosterAgent{{RosterEntry: RosterEntry{Session: "s2", Handle: "liveone"}, Liveness: "live"}}},
+	}
+	var page strings.Builder
+	if err := WriteHTML(&page, m, "amq-board --html"); err != nil {
+		t.Fatal(err)
+	}
+	html := page.String()
+	live, fold, quiet := strings.Index(html, "<h2>s2</h2>"), strings.Index(html, `<details class="context-block quiet-sessions"><summary>1 session without recent presence</summary>`), strings.Index(html, "<h2>s1</h2>")
+	if live < 0 || fold < 0 || live >= fold || fold >= quiet {
+		t.Errorf("Agents does not list the live session first and fold the quiet one after it (live %d, fold %d, quiet %d)", live, fold, quiet)
 	}
 }
 
@@ -266,5 +292,71 @@ func TestHTMLSuggestionStatusLabels(t *testing.T) {
 		if err != nil || !strings.Contains(string(raw), `"status":"`+string(r.status)+`"`) {
 			t.Errorf("status %s: JSON lacks status: %s", r.status, raw)
 		}
+	}
+}
+
+// The Inbox view lists a decision's options and one copy command per option,
+// the recommended option first, then the free answer.
+func TestHTMLInboxDecisionCopiesOneAnswerPerOption(t *testing.T) {
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	answer := func(label, body string) Action {
+		return newAction(label, "amq", "send", "--me", "user", "--to", "demo-lead", "--kind", "answer", "--body", body)
+	}
+	m := Model{GeneratedAt: now, Inbox: Inbox{Items: []OwnerItem{{
+		ID: "demo/q1", Kind: "question", Title: "Pick a store", From: "demo-lead in demo", Since: now.Add(-time.Hour), Blocking: true,
+		Options:     []OwnerOption{{Label: "Files", Pros: []string{"No dependency"}}, {Label: "Log", Cons: []string{"Needs a lock"}}},
+		Recommended: "Log",
+		Answer:      []Action{answer("answer Files", "Files"), answer("answer Log", "Log"), answer("complete: answer demo-lead", "-")},
+	}}}}
+	var page strings.Builder
+	if err := WriteHTML(&page, m, ""); err != nil {
+		t.Fatal(err)
+	}
+	html := page.String()
+	for _, want := range []string{
+		`aria-label="Inbox, 1 waiting"`,
+		"1 item waits on you, 1 blocks work.",
+		`<dt>Log <span class="recommended">Recommended</span></dt>`,
+		"<li>No dependency</li>", "<li>Needs a lock</li>",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("Inbox view lacks %q", want)
+		}
+	}
+	log, files, free := strings.Index(html, ">Copy answer: Log</button>"), strings.Index(html, ">Copy answer: Files</button>"), strings.Index(html, ">Copy free answer</button>")
+	if log < 0 || files < 0 || free < 0 || log > files || files > free {
+		t.Errorf("answer buttons missing or out of order: Log %d, Files %d, free %d", log, files, free)
+	}
+}
+
+// The Cost view lists each model row with its cost and share, in the order
+// the usage view gives them.
+func TestHTMLCostListsEachModelWithCostAndShare(t *testing.T) {
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	cost := func(v float64) *float64 { return &v }
+	window := func(w string, c float64) Usage {
+		return Usage{Window: w, Fresh: 1000, CostUSD: cost(c), CostKind: usage.ListPrice}
+	}
+	m := Model{GeneratedAt: now, Usage: &UsageView{
+		Fleet: []Usage{window("5h", 4), window("7d", 300)},
+		FleetModels: []ModelUsage{
+			{Model: "demo-large", Harness: "claude", Usage: []Usage{window("5h", 3), window("7d", 225)}},
+			{Model: "demo-small", Harness: "codex", Usage: []Usage{window("5h", 1), window("7d", 75)}},
+		},
+	}}
+	var page strings.Builder
+	if err := WriteHTML(&page, m, ""); err != nil {
+		t.Fatal(err)
+	}
+	html := page.String()
+	if !strings.Contains(html, "List-price equivalent: $4.00 in the last 5 h, $300.00 in 7 d.") {
+		t.Error("Cost view lacks the fleet sentence")
+	}
+	large, small := strings.Index(html, `data-label="Model"><span class="cell-name">demo-large</span>`), strings.Index(html, `data-label="Model"><span class="cell-name">demo-small</span>`)
+	if large < 0 || small < 0 || large > small {
+		t.Errorf("model rows missing or out of the usage view's order: large %d, small %d", large, small)
+	}
+	if !strings.Contains(html, "$225.00") || !strings.Contains(html, "75.0%") || !strings.Contains(html, "25.0%") {
+		t.Error("model rows lack their cost or share")
 	}
 }
