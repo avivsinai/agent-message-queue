@@ -22,6 +22,7 @@ func runDrain(args []string) error {
 	common := addCommonFlags(fs)
 	limitFlag := fs.Int("limit", 20, "Max messages to drain (0 = no limit)")
 	includeBodyFlag := fs.Bool("include-body", false, "Include message body in output")
+	forTurnFlag := fs.Bool("for-turn", false, "Receive for an agent turn: urgent, then other wake-eligible, then passive mail, ordered before --limit; full bodies, a compact digest for passive mail, and the remaining counts")
 	sessionFlag := fs.String("session", "", "Target session under the resolved base root")
 	ignoreSessionPinFlag := fs.Bool("ignore-session-pin", false, "With explicit --root, ignore a conflicting AM_SESSION pin")
 
@@ -33,7 +34,14 @@ func runDrain(args []string) error {
 		"receipts/, receipts-pending/, dlq/tmp/, dlq/new/, .presence.lock, and",
 		"presence.json. The presence refresh is best-effort: drain ignores its error.",
 		"A due follow-up timer in follow-ups/ becomes a notice through inbox/tmp/",
-		"into inbox/new/ before the drain, and the timer is removed.")
+		"into inbox/new/ before the drain, and the timer is removed.",
+		"",
+		"--for-turn takes urgent mail first, then other wake-eligible mail, then",
+		"passive mail, and applies --limit to that order. Wake-eligible mail prints",
+		"in full; each passive message prints as a digest with a preview of at most",
+		"160 characters and the amq read command for the original, which stays in",
+		"inbox/cur. It ends with the counts still unread. Every claimed message,",
+		"passive or not, gets its drained receipt.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
@@ -83,17 +91,37 @@ func runDrain(args []string) error {
 	}
 	defer func() { _ = deliveryRoot.Close() }()
 
+	if *forTurnFlag {
+		var route []string
+		if common.rootExplicit() {
+			route = append(route, "--root", common.Root)
+		}
+		if *sessionFlag != "" {
+			route = append(route, "--session", *sessionFlag)
+		}
+		if *ignoreSessionPinFlag {
+			route = append(route, "--ignore-session-pin")
+		}
+		items, rest, err := drainForTurnItems(deliveryRoot, root, common.Me, *limitFlag, validator)
+		return finishDrainBatch(deliveryRoot, root, common.Me, common.JSON, items, err, func(items []inboxItem) error {
+			return outputForTurn(common.JSON, common.Me, route, items, rest)
+		})
+	}
 	items, err := drainInboxItems(deliveryRoot, root, common.Me, *includeBodyFlag, *limitFlag, validator)
-	return finishDrainBatch(deliveryRoot, root, common.Me, common.JSON, *includeBodyFlag, items, err)
+	return finishDrainBatch(deliveryRoot, root, common.Me, common.JSON, items, err, func(items []inboxItem) error {
+		return outputDrainItems(common.JSON, common.Me, *includeBodyFlag, items)
+	})
 }
 
-func finishDrainBatch(deliveryRoot *fsq.DeliveryRoot, root, me string, jsonOutput, includeBody bool, items []inboxItem, drainErr error) error {
+// finishDrainBatch reports a drain batch through write, which also prints the
+// empty JSON result.
+func finishDrainBatch(deliveryRoot *fsq.DeliveryRoot, root, me string, jsonOutput bool, items []inboxItem, drainErr error, write func([]inboxItem) error) error {
 	// Once a claim commits, its payload or failure record must be observable
 	// even if a later claim fails. Emit accumulated results before returning the
 	// batch error so callers can both consume the committed work and retry.
 	if len(items) > 0 {
 		_ = presence.TouchDeliveryRoot(deliveryRoot, me)
-		if err := outputDrainItems(jsonOutput, me, includeBody, items); err != nil {
+		if err := write(items); err != nil {
 			if drainErr != nil {
 				return errors.Join(drainErr, err)
 			}
@@ -119,7 +147,7 @@ func finishDrainBatch(deliveryRoot *fsq.DeliveryRoot, root, me string, jsonOutpu
 	if len(items) == 0 {
 		emitSiblingBacklogHintsIfInboxEmpty(root, me)
 		if jsonOutput {
-			return joinOutcomeErr(drainErr, writeJSON(os.Stdout, drainResult{Drained: []drainItem{}, Count: 0}))
+			return joinOutcomeErr(drainErr, write([]inboxItem{}))
 		}
 		// Silent for text mode when empty (hook-friendly)
 		return drainErr
@@ -137,66 +165,68 @@ func outputDrainItems(jsonOutput bool, me string, includeBody bool, items []inbo
 		return err
 	}
 	for _, item := range items {
-		if item.ParseError != "" {
-			dlqNote := ""
-			if item.MovedToDLQ {
-				dlqNote = " [moved to DLQ]"
-			}
-			if err := writeStdout("- ID: %s\n  ERROR: %s%s\n---\n", item.ID, item.ParseError, dlqNote); err != nil {
-				return err
-			}
-			continue
-		}
-		subject := item.Subject
-		if subject == "" {
-			subject = "(no subject)"
-		}
-		priority := item.Priority
-		if priority == "" {
-			priority = "-"
-		}
-		kind := item.Kind
-		if kind == "" {
-			kind = "-"
-		}
-		fromDisplay := item.From
-		if item.FromProject != "" {
-			fromDisplay = item.From + " (project: " + item.FromProject + ")"
-		}
-		if err := writeStdout("- From: %s\n  Thread: %s\n  ID: %s\n  Subject: %s\n  Priority: %s\n  Kind: %s\n  Created: %s\n",
-			fromDisplay, item.Thread, item.ID, subject, priority, kind, item.Created); err != nil {
-			return err
-		}
-		for _, due := range []struct{ label, at string }{{"Reply by", item.ReplyBy}, {"News by", item.NewsBy}} {
-			if due.at == "" {
-				continue
-			}
-			relative := replyByRelative(due.at, time.Now())
-			if relative == "" {
-				if err := writeStdout("  %s: %s\n", due.label, sanitizeForTTY(due.at)); err != nil {
-					return err
-				}
-			} else if err := writeStdout("  %s: %s (%s)\n", due.label, due.at, relative); err != nil {
-				return err
-			}
-		}
-		if recipe := item.Completion; recipe != nil {
-			labels := ""
-			if len(recipe.Labels) > 0 {
-				labels = " --labels " + strings.Join(recipe.Labels, ",")
-			}
-			if err := writeStdout("  Close with: amq reply --id %s --kind %s%s --body @<file>\n", shellQuoteArg(item.ID), recipe.Kind, labels); err != nil {
-				return err
-			}
-		}
-		if includeBody && item.Body != "" {
-			if err := writeStdout("  Body:\n%s\n", item.Body); err != nil {
-				return err
-			}
-		}
-		if err := writeStdout("---\n"); err != nil {
+		if err := writeDrainItemText(item, includeBody); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// writeDrainItemText prints one drained message as plain drain shows it.
+func writeDrainItemText(item inboxItem, includeBody bool) error {
+	if item.ParseError != "" {
+		dlqNote := ""
+		if item.MovedToDLQ {
+			dlqNote = " [moved to DLQ]"
+		}
+		return writeStdout("- ID: %s\n  ERROR: %s%s\n---\n", item.ID, item.ParseError, dlqNote)
+	}
+	subject := item.Subject
+	if subject == "" {
+		subject = "(no subject)"
+	}
+	priority := item.Priority
+	if priority == "" {
+		priority = "-"
+	}
+	kind := item.Kind
+	if kind == "" {
+		kind = "-"
+	}
+	fromDisplay := item.From
+	if item.FromProject != "" {
+		fromDisplay = item.From + " (project: " + item.FromProject + ")"
+	}
+	if err := writeStdout("- From: %s\n  Thread: %s\n  ID: %s\n  Subject: %s\n  Priority: %s\n  Kind: %s\n  Created: %s\n",
+		fromDisplay, item.Thread, item.ID, subject, priority, kind, item.Created); err != nil {
+		return err
+	}
+	for _, due := range []struct{ label, at string }{{"Reply by", item.ReplyBy}, {"News by", item.NewsBy}} {
+		if due.at == "" {
+			continue
+		}
+		relative := replyByRelative(due.at, time.Now())
+		if relative == "" {
+			if err := writeStdout("  %s: %s\n", due.label, sanitizeForTTY(due.at)); err != nil {
+				return err
+			}
+		} else if err := writeStdout("  %s: %s (%s)\n", due.label, due.at, relative); err != nil {
+			return err
+		}
+	}
+	if recipe := item.Completion; recipe != nil {
+		labels := ""
+		if len(recipe.Labels) > 0 {
+			labels = " --labels " + strings.Join(recipe.Labels, ",")
+		}
+		if err := writeStdout("  Close with: amq reply --id %s --kind %s%s --body @<file>\n", shellQuoteArg(item.ID), recipe.Kind, labels); err != nil {
+			return err
+		}
+	}
+	if includeBody && item.Body != "" {
+		if err := writeStdout("  Body:\n%s\n", item.Body); err != nil {
+			return err
+		}
+	}
+	return writeStdout("---\n")
 }

@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/pi"
 )
@@ -38,6 +40,18 @@ func TestPiFoldRendersTerminalAndBuzzRuns(t *testing.T) {
 		rec("0f1e2d3c-r2", 12, "turn_end", ""),
 		rec("0f1e2d3c-r2", 12, "settled", `,"status":"completed"`),
 	}
+	// The doorbell changed its text; a bridge of an older release shows the
+	// earlier line.
+	for i, doorbell := range []string{harness.Doorbell, harness.LegacyDoorbell} {
+		run, ts := fmt.Sprintf("0f1e2d3c-d%d", i), 20+10*i
+		lines = append(lines,
+			rec(run, ts, "run_start", ""),
+			rec(run, ts, "user", `,"text":`+strconv.Quote(doorbell)),
+			rec(run, ts, "turn_start", ""),
+			rec(run, ts+1, "assistant", `,"text":"Drained."`),
+			rec(run, ts+1, "turn_end", ""),
+			rec(run, ts+1, "settled", `,"status":"completed"`))
+	}
 	carried := Carried(func(id string) bool { return id == ref })
 	src := SourceFor("pi")
 	var st State
@@ -55,6 +69,8 @@ func TestPiFoldRendersTerminalAndBuzzRuns(t *testing.T) {
 	want := []string{
 		"▶ run the tests\n✓ 1 tool (bash) · 3s\nAll pass.",
 		"▶ Buzz\n✓ 2s",
+		"▶ AMQ message\n✓ 1s\nDrained.",
+		"▶ AMQ message\n✓ 1s\nDrained.",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("posts = %q, want %q", got, want)

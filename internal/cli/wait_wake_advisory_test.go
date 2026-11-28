@@ -38,7 +38,7 @@ func TestBlockingWaitNotesLiveInjectingWakeOnly(t *testing.T) {
 			if got := strings.Contains(out, "already notifies this terminal"); got != tc.wantNote {
 				t.Fatalf("note emitted = %v, want %v; stderr=%q", got, tc.wantNote, out)
 			}
-			if tc.wantNote && !strings.Contains(out, "amq drain --include-body") {
+			if tc.wantNote && !strings.Contains(out, "amq drain --for-turn") {
 				t.Fatalf("note does not name the remedy: %q", out)
 			}
 		})

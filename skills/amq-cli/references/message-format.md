@@ -38,7 +38,7 @@ Field notes:
 - `created`: RFC3339 timestamp.
 - `refs`: optional list of related message ids (e.g., replies).
 - `priority`: optional (`urgent`, `normal`, `low`).
-- `notify`: optional (`wake` or `passive`). Missing or empty uses normal wake eligibility. Passive mail stays readable and drains normally, but never starts or extends a turn. Sends refuse urgent plus passive, and stored urgent messages remain eligible. A reply chooses its own intent.
+- `notify`: optional (`wake` or `passive`). Missing or empty uses normal wake eligibility. Passive mail stays readable and drains normally, but never starts or extends a turn. Sends refuse urgent plus passive, and stored urgent messages remain eligible. A reply chooses its own intent. A follow-up or news notice carries the intent the sender chose with `--reminder-notify`.
 - `kind`: optional; one of the kinds below.
 - `labels`: optional list of tags for filtering.
 - `context`: optional JSON object for structured metadata.
@@ -60,6 +60,7 @@ Notes:
   thread. Set `--thread` explicitly when sending to multiple recipients.
 - `reply_to`, `reply_project`, and `from_project` are transport metadata stamped by the CLI.
 - Delivery outcomes are tracked separately in consumer-local receipt files. `drained` means the consumer ingested the message; `dlq` means ingest failed and the message moved to DLQ.
+- `amq drain --for-turn` writes the same `drained` receipt for a passive message it shows as a digest: the consumer ingested the original, which stays in `inbox/cur`, and received its compact representation. Neither the receipt nor the digest proves that the model read every byte of the body or did the work.
 
 ## Message kinds
 

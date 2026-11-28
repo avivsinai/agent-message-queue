@@ -122,6 +122,19 @@ func TestEmit_AllEvents(t *testing.T) {
 			if result.Event != event {
 				t.Errorf("expected event=%s, got %s", event, result.Event)
 			}
+
+			// Only the events sent at normal priority ask the agent to act.
+			wantNotify := format.NotifyPassive
+			if event == "after_run" || event == "before_remove" {
+				wantNotify = format.NotifyWake
+			}
+			msg, err := format.ReadMessageFile(result.MessagePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if msg.Header.Notify != wantNotify {
+				t.Errorf("Notify for %s = %q, want %q", event, msg.Header.Notify, wantNotify)
+			}
 		})
 	}
 }

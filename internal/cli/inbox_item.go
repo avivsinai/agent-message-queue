@@ -24,8 +24,12 @@ type inboxItem struct {
 	NewsBy        string            `json:"news_by,omitempty"`
 	Completion    *threadOpenRecipe `json:"completion,omitempty"`
 	FailureReason string            `json:"-"`
-	Filename      string            `json:"-"` // actual filename on disk
-	SortKey       time.Time         `json:"-"`
+	Refs          []string          `json:"-"`
+	// Passive is !wakeEligible(header) for a valid header; a message whose
+	// header does not parse or validate is never passive.
+	Passive  bool      `json:"-"`
+	Filename string    `json:"-"` // actual filename on disk
+	SortKey  time.Time `json:"-"`
 }
 
 func (i inboxItem) GetCreated() string {

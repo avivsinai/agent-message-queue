@@ -102,6 +102,22 @@ Threading rules:
 - Symphony: `task/<workspace-key>`
 - Kanban: `task/<task-id>`
 
+## Notification Intent
+
+A generated message that asks its receiver to act, or that a person waits on,
+carries `notify: wake`. A generated message that only informs carries
+`notify: passive`, so it waits in the inbox and never starts a turn. A
+generator not listed here sets no `notify` and keeps the default wake
+eligibility.
+
+| Generator | `wake` | `passive` |
+|-----------|--------|-----------|
+| Symphony | events sent at normal priority (`after_run`, `before_remove`) | events sent at low priority |
+| Kanban | blocking and handoff todos | low-priority status updates |
+| Swarm bridge | `task_assigned`, `task_unblocked`, `task_failed`, `task_blocked` | `task_added`, `task_completed` |
+| ACP cockpit prompts, steering and replies | all | none |
+| Remote prompts | all | none |
+
 ## Reply and Relay Semantics
 
 Adapter messages are still AMQ messages, but reply behavior can be asymmetric across systems:

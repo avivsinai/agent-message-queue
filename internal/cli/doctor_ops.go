@@ -13,6 +13,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/followup"
+	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
@@ -73,7 +74,12 @@ type opsAgent struct {
 	OldestUnreadAgeSeconds float64 `json:"oldest_unread_age_seconds"`
 	// UnreadCountError is set when the inbox could not be inspected; the
 	// count is then unknown, not zero.
-	UnreadCountError    string  `json:"unread_count_error,omitempty"`
+	UnreadCountError string `json:"unread_count_error,omitempty"`
+	// EligibleCount and PassiveCount split UnreadCount by the wake rule:
+	// eligible mail may start a turn, passive mail never rings. When
+	// UnreadCountError is set, both stay zero and mean nothing.
+	EligibleCount       int     `json:"eligible_count"`
+	PassiveCount        int     `json:"passive_count"`
 	DLQCount            int     `json:"dlq_count"`
 	OldestDLQAgeSeconds float64 `json:"oldest_dlq_age_seconds"`
 	// DLQCountError is UnreadCountError for the DLQ.
@@ -276,8 +282,11 @@ func runOpsChecksWithSchema(
 			result.Hints = append(result.Hints, opsHint{Code: "codex_terminal_approvals", Status: "warn", Message: fmt.Sprintf("%s: Buzz approvals: terminal only: %s", handle, reason)})
 		}
 		mailboxPresent := dirExists(fsq.AgentBase(root, handle))
-		agent.UnreadCount, agent.OldestUnreadAgeSeconds, agent.UnreadCountError = opsMailboxCount(fsq.AgentInboxNew(root, handle), mailboxPresent, now)
-		agent.DLQCount, agent.OldestDLQAgeSeconds, agent.DLQCountError = opsMailboxCount(fsq.AgentDLQNew(root, handle), mailboxPresent, now)
+		inboxNew := fsq.AgentInboxNew(root, handle)
+		unreadSplit := &unreadBacklogSplit{dir: inboxNew}
+		agent.UnreadCount, agent.OldestUnreadAgeSeconds, agent.UnreadCountError = opsMailboxCount(inboxNew, mailboxPresent, now, unreadSplit.count)
+		agent.EligibleCount, agent.PassiveCount = unreadSplit.eligible, unreadSplit.passive
+		agent.DLQCount, agent.OldestDLQAgeSeconds, agent.DLQCountError = opsMailboxCount(fsq.AgentDLQNew(root, handle), mailboxPresent, now, nil)
 		agent.LastSentAgeSeconds = opsLastSentAge(fsq.AgentOutboxSent(root, handle), now)
 		agent.LastReadAgeSeconds = opsLastReadAge(fsq.AgentReceipts(root, handle), handle, now)
 		opsFollowUps(&agent, root, now)
@@ -586,10 +595,34 @@ func followUpRowNote(a opsAgent, now time.Time) string {
 	return fmt.Sprintf(", %d follow-ups (next due in %s)", a.FollowUpsPending, wait)
 }
 
+// unreadBacklogSplit classifies unread mail during the one opsMailboxCount
+// pass. Eligible and passive split by the wake rule over the header only:
+// eligible mail may start a turn, passive mail never rings. An unreadable or
+// corrupt header stays eligible, as wakeEligible preserves it for
+// notification.
+type unreadBacklogSplit struct {
+	dir      string
+	eligible int
+	passive  int
+}
+
+func (s *unreadBacklogSplit) count(e os.DirEntry) {
+	header, err := format.ReadHeaderFile(filepath.Join(s.dir, e.Name()))
+	if err == nil && !wakeEligible(header) {
+		s.passive++
+		return
+	}
+	s.eligible++
+}
+
 // opsMailboxCount counts the messages of one mailbox directory and the age of
 // the oldest. A missing directory of a missing mailbox counts zero; any other
 // failure returns an error string, so the zero is never mistaken for empty.
-func opsMailboxCount(dir string, mailboxPresent bool, now time.Time) (int, float64, string) {
+// For the inbox the caller classifies each unread message with classify:
+// eligible mail may start a turn and passive never rings, by the wake rule
+// over the header only; an unreadable header stays eligible, as wakeEligible
+// preserves it for notification.
+func opsMailboxCount(dir string, mailboxPresent bool, now time.Time, classify func(os.DirEntry)) (int, float64, string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) && !mailboxPresent {
@@ -603,6 +636,9 @@ func opsMailboxCount(dir string, mailboxPresent bool, now time.Time) (int, float
 			continue
 		}
 		count++
+		if classify != nil {
+			classify(e)
+		}
 		if info, err := e.Info(); err == nil {
 			if age := now.Sub(info.ModTime()).Seconds(); age > oldest {
 				oldest = age

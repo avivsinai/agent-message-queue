@@ -432,7 +432,7 @@ func TestOpsMailboxCountCountsOnlyMessageFiles(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(dir, "sub.md"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if count, _, errText := opsMailboxCount(dir, true, time.Now()); count != 1 || errText != "" {
+	if count, _, errText := opsMailboxCount(dir, true, time.Now(), nil); count != 1 || errText != "" {
 		t.Fatalf("count = %d (%q), want 1", count, errText)
 	}
 }
@@ -523,5 +523,76 @@ func TestRunOpsChecksFixWakeLocksUsesBaseConfigForSessionRoot(t *testing.T) {
 		if hint.Code == "config_error" {
 			t.Fatalf("false config_error under fix: %s", hint.Message)
 		}
+	}
+}
+
+// doctor --ops splits one agent's unread mail by the wake rule: a passive
+// message never starts a turn, and the split names both sides only when the
+// passive side is not empty (agent-message-queue-9w4b).
+func TestRunOpsChecksSplitsUnreadIntoEligibleAndPassive(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("ensure root dirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "carol"); err != nil {
+		t.Fatalf("ensure agent dirs: %v", err)
+	}
+	if err := config.WriteConfig(filepath.Join(root, "meta", "config.json"), config.Config{
+		Version: 1,
+		Agents:  []string{"carol"},
+	}, true); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	deliver := func(name string, header format.Header) {
+		t.Helper()
+		msg := format.Message{Header: header, Body: "body"}
+		data, err := msg.Marshal()
+		if err != nil {
+			t.Fatalf("marshal %s: %v", name, err)
+		}
+		if _, err := deliverToInboxForTest(t, root, "carol", name, data); err != nil {
+			t.Fatalf("deliver %s: %v", name, err)
+		}
+	}
+	base := format.Header{
+		Schema:  1,
+		From:    "dan",
+		To:      []string{"carol"},
+		Thread:  "p2p/carol__dan",
+		Subject: "Test",
+		Created: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+
+	urgent := base
+	urgent.ID = "urgent-1"
+	urgent.Notify = format.NotifyPassive
+	urgent.Priority = format.PriorityUrgent
+	deliver("urgent-passive.md", urgent)
+
+	for _, id := range []string{"normal-1", "normal-2"} {
+		normal := base
+		normal.ID = id
+		deliver(id+".md", normal)
+	}
+	for _, id := range []string{"passive-1", "passive-2", "passive-3"} {
+		passive := base
+		passive.ID = id
+		passive.Notify = format.NotifyPassive
+		deliver(id+".md", passive)
+	}
+
+	result := runOpsChecks(root, "test_source", false)
+	var carol *opsAgent
+	for i := range result.Agents {
+		if result.Agents[i].Handle == "carol" {
+			carol = &result.Agents[i]
+		}
+	}
+	if carol == nil {
+		t.Fatal("carol missing from ops agents")
+	}
+	if carol.UnreadCount != 6 || carol.EligibleCount != 3 || carol.PassiveCount != 3 {
+		t.Fatalf("carol unread=%d eligible=%d passive=%d, want 6/3/3", carol.UnreadCount, carol.EligibleCount, carol.PassiveCount)
 	}
 }

@@ -117,6 +117,12 @@ Send or reply with `--notify passive` for mail the recipient can read on
 their next turn. It has no notification deadline and never rings or blocks
 Stop, including through hook fallback. It still counts on a natural prompt
 and is included in ordinary drains. Missing intent uses wake eligibility.
+The doorbell line is `: AMQ doorbell run amq drain --for-turn then act on
+actionable mail`. `amq drain --for-turn` gives urgent mail first, then other
+wake-eligible mail in full, then a digest of each passive message; a passive
+remainder never asks for another turn. The prompt hook and the session
+mirror also recognize the line an older wake or hook types, `: AMQ doorbell
+run amq drain --include-body then act on it`.
 Upgrade all live wake and hook binaries before sending passive mail.
 
 ## Hold by priority

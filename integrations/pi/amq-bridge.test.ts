@@ -2097,12 +2097,13 @@ test("the doorbell is claimed, shown once as the visible custom message, and acc
 	}
 });
 
-test("an accepted doorbell attests its turn running until the turn ends", async () => {
+test("an accepted doorbell attests its turn running until the turn ends", async (t) => {
+	t.mock.timers.enable({ apis: ["Date", "setInterval"], now: Date.now() });
 	const h = harness();
 	await h.start();
 	try {
 		doorbell(h, "attempt-turn");
-		await h.waitFor(() => doorbellDecision(h, "attempt-turn") !== null);
+		t.mock.timers.tick(250);
 		assert.equal(doorbellDecision(h, "attempt-turn")?.decision, "claimed");
 		await h.emit("message_start", doorbellMessageStart("attempt-turn", h.generation()));
 		const turnFile = path.join(h.dir, "doorbell", "attempt-turn.turn.json");
@@ -2111,6 +2112,11 @@ test("an accepted doorbell attests its turn running until the turn ends", async 
 		assert.equal(running.attempt, "attempt-turn");
 		assert.equal(running.generation, h.generation());
 		assert.ok(running.updatedAt.length > 0);
+		// 03wb: one tool call can outlast the turn stamp without an iteration ending.
+		t.mock.timers.tick(2000);
+		const heartbeat = JSON.parse(fs.readFileSync(turnFile, "utf8"));
+		assert.equal(heartbeat.phase, "running");
+		assert.ok(Date.parse(heartbeat.updatedAt) > Date.parse(running.updatedAt), "heartbeat must renew the running turn");
 		await h.emit("turn_end", {});
 		// pi emits turn_end per model/tool iteration: a tool call inside the
 		// doorbell's work refreshes the attestation and never ends it. The
@@ -2119,6 +2125,9 @@ test("an accepted doorbell attests its turn running until the turn ends", async 
 		const stillRunning = JSON.parse(fs.readFileSync(turnFile, "utf8"));
 		assert.equal(stillRunning.phase, "running");
 		assert.ok(Date.parse(stillRunning.updatedAt) >= Date.parse(running.updatedAt));
+		await h.emit("agent_end", { messages: [] });
+		t.mock.timers.tick(4000);
+		assert.deepEqual(JSON.parse(fs.readFileSync(turnFile, "utf8")), stillRunning, "heartbeat after agent_end must let the turn stamp expire");
 		await h.emit("agent_settled", { aborted: false });
 		const ended = JSON.parse(fs.readFileSync(turnFile, "utf8"));
 		assert.equal(ended.phase, "ended");

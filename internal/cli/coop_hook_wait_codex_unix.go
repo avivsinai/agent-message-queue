@@ -174,7 +174,7 @@ func codexWaiter(ctx context.Context, thread, codexHome string, held func() bool
 			// Codex shows a Stop hook's systemMessage at the next turn.
 			out, merr := json.Marshal(struct {
 				SystemMessage string `json:"systemMessage"`
-			}{fmt.Sprintf("AMQ could not ring this chat for new mail: %s. Run amq drain --include-body.", strings.TrimSuffix(err.Error(), "."))})
+			}{fmt.Sprintf("AMQ could not ring this chat for new mail: %s. Run amq drain --for-turn.", strings.TrimSuffix(err.Error(), "."))})
 			if merr == nil {
 				_ = writeStdout("%s\n", out)
 			}
