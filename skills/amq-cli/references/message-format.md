@@ -60,6 +60,7 @@ Notes:
   thread. Set `--thread` explicitly when sending to multiple recipients.
 - `reply_to`, `reply_project`, and `from_project` are transport metadata stamped by the CLI.
 - Delivery outcomes are tracked separately in consumer-local receipt files. `drained` means the consumer ingested the message; `dlq` means ingest failed and the message moved to DLQ.
+- `amq drain --for-turn` writes the same `drained` receipt for a passive message it shows as a digest: the consumer ingested the original, which stays in `inbox/cur`, and received its compact representation. Neither the receipt nor the digest proves that the model read every byte of the body or did the work.
 
 ## Message kinds
 

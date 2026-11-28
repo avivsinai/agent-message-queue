@@ -67,7 +67,7 @@ const coopPromptInputLimit = 1 << 20
 // submitted prompt. The wake's own doorbell gets none: it already tells the
 // agent to drain.
 func writeCoopPromptFor(w io.Writer, prompt, root, me, session string) {
-	if strings.TrimSpace(prompt) == harness.Doorbell {
+	if harness.IsDoorbell(prompt) {
 		return
 	}
 	pending, err := coopStopPending(root, me)

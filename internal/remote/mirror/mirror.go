@@ -394,7 +394,7 @@ func (st *State) user(l claude.TranscriptLine, carried Carried, out []Event) []E
 	switch {
 	case l.OriginKind == "peer" && carried.has(l.MsgID):
 		t.Cause, t.Answered = CauseBuzz, true
-	case promptCause(text) == harness.Doorbell:
+	case harness.IsDoorbell(promptCause(text)):
 		// Typed into the terminal, or sent as a peer frame by a native wake.
 		t.Cause = CauseMail
 	case l.OriginKind == "peer", l.OriginKind == "" && l.CrossSession:

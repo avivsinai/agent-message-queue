@@ -28,7 +28,7 @@ const GRANT_REVISION = 6;
 // DOORBELL_LINE is the fixed visible line the bridge shows; it matches the
 // harness doorbell constant (internal/harness), so a reader of the
 // transcript sees the same text a typed doorbell leaves.
-export const DOORBELL_LINE = ": AMQ doorbell run amq drain --include-body then act on it";
+export const DOORBELL_LINE = ": AMQ doorbell run amq drain --for-turn then act on actionable mail";
 // DOORBELL_ATTEMPT bounds the attempt id the wake mints: one durable id per
 // pending cohort, lowercase alphanumerics and dashes.
 const DOORBELL_ATTEMPT = /^[a-z0-9][a-z0-9-]{0,63}$/;

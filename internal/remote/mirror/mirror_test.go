@@ -208,6 +208,16 @@ func TestFoldRendersEachMeasuredShape(t *testing.T) {
 		events: []string{Ended},
 		posts:  []string{"▶ AMQ message\n✓ 2s\nDrained one message."},
 	}, {
+		// The doorbell changed its text; a transcript from an older wake
+		// holds the earlier line.
+		name: "a turn an older wake's doorbell started",
+		lines: []string{
+			prompt("o1", "p1", 0, harness.LegacyDoorbell),
+			assistant("m1", "end_turn", 2, nil, text("Drained one message.")),
+		},
+		events: []string{Ended},
+		posts:  []string{"▶ AMQ message\n✓ 2s\nDrained one message."},
+	}, {
 		// agent-message-queue-6r9 review: a native wake sends the doorbell
 		// as a peer frame, which posted as a message from another session.
 		name: "a doorbell a native wake sent as a peer frame",

@@ -328,6 +328,10 @@ Use `--notify wake` when the recipient needs to act. Use `--notify passive`
 for informational mail they can read on their next turn and `amq presence set`
 for availability. Upgrade live wake and hook binaries before sending passive
 mail. A handoff wakes the reviewer and sends the requester a passive update.
+An agent reads its mail with `amq drain --for-turn` once in a turn that
+already runs, also one a native message or a finished background task
+started: urgent and other wake-eligible mail in full, passive mail as a
+digest. Do not keep a turn open to read passive mail.
 
 ```sh
 amq coop exec --session factory --me lead --no-wake sh

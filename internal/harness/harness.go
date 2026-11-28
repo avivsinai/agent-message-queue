@@ -28,8 +28,25 @@ const (
 
 // Doorbell is the prompt a wake types into a harness when mail arrives. A
 // reader of the harness's transcript knows a turn the doorbell started by
-// this exact text.
-const Doorbell = ": AMQ doorbell run amq drain --include-body then act on it"
+// this exact text, or by LegacyDoorbell.
+const Doorbell = ": AMQ doorbell run amq drain --for-turn then act on actionable mail"
+
+// LegacyDoorbell is the doorbell an older wake, hook or pi bridge types.
+// Transcripts and queued prompts can still hold it.
+const LegacyDoorbell = ": AMQ doorbell run amq drain --include-body then act on it"
+
+// IsDoorbell reports whether text, without surrounding space, is a doorbell.
+func IsDoorbell(text string) bool {
+	text = strings.TrimSpace(text)
+	return text == Doorbell || text == LegacyDoorbell
+}
+
+// StartsWithDoorbell reports whether text, without leading space, begins
+// with a doorbell.
+func StartsWithDoorbell(text string) bool {
+	text = strings.TrimSpace(text)
+	return strings.HasPrefix(text, Doorbell) || strings.HasPrefix(text, LegacyDoorbell)
+}
 
 // ClaudeRewakeRingExit is the wait hook's ring result. The installed hook
 // maps this code to 2 without treating an AMQ usage error as a ring.

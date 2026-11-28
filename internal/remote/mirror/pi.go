@@ -100,7 +100,7 @@ func foldPi(st State, n pi.ActivityNote, carried Carried) (State, []Event) {
 		switch {
 		case carried.has(n.ID):
 			t.Cause, t.Answered = CauseBuzz, true
-		case strings.HasPrefix(strings.TrimSpace(n.Text), harness.Doorbell):
+		case harness.StartsWithDoorbell(n.Text):
 			t.Cause = CauseMail
 		default:
 			t.Cause = promptCause(n.Text)

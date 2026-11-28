@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 )
@@ -68,6 +69,18 @@ func TestFoldCodexRendersFinishedTurns(t *testing.T) {
 		lines:  turn(codexPrompt(0, "run the tests", map[string]any{"client_id": clientID})),
 		events: []string{Ended},
 		post:   "▶ Buzz\n✓ 3 tools (command ×2, edit) · 12s",
+	}, {
+		// The doorbell changed its text; a rollout from an older hook holds
+		// the earlier line.
+		name:   "doorbell prompt",
+		lines:  turn(codexPrompt(0, harness.Doorbell, nil)),
+		events: []string{Ended},
+		post:   "▶ AMQ message\n✓ 3 tools (command ×2, edit) · 12s\nAll green.",
+	}, {
+		name:   "older doorbell prompt",
+		lines:  turn(codexPrompt(0, harness.LegacyDoorbell, nil)),
+		events: []string{Ended},
+		post:   "▶ AMQ message\n✓ 3 tools (command ×2, edit) · 12s\nAll green.",
 	}, {
 		// agent-message-queue-7fz review: reasoning and subagent items after
 		// the end edited the post with no new work.

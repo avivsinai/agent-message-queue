@@ -36,7 +36,7 @@ func TestNativeWakeFrameContainsOnlyTheConstantDoorbell(t *testing.T) {
 	if err := json.Unmarshal(raw, &frame); err != nil {
 		t.Fatal(err)
 	}
-	const want = "<cross-session-message from=\"amq-doorbell\" from-session=\"amq\" from-name=\"amq-wake\" from-mode=\"code\">\n: AMQ doorbell run amq drain --include-body then act on it\n</cross-session-message>"
+	const want = "<cross-session-message from=\"amq-doorbell\" from-session=\"amq\" from-name=\"amq-wake\" from-mode=\"code\">\n: AMQ doorbell run amq drain --for-turn then act on actionable mail\n</cross-session-message>"
 	if frame.Version != 1 || frame.ID != "b759ed39-29b2-4260-95cf-15de40569466" ||
 		frame.Type != "user" || frame.Priority != "next" || frame.Message.Role != "user" || frame.Message.Content != want {
 		t.Fatalf("unexpected native frame: %+v", frame)
