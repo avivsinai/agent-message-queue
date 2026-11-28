@@ -5,7 +5,7 @@ import (
 )
 
 func TestResolvePlacementOmittedUsesLegacy(t *testing.T) {
-	for _, backend := range []string{LauncherTMux, LauncherCMux, LauncherGhostty, CommandsBackendName} {
+	for _, backend := range []string{LauncherTMux, LauncherCMux, LauncherGhostty, LauncherRex, CommandsBackendName} {
 		preview, err := ResolvePlacement(backend, nil)
 		if err != nil || !preview.Supported || preview.Requested != nil {
 			t.Fatalf("%s omitted preview = %#v, %v", backend, preview, err)

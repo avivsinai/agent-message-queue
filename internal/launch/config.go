@@ -18,12 +18,13 @@ const (
 	LayoutColumns       = "columns"
 	LauncherCMux        = "cmux"
 	LauncherGhostty     = "ghostty"
+	LauncherRex         = "rex"
 	LauncherTMux        = "tmux"
 	LauncherCommands    = "commands"
 )
 
 func knownLaunchers() []string {
-	return []string{LauncherCMux, LauncherGhostty, LauncherTMux, LauncherCommands}
+	return []string{LauncherCMux, LauncherGhostty, LauncherRex, LauncherTMux, LauncherCommands}
 }
 
 type ProjectConfig struct {

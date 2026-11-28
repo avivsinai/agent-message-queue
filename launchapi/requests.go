@@ -45,7 +45,7 @@ func (request PrepareRequestV1) Validate() error {
 	if err := request.Target.validate(); err != nil {
 		return err
 	}
-	if !slices.Contains([]string{"auto", "cmux", "ghostty", "tmux", "commands"}, request.Launcher) {
+	if !slices.Contains([]string{"auto", "cmux", "ghostty", "rex", "tmux", "commands"}, request.Launcher) {
 		return fmt.Errorf("unsupported launcher %q", request.Launcher)
 	}
 	if request.Placement != nil {

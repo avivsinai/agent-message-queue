@@ -291,14 +291,20 @@ under managed launch.
 
 ### Launchers
 
-The registered launcher backends are `commands`, `tmux`, `cmux`, and
-`ghostty`.
+The registered launcher backends are `commands`, `tmux`, `cmux`, `ghostty`,
+and `rex`.
 
 - `--launcher <name>` wins over `--launcher auto`, which walks the local
   preference.
 - Under `auto`, `CMUX_SURFACE_ID` prepends `cmux` ahead of `ghostty`;
-  otherwise `TERM_PROGRAM=ghostty` prepends `ghostty`.
+  otherwise `TERM_PROGRAM=ghostty` prepends `ghostty`, and otherwise
+  `TERM_PROGRAM=rex` prepends `rex`.
 - Selection still requires Detect Available.
+- Rex is available only on macOS, from inside a Rex pane, with Rex API
+  revision 24 or later. Outside a pane, `auto` falls through to the next
+  preference.
+- Rex Create opens one unfocused tab in the caller's Rex session, with one
+  pane per agent.
 - Cmux Create uses `--focus false` and restores the prior selection. See
   [Managed launch recovery](launch-recovery.md).
 

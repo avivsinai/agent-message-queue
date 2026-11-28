@@ -86,10 +86,10 @@ roster and the mailboxes.
 amq launch
 ```
 
-The first launch asks you to trust the launch plan. With `tmux`, `cmux`, or
-`ghostty`, AMQ starts the agents in that terminal app. With the `commands`
-backend, it prints one command per agent and exits with code `6` (action
-required). Paste each complete command into a separate terminal; do not
+The first launch asks you to trust the launch plan. With `tmux`, `cmux`,
+`ghostty`, or `rex`, AMQ starts the agents in that terminal app. With the
+`commands` backend, it prints one command per agent and exits with code `6`
+(action required). Paste each complete command into a separate terminal; do not
 shorten or rebuild it.
 
 By default the wake rings a plain doorbell (text and Enter) on every harness,
