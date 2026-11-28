@@ -6,7 +6,6 @@
   var views = Array.prototype.slice.call(document.querySelectorAll(".view"));
   var links = Array.prototype.slice.call(document.querySelectorAll("[data-view-link]"));
   var secondary = document.querySelector(".secondary-nav");
-  var mobile = window.matchMedia("(max-width: 959px)");
   var snapshot = {};
   try { snapshot = JSON.parse(document.getElementById("model").textContent); } catch (e) { /* the server still renders every record */ }
   var storageKey = "amq-board-ui:" + (snapshot.dir || "");
@@ -54,12 +53,6 @@
       showAll.textContent = "Show all " + rows.length + " known next actions";
     }
   }
-  // On compact layouts the primary links scroll sideways; the current one
-  // is kept in view.
-  function showLink(link) {
-    var strip = link.parentElement, box = strip.getBoundingClientRect(), at = link.getBoundingClientRect();
-    if (at.left < box.left || at.right > box.right) { strip.scrollLeft += at.left - box.left; }
-  }
   // A fragment names a view (#view-inbox) or a record inside one, such as
   // an Inbox item a Needs you tile links to; a record opens its view.
   function hashTarget() {
@@ -78,7 +71,7 @@
     root.setAttribute("data-view", current);
     views.forEach(function (view) { view.hidden = view !== chosen; });
     links.forEach(function (link) {
-      if (link.dataset.viewLink === current) { link.setAttribute("aria-current", "page"); showLink(link); }
+      if (link.dataset.viewLink === current) { link.setAttribute("aria-current", "page"); }
       else { link.removeAttribute("aria-current"); }
     });
     filter(chosen);
@@ -123,12 +116,10 @@
     if (search) { search.focus({preventScroll:true}); }
   }
 
-  // More is an open rail beside the reading views and a closed menu on the
-  // top row of Flow and Floor and on compact layouts.
-  function menu() { return mobile.matches || current === "flow" || current === "floor"; }
-  function placeSecondary() { if (secondary) { secondary.open = !menu(); } }
+  // More is one closed menu under the bar on every view and width.
+  function placeSecondary() { if (secondary) { secondary.open = false; } }
   function closeMenu(focus) {
-    if (!secondary || !secondary.open || !menu()) { return false; }
+    if (!secondary || !secondary.open) { return false; }
     secondary.open = false;
     if (focus) { secondary.querySelector("summary").focus({preventScroll:true}); }
     return true;
@@ -170,7 +161,6 @@
     applyTheme(appearance.value);
     try { window.localStorage.setItem("amq-board-appearance", appearance.value); } catch (e) { /* theme still applies to this view */ }
   });
-  mobile.addEventListener("change", placeSecondary);
 
   function manualCopy(button, command) {
     var row = button.closest(".strip");

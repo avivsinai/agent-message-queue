@@ -24,13 +24,11 @@
 </header>
 <div class="workspace">
 <nav class="navigation" aria-label="Board views">
-  <div class="primary-nav">
   <a href="#view-inbox" data-view-link="inbox"{{if .Inbox.Count}} aria-label="Inbox, {{.Inbox.Count}} waiting"{{end}}>Inbox{{if .Inbox.Count}} <span class="nav-count">{{.Inbox.Count}}</span>{{end}}</a>
   <a href="#view-flow" data-view-link="flow">Flow</a>
   <a href="#view-floor" data-view-link="floor">Floor</a>
   <a href="#view-cost" data-view-link="cost">Cost</a>
-  </div>
-  <details class="secondary-nav" open><summary>More</summary><div>
+  <details class="secondary-nav"><summary>More</summary><div>
     <a href="#view-next" data-view-link="next">Next</a>
     <a href="#view-work" data-view-link="work">Work</a>
     <a href="#view-backlog" data-view-link="backlog">Backlog</a>
@@ -42,7 +40,6 @@
     <a href="#view-agents" data-view-link="agents">Agents</a>
     <label class="appearance">Appearance <select id="appearance"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
   </div></details>
-  <p class="nav-note">Read the context.<br>Copy a command.<br>Act in your terminal.</p>
 </nav>
 <main id="content">
 {{with .Inbox}}
@@ -275,7 +272,7 @@
 </section>
 </main>
 </div>
-<footer>AMQ {{.Version}}<span>Commands are copied, never run by this page.</span></footer>
+<footer>AMQ {{.Version}}<span>{{if .Live}}Answers you choose here are sent as you. Nothing else is run by this page.{{else}}Commands are copied, never run by this page.{{end}}</span></footer>
 </div>
 <datalist id="board-tasks">{{range .TaskChoices}}<option value="{{.Label}}" data-task-id="{{.ID}}">{{.Title}}</option>{{end}}</datalist>
 <p class="sr-only" id="announce" aria-live="polite"></p>

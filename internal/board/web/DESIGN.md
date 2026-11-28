@@ -139,11 +139,11 @@ The Work Navigator uses a cool neutral canvas, a clear list surface, and restrai
 Inline disclosures reveal context in place. Suggestion quotes preserve line breaks and tabs; other control characters appear as escapes. Color supports written state: warnings explain missing coverage, and errors identify failed operations. Local font stacks and CSS carry the system without external assets.
 
 **Key Characteristics:**
-- One reading lane with a secondary navigation rail; Flow and Floor use the full window, as a lifecycle board and as a grid of agent stations.
+- One navigation bar under the header on every view: Inbox, Flow, Floor, Cost, and a closed More menu; there is no navigation rail.
 - Readable titles, body text, and metadata at distinct sizes.
 - Flat surfaces, fine dividers, and restrained cobalt selection.
 - Native inline disclosures and visible keyboard focus.
-- Four primary destinations, Inbox, Flow, Floor, and Cost; separate destinations under More for Next, Work, Backlog, Requests, Older requests, Suggestions, and History.
+- Four primary destinations, Inbox, Flow, Floor, and Cost; separate destinations under More.
 - Cobalt is reserved for what needs you, links, and navigation; stage tones stay neutral.
 - Stage marks that fill as work advances: an empty circle for Backlog, a quarter, half, and three quarters for Ready, In progress, and In review, a full disc for Shipped, and a square for Blocked.
 - Station plates that state each agent seat's state as a glyph and a word, repeated by a 6px state bar.
@@ -180,11 +180,11 @@ The type is plain and readable. View headings lead; record titles support scanni
 
 ## Layout
 
-The shell is centered and bounded at 75rem, with 2rem side gutters on wide screens. A two-column workspace uses an 11rem navigation rail and a 2rem gap. The main column is one reading lane. A view heading and search wrap when space runs out. Search is bounded at 20rem on wide screens.
+The shell is centered and bounded at 75rem, with 2rem side gutters on wide screens. One navigation bar sits under the header on every view: the four main destinations and the More menu in one row, over a divider rule. The main column is one reading lane. A view heading and search wrap when space runs out. Search is bounded at 20rem on wide screens.
 
-At 959px and below, gutters become 1rem, navigation moves above the content, secondary destinations and Appearance use More, and search fills its row. Snapshot age remains visible at compact widths. At 600px and below, work rows become one column; copy actions keep their natural width. Metadata wraps and definition lists stack. Work rows use 1.25rem by 1.5rem padding on wide screens and 1rem on small screens. Shared spacing steps are in the frontmatter.
+At 959px and below, gutters become 1rem, the bar keeps its row and wraps, and search fills its row. Snapshot age remains visible at compact widths. At 600px and below, work rows become one column; copy actions keep their natural width. Metadata wraps and definition lists stack. Work rows use 1.25rem by 1.5rem padding on wide screens and 1rem on small screens. Shared spacing steps are in the frontmatter.
 
-Flow and Floor are the exceptions to the reading lane. With script, both views release the shell to the window width (2rem gutters, at most 120rem) and the navigation becomes one top row of tabs. On Flow, six stage columns share the width; at 1279px and below the board has three columns; at 600px and below the stages stack as sections under their headings. On Floor, sessions flow side by side, each holding its station plates at 16.5rem; a session wraps its plates, and at 600px and below the plates and sessions become one column. Without script, both render inside the normal shell.
+Flow and Floor are the exceptions to the reading lane. With script, both views release the shell to the window width (2rem gutters, at most 120rem) under the same bar. On Flow, six stage columns share the width; at 1279px and below the board has three columns; at 600px and below the stages stack as sections under their headings. On Floor, sessions flow side by side, each holding its station plates at 16.5rem; a session wraps its plates, and at 600px and below the plates and sessions become one column. Without script, both render inside the normal shell.
 
 Without script, all views remain readable in document order. With script, one destination is shown at a time. Print shows all views and removes navigation and controls.
 
@@ -207,7 +207,7 @@ Outlined surface buttons use accent text. Hover uses the selected tone, active u
 Search has a visible label, surface fill, control border, and full-size body type. Commands use a readonly, resizable monospace textarea with a minimum height of 4.5rem. Both retain visible focus.
 
 ### Navigation
-Primary destinations are Inbox, Flow (the default), Floor, and Cost. Next, Work, Backlog, Requests, Older requests, Suggestions, History, Sources, Agents, and Appearance sit under More, in that order. Inbox carries its count after the word when it is above zero, in accent ink in every state, and its accessible name says the count in words ("Inbox, 2 waiting"). The current destination uses accent ink on the selected tone. Links have a minimum height of 2.75rem. More is a native disclosure on compact layouts and a menu that starts closed on Flow and Floor. Disclosure markers are drawn chevrons (a 1.5px stroke that turns when open), not browser triangles.
+Primary destinations are Inbox, Flow (the default), Floor, and Cost, one bar under the header, the same on every view and width. The bar comes before the content in tab order. Next, Work, Backlog, Requests, Older requests, Suggestions, History, Sources, Agents, and Appearance sit under More, in that order, until a later slice removes destinations. Inbox carries its count after the word when it is above zero, in accent ink in every state, and its accessible name says the count in words ("Inbox, 2 waiting"). The current destination uses accent ink on the selected tone. Links have a minimum height of 2.75rem. More is a native disclosure that starts closed on every view; it opens with Enter or Space and closes with Esc or a click outside, which returns focus to its summary. Disclosure markers are drawn chevrons (a 1.5px stroke that turns when open), not browser triangles.
 
 ### Cards / Containers
 A shared list surface groups work records; each row holds a title, a one-sentence summary clamped to two lines when the record has one, the reason, metadata, copy action, and Details. A conventional-commit prefix (feat, fix, and the like) is a quiet monospace chip on the subtle tone before the title, and the rest of the title is sentence-cased. Secondary source and agent lists use the same surface and divider treatment. Agents lists sessions with a live wake or recent presence first; the other sessions fold into one closed disclosure at the end of the view, "N sessions without recent presence". Empty states remain inside the list surface; search-empty feedback sits outside it.

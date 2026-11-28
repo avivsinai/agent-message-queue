@@ -360,3 +360,51 @@ func TestHTMLCostListsEachModelWithCostAndShare(t *testing.T) {
 		t.Error("model rows lack their cost or share")
 	}
 }
+
+// Design slice 1 (bead x36b.9): the board has one navigation bar on every
+// view — Inbox with its count, Flow, Floor, Cost, then a closed More menu
+// holding the secondary destinations and Appearance. The old left rail with
+// its open More list and nav note is gone, and the footer says which writes
+// the page can do on the face being served.
+func TestHTMLNavigationBarIsOneBarWithAClosedMoreMenu(t *testing.T) {
+	m := Model{}
+	var page strings.Builder
+	if err := WriteHTML(&page, m, ""); err != nil {
+		t.Fatal(err)
+	}
+	html := page.String()
+	if strings.Count(html, `class="navigation"`) != 1 {
+		t.Fatalf("the page holds more than one navigation bar")
+	}
+	if strings.Contains(html, "primary-nav") || strings.Contains(html, "nav-note") {
+		t.Error("the navigation rail or its note is still on the page")
+	}
+	if strings.Contains(html, `<details class="secondary-nav" open>`) {
+		t.Error("the More menu does not start closed")
+	}
+	navStart := strings.Index(html, `</header>`)
+	navEnd := strings.Index(html, `<main id="content">`)
+	if navStart < 0 || navEnd < 0 || navEnd < navStart {
+		t.Fatal("the navigation bar does not sit between the header and the content")
+	}
+	bar := html[navStart:navEnd]
+	for _, link := range []string{"inbox", "flow", "floor", "cost", "requests", "history", "sources", "suggestions", "older-requests", "agents"} {
+		if !strings.Contains(bar, `data-view-link="`+link+`"`) {
+			t.Errorf("the bar does not link the %s view", link)
+		}
+	}
+	if !strings.Contains(bar, `id="appearance"`) {
+		t.Error("Appearance is not in the More menu")
+	}
+	var live strings.Builder
+	if err := WriteLiveHTML(&live, Model{}); err != nil {
+		t.Fatal(err)
+	}
+	liveHTML := live.String()
+	if !strings.Contains(liveHTML, "Answers you choose here are sent as you. Nothing else is run by this page.") {
+		t.Error("the live footer does not say what the served page sends")
+	}
+	if !strings.Contains(html, "Commands are copied, never run by this page.") {
+		t.Error("the static footer does not say the page only copies")
+	}
+}
