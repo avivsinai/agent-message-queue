@@ -77,8 +77,15 @@ When the work takes design, write the design yourself and brief the build.
   is there. What you built yourself goes to another seat. The owner gets
   outcomes and proof, never a diff to read.
 - Read the diff, not the report. Run or read the real output.
-- Findings go back in one message, as exact edits. A third round on one
-  change means the brief was wrong: rewrite the brief.
+- Findings go back in one message, as exact edits. Each finding names its
+  origin (new, there before the change, or brought in by a fix) and the size
+  of its remedy. A remedy larger than the change it protects is a design
+  question, not a finding.
+- Round two reviews only the fix diff and attacks what the fix changed. A
+  third round never starts: you decide between shipping with a named known
+  limit, a smaller scope, or a decision record or question by the door rule.
+- When you will act against the owner's words, write the decision record
+  first, then act.
 - Merge only what you reviewed, on green checks that ran on that head. Say
   "GO" for one named change; a general "go" from anyone is not a merge order.
 - Done is the user's path working, not a passed test. Close the task record

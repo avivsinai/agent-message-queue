@@ -438,10 +438,17 @@ amq reply --id "$review_id" --kind review_response --body @verdict.md
 ```
 
 **Lead.** Drain the verdict. Send findings to the builder and request another
-review if the head changes. The authorized merger compares the current head
-with the reviewed head, confirms required checks and approvals on that
-revision, then merges through the project's normal process. Record the
-resulting revision and observed outcome.
+review if the head changes. Each finding names its origin (new, there before
+the change, or brought in by a fix) and the size of its remedy; a remedy
+larger than the change it protects is a design question, not a finding. The
+next round reviews only the fix diff and attacks what the fix changed; after
+two rounds of fixes, a third round never starts — the lead decides between
+shipping with a named known limit, a smaller scope, or a decision record or
+question by the door rule. When the lead will act against the owner's words,
+it writes the decision record first, then acts. The authorized merger
+compares the current head with the reviewed head, confirms required checks
+and approvals on that revision, then merges through the project's normal
+process. Record the resulting revision and observed outcome.
 
 At the end of a reporting period, run `amq-board sync` and
 `amq-board retro --since 14d`. Read time to first reply, time to closure
