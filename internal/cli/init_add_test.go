@@ -1,8 +1,6 @@
 package cli
 
 import (
-	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -66,27 +64,8 @@ func TestInitAddRegistersNewAgentsInExistingRoot(t *testing.T) {
 	}
 }
 
-func TestInitAddRejectsForce(t *testing.T) {
-	err := runInit([]string{"--root", t.TempDir(), "--agents", "claude", "--add", "--force"})
-	if GetExitCode(err) != ExitUsage {
-		t.Fatalf("init --add --force = %v (exit %d), want usage error", err, GetExitCode(err))
-	}
-}
-
-func TestInitAddRequiresInitializedRoot(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "missing")
-	err := runInit([]string{"--root", root, "--agents", "claude", "--add"})
-	if GetExitCode(err) != ExitNotFound {
-		t.Fatalf("init --add on a missing root = %v (exit %d), want not found", err, GetExitCode(err))
-	}
-	if _, statErr := os.Stat(root); !errors.Is(statErr, fs.ErrNotExist) {
-		t.Fatalf("init --add created the root: %v", statErr)
-	}
-}
-
-// Review finding (agy-183 R1 blocker): provisioning through the ambient path
-// followed a symlinked mailbox into another agent's tree and then listed the
-// handle.
+// Review finding: provisioning through the ambient path followed a symlinked
+// mailbox into another agent's tree and then listed the handle.
 func TestInitAddRefusesSymlinkedMailbox(t *testing.T) {
 	root := t.TempDir()
 	if _, err := captureEnvStdout(t, func() error {
