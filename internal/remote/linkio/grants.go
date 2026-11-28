@@ -164,6 +164,29 @@ func MintGeneration(stateDir, link string, bindings ...string) error {
 // clear only lowers authority, so it proceeds without an advisory file
 // lock. A removed link has nothing to clear.
 func ClearGrant(stateDir, link, binding, digest string) error {
+	_, err := clearGrant(stateDir, link, binding, digest)
+	return err
+}
+
+// RevokeGrant removes the binding's stored grant when its digest is digest,
+// as ClearGrant does, and reports whether it removed it. The digest is
+// compared and the grant cleared under the lock StoreGrant takes, so a
+// grant stored meanwhile is never the one removed. Without an advisory file
+// lock it refuses: the comparison must exclude a concurrent store.
+func RevokeGrant(stateDir, link, binding, digest string) (bool, error) {
+	if !lock.AdvisoryLockAvailable() {
+		return false, errors.New("refusing to revoke a named grant without an advisory file lock")
+	}
+	return clearGrant(stateDir, link, binding, digest)
+}
+
+// clearGrant is the exact clear: it removes the binding's stored grant only
+// when its digest is digest, keeps every other value of the file, and
+// reports whether it changed the record. A link that does not exist has
+// nothing to clear; a failed write is an error, whatever its cause.
+func clearGrant(stateDir, link, binding, digest string) (bool, error) {
+	changed := false
+	var writeErr error
 	err := withGrants(stateDir, link, func() error {
 		g, err := LoadGrants(stateDir, link)
 		if err != nil {
@@ -175,12 +198,19 @@ func ClearGrant(stateDir, link, binding, digest string) error {
 		}
 		rec.Grant = nil
 		g[binding] = rec
-		return writeJSON(LinkDir(stateDir, link), grantsFile, g)
-	})
-	if errors.Is(err, os.ErrNotExist) {
+		if writeErr = writeJSON(LinkDir(stateDir, link), grantsFile, g); writeErr != nil {
+			return writeErr
+		}
+		changed = true
 		return nil
+	})
+	switch {
+	case writeErr != nil:
+		return false, writeErr
+	case errors.Is(err, os.ErrNotExist):
+		return false, nil
 	}
-	return err
+	return changed, err
 }
 
 // StoreGrant stores an accepted grant for its binding, replacing an older
@@ -239,6 +269,10 @@ type GrantStore interface {
 	// Clear removes the binding's stored grant with that digest and keeps
 	// its generation (ClearGrant).
 	Clear(binding, digest string) error
+	// Revoke removes the binding's stored grant with that digest under the
+	// store's lock, keeps its generation and issued floor, and reports
+	// whether it removed it (RevokeGrant).
+	Revoke(binding, digest string) (bool, error)
 }
 
 // FileGrants is the GrantStore of link in stateDir: its grants.json.
@@ -256,6 +290,10 @@ func (f fileGrants) Store(sg StoredGrant) error { return StoreGrant(f.stateDir, 
 
 func (f fileGrants) Clear(binding, digest string) error {
 	return ClearGrant(f.stateDir, f.link, binding, digest)
+}
+
+func (f fileGrants) Revoke(binding, digest string) (bool, error) {
+	return RevokeGrant(f.stateDir, f.link, binding, digest)
 }
 
 func (f fileGrants) Mint(binding string) (string, error) {

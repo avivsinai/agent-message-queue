@@ -39,6 +39,7 @@ type fakeServer struct {
 	conn     *websocket.Conn
 	ctx      context.Context
 	welcomed chan int64
+	hello    []byte // under mu: the last hello frame as the endpoint wrote it
 }
 
 func newFakeServer(t *testing.T) *fakeServer {
@@ -59,11 +60,19 @@ func (fs *fakeServer) serve(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	nonce := b64.EncodeToString([]byte("nonce-nonce-nonce-nonce-nonce-32"))
 	write(ctx, ws, Frame{Schema: SchemaFrame, ID: "c1", Body: mustJSON(challengeBody{Schema: SchemaChallenge, ServerID: fs.serverID, Nonce: nonce})})
-	hf, err := readFrame(ctx, ws)
+	typ, raw, err := ws.Read(ctx)
 	if err != nil {
 		return
 	}
+	fs.mu.Lock()
+	fs.hello = raw
+	fs.mu.Unlock()
+	var hf Frame
 	var hello helloBody
+	if err := json.Unmarshal(raw, &hf); err != nil || typ != websocket.MessageText || hf.Schema != SchemaFrame || len(hf.Body) == 0 {
+		fs.t.Errorf("hello envelope: %v", err)
+		return
+	}
 	if err := decodeStrict(hf.Body, SchemaHello, &hello); err != nil || hf.Re != "c1" {
 		fs.t.Errorf("hello: %v", err)
 		return
