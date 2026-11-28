@@ -77,8 +77,11 @@
     filter(chosen);
     placeSecondary();
     // One view shows at a time, so a view link opens it from the top with
-    // the masthead and navigation in place instead of jumping to its anchor.
-    if (requested === current) { window.scrollTo(0, 0); }
+    // the masthead and navigation in place instead of jumping to its
+    // anchor. The scroll lands before the browser's own anchor jump for
+    // this fragment, which would otherwise move the page and take the
+    // bar off screen.
+    window.scrollTo(0, 0);
     if (target) {
       var title = target.querySelector("h2") || target;
       target.scrollIntoView({block:"start"});
@@ -103,6 +106,16 @@
   (saved.open || []).forEach(function (id) { var detail = document.getElementById(id); if (detail && detail.matches("details")) { detail.open = true; } });
   root.classList.add("enhanced");
   selectView(false);
+  // A click on a view link opens the view itself and keeps the page at the
+  // top; the anchor jump never runs.
+  document.addEventListener("click", function (event) {
+    var link = event.target.closest("[data-view-link]");
+    if (!link) { return; }
+    event.preventDefault();
+    var id = link.getAttribute("href").slice(1);
+    if (window.location.hash === "#" + id) { selectView(true); }
+    else { window.location.hash = id; }
+  });
   window.addEventListener("hashchange", function () { selectView(true); });
   // The browser scrolls to the fragment after load, so the view opens from
   // the top once that scroll has happened.
