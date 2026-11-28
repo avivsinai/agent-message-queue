@@ -264,25 +264,25 @@ func codexJoinDoorbell(root, me string) string {
 	home, err := os.UserHomeDir()
 	path, perr := codexCoopHooksPath()
 	if err != nil || perr != nil {
-		return "No wake: run amq drain --include-body between tasks."
+		return "No wake: run amq drain --for-turn between tasks."
 	}
 	commands, err := hookfile.MarkedHookCommandsAt(path, "Stop", coopHookMarker)
 	bin, _ := os.Executable()
 	switch {
 	case err != nil || len(commands) == 0:
-		return "No wake: the wait hook is not installed. Run amq coop install-hooks --harness codex, approve the hook in Codex, then start a new chat and join again; until then run amq drain --include-body between tasks."
+		return "No wake: the wait hook is not installed. Run amq coop install-hooks --harness codex, approve the hook in Codex, then start a new chat and join again; until then run amq drain --for-turn between tasks."
 	case !slices.Contains(commands, codexCoopWaitCommand(bin, codexidentity.ThreadsDir(home))):
-		return "No wake: the installed wait hook is not the one this amq installs (another binary, or an older release). Run amq coop install-hooks --harness codex, approve the hook in Codex, then start a new chat; until then run amq drain --include-body between tasks."
+		return "No wake: the installed wait hook is not the one this amq installs (another binary, or an older release). Run amq coop install-hooks --harness codex, approve the hook in Codex, then start a new chat; until then run amq drain --for-turn between tasks."
 	}
 	if readSeatDoorbell(root, me).ringer == doorbellNone {
 		stop, stopErr := hookfile.MarkedHookCommandsAt(path, "Stop", codexStopHookMarker)
 		switch {
 		case stopErr != nil:
-			return "No turn-end notice: the attended-stop hook cannot be read. Run amq drain --include-body between tasks."
+			return "No turn-end notice: the attended-stop hook cannot be read. Run amq drain --for-turn between tasks."
 		case !slices.Contains(stop, codexCoopStopCommand(bin, codexidentity.ThreadsDir(home))):
-			return "No turn-end notice: the attended-stop hook is absent or from another amq. Run amq coop install-hooks --harness codex, approve AMQ_COOP_STOP_HOOK in Codex, then start a new chat; until then run amq drain --include-body between tasks."
+			return "No turn-end notice: the attended-stop hook is absent or from another amq. Run amq coop install-hooks --harness codex, approve AMQ_COOP_STOP_HOOK in Codex, then start a new chat; until then run amq drain --for-turn between tasks."
 		default:
-			return "A synchronous Stop hook shows new unread mail as a warning at this attended seat's next turn end; approve AMQ_COOP_STOP_HOOK in Codex if it is new. The async hook types no prompt. Use amq drain --include-body to read mail now."
+			return "A synchronous Stop hook shows new unread mail as a warning at this attended seat's next turn end; approve AMQ_COOP_STOP_HOOK in Codex if it is new. The async hook types no prompt. Use amq drain --for-turn to read mail now."
 		}
 	}
 	return "A hook wakes this chat when mail arrives after a turn ends; it starts at the end of this turn, in a chat opened after the hook was approved in Codex. Do not run amq watch, amq monitor or a polling loop."
@@ -466,7 +466,7 @@ func runCoopJoin(args []string) error {
 	// This session's SessionStart ran before the join and printed no
 	// preamble, so the backlog is reported here.
 	if unread := coopHookUnread(root, handle); unread > 0 {
-		if err := writeStdout("Inbox: %d unread. Run amq drain --include-body.\n", unread); err != nil {
+		if err := writeStdout("Inbox: %d unread. Run amq drain --for-turn.\n", unread); err != nil {
 			return err
 		}
 	}
@@ -522,17 +522,17 @@ const claudeNameSourceUser = "user"
 func coopJoinDoorbell(root, me string) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "No wake: run amq drain --include-body between tasks."
+		return "No wake: run amq drain --for-turn between tasks."
 	}
 	commands, err := claude.MarkedHookCommands(home, "Stop", coopHookMarker)
 	bin, _ := os.Executable()
 	switch {
 	case err != nil || !slices.ContainsFunc(commands, ownsCoopHook(true)):
-		return "No wake: the wait hook is not installed. Run amq coop install-hooks, then start a new session and join again; until then run amq drain --include-body between tasks."
+		return "No wake: the wait hook is not installed. Run amq coop install-hooks, then start a new session and join again; until then run amq drain --for-turn between tasks."
 	case !slices.Contains(commands, coopHookCommand(bin, claudeidentity.SessionsDir(home), "wait")):
-		return "No wake: the installed wait hook is not the one this amq installs (another binary, or an older release). Run amq coop install-hooks, then start a new session; until then run amq drain --include-body between tasks."
+		return "No wake: the installed wait hook is not the one this amq installs (another binary, or an older release). Run amq coop install-hooks, then start a new session; until then run amq drain --for-turn between tasks."
 	case !coopWaitRunsInBackground(readSeatDoorbell(root, me).optIn):
-		return "No wake: this Claude Code session does not keep the wait hook in the background. Run amq drain --include-body between tasks."
+		return "No wake: this Claude Code session does not keep the wait hook in the background. Run amq drain --for-turn between tasks."
 	}
 	return "A hook wakes this session when mail arrives after a turn ends; it starts at the end of this turn. Do not run amq watch, amq monitor or a polling loop."
 }

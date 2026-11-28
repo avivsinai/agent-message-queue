@@ -9,6 +9,16 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/sessionguard"
 )
 
+// notifyForPriority is the notification intent of an integration message: a
+// low-priority message only informs and stays passive; any other priority
+// asks the receiver to act and wakes it.
+func notifyForPriority(priority string) string {
+	if priority == format.PriorityLow {
+		return format.NotifyPassive
+	}
+	return format.NotifyWake
+}
+
 // DeliverIntegrationMessage builds and delivers a standard integration message
 // to the specified recipient's inbox. It uses the same Maildir atomic delivery
 // as the rest of AMQ, and refuses a root the inherited session pin does not
@@ -41,6 +51,7 @@ func DeliverIntegrationMessage(root, from, to, subject, body string, ctx map[str
 			Thread:   thread,
 			Subject:  subject,
 			Created:  now.UTC().Format(time.RFC3339Nano),
+			Notify:   notifyForPriority(priority),
 			Priority: priority,
 			Kind:     kind,
 			Labels:   labels,

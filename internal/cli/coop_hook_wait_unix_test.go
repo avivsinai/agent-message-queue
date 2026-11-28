@@ -607,7 +607,7 @@ func TestCodexPromptAddsUnreadContextToAJoinedChat(t *testing.T) {
 		return out.String()
 	}
 	got := prompt(thread, "hello")
-	if !strings.Contains(got, `"hookEventName":"UserPromptSubmit"`) || !strings.Contains(got, "You have 1 unread AMQ message(s). Run amq drain --include-body.") {
+	if !strings.Contains(got, `"hookEventName":"UserPromptSubmit"`) || !strings.Contains(got, "You have 1 unread AMQ message(s). Run amq drain --for-turn.") {
 		t.Fatalf("a person's prompt in the joined chat got %q, want the unread context", got)
 	}
 	if got := prompt(thread, harness.Doorbell); got != "" {
@@ -774,7 +774,7 @@ func TestTerminalWaitHookRequiresOptIn(t *testing.T) {
 	if err := writeCoopSessionStart(&preamble, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(preamble.String(), "No wake: run amq drain --include-body between tasks.") {
+	if !strings.Contains(preamble.String(), "No wake: run amq drain --for-turn between tasks.") {
 		t.Fatalf("preamble with no wake and no wait hook = %q, want No wake", preamble.String())
 	}
 }

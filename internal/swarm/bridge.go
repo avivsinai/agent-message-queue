@@ -323,6 +323,19 @@ func isAssignedToMe(assignedTo, handle, agentID string) bool {
 	return strings.EqualFold(assignedTo, handle) || strings.EqualFold(assignedTo, agentID)
 }
 
+// bridgeNotify is the notification intent of a bridge event: events that ask
+// the agent to act wake it, events that only report stay passive, and any
+// other event keeps the legacy default.
+func bridgeNotify(eventType string) string {
+	switch eventType {
+	case "task_assigned", "task_unblocked", "task_failed", "task_blocked":
+		return format.NotifyWake
+	case "task_added", "task_completed":
+		return format.NotifyPassive
+	}
+	return ""
+}
+
 // deliverBridgeEvent self-delivers event to the agent's inbox, and refuses a
 // root the inherited session pin does not name (sessionguard.ContextError).
 func deliverBridgeEvent(cfg BridgeConfig, event BridgeEvent) error {
@@ -371,6 +384,7 @@ func deliverBridgeEvent(cfg BridgeConfig, event BridgeEvent) error {
 			Thread:   fmt.Sprintf("swarm/%s", cfg.TeamName),
 			Subject:  subject,
 			Created:  now.UTC().Format(time.RFC3339Nano),
+			Notify:   bridgeNotify(event.Type),
 			Priority: format.PriorityNormal,
 			Kind:     format.KindStatus,
 			Labels:   []string{"swarm", event.Type},

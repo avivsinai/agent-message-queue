@@ -85,7 +85,20 @@ func claimInboxItemsPinned(
 	if err != nil {
 		return nil, err
 	}
+	return claimInboxFilesPinned(deliveryRoot, root, me, filenames, includeBody, limit, validator, afterClaim)
+}
 
+// claimInboxFilesPinned claims the named inbox/new files in the given order,
+// up to limit (0 = all), and returns them in timestamp order.
+func claimInboxFilesPinned(
+	deliveryRoot *fsq.DeliveryRoot,
+	root, me string,
+	filenames []string,
+	includeBody bool,
+	limit int,
+	validator *headerValidator,
+	afterClaim func(string) error,
+) ([]inboxItem, error) {
 	if validator == nil {
 		validator = &headerValidator{}
 	}
@@ -442,6 +455,8 @@ func readInboxItem(
 		item.ReplyProject = header.ReplyProject
 		item.ReplyBy = header.ReplyBy
 		item.NewsBy = header.NewsBy
+		item.Refs = header.Refs
+		item.Passive = !wakeEligible(header)
 		if slices.Contains(thread.OpenerKinds, header.Kind) {
 			recipe := completionRecipe(header.Kind)
 			item.Completion = &recipe

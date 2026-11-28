@@ -35,7 +35,7 @@ for a direct run, use `amq coop exec --me reviewer claude`.
 
 Start both agents before sending a first message. A newly started wake can
 baseline messages already waiting, leaving them unread without notifying. If a
-message was sent first, run `amq drain --include-body` in the target agent.
+message was sent first, run `amq drain --for-turn` in the target agent.
 
 Disable wake when the environment has no usable terminal:
 
@@ -193,7 +193,7 @@ amq coop leave                           # release the handle
   carries no sender or subject. A ring that fails shows a warning at the next
   turn and is rung again by the next waiter. While a waiter runs, `amq who`
   shows the agent as `active (hook_live)`. `join` prints whether the hook
-  will wake the chat, or why not. Without it, run `amq drain --include-body`
+  will wake the chat, or why not. Without it, run `amq drain --for-turn`
   between tasks. An attended seat does not receive this ring; the synchronous
   Stop hook instead shows new unread mail at a turn end.
 - **The prompt hook tells the model at a submit.** The same install writes a
@@ -328,6 +328,10 @@ Use `--notify wake` when the recipient needs to act. Use `--notify passive`
 for informational mail they can read on their next turn and `amq presence set`
 for availability. Upgrade live wake and hook binaries before sending passive
 mail. A handoff wakes the reviewer and sends the requester a passive update.
+An agent reads its mail with `amq drain --for-turn` once in a turn that
+already runs, also one a native message or a finished background task
+started: urgent and other wake-eligible mail in full, passive mail as a
+digest. Do not keep a turn open to read passive mail.
 
 ```sh
 amq coop exec --session factory --me lead --no-wake sh
@@ -339,7 +343,7 @@ For coding agents, use the installed harness command in place of `sh` and
 omit `--no-wake` for doorbell delivery. If a launcher already starts your
 seats, declare the three handles there and follow [Running co-op mode](#running-co-op-mode).
 In each seat, run `amq env --json` and check `me` and `session_name`, then
-run `amq drain --include-body` once.
+run `amq drain --for-turn` once.
 
 ### Brief the builder and check the floor
 
@@ -358,7 +362,7 @@ Each assignment keeps its own `--follow-up` timer for completion. When the lead 
 request whose recipient is outside the thread view has no obligation or
 overdue board card in that view, but its sender still gets the notice.
 
-**Builder.** Run `amq drain --include-body` and copy the assignment's `ID`
+**Builder.** Run `amq drain --for-turn` and copy the assignment's `ID`
 into the shell variable `brief_id`. Acknowledge with an ETA. Once the work
 passes its checks, put the commit ID and observed result in `result.md` and
 send the closing reply.
@@ -429,7 +433,7 @@ amq send --to reviewer --kind review_request --follow-up 30m \
   --subject "Review the proposed head" --body @review.md
 ```
 
-**Reviewer.** Run `amq drain --include-body` and set `review_id` to the review
+**Reviewer.** Run `amq drain --for-turn` and set `review_id` to the review
 request's ID. Inspect that revision and run the requested checks. Record the
 reviewed head, verdict, findings and checks in `verdict.md`:
 
@@ -500,7 +504,9 @@ question or review request, the reply that closes it cancels the timer. A
 progress reply leaves it armed. For any other message, any reply from the
 recipient cancels it. A live wake, the wait hook, or the next `drain`,
 `read` or `monitor` checks the timer. The recipient sees the due time in
-drain output as `Reply by:`.
+drain output as `Reply by:`. `--reminder-notify passive` makes the notice an
+advisory one that never starts a turn; the default `wake` suits a deadline
+that needs the sender to act.
 
 Use `watch` only when no live wake is delivering notifications:
 

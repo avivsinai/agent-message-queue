@@ -96,6 +96,7 @@ func runHandoff(args []string) error {
 	projectFlag := fs.String("project", "", "Reviewer's peer project, as on send")
 	followUpFlag := fs.Duration("follow-up", 0, "Notify me if the reviewer has not closed the review request after this duration (e.g. 30m)")
 	newsWithinFlag := fs.Duration("news-within", 0, "One notice if the reviewer sends no reply about the review request within this time (e.g. 20m)")
+	reminderNotifyFlag := fs.String("reminder-notify", "", "Notification intent of the --follow-up and --news-within notices: wake or passive (default wake)")
 
 	usage := usageWithFlags(fs, "amq handoff --me <agent> --id <request> --to <reviewer> --commit <sha> --body <text|@file> [options]",
 		"Hand a candidate to a reviewer and tell the requester, in one command.",
@@ -148,6 +149,9 @@ func runHandoff(args []string) error {
 	}
 	if *newsWithinFlag < 0 {
 		return UsageError("--news-within must be >= 0")
+	}
+	if err := validateReminderNotify(*reminderNotifyFlag, *followUpFlag, *newsWithinFlag); err != nil {
+		return err
 	}
 
 	body, err := readBody(*bodyFlag, false)
@@ -239,6 +243,9 @@ func runHandoff(args []string) error {
 	}
 	if *newsWithinFlag > 0 {
 		leg1Args = append(leg1Args, "--news-within", newsWithinFlag.String())
+	}
+	if *reminderNotifyFlag != "" {
+		leg1Args = append(leg1Args, "--reminder-notify", *reminderNotifyFlag)
 	}
 	leg2Args := append(slices.Clone(stepArgs), "--id", request, "--kind", format.KindStatus, "--notify", format.NotifyPassive, "--labels", handedOffLabel)
 

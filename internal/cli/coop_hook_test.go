@@ -369,8 +369,10 @@ func TestCoopPromptAddsUnreadContextOnlyForAHumanPrompt(t *testing.T) {
 		t.Fatalf("long prompt: output %q, error %v", out.String(), err)
 	}
 	out.Reset()
-	if err := writeCoopPrompt(strings.NewReader(`{"prompt":"`+harness.Doorbell+`"}`), &out); err != nil || out.Len() != 0 {
-		t.Fatalf("own doorbell: output %q, error %v", out.String(), err)
+	for _, doorbell := range []string{harness.Doorbell, harness.LegacyDoorbell} {
+		if err := writeCoopPrompt(strings.NewReader(`{"prompt":"`+doorbell+`"}`), &out); err != nil || out.Len() != 0 {
+			t.Fatalf("own doorbell %q: output %q, error %v", doorbell, out.String(), err)
+		}
 	}
 	listed, err := captureStdout(t, func() error {
 		return runList([]string{"--new", "--json"})

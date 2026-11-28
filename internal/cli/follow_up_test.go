@@ -199,3 +199,82 @@ func TestDrainShowsTheReplyTimeOfARequestWithFollowUp(t *testing.T) {
 		t.Fatalf("actual drain output = %q; want Reply by timestamp and relative hint", line)
 	}
 }
+
+// A timer carries the intent its sender chose, and its notice is the same
+// bytes as before when the sender chose none.
+func TestSendReminderNotifyChoosesTheNoticeIntent(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		extra []string
+		want  string
+	}{
+		{"passive", []string{"--reminder-notify", "passive"}, format.NotifyPassive},
+		{"unset", nil, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := initFollowUpRootForTest(t)
+			args := append([]string{"--root", root, "--me", "alice", "--to", "bob", "--kind", "todo", "--follow-up", "30m", "--body", "review the parser"}, tc.extra...)
+			if _, err := captureStdout(t, func() error { return runSend(args) }); err != nil {
+				t.Fatalf("send: %v", err)
+			}
+			files, err := os.ReadDir(fsq.AgentFollowUps(root, "alice"))
+			if err != nil || len(files) != 1 {
+				t.Fatalf("timer files = %v, %v; want one", files, err)
+			}
+			data, err := os.ReadFile(filepath.Join(fsq.AgentFollowUps(root, "alice"), files[0].Name()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var timer followup.Timer
+			if err := json.Unmarshal(data, &timer); err != nil {
+				t.Fatal(err)
+			}
+			if timer.Notify != tc.want {
+				t.Fatalf("timer notify = %q, want %q", timer.Notify, tc.want)
+			}
+			if err := promoteFollowUpsAtPath(root, "alice", timer.Due.Add(time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+			notice := soleDeliveredMessage(t, root, "alice")
+			if notice.Header.Notify != tc.want {
+				t.Fatalf("notice notify = %q, want %q", notice.Header.Notify, tc.want)
+			}
+			if wakeEligible(notice.Header) != (tc.want == "") {
+				t.Fatalf("wakeEligible(notice) = %v for notify %q", wakeEligible(notice.Header), tc.want)
+			}
+			if tc.want == "" {
+				legacy := timer
+				legacy.Notify = ""
+				got, err := notice.Marshal()
+				if err != nil {
+					t.Fatal(err)
+				}
+				want, err := followup.Notice(legacy, "alice").Marshal()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(got) != string(want) {
+					t.Fatalf("notice bytes differ from a timer with no notify:\n%s\nwant\n%s", got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestSendRefusesReminderNotifyWithoutAClockOrWithAnUnknownValue(t *testing.T) {
+	root := initFollowUpRootForTest(t)
+	for _, tc := range []struct {
+		extra []string
+		want  string
+	}{
+		{[]string{"--reminder-notify", "passive"}, "needs --follow-up or --news-within"},
+		{[]string{"--reminder-notify", "loud", "--follow-up", "30m"}, "must be one of: wake, passive"},
+	} {
+		extra := tc.extra
+		args := append([]string{"--root", root, "--me", "alice", "--to", "bob", "--body", "x"}, extra...)
+		err := runSend(args)
+		if GetExitCode(err) != ExitUsage || err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("send %v: err = %v, want a usage error containing %q", extra, err, tc.want)
+		}
+	}
+}

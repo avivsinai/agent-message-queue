@@ -85,6 +85,7 @@ func deliver(cfg Config, body, thread, subject, priority string, labels, refs []
 				Thread:   thread,
 				Subject:  subject,
 				Created:  created,
+				Notify:   format.NotifyWake,
 				Priority: priority,
 				Labels:   all,
 				Refs:     refs,
