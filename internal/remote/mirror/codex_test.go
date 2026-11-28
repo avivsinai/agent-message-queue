@@ -70,18 +70,6 @@ func TestFoldCodexRendersFinishedTurns(t *testing.T) {
 		events: []string{Ended},
 		post:   "▶ Buzz\n✓ 3 tools (command ×2, edit) · 12s",
 	}, {
-		// The doorbell changed its text; a rollout from an older hook holds
-		// the earlier line.
-		name:   "doorbell prompt",
-		lines:  turn(codexPrompt(0, harness.Doorbell, nil)),
-		events: []string{Ended},
-		post:   "▶ AMQ message\n✓ 3 tools (command ×2, edit) · 12s\nAll green.",
-	}, {
-		name:   "older doorbell prompt",
-		lines:  turn(codexPrompt(0, harness.LegacyDoorbell, nil)),
-		events: []string{Ended},
-		post:   "▶ AMQ message\n✓ 3 tools (command ×2, edit) · 12s\nAll green.",
-	}, {
 		// agent-message-queue-7fz review: reasoning and subagent items after
 		// the end edited the post with no new work.
 		name: "items after the end that change no post",
@@ -99,6 +87,16 @@ func TestFoldCodexRendersFinishedTurns(t *testing.T) {
 		events: []string{Ended},
 		post:   "▶ hi\n✗ error · 2s",
 	}}
+	// The doorbell changed its text; a rollout from an older hook holds the
+	// earlier line.
+	for _, doorbell := range []string{harness.Doorbell, harness.LegacyDoorbell} {
+		rows = append(rows, struct {
+			name   string
+			lines  []string
+			events []string
+			post   string
+		}{"doorbell prompt " + doorbell, turn(codexPrompt(0, doorbell, nil)), []string{Ended}, "▶ AMQ message\n✓ 3 tools (command ×2, edit) · 12s\nAll green."})
+	}
 	src := SourceFor("codex")
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {

@@ -491,7 +491,8 @@ its last line gives the counts still unread; with `--json` it prints
 `drained` (wake-eligible messages with bodies, and any moved to DLQ),
 `passive` (one digest each: `id`, `from`, `thread`, `kind`, `priority`,
 `subject`, `refs`, `labels`, `preview`, `truncated`, `read`), `count` (every
-message claimed) and `remaining` (`urgent`, `eligible`, `passive`). Keep continuation bounded rather
+message claimed) and `remaining` (`urgent`, `eligible`, `passive`), read from
+`inbox/new` after the claim; another reader can change it right after. Keep continuation bounded rather
 than accumulating an unlimited backlog in the model context.
 
 For completion batches, partial results, and changed-state notices, see

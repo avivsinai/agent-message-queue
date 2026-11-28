@@ -92,9 +92,19 @@ func runDrain(args []string) error {
 	defer func() { _ = deliveryRoot.Close() }()
 
 	if *forTurnFlag {
+		var route []string
+		if common.rootExplicit() {
+			route = append(route, "--root", common.Root)
+		}
+		if *sessionFlag != "" {
+			route = append(route, "--session", *sessionFlag)
+		}
+		if *ignoreSessionPinFlag {
+			route = append(route, "--ignore-session-pin")
+		}
 		items, rest, err := drainForTurnItems(deliveryRoot, root, common.Me, *limitFlag, validator)
 		return finishDrainBatch(deliveryRoot, root, common.Me, common.JSON, items, err, func(items []inboxItem) error {
-			return outputForTurn(common.JSON, common.Me, items, rest)
+			return outputForTurn(common.JSON, common.Me, route, items, rest)
 		})
 	}
 	items, err := drainInboxItems(deliveryRoot, root, common.Me, *includeBodyFlag, *limitFlag, validator)

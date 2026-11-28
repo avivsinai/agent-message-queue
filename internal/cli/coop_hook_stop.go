@@ -181,7 +181,7 @@ func writeCoopStopAttendedState(w io.Writer, pending []coopStopMessage, old coop
 	// of a turn that runs anyway.
 	notice := fmt.Sprintf("AMQ: %d unread message(s). Run amq drain --for-turn.", len(pending))
 	if !slices.ContainsFunc(pending, func(msg coopStopMessage) bool { return msg.ID != "" && !msg.Passive }) {
-		notice = fmt.Sprintf("AMQ: %d passive message(s) wait; they are read at the next amq drain --for-turn.", len(pending))
+		notice = fmt.Sprintf("AMQ: %d passive message(s) wait. A turn drain (amq drain --for-turn) includes them as space permits.", len(pending))
 	}
 	return writeCoopHookJSON(w, map[string]string{"systemMessage": notice})
 }

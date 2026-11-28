@@ -16,8 +16,10 @@ import (
 // its truncation mark included.
 const passivePreviewLimit = 160
 
-// forTurnRemaining counts the unread messages a --for-turn drain leaves, by
-// tier. Eligible counts wake-eligible messages that are not urgent.
+// forTurnRemaining counts, by tier, the messages in inbox/new in one read
+// taken after this drain's claims. It is a sample: another reader or a new
+// arrival can change the inbox right after it. Eligible counts
+// wake-eligible messages that are not urgent.
 type forTurnRemaining struct {
 	Urgent   int `json:"urgent"`
 	Eligible int `json:"eligible"`
@@ -36,7 +38,8 @@ type drainForTurnResult struct {
 }
 
 // passiveDigest is the compact record of one claimed passive message. Read
-// is the command that prints the complete original from inbox/cur.
+// is the command that prints the complete original from inbox/cur, from the
+// shell that ran the drain.
 type passiveDigest struct {
 	ID        string   `json:"id"`
 	From      string   `json:"from"`
@@ -93,12 +96,18 @@ func countForTurn(items []inboxItem) forTurnRemaining {
 }
 
 // digestPassive is the compact record of a claimed passive message. The
-// preview is the body with each run of white space made one space.
-func digestPassive(me string, item inboxItem) passiveDigest {
+// preview is the body with each run of white space made one space. route is
+// the drain's own routing arguments, as the caller gave them, so the read
+// command reaches the same mailbox under the same pin checks.
+func digestPassive(me string, route []string, item inboxItem) passiveDigest {
 	preview := []rune(strings.Join(strings.Fields(item.Body), " "))
 	truncated := len(preview) > passivePreviewLimit
 	if truncated {
 		preview = append(preview[:passivePreviewLimit-1], '…')
+	}
+	argv := slices.Concat([]string{"amq", "read"}, route, []string{"--me", me, "--id", item.ID})
+	for i, arg := range argv {
+		argv[i] = shellQuoteArg(arg)
 	}
 	return passiveDigest{
 		ID:        item.ID,
@@ -111,7 +120,7 @@ func digestPassive(me string, item inboxItem) passiveDigest {
 		Labels:    item.Labels,
 		Preview:   string(preview),
 		Truncated: truncated,
-		Read:      "amq read --me " + shellQuoteArg(me) + " --id " + shellQuoteArg(item.ID),
+		Read:      strings.Join(argv, " "),
 	}
 }
 
@@ -140,6 +149,25 @@ func drainForTurnPinned(deliveryRoot *fsq.DeliveryRoot, root, me string, limit i
 	if validator == nil {
 		validator = &headerValidator{}
 	}
+	picked := orderForTurn(readUnreadForTurn(deliveryRoot, me, filenames, validator), limit)
+	filenames = filenames[:0]
+	for _, item := range picked {
+		filenames = append(filenames, item.Filename)
+	}
+	items, err := claimInboxFilesPinned(deliveryRoot, root, me, filenames, true, 0, validator, nil)
+	var rest forTurnRemaining
+	if left, listErr := collectInboxFilenames(deliveryRoot, me); listErr != nil {
+		err = joinOutcomeErr(err, listErr)
+	} else {
+		rest = countForTurn(readUnreadForTurn(deliveryRoot, me, left, validator))
+	}
+	return orderForTurn(items, 0), rest, joinOutcomeErr(err, repairErr)
+}
+
+// readUnreadForTurn reads the headers of the named inbox/new files for
+// ordering and counting. A file another reader took is skipped; a file that
+// cannot be read stays wake-eligible.
+func readUnreadForTurn(deliveryRoot *fsq.DeliveryRoot, me string, filenames []string, validator *headerValidator) []inboxItem {
 	unread := make([]inboxItem, 0, len(filenames))
 	for _, filename := range filenames {
 		item, err := readInboxItem(deliveryRoot, filepath.Join("agents", me, "inbox", "new", filename), filename, false, validator)
@@ -148,30 +176,17 @@ func drainForTurnPinned(deliveryRoot *fsq.DeliveryRoot, root, me string, limit i
 		}
 		unread = append(unread, item)
 	}
-	picked := orderForTurn(unread, limit)
-	filenames = filenames[:0]
-	for _, item := range picked {
-		filenames = append(filenames, item.Filename)
-	}
-	items, err := claimInboxFilesPinned(deliveryRoot, root, me, filenames, true, 0, validator, nil)
-	// A batch that stops early leaves picked files unread: count every file
-	// this drain did not claim.
-	claimed := make(map[string]bool, len(items))
-	for _, item := range items {
-		claimed[item.Filename] = true
-	}
-	unread = slices.DeleteFunc(unread, func(item inboxItem) bool { return claimed[item.Filename] })
-	return orderForTurn(items, 0), countForTurn(unread), joinOutcomeErr(err, repairErr)
+	return unread
 }
 
 // outputForTurn prints wake-eligible mail in full, then one digest per
 // passive message, then the counts still unread.
-func outputForTurn(jsonOutput bool, me string, items []inboxItem, rest forTurnRemaining) error {
+func outputForTurn(jsonOutput bool, me string, route []string, items []inboxItem, rest forTurnRemaining) error {
 	full := make([]drainItem, 0, len(items))
 	digests := make([]passiveDigest, 0)
 	for _, item := range items {
 		if item.Passive {
-			digests = append(digests, digestPassive(me, item))
+			digests = append(digests, digestPassive(me, route, item))
 		} else {
 			full = append(full, item)
 		}

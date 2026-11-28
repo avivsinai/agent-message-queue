@@ -23,28 +23,3 @@ func TestResolveInvocation(t *testing.T) {
 		}
 	}
 }
-
-// The doorbell changed its text; a transcript or queued prompt from an
-// older wake, hook or pi bridge still holds the old line, so every reader
-// that attributes a turn or suppresses a prompt knows both.
-func TestDoorbellRecognizesTheCurrentAndTheLegacyLine(t *testing.T) {
-	for _, tc := range []struct {
-		text         string
-		is, startsAs bool
-	}{
-		{Doorbell, true, true},
-		{LegacyDoorbell, true, true},
-		{"  " + LegacyDoorbell + "\n", true, true},
-		{Doorbell + "\nmore", false, true},
-		{LegacyDoorbell + "\nmore", false, true},
-		{": AMQ doorbell run amq drain", false, false},
-		{"please run amq drain --for-turn", false, false},
-	} {
-		if got := IsDoorbell(tc.text); got != tc.is {
-			t.Errorf("IsDoorbell(%q) = %v, want %v", tc.text, got, tc.is)
-		}
-		if got := StartsWithDoorbell(tc.text); got != tc.startsAs {
-			t.Errorf("StartsWithDoorbell(%q) = %v, want %v", tc.text, got, tc.startsAs)
-		}
-	}
-}

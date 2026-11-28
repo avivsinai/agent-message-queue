@@ -47,20 +47,24 @@ func TestCoopStopCodexReportsAnAttendedSeatOncePerNewMail(t *testing.T) {
 		return out.String()
 	}
 	setAttendedForTest(t, root, "codex")
-	// A passive backlog only informs: it waits for the next drain of a turn.
-	send("fyi", "--notify", "passive")
-	if got, want := stop(), `{"systemMessage":"AMQ: 1 passive message(s) wait; they are read at the next amq drain --for-turn."}`+"\n"; got != want {
+	// A passive backlog only informs, and promises no more than a turn drain
+	// gives: one batch of 20 holds less than this backlog (review of the
+	// --for-turn drain: the notice said all of them were read next turn).
+	for i := 0; i < 21; i++ {
+		send("fyi", "--notify", "passive")
+	}
+	if got, want := stop(), `{"systemMessage":"AMQ: 21 passive message(s) wait. A turn drain (amq drain --for-turn) includes them as space permits."}`+"\n"; got != want {
 		t.Fatalf("passive turn end = %q, want %q", got, want)
 	}
 	send("first")
-	if got, want := stop(), `{"systemMessage":"AMQ: 2 unread message(s). Run amq drain --for-turn."}`+"\n"; got != want {
+	if got, want := stop(), `{"systemMessage":"AMQ: 22 unread message(s). Run amq drain --for-turn."}`+"\n"; got != want {
 		t.Fatalf("first turn end = %q, want %q", got, want)
 	}
 	if got := stop(); got != "" {
 		t.Fatalf("the same mail got %q, want no notice", got)
 	}
 	send("second")
-	if got, want := stop(), `{"systemMessage":"AMQ: 3 unread message(s). Run amq drain --for-turn."}`+"\n"; got != want {
+	if got, want := stop(), `{"systemMessage":"AMQ: 23 unread message(s). Run amq drain --for-turn."}`+"\n"; got != want {
 		t.Fatalf("next turn end = %q, want %q", got, want)
 	}
 }
