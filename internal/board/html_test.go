@@ -294,3 +294,69 @@ func TestHTMLSuggestionStatusLabels(t *testing.T) {
 		}
 	}
 }
+
+// The Inbox view lists a decision's options and one copy command per option,
+// the recommended option first, then the free answer.
+func TestHTMLInboxDecisionCopiesOneAnswerPerOption(t *testing.T) {
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	answer := func(label, body string) Action {
+		return newAction(label, "amq", "send", "--me", "user", "--to", "demo-lead", "--kind", "answer", "--body", body)
+	}
+	m := Model{GeneratedAt: now, Inbox: Inbox{Items: []OwnerItem{{
+		ID: "demo/q1", Kind: "question", Title: "Pick a store", From: "demo-lead in demo", Since: now.Add(-time.Hour), Blocking: true,
+		Options:     []OwnerOption{{Label: "Files", Pros: []string{"No dependency"}}, {Label: "Log", Cons: []string{"Needs a lock"}}},
+		Recommended: "Log",
+		Answer:      []Action{answer("answer Files", "Files"), answer("answer Log", "Log"), answer("complete: answer demo-lead", "-")},
+	}}}}
+	var page strings.Builder
+	if err := WriteHTML(&page, m, ""); err != nil {
+		t.Fatal(err)
+	}
+	html := page.String()
+	for _, want := range []string{
+		`aria-label="Inbox, 1 waiting"`,
+		"1 item waits on you, 1 blocks work.",
+		`<dt>Log <span class="recommended">Recommended</span></dt>`,
+		"<li>No dependency</li>", "<li>Needs a lock</li>",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("Inbox view lacks %q", want)
+		}
+	}
+	log, files, free := strings.Index(html, ">Copy answer: Log</button>"), strings.Index(html, ">Copy answer: Files</button>"), strings.Index(html, ">Copy free answer</button>")
+	if log < 0 || files < 0 || free < 0 || log > files || files > free {
+		t.Errorf("answer buttons missing or out of order: Log %d, Files %d, free %d", log, files, free)
+	}
+}
+
+// The Cost view lists each model row with its cost and share, in the order
+// the usage view gives them.
+func TestHTMLCostListsEachModelWithCostAndShare(t *testing.T) {
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	cost := func(v float64) *float64 { return &v }
+	window := func(w string, c float64) Usage {
+		return Usage{Window: w, Fresh: 1000, CostUSD: cost(c), CostKind: usage.ListPrice}
+	}
+	m := Model{GeneratedAt: now, Usage: &UsageView{
+		Fleet: []Usage{window("5h", 4), window("7d", 300)},
+		FleetModels: []ModelUsage{
+			{Model: "demo-large", Harness: "claude", Usage: []Usage{window("5h", 3), window("7d", 225)}},
+			{Model: "demo-small", Harness: "codex", Usage: []Usage{window("5h", 1), window("7d", 75)}},
+		},
+	}}
+	var page strings.Builder
+	if err := WriteHTML(&page, m, ""); err != nil {
+		t.Fatal(err)
+	}
+	html := page.String()
+	if !strings.Contains(html, "List-price equivalent: $4.00 in the last 5 h, $300.00 in 7 d.") {
+		t.Error("Cost view lacks the fleet sentence")
+	}
+	large, small := strings.Index(html, `data-label="Model"><span class="cell-name">demo-large</span>`), strings.Index(html, `data-label="Model"><span class="cell-name">demo-small</span>`)
+	if large < 0 || small < 0 || large > small {
+		t.Errorf("model rows missing or out of the usage view's order: large %d, small %d", large, small)
+	}
+	if !strings.Contains(html, "$225.00") || !strings.Contains(html, "75.0%") || !strings.Contains(html, "25.0%") {
+		t.Error("model rows lack their cost or share")
+	}
+}

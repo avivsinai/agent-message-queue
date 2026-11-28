@@ -251,8 +251,9 @@ The Inbox is what waits on the owner, by one rule:
 
 Nothing else is an item. Needs you in the text headline and section, the
 Flow strip, the pane's `waiting_total`, and the Requests headline count these
-items. On the page, the Requests headline links to the Flow view's Needs you
-strip. Items are listed blocking first, then
+items. On the page, the Requests headline links to the Inbox view, and each
+tile of the Flow view's Needs you strip links to its item there. Items are
+listed blocking first, then
 oldest first. A question whose header carries a valid `context.decision`
 shows its options with pros and cons, the recommended option, whether it
 blocks, what happens if the answer comes later, and one copy command per
@@ -483,6 +484,16 @@ of the window: on pace to reach the limit before it resets`.
 
 Text, JSON, static HTML, and the live page use the same pure task projection.
 
+The page's primary destinations are Inbox, Flow, Floor, and Cost; Next, Work,
+Backlog, Requests, Older requests, Suggestions, History, Sources, and Agents
+are under More. Inbox lists each owner item with its options, the recommended
+one first, and a copy button per answer command, then the owner's unread mail
+per session; the Inbox tab shows the item count. Cost shows the list-price
+sentence, a table per model and a table per seat over 7 d with each row's
+share, and each account's limit sentences. Every figure comes from the
+published usage view in the text view's words; a share is the row's part of
+its table's priced total.
+
 Flow is the default page view and a `== Flow ==` text section. It puts every
 current card in one stage, first match wins: In review (a linked pull request
 is open and not a draft), Blocked (the tracker records a blocker), In progress
@@ -499,7 +510,7 @@ Forge cards are never tasks: they have no task ID, cannot take attachments,
 and stay outside task counts. Needs you (a structured field waits on you) is a
 flag on the card, not a stage; the strip above the board lists the cards that
 need you, the unread messages for you, and the requests to you that have no
-direct reply. A pull request card shows its checks as CI green, CI red,
+direct reply; on the page each tile links to its item in the Inbox view. A pull request card shows its checks as CI green, CI red,
 CI running, or no CI. `--json` carries `flow` (stage, title, card IDs,
 omitted count) and `forge_cards`; each card carries `stage`, `stage_since`,
 `flags`, and `ci`. Pane task rows carry `stage`. Next, Work, Backlog, and

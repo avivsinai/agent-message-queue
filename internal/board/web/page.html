@@ -25,14 +25,16 @@
 <div class="workspace">
 <nav class="navigation" aria-label="Board views">
   <div class="primary-nav">
+  <a href="#view-inbox" data-view-link="inbox"{{if .Inbox.Count}} aria-label="Inbox, {{.Inbox.Count}} waiting"{{end}}>Inbox{{if .Inbox.Count}} <span class="nav-count">{{.Inbox.Count}}</span>{{end}}</a>
   <a href="#view-flow" data-view-link="flow">Flow</a>
   <a href="#view-floor" data-view-link="floor">Floor</a>
-  <a href="#view-next" data-view-link="next">Next</a>
-  <a href="#view-work" data-view-link="work">Work</a>
-  <a href="#view-backlog" data-view-link="backlog">Backlog</a>
-  <a href="#view-requests" data-view-link="requests">Requests</a>
+  <a href="#view-cost" data-view-link="cost">Cost</a>
   </div>
   <details class="secondary-nav" open><summary>More</summary><div>
+    <a href="#view-next" data-view-link="next">Next</a>
+    <a href="#view-work" data-view-link="work">Work</a>
+    <a href="#view-backlog" data-view-link="backlog">Backlog</a>
+    <a href="#view-requests" data-view-link="requests">Requests</a>
     <a href="#view-older-requests" data-view-link="older-requests">Older requests</a>
     <a href="#view-suggestions" data-view-link="suggestions">Suggestions</a>
     <a href="#view-history" data-view-link="history">History</a>
@@ -43,13 +45,44 @@
   <p class="nav-note">Read the context.<br>Copy a command.<br>Act in your terminal.</p>
 </nav>
 <main id="content">
+{{with .Inbox}}
+<section class="view view-inbox" id="view-inbox" data-view="inbox" aria-labelledby="heading-inbox">
+  <div class="view-heading"><div><h1 id="heading-inbox">Inbox</h1><p class="view-headline">{{.Headline}}</p></div></div>
+  <div class="work-list">{{range .Items}}
+  <article class="strip owner-item" id="{{.ID}}" aria-labelledby="{{.ID}}-title">
+    <div class="item-main">
+      <div class="owner-head"><h2 class="title" id="{{.ID}}-title">{{template "title" .}}</h2>{{if .Blocking}}<span class="flag flag-you"><span class="mark mark-flag" aria-hidden="true"></span>Blocks work</span>{{end}}</div>
+      <div class="item-meta"><span class="item-state">{{.Kind}}</span>{{if .From}}<span class="c-owner">from {{.From}}</span>{{end}}<span>{{if .AgeAt}}<time datetime="{{.AgeAt}}">{{.Age}}</time>{{else}}{{.Age}}{{end}}</span>{{if .ReplyBy}}<span{{if .Overdue}} class="is-overdue"{{end}}>reply by <time datetime="{{.ReplyByAt}}">{{.ReplyBy}}</time>{{if .Overdue}} (overdue){{end}}</span>{{end}}</div>
+      {{if .Summary}}<p class="owner-summary">{{.Summary}}</p>{{end}}
+      {{if .Options}}<dl class="options">{{range .Options}}<dt>{{.Label}}{{if .Recommended}} <span class="recommended">Recommended</span>{{end}}</dt><dd>{{if .Summary}}<p>{{.Summary}}</p>{{end}}{{if .Pros}}<div class="tradeoff"><p class="tradeoff-head">For:</p><ul>{{range .Pros}}<li>{{.}}</li>{{end}}</ul></div>{{end}}{{if .Cons}}<div class="tradeoff"><p class="tradeoff-head">Against:</p><ul>{{range .Cons}}<li>{{.}}</li>{{end}}</ul></div>{{end}}</dd>{{end}}</dl>{{end}}
+      {{if .IfLater}}<p class="if-later">If you answer later: {{.IfLater}}</p>{{end}}
+    </div>
+    {{if or .Buttons .NoAnswer}}<div class="owner-actions">{{range .Buttons}}<button type="button" class="copy" data-command="{{.Command}}">{{.Label}}</button>{{end}}{{if .NoAnswer}}<p class="command-unavailable">No answer command: {{.NoAnswer}}.</p>{{end}}</div>{{end}}
+    {{if .Commands}}<details class="item-details" id="{{.ID}}-details"><summary>Details</summary><div class="detail-content">{{range .Commands}}{{template "cmd" .}}{{end}}</div></details>{{end}}
+  </article>{{else}}
+  <div class="empty"><h2>Nothing waits on you.</h2><p>Agents ask here when a decision is yours.</p></div>{{end}}
+  </div>
+  {{if .More}}<p class="request-note">{{.More}}</p>{{end}}
+  {{if .Mail}}<section class="inbox-mail" aria-labelledby="inbox-mail">
+    <h2 class="request-group-head" id="inbox-mail">Mail for you</h2>
+    <p class="request-note">Unread mail is not counted as a decision.</p>
+    <div class="work-list">{{range .Mail}}
+    <article class="strip mail-row" aria-labelledby="{{.ID}}">
+      <div class="item-main"><h3 class="title" id="{{.ID}}">{{.Session}}</h3><div class="item-meta"><span>{{.Counts}}</span></div></div>
+      {{with .Read}}<div class="item-action"><button type="button" class="copy primary-copy" data-command="{{.Command}}">Copy read command</button></div>
+      <details class="item-details"><summary>Details</summary><div class="detail-content">{{template "cmd" .}}</div></details>{{end}}
+    </article>{{end}}
+    </div>
+  </section>{{end}}
+</section>
+{{end}}
 {{with .Flow}}
 <section class="view view-flow" id="view-flow" data-view="flow" aria-labelledby="heading-flow">
   <div class="view-heading"><h1 id="heading-flow">Flow</h1></div>
   <section class="attention" aria-labelledby="needs-you">
     <h2 class="attention-head" id="needs-you"><span class="flag flag-you"><span class="mark mark-flag" aria-hidden="true"></span>Needs you</span> <span class="stage-count">{{.AttentionCount}}</span></h2>
-    {{if .NeedsYou}}<ul class="tiles">{{range .NeedsYou}}<li class="tile"><a class="tile-title" href="#{{.Anchor}}" data-open="{{.Anchor}}">{{template "title" .}}</a>{{if .Summary}}<p class="tile-summary">{{.Summary}}</p>{{end}}<p class="tile-why"><span>{{.Reason}}</span> <span class="tile-age">{{if .SinceAt}}<time datetime="{{.SinceAt}}">{{.Waited}}</time>{{else}}{{.Waited}}{{end}}</span></p></li>{{end}}</ul>{{else if not .AttentionCount}}<p class="attention-empty">No card waits on you.</p>{{end}}
-    {{if .AskRows}}<ul class="tiles">{{range .AskRows}}<li class="tile">{{.}}</li>{{end}}</ul>{{end}}
+    {{if .NeedsYou}}<ul class="tiles">{{range .NeedsYou}}<li class="tile"><a class="tile-title" href="#{{.Anchor}}">{{template "title" .}}</a>{{if .Summary}}<p class="tile-summary">{{.Summary}}</p>{{end}}<p class="tile-why"><span>{{.Reason}}</span> <span class="tile-age">{{if .SinceAt}}<time datetime="{{.SinceAt}}">{{.Waited}}</time>{{else}}{{.Waited}}{{end}}</span></p></li>{{end}}</ul>{{else if not .AttentionCount}}<p class="attention-empty">No card waits on you.</p>{{end}}
+    {{if .AskRows}}<ul class="tiles">{{range .AskRows}}<li class="tile"><a class="tile-ask" href="#{{.Anchor}}">{{.Text}}</a></li>{{end}}</ul>{{end}}
     {{if .AskMore}}<p class="request-note">{{.AskMore}}</p>{{end}}
     {{if .Gates}}<div class="attention-foot"><p class="gates"><span class="gates-head">Unread for you</span>{{range .Gates}} <span>{{.}}</span>{{end}}</p></div>{{end}}
   </section>
@@ -134,6 +167,26 @@
   </section>
   {{else}}<div class="empty"><h2>No seat has recent evidence.</h2><p>Every mailbox is dormant. <a href="#view-agents">Agents</a> lists them.</p></div>{{end}}{{if .Sessions}}</div>{{end}}
   <p class="filter-result" hidden>No matches in this view. <button type="button" class="clear-search">Clear search</button></p>
+</section>
+{{end}}
+{{with .Cost}}
+<section class="view view-cost" id="view-cost" data-view="cost" aria-labelledby="heading-cost">
+  <div class="view-heading"><div><h1 id="heading-cost">Cost</h1><p class="view-headline">{{.Headline}}</p>{{range .Notes}}<p class="request-note">{{.}}</p>{{end}}</div></div>
+  {{if .HasUsage}}
+  <div class="cost-table">{{if .Models}}<table role="table">
+    <caption>By model, {{.Window}}</caption>
+    <thead role="rowgroup"><tr role="row"><th role="columnheader" scope="col">Model</th><th role="columnheader" scope="col">Harness</th><th role="columnheader" scope="col" class="num">Cost</th><th role="columnheader" scope="col" class="num">Share</th><th role="columnheader" scope="col" class="num">Fresh</th><th role="columnheader" scope="col" class="num">Cached</th><th role="columnheader" scope="col" class="num">Output</th></tr></thead>
+    <tbody role="rowgroup">{{range .Models}}<tr role="row"><th role="rowheader" scope="row" data-label="Model"><span class="cell-name">{{.Name}}</span></th><td role="cell" data-label="Harness">{{.Harness}}</td><td role="cell" class="num" data-label="Cost">{{.Cost}}</td><td role="cell" class="num" data-label="Share">{{template "share" .Share}}</td><td role="cell" class="num" data-label="Fresh">{{.Fresh}}</td><td role="cell" class="num" data-label="Cached">{{.Cached}}</td><td role="cell" class="num" data-label="Output">{{.Output}}</td></tr>{{end}}</tbody>
+  </table>{{else}}<h2 class="cost-caption">By model, {{.Window}}</h2><div class="work-list"><div class="empty"><h2>{{.ModelsEmpty}}</h2></div></div>{{end}}</div>
+  <div class="cost-table">{{if .Seats}}<table role="table">
+    <caption>By seat, {{.Window}}</caption>
+    <thead role="rowgroup"><tr role="row"><th role="columnheader" scope="col">Seat</th><th role="columnheader" scope="col" class="num">Cost</th><th role="columnheader" scope="col" class="num">Share</th><th role="columnheader" scope="col" class="num">5 h cost</th><th role="columnheader" scope="col" class="num">Context of latest response</th><th role="columnheader" scope="col" class="num">Cache-read share, 5 h</th></tr></thead>
+    <tbody role="rowgroup">{{range .Seats}}<tr role="row"{{if .Other}} class="is-other"{{end}}><th role="rowheader" scope="row" data-label="Seat"><span class="cell-name">{{.Name}}</span><span class="cell-meta">{{.Meta}}</span></th><td role="cell" class="num" data-label="Cost">{{.Cost}}</td><td role="cell" class="num" data-label="Share">{{template "share" .Share}}</td><td role="cell" class="num" data-label="5 h cost">{{or .Cost5h "none"}}</td><td role="cell" class="num" data-label="Context of latest response">{{or .Context "none"}}</td><td role="cell" class="num" data-label="Cache-read share, 5 h">{{or .CacheShare "none"}}</td></tr>{{end}}</tbody>
+  </table>{{else}}<h2 class="cost-caption">By seat, {{.Window}}</h2><div class="work-list"><div class="empty"><h2>{{.SeatsEmpty}}</h2></div></div>{{end}}</div>
+  <section class="cost-limits" aria-labelledby="cost-limits"><h2 class="cost-caption" id="cost-limits">Limits</h2>
+    <ul class="work-list limit-list">{{range .Limits}}<li><h3 class="limit-account">{{.Account}}</h3>{{range .Lines}}<p{{if .Reached}} class="limit-reached"{{end}}>{{.Text}}</p>{{end}}</li>{{else}}<li class="muted">No account limits were read.</li>{{end}}</ul>
+  </section>
+  {{else}}<div class="work-list"><div class="empty"><h2>No spend to show.</h2><p>Spend comes from the harness session files a sync reads. <a href="#view-sources">Sources</a> says what this snapshot read.</p></div></div>{{end}}
 </section>
 {{end}}
 {{range .Views}}
@@ -304,6 +357,7 @@
   </div>
 </article>
 {{end}}
+{{define "share"}}{{if .}}<span class="share">{{.}}<svg class="share-bar" aria-hidden="true" focusable="false"><rect width="{{.}}" height="100%"></rect></svg></span>{{else}}<span class="muted">not counted</span>{{end}}{{end}}
 {{define "title"}}{{if .Prefix}}<span class="cc">{{.Prefix}}</span> {{end}}{{.Title}}{{end}}
 {{define "owners"}}{{range $i, $o := .}}{{if $i}}, {{end}}{{if $o.Unmapped}}<span class="sr-only">not mapped: </span>{{end}}{{$o.Name}}{{end}}{{end}}
 {{define "coverage"}}{{if .}}<details class="coverage"><summary><span class="coverage-word">Incomplete coverage:</span> {{range $i, $g := .}}{{if $i}}, {{end}}<span class="gap"><span class="gap-name">{{$g.Name}}</span> {{$g.Status}}</span>{{end}}</summary><div class="coverage-body">{{range .}}<div class="coverage-gap"><p><span class="gap-name">{{.Name}}</span> {{.Status}}{{if eq .Status "partly read"}}: {{.Gap}}{{end}}.</p>{{range .Steps}}{{with .Command}}{{template "cmd" .}}{{else}}<p>{{.Text}}.</p>{{end}}{{end}}</div>{{end}}{{if .NothingToDo}}<p>Nothing for you to do.</p>{{end}}<p><a href="#view-sources">Sources</a> says why.</p></div></details>{{end}}{{end}}

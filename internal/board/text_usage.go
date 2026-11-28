@@ -243,15 +243,23 @@ func contextLine(a RosterAgent, now time.Time) string {
 		return ""
 	}
 	line := fmt.Sprintf("context %s at %s", si(last.LastContextTokens), age(now.Sub(last.LastAt))+" ago")
-	// The share needs cache reads: a harness that records none (pi) or a
-	// window with none shows no percentage. Truncated to one decimal, never
-	// rounded: a near-total share stays below 100 and only a genuinely zero
-	// fresh count prints 100.0.
-	if cached := last.CacheRead; cached > 0 {
-		share := math.Floor(1000*float64(cached)/float64(last.Fresh+cached)) / 10
-		line += fmt.Sprintf(" · cache reads %.1f%% of 5 h", share)
+	if share, ok := cacheReadShare(last); ok {
+		line += " · cache reads " + share + " of 5 h"
 	}
 	return line
+}
+
+// cacheReadShare is a window's cache reads as a percent of its fresh and
+// cached tokens. The share needs cache reads: a harness that records none
+// (pi) or a window with none has no percentage. Truncated to one decimal,
+// never rounded: a near-total share stays below 100 and only a genuinely
+// zero fresh count prints 100.0.
+func cacheReadShare(u Usage) (string, bool) {
+	if u.CacheRead <= 0 {
+		return "", false
+	}
+	share := math.Floor(1000*float64(u.CacheRead)/float64(u.Fresh+u.CacheRead)) / 10
+	return fmt.Sprintf("%.1f%%", share), true
 }
 
 // pastLimit names a reached limit the account spent tokens after.

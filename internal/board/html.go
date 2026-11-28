@@ -105,8 +105,10 @@ type pageData struct {
 	Live                 bool
 	TaskChoices          []pageTaskChoice
 	Views                []pageView
+	Inbox                pageInbox
 	Flow                 pageFlow
 	Floor                pageFloor
+	Cost                 pageCost
 	Requests             pageRequests
 	Suggestions          []pageSuggestion
 	SuggestionDiagnostic string
@@ -283,7 +285,7 @@ type pageStrip struct {
 	Actions               []Action
 	HasDetail             bool
 	ReasonField, Priority string
-	// Flow card facts.
+	// Flow card facts. Anchor is where a Needs you tile links in the Inbox.
 	Stage, StageID, StageAge, PR, CI, CIText, NamesBead, Anchor string
 	// Opened is an open pull request's age ("open 30d"); CardAge is the age
 	// a card face shows: time in stage, else Opened.
@@ -431,8 +433,10 @@ func buildPage(m Model, regenerate string) pageData {
 		p.QuietTitle = pluralize(len(p.QuietRoster), "session") + " without recent presence"
 	}
 	p.Views = buildViews(m, now, live)
-	p.Flow = buildFlowPage(m, now, live)
+	p.Inbox = buildInboxPage(m.Inbox, now)
+	p.Flow = buildFlowPage(m, now, live, p.Inbox.link)
 	p.Floor = buildFloorPage(m, now)
+	p.Cost = buildCostPage(m.Usage, now)
 	p.Requests = buildRequestsPage(m, now)
 	if m.SuggestionDiagnostic.Status != "" {
 		p.SuggestionDiagnostic = clean(m.SuggestionDiagnostic.Status + ": " + m.SuggestionDiagnostic.Detail)

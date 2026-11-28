@@ -81,11 +81,15 @@ type pageFlow struct {
 	NeedsYou []pageStrip
 	// Gates are the unread messages for the owner, one line per session
 	// with its oldest age, kept apart from the cards.
-	Gates          []string
-	AskRows        []string
+	Gates []string
+	// AskRows are the owner's open requests, each linking to its item in
+	// the Inbox view.
+	AskRows        []pageAsk
 	AskMore        string
 	AttentionCount int
 }
+
+type pageAsk struct{ Text, Anchor string }
 
 type pageStage struct {
 	ID, Title, Empty, More string
@@ -104,7 +108,7 @@ var stageEmpty = map[Stage]string{
 
 // buildFlowPage renders Flow: one column per stage, plus the attention strip
 // of cards that need the owner and the unread messages for the owner.
-func buildFlowPage(m Model, now time.Time, live map[[2]string]string) pageFlow {
+func buildFlowPage(m Model, now time.Time, live map[[2]string]string, inboxLink func(string) string) pageFlow {
 	f := pageFlow{Legend: flowLegend}
 	for _, g := range m.Gates {
 		f.Gates = append(f.Gates, clean(g.Session)+": "+pluralize(g.OpenCount, "unread message")+", oldest "+age(seconds(g.OldestAgeSeconds)))
@@ -123,9 +127,20 @@ func buildFlowPage(m Model, now time.Time, live map[[2]string]string) pageFlow {
 		f.Stages = append(f.Stages, st)
 	}
 	attention := needsYou(m)
-	f.AskRows, f.AskMore, f.AttentionCount = attention.rows, attention.more, attention.count
+	f.AskMore, f.AttentionCount = attention.more, attention.count
+	// needsYou words the first rows of the owner's asks in model order.
+	i := 0
+	for _, a := range m.Asks {
+		if !a.Human || i >= len(attention.rows) {
+			continue
+		}
+		f.AskRows = append(f.AskRows, pageAsk{Text: attention.rows[i], Anchor: inboxLink(a.Key)})
+		i++
+	}
 	for _, c := range attention.cards {
-		f.NeedsYou = append(f.NeedsYou, flowStrip(c, now, live))
+		s := flowStrip(c, now, live)
+		s.Anchor = inboxLink(c.ID)
+		f.NeedsYou = append(f.NeedsYou, s)
 	}
 	f.Coverage = coverageGaps(m.Sources, func(SourceView) bool { return true })
 	return f
@@ -159,7 +174,6 @@ func flowStrip(c Card, now time.Time, live map[[2]string]string) pageStrip {
 	if c.Authority == "" {
 		s.TaskID = ""
 	}
-	s.Anchor = stripArgs("flow", s).ID
 	return s
 }
 
