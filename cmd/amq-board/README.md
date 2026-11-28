@@ -260,8 +260,7 @@ blocks, what happens if the answer comes later, and one copy command per
 option that answers with the option label as the body; the free-text answer
 and the acknowledgement follow. A decision that breaks the `send` rule shows
 as a plain question. A request with no answer command says why (for
-example, the requester is in the base root, or its project is not a
-configured peer); a reply-by time in the past is marked overdue. A bead shows
+example, the requester’s project is missing from the configured peers); a reply-by time in the past is marked overdue. A bead shows
 its `bd show` command. After the items, the owner's unread mail is one line
 per session with its count, oldest age, and the `amq drain` command whose
 `--limit` covers that count; mail is never an item.
@@ -580,7 +579,19 @@ you need the text of a reply referenced by key.
 
 Static HTML is self-contained and escapes source content. The live server binds
 127.0.0.1 on a free port. Its random token protects every route; Host checks
-protect against DNS rebinding. The page never runs source commands.
+protect against DNS rebinding. In the served Inbox, choose an option or open
+**Answer in your own words** to send up to 4 KiB as `user`. The server requires
+the exact local Origin and a separate per-start token embedded in the live
+page. It checks the fresh published question and its open AMQ obligation,
+then runs the installed `amq reply` in the owner mailbox with the answer on
+stdin. Details and static exports provide copyable commands. A delivery
+confirmation identifies the asker and reply. If delivery is unconfirmed,
+check the original thread before trying again.
+
+Concurrent board submissions serialize across tabs and servers for the same
+project; an ordinary CLI answer between the final check and send can produce
+a duplicate. After an AMQ upgrade, restart the board to enable answers with
+the new binary.
 
 The live page reloads the snapshot once per minute or when Refresh is pressed.
 It shows publication freshness and source coverage. Every view names the

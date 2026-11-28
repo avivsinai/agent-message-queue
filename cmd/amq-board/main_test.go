@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/board"
 	boardusage "github.com/avivsinai/agent-message-queue/internal/board/usage"
+	"github.com/avivsinai/agent-message-queue/internal/cli"
 	"github.com/avivsinai/agent-message-queue/internal/loginservice"
 )
 
@@ -21,6 +23,13 @@ const floodEnv = "AMQ_BOARD_TEST_FLOOD"
 // TestMain doubles as a command that floods stdout, so the runner is tested
 // against a real child process.
 func TestMain(m *testing.M) {
+	if os.Getenv("AMQ_BOARD_TEST_CLI") == "1" {
+		if err := cli.Run(os.Args[1:], "test"); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(cli.GetExitCode(err))
+		}
+		os.Exit(0)
+	}
 	if os.Getenv(floodEnv) == "1" {
 		_, _ = os.Stdout.Write(bytes.Repeat([]byte("x"), 2<<20))
 		os.Exit(0)

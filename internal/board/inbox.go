@@ -11,6 +11,7 @@ import (
 
 // OwnerItem is one thing that waits on the owner.
 type OwnerItem struct {
+	question    *QuestionPlan
 	ID          string        `json:"id"`   // the card or request it links to
 	Kind        string        `json:"kind"` // question, review_request, todo, bead, task
 	Bead        string        `json:"bead,omitempty"`
@@ -65,7 +66,7 @@ func buildInbox(m *Model, messages map[string]Message, sessionPaths map[string]s
 			continue
 		}
 		for _, c := range col.Cards {
-			inbox.Items = append(inbox.Items, cardItem(c, peers))
+			inbox.Items = append(inbox.Items, cardItem(c, peers, sessionPaths))
 		}
 	}
 	for _, a := range m.Asks {
@@ -89,9 +90,21 @@ func buildInbox(m *Model, messages map[string]Message, sessionPaths map[string]s
 				labels = append(labels, o.Label)
 			}
 		}
-		it.Answer, it.NoAnswer = answerItem(a.answer, peers, labels)
 		if a.answer != nil {
-			if read, ok := ShowThread(sessionPaths[a.answer.OwnerSession], a.answer.Thread); ok {
+			root := sessionPaths[a.answer.OwnerSession]
+			if root == "" {
+				for _, c := range message.Copies {
+					if c.Session == a.Owner.Session && slices.Contains(c.Agents, reservedHuman) {
+						root = c.Root
+						break
+					}
+				}
+			}
+			it.Answer, it.question, it.NoAnswer = AnswerActions(a.answer, peers, root, labels...)
+			if a.Owner.Project != "" {
+				it.question = nil
+			}
+			if read, ok := ShowThread(root, a.answer.Thread); ok {
 				it.Read = &read
 			}
 		}
@@ -118,7 +131,7 @@ func buildInbox(m *Model, messages map[string]Message, sessionPaths map[string]s
 
 // cardItem is a Needs you card as an owner item: a bead shows its show-bead
 // command; an obligation card answers through AnswerActions.
-func cardItem(c Card, peers map[string]bool) OwnerItem {
+func cardItem(c Card, peers map[string]bool, sessionPaths map[string]string) OwnerItem {
 	it := OwnerItem{ID: c.ID, Kind: "task", Title: c.Title, Summary: c.Summary, Since: c.Reason.Since}
 	if c.Requester != nil {
 		it.From = ownerLabel(*c.Requester, nil)
@@ -139,7 +152,7 @@ func cardItem(c Card, peers map[string]bool) OwnerItem {
 				break
 			}
 		}
-		it.Answer, it.NoAnswer = answerItem(i.Obligation, peers, nil)
+		it.Answer, _, it.NoAnswer = AnswerActions(i.Obligation, peers, sessionPaths[i.Obligation.OwnerSession])
 		break
 	}
 	for _, a := range c.Actions {
@@ -150,18 +163,6 @@ func cardItem(c Card, peers map[string]bool) OwnerItem {
 		}
 	}
 	return it
-}
-
-// answerItem is the answer commands of a request, or why it has none.
-func answerItem(o *ObligationFacts, peers map[string]bool, options []string) ([]Action, string) {
-	answer := AnswerActions(o, peers, options...)
-	if len(answer) > 0 {
-		return answer, ""
-	}
-	if _, blocked := answerRoute(o, peers); blocked != "" {
-		return nil, blocked
-	}
-	return nil, "the request's kind has no answer command"
 }
 
 // obligationAnswer is the answer route of an obligation the snapshot's

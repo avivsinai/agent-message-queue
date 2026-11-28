@@ -416,7 +416,8 @@ func cardActions(items []Item, col Column, known map[string]string, sessionPaths
 			continue
 		}
 		if it.Owner.Kind == OwnerHuman {
-			for _, a := range AnswerActions(o, peers) {
+			actions, _, _ := AnswerActions(o, peers, sessionPaths[o.OwnerSession])
+			for _, a := range actions {
 				add(a, true)
 			}
 		}

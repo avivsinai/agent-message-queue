@@ -217,6 +217,14 @@ textarea { display: block; width: 100%; min-height: 4.5rem; resize: vertical; co
 .tradeoff ul { padding-left: 1rem; }
 .tradeoff li + li { margin-top: .25rem; }
 .if-later { margin-top: .75rem; max-width: 66ch; color: var(--muted); font-size: .875rem; line-height: 1.4286; }
+[data-question] .options button { margin-block-start: .5rem; }
+.recommended-choice:not(:disabled) { background: var(--accent); color: var(--surface); }
+.answer-controls textarea, .check-thread input { display: block; width: 100%; margin: .5rem 0; }
+.answer-result, .answer-note { overflow-wrap: anywhere; }
+.answer-result:empty, .answer-note:empty { display: none; }
+.answer-error { color: var(--error); }
+.answer-note { color: var(--muted); }
+@media (max-width: 600px) { [data-question] [data-option], [data-question] [data-answer] { width: 100%; min-height: 44px; } }
 .owner-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .75rem; }
 .inbox-mail { margin-top: 2rem; }
 .inbox-mail > .request-note { margin: -.5rem 0 .75rem; }

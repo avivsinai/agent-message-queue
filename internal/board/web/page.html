@@ -46,17 +46,21 @@
 </nav>
 <main id="content">
 {{with .Inbox}}
-<section class="view view-inbox" id="view-inbox" data-view="inbox" aria-labelledby="heading-inbox">
+<section class="view view-inbox" id="view-inbox"{{if $.WriteToken}} data-write-token="{{$.WriteToken}}"{{end}} data-view="inbox" aria-labelledby="heading-inbox">
   <div class="view-heading"><div><h1 id="heading-inbox">Inbox</h1><p class="view-headline">{{.Headline}}</p></div></div>
   <div class="work-list">{{range .Items}}
-  <article class="strip owner-item" id="{{.ID}}" aria-labelledby="{{.ID}}-title">
+  <article class="strip owner-item"{{if and $.WriteToken .QuestionKey}} data-question="{{.QuestionKey}}"{{end}} id="{{.ID}}" aria-labelledby="{{.ID}}-title">
     <div class="item-main">
       <div class="owner-head"><h2 class="title" id="{{.ID}}-title">{{template "title" .}}</h2>{{if .Blocking}}<span class="flag flag-you"><span class="mark mark-flag" aria-hidden="true"></span>Blocks work</span>{{end}}</div>
       <div class="item-meta"><span class="item-state">{{.Kind}}</span>{{if .From}}<span class="c-owner">from {{.From}}</span>{{end}}<span>{{if .AgeAt}}<time datetime="{{.AgeAt}}">{{.Age}}</time>{{else}}{{.Age}}{{end}}</span>{{if .ReplyBy}}<span{{if .Overdue}} class="is-overdue"{{end}}>reply by <time datetime="{{.ReplyByAt}}">{{.ReplyBy}}</time>{{if .Overdue}} (overdue){{end}}</span>{{end}}</div>
       {{if .Summary}}<p class="owner-summary">{{.Summary}}</p>{{end}}
-      {{if .Options}}<dl class="options">{{range .Options}}<dt>{{.Label}}{{if .Recommended}} <span class="recommended">Recommended</span>{{end}}</dt><dd>{{if .Summary}}<p>{{.Summary}}</p>{{end}}{{if .Pros}}<div class="tradeoff"><p class="tradeoff-head">For:</p><ul>{{range .Pros}}<li>{{.}}</li>{{end}}</ul></div>{{end}}{{if .Cons}}<div class="tradeoff"><p class="tradeoff-head">Against:</p><ul>{{range .Cons}}<li>{{.}}</li>{{end}}</ul></div>{{end}}</dd>{{end}}</dl>{{end}}
+      {{$actionable := and $.WriteToken .QuestionKey}}{{if .Options}}<dl class="options">{{range .Options}}<dt>{{.Label}}{{if .Recommended}} <span class="recommended">Recommended</span>{{end}}</dt><dd>{{if .Summary}}<p>{{.Summary}}</p>{{end}}{{if .Pros}}<div class="tradeoff"><p class="tradeoff-head">For:</p><ul>{{range .Pros}}<li>{{.}}</li>{{end}}</ul></div>{{end}}{{if .Cons}}<div class="tradeoff"><p class="tradeoff-head">Against:</p><ul>{{range .Cons}}<li>{{.}}</li>{{end}}</ul></div>{{end}}{{if $actionable}}<button type="button" data-option="{{.Label}}"{{if .Recommended}} class="recommended-choice"{{end}} hidden>Choose {{.Label}}</button>{{end}}</dd>{{end}}</dl>{{end}}
       {{if .IfLater}}<p class="if-later">If you answer later: {{.IfLater}}</p>{{end}}
     </div>
+    {{if $actionable}}<div class="answer-controls" hidden>
+      <details class="own-words"><summary>Answer in your own words</summary><label>Your answer<textarea rows="3" maxlength="4096"></textarea></label><button type="button" data-answer>Send answer</button></details>
+      <p class="answer-result"></p><p class="answer-note"></p><div class="check-thread" hidden><label>Thread command<input readonly value="{{.CheckThread}}"></label> <button type="button" class="copy" data-command="{{.CheckThread}}">Copy thread command</button></div>
+    </div>{{end}}
     {{if or .Buttons .NoAnswer}}<div class="owner-actions">{{range .Buttons}}<button type="button" class="copy" data-command="{{.Command}}">{{.Label}}</button>{{end}}{{if .NoAnswer}}<p class="command-unavailable">No answer command: {{.NoAnswer}}.</p>{{end}}</div>{{end}}
     {{if .Commands}}<details class="item-details" id="{{.ID}}-details"><summary>Details</summary><div class="detail-content">{{range .Commands}}{{template "cmd" .}}{{end}}</div></details>{{end}}
   </article>{{else}}

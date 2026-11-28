@@ -75,12 +75,18 @@ func WriteHTML(w io.Writer, m Model, regenerate string) error {
 // The live page follows pane.json's stale flag and local publication age on
 // polls; its local clock keeps applying liveness_window between those polls.
 func WriteLiveHTML(w io.Writer, m Model) error {
+	return writeLiveHTML(w, m, "")
+}
+
+func writeLiveHTML(w io.Writer, m Model, token string) error {
 	p := buildPage(m, "")
+	p.WriteToken = token
 	p.Live, p.CSP = true, liveCSP
 	return pageTemplate.Execute(w, p)
 }
 
 type pageData struct {
+	WriteToken           string
 	Model                pageModel
 	Stale                bool
 	StaleText            string

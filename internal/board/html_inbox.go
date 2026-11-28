@@ -22,6 +22,7 @@ type pageInbox struct {
 }
 
 type pageInboxItem struct {
+	QuestionKey, CheckThread   string
 	ID, Prefix, Title, Summary string
 	Kind, From                 string
 	Age, AgeAt                 string
@@ -100,6 +101,10 @@ func (p pageInbox) link(id string) string {
 
 func buildInboxItem(it OwnerItem, now time.Time) pageInboxItem {
 	pi := pageInboxItem{ID: inboxAnchor(it.ID), Summary: clean(it.Summary), From: clean(it.From), Blocking: it.Blocking, IfLater: clean(it.IfLater), NoAnswer: clean(it.NoAnswer)}
+	if it.question != nil && it.Read != nil {
+		pi.QuestionKey = it.ID
+		pi.CheckThread = it.Read.Command
+	}
 	pi.Prefix, pi.Title = commitPrefix(cleanTitle(it.Title))
 	if pi.Title == "" {
 		pi.Title = clean(it.ID)
@@ -137,7 +142,7 @@ func buildInboxItem(it OwnerItem, now time.Time) pageInboxItem {
 			ordered = append(ordered, o)
 		}
 	}
-	for _, o := range it.Options {
+	for _, o := range ordered {
 		po := pageOption{Label: clean(o.Label), Summary: clean(o.Summary), Recommended: o.Label == it.Recommended}
 		for _, s := range o.Pros {
 			po.Pros = append(po.Pros, clean(s))

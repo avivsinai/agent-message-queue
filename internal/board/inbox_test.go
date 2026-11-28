@@ -2,6 +2,7 @@ package board
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -24,7 +25,7 @@ func TestInboxListsADecisionForTheOwner(t *testing.T) {
 	}{
 		{"valid decision", valid, "s1", []string{"Today", "After the service"}, 4, []string{"reply by 2026-11-01T11:00:00Z (overdue)", "mail: s1 27 unread, oldest 24h · amq drain --me user --session s1 --limit 27 --include-body"}},
 		{"invalid stored decision", strings.Replace(valid, `"recommended":"After the service"`, `"recommended":"Never"`, 1), "s1", nil, 2, nil},
-		{"requester in the base root", valid, "", []string{"Today", "After the service"}, 0, []string{"no answer command: the requester is in the base root"}},
+		{"requester in the base root", valid, "", []string{"Today", "After the service"}, 4, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ask := requestMessage("ask", "question", "p2p/lead__user", "lead", []string{reservedHuman}, tc.session, requestNow.Add(-time.Hour))
@@ -53,7 +54,7 @@ func TestInboxListsADecisionForTheOwner(t *testing.T) {
 				t.Fatalf("answers = %+v, no_answer %q, want %d", it.Answer, it.NoAnswer, tc.answers)
 			}
 			for i, label := range tc.options[:min(len(tc.options), tc.answers)] {
-				want := "amq send --session s1 --me user --to lead --thread p2p/lead__user --refs ask --kind answer --body " + Quote([]string{label})
+				want := `(amq_context="$(amq env --root ` + filepath.ToSlash(filepath.Join("/base", tc.session)) + ` --me user --shell sh)" && eval "$amq_context" && printf '%s' ` + Quote([]string{label}) + " | amq reply --me user --id ask --kind answer --body -)"
 				if got := it.Answer[i].Command; got != want {
 					t.Errorf("answer %d = %q, want %q", i, got, want)
 				}

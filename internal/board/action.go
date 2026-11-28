@@ -1,6 +1,7 @@
 package board
 
 import (
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -70,14 +71,27 @@ func validThread(t string) bool {
 }
 
 // AnswerActions builds "complete" and "acknowledge" for an obligation owed by
-// the reserved human (design 9.2). The route is the obligation's reply
-// destination, never its own session. peers is the project's .amqrc peer set.
+// the reserved human. Questions reply from the original owner mailbox. Other
+// requests use the recorded completion recipe and destination.
 // Each option, a label format.ParseDecision accepted, adds first one
 // "complete" whose body is the label.
-func AnswerActions(o *ObligationFacts, peers map[string]bool, options ...string) []Action {
+func AnswerActions(o *ObligationFacts, peers map[string]bool, sourceRoot string, options ...string) ([]Action, *QuestionPlan, string) {
+	if o != nil && o.CompletionKind == format.KindAnswer {
+		plan, reason := questionPlan(o, peers, sourceRoot)
+		if reason != "" {
+			return nil, nil, reason
+		}
+		var actions []Action
+		for _, option := range options {
+			actions = append(actions, plan.copy("answer "+option, format.KindAnswer, option))
+		}
+		actions = append(actions, plan.copy("complete: answer "+o.Destination.Handle, format.KindAnswer, ""))
+		return append(actions, plan.copy("acknowledge: the card stays", format.KindStatus, "")), &plan, ""
+	}
+
 	route, blocked := answerRoute(o, peers)
 	if blocked != "" {
-		return nil
+		return nil, nil, blocked
 	}
 	d := o.Destination
 	build := func(label, kind string, labels []string, body string) (Action, bool) {
@@ -109,7 +123,52 @@ func AnswerActions(o *ObligationFacts, peers map[string]bool, options ...string)
 	if a, ok := build("acknowledge: the card stays", o.AcknowledgeKind, nil, "-"); ok {
 		out = append(out, a)
 	}
-	return out
+	if len(out) == 0 {
+		return nil, nil, "the request's kind has no answer command"
+	}
+	return out, nil, ""
+}
+
+// QuestionPlan binds an original message to the mailbox in which the owner
+// received it. AMQ derives the reply destination and lineage from that original.
+type QuestionPlan struct {
+	Obligation ObligationFacts
+	Root       string
+}
+
+func questionPlan(o *ObligationFacts, peers map[string]bool, root string) (QuestionPlan, string) {
+	if o == nil || o.Destination == nil {
+		return QuestionPlan{}, "the request's reply route is unreadable"
+	}
+	d := o.Destination
+	if !validMessageID(o.OpenerID) || !validThread(o.Thread) || !validHandle(d.Handle) ||
+		(o.OwnerSession != "" && !validHandle(o.OwnerSession)) || (d.Session != "" && !validHandle(d.Session)) {
+		return QuestionPlan{}, "the request's message id, thread or route is invalid"
+	}
+	if d.Project != "" && !peers[d.Project] {
+		return QuestionPlan{}, "the requester's project is not a configured peer"
+	}
+	if !filepath.IsAbs(root) || hasControl(root) {
+		return QuestionPlan{}, "the owner's mailbox root is unknown"
+	}
+	return QuestionPlan{Obligation: *o, Root: filepath.Clean(root)}, ""
+}
+
+func (p QuestionPlan) reply(kind string) []string {
+	return []string{"amq", "reply", "--me", reservedHuman, "--id", p.Obligation.OpenerID, "--kind", kind, "--body", "-"}
+}
+
+func (p QuestionPlan) AnswerArgv() []string { return append(p.reply(format.KindAnswer), "--json") }
+
+func (p QuestionPlan) copy(label, kind, option string) Action {
+	a := newOwnerAction(label, p.reply(kind)...)
+	cmd := a.Command
+	if option != "" {
+		cmd = "printf '%s' " + Quote([]string{option}) + " | " + cmd
+	}
+	selectRoot := Quote([]string{"amq", "env", "--root", p.Root, "--me", reservedHuman, "--shell", "sh"})
+	a.Command = `(amq_context="$(` + selectRoot + `)" && eval "$amq_context" && ` + cmd + ")"
+	return a
 }
 
 // answerRoute is the --project/--session route of an answer to o, or why no

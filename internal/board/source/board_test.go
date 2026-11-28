@@ -234,7 +234,7 @@ func TestBoardPlacesCapturedAMQAndBeadsPayloads(t *testing.T) {
 	// Pro finding 4: the complete action answers T5 in s1, where the
 	// requester is, with --kind from completion; a todo completes with
 	// --labels done, and acknowledge is a separate command.
-	if got := actionCommand(cards[refT5], "complete"); got != "amq send --session s1 --me user --to alpha --thread p2p/alpha__user --refs 2026-10-22T08-00-00.000Z_pid101_aa11bb22 --kind answer --body -" {
+	if got := actionCommand(cards[refT5], "complete"); got != `(amq_context="$(amq env --root /fixture/.agent-mail/s2 --me user --shell sh)" && eval "$amq_context" && amq reply --me user --id 2026-10-22T08-00-00.000Z_pid101_aa11bb22 --kind answer --body -)` {
 		t.Errorf("T5 complete = %q", got)
 	}
 	if got := actionCommand(cards[refTodo], "complete"); !strings.Contains(got, "--kind status --labels done --body -") {
@@ -375,7 +375,7 @@ func TestBoardSourceDefects(t *testing.T) {
 				`"thread": "p2p/alpha__user"`, `"thread": "\"$USER\""`)},
 			check: func(t *testing.T, m board.Model) {
 				cards := cardsByRef(m)
-				if got := actionCommand(cards[refT5], "complete"); !strings.Contains(got, `--thread '"$USER"'`) {
+				if got := actionCommand(cards[refT5], "show thread"); !strings.Contains(got, `--id '"$USER"'`) {
 					t.Errorf("T5 complete = %q", got)
 				}
 				if got := actionCommand(cards["bead:demo-b5"], "claim"); !strings.HasSuffix(got, `--assignee "$USER"`) {

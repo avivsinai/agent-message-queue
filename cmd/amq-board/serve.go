@@ -59,7 +59,14 @@ func runServe(args []string) int {
 		fmt.Fprintf(os.Stderr, "amq-board: "+format+"\n", a...)
 	}
 
-	store, err := resolveStore(ctx, newEnv(dir, execRunner{}))
+	env := newEnv(dir, execRunner{})
+	amq, err := env.LookPath("amq")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "amq-board: installed amq unavailable")
+		return exitGeneral
+	}
+	env.Run = execRunner{amqExe: amq}
+	store, pinned, err := resolveBoardContext(ctx, env)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "amq-board:", err)
 		return exitGeneral
@@ -91,6 +98,12 @@ func runServe(args []string) int {
 		},
 	}
 
+	live.WriteToken, err = randomToken()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "amq-board: could not initialize action authority")
+		return exitGeneral
+	}
+	live.Submit = ownerAnswer(ctx, store, pinned)
 	live.Refresh(ctx, false)
 	if ctx.Err() != nil {
 		return 0
@@ -108,7 +121,7 @@ func runServe(args []string) int {
 		return exitGeneral
 	}
 	host := ln.Addr().String()
-	srv := &http.Server{Handler: live.Handler(secret, host), ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Handler: live.Handler(secret, host), BaseContext: func(net.Listener) context.Context { return ctx }, ReadTimeout: 20 * time.Second, ReadHeaderTimeout: 10 * time.Second}
 	fmt.Printf("amq-board: serving http://%s/%s/\n", host, secret)
 	record := serveRecord{URL: "http://" + host, Token: secret, PID: os.Getpid(), StartedAt: time.Now().UTC()}
 	if err := writeServeFile(record); err != nil {

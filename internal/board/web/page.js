@@ -260,6 +260,78 @@
   }
   tick(); window.setInterval(tick, 30000);
   if (!live) { return; }
+  var inbox = document.getElementById("view-inbox");
+  if (inbox && inbox.dataset.writeToken) {
+    var rows = inbox.querySelectorAll("[data-question]");
+    function controls(row) { return row.querySelectorAll("[data-option], [data-answer], .own-words textarea"); }
+    function disable(row, disabled) { controls(row).forEach(function (node) { node.disabled = disabled; }); }
+    function result(row, message, note, error) {
+      var line = row.querySelector(".answer-result");
+      line.classList.toggle("answer-error", error);
+      line.textContent = message;
+      row.querySelector(".answer-note").textContent = note;
+      say(message + " " + note);
+    }
+    function stale(row) {
+      var elapsed = Date.now() - generated;
+      if (Number.isFinite(elapsed) && elapsed <= freshnessWindow * 1000) { return false; }
+      disable(row, true);
+      var message = Number.isFinite(elapsed) ? "Update first: this view is " + ageText(elapsed) + " old." : "Update first: the age of this view is unknown.";
+      if (row.querySelector(".answer-result").textContent !== message) { result(row, message, "", false); }
+      return true;
+    }
+    rows.forEach(function (row) {
+      row.querySelector(".owner-actions").hidden = true;
+      row.querySelector(".answer-controls").hidden = false;
+      row.querySelectorAll("[data-option]").forEach(function (node) { node.hidden = false; });
+      stale(row);
+    });
+    window.setInterval(function () { rows.forEach(function (row) { if (!row.dataset.delivery) { stale(row); } }); }, 30000);
+    inbox.addEventListener("click", async function (event) {
+      var button = event.target.closest("[data-option], [data-answer]");
+      if (!button) { return; }
+      var row = button.closest("[data-question]");
+      if (!row || button.disabled || row.dataset.delivery || stale(row)) { return; }
+      var payload = {action: "answer", item: row.dataset.question};
+      if (button.hasAttribute("data-option")) { payload.option = button.dataset.option; }
+      else {
+        payload.text = row.querySelector(".own-words textarea").value;
+        if (!payload.text.trim()) { result(row, "Enter an answer.", "", true); return; }
+      }
+      if (!navigator.onLine) {
+        result(row, "Not sent: the board server did not answer. Nothing was sent.", "Try again, or copy the command from Details.", true);
+        return;
+      }
+      row.dataset.delivery = "sending";
+      disable(row, true);
+      var label = button.textContent;
+      button.textContent = "Sending…";
+      button.setAttribute("aria-busy", "true");
+      result(row, "Sending…", "", false);
+      function uncertain(command) {
+        row.dataset.delivery = "unconfirmed";
+        var check = row.querySelector(".check-thread");
+        if (command) { check.querySelector("input").value = command; check.querySelector("button").dataset.command = command; }
+        check.hidden = false;
+        result(row, "Delivery unconfirmed. Check the thread:", "", true);
+      }
+      try {
+        var response = await fetch("actions", {method: "POST", headers: {"Content-Type": "application/json", "X-AMQ-Write-Token": inbox.dataset.writeToken}, body: JSON.stringify(payload)});
+        var reply = await response.json();
+        if (response.ok && reply.id) {
+          row.dataset.delivery = "sent";
+          row.querySelectorAll(".options, .own-words").forEach(function (node) { node.hidden = true; });
+          var clock = new Date().toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", hour12: false});
+          result(row, "Sent to " + reply.recipient + ": " + (payload.option || payload.text) + ". " + clock + ".", "It moves to Answered at the next update.", false);
+        } else if (response.status >= 400 && response.status < 500 && reply.reason) {
+          delete row.dataset.delivery;
+          disable(row, false);
+          result(row, "Not sent: " + reply.reason + ".", "Details has the command to send it yourself.", true);
+        } else { uncertain(reply.check_thread); }
+      } catch (_) { uncertain(); }
+      finally { button.textContent = label; button.removeAttribute("aria-busy"); }
+    });
+  }
   function applyFreshPane(model) {
     // pane.json is a bounded freshness face, not the whole board model.
     // A newer pane that is only available changes the Update affordance

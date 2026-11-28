@@ -48,7 +48,20 @@ func readBoardContext(ctx context.Context, env board.Env) (boardContext, error) 
 }
 
 func readBoardRoute(ctx context.Context, env board.Env, session string) (boardContext, error) {
+	return (boardSelection{session: session}).read(ctx, env)
+}
+
+type boardSelection struct{ session, root, me string }
+
+func (s boardSelection) read(ctx context.Context, env board.Env) (boardContext, error) {
+	session, root := s.session, s.root
 	args := []string{"amq", "env", "--json"}
+	if s.me != "" {
+		args = append(args, "--me", s.me)
+	}
+	if root != "" {
+		args = append(args, "--root", root)
+	}
 	if session != "" {
 		args = append(args, "--session", session)
 	}
@@ -80,7 +93,11 @@ func resolveBoardContext(ctx context.Context, env board.Env) (board.Store, board
 }
 
 func resolveBoardSession(ctx context.Context, env board.Env, session string) (board.Store, board.Env, error) {
-	initial, err := readBoardRoute(ctx, env, session)
+	return resolveBoardSelection(ctx, env, boardSelection{session: session})
+}
+
+func resolveBoardSelection(ctx context.Context, env board.Env, selectRoute boardSelection) (board.Store, board.Env, error) {
+	initial, err := selectRoute.read(ctx, env)
 	if err != nil {
 		return board.Store{}, env, err
 	}
@@ -113,10 +130,10 @@ func resolveBoardSession(ctx context.Context, env board.Env, session string) (bo
 		// The original resolver detects a changed project route. The pinned resolver
 		// separately checks the identities on disk rather than trusting stored IDs.
 		for _, route := range []struct {
-			env     board.Env
-			session string
-		}{{env, session}, {pinned, ""}} {
-			actual, err := readBoardRoute(ctx, route.env, route.session)
+			env       board.Env
+			selection boardSelection
+		}{{env, selectRoute}, {pinned, boardSelection{}}} {
+			actual, err := route.selection.read(ctx, route.env)
 			if err != nil {
 				return err
 			}

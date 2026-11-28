@@ -6,7 +6,9 @@ package source
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -395,6 +397,11 @@ type recipe struct {
 }
 
 type threadOpenDoc struct {
+	threadOpenRows
+	Coverage threadOpenCoverage `json:"coverage"`
+}
+
+type threadOpenRows struct {
 	Schema      string `json:"schema"`
 	Obligations []struct {
 		Key    string `json:"key"`
@@ -424,18 +431,19 @@ type threadOpenDoc struct {
 			Created string `json:"created"`
 		} `json:"last_activity"`
 	} `json:"obligations"`
-	Coverage struct {
-		AssessedSince     string            `json:"assessed_since"`
-		Skipped           []json.RawMessage `json:"skipped"`
-		UnresolvedLineage []json.RawMessage `json:"unresolved_lineage"`
-		Ambiguous         []json.RawMessage `json:"ambiguous"`
-		OutboundRouted    []struct {
-			Count int `json:"count"`
-		} `json:"outbound_routed"`
-		TruncatedByLimit struct {
-			Omitted int `json:"omitted"`
-		} `json:"truncated_by_limit"`
-	} `json:"coverage"`
+}
+
+type threadOpenCoverage struct {
+	AssessedSince     string              `json:"assessed_since"`
+	Skipped           []json.RawMessage   `json:"skipped"`
+	UnresolvedLineage []thread.Unresolved `json:"unresolved_lineage"`
+	Ambiguous         []thread.Ambiguous  `json:"ambiguous"`
+	OutboundRouted    []struct {
+		Count int `json:"count"`
+	} `json:"outbound_routed"`
+	TruncatedByLimit struct {
+		Omitted int `json:"omitted"`
+	} `json:"truncated_by_limit"`
 }
 
 func parseThreadOpen(data []byte) ([]board.Item, board.Coverage, string, error) {
@@ -587,4 +595,67 @@ func errLine(err error) string {
 		s = s[:200] + "..."
 	}
 	return s
+}
+
+// CheckQuestionOpen uses the same reducer as a typed thread-open command.
+// Include the base and sibling sessions because a closing reply may live there.
+func CheckQuestionOpen(ctx context.Context, env board.Env, base string, plan board.QuestionPlan) error {
+	unverified := errors.New("the question's current state could not be verified")
+	data, err := env.Run.Run(ctx, env.Dir, []string{"amq", "thread", "open", "--all-sessions", "--include-base", "--owed-by", reservedHuman, "--kind", "question", "--max-age", "0", "--json"})
+	if err != nil {
+		return unverified
+	}
+	var doc struct {
+		threadOpenRows
+		BaseRoot string   `json:"base_root"`
+		Sessions []string `json:"sessions"`
+		Coverage struct {
+			threadOpenCoverage
+			Outcomes []struct {
+				OpenerID string      `json:"opener_id"`
+				OwedBy   participant `json:"owed_by"`
+				State    string      `json:"state"`
+			} `json:"action_outcomes"`
+		} `json:"coverage"`
+	}
+	if json.Unmarshal(data, &doc) != nil || doc.Schema != ThreadOpenSchema || doc.BaseRoot != base || !slices.Contains(doc.Sessions, plan.Obligation.OwnerSession) {
+		return unverified
+	}
+	c := doc.Coverage
+	if c.Skipped == nil || c.UnresolvedLineage == nil || c.Ambiguous == nil || len(c.Skipped) != 0 || c.TruncatedByLimit.Omitted != 0 {
+		return unverified
+	}
+	want := plan.Obligation
+	for _, missing := range c.UnresolvedLineage {
+		if missing.ID == want.OpenerID || missing.MissingRef == want.OpenerID ||
+			(missing.From == reservedHuman && missing.Session == want.OwnerSession) ||
+			(missing.From == want.Destination.Handle && missing.Session == want.Destination.Session) {
+			return unverified
+		}
+	}
+	count := 0
+	for _, o := range doc.Obligations {
+		if o.Opener.ID != want.OpenerID {
+			continue
+		}
+		if o.Opener.Kind != "question" || o.OwedBy.Handle != reservedHuman || o.OwedBy.Session != want.OwnerSession ||
+			o.OwedByKind != "human" || o.OwedBy.Project != "" || o.Thread != want.Thread || o.ReplyDestination == nil || board.Destination(*o.ReplyDestination) != *want.Destination {
+			return unverified
+		}
+		for _, gap := range c.Ambiguous {
+			if gap.ID == want.OpenerID || slices.Contains(gap.Candidates, o.Key) {
+				return unverified
+			}
+		}
+		count++
+	}
+	if count == 1 {
+		return nil
+	}
+	for _, outcome := range c.Outcomes {
+		if count == 0 && outcome.OpenerID == want.OpenerID && outcome.OwedBy.Handle == reservedHuman && outcome.OwedBy.Session == want.OwnerSession && outcome.State == "closed" {
+			return errors.New("this question was already answered")
+		}
+	}
+	return unverified
 }

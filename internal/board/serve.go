@@ -29,6 +29,8 @@ const ManualEvery = 60 * time.Second
 // refresh. A refused edit (a warning that the last accepted load did not
 // have) keeps the last good configuration and is reported once.
 type Live struct {
+	WriteToken string
+	Submit     SubmitAnswer
 	// Load reads the configuration, as LoadConfig does.
 	Load func() (FileConfig, []string)
 	// Build builds the model under the configuration. serve reloads the
@@ -149,7 +151,7 @@ func (l *Live) run(ctx context.Context, force bool) {
 		return
 	}
 	var page bytes.Buffer
-	if err := WriteLiveHTML(&page, m); err != nil {
+	if err := writeLiveHTML(&page, m, l.WriteToken); err != nil {
 		l.Logf("refresh: page not rendered: %v", err)
 		return
 	}
@@ -208,11 +210,10 @@ func set(xs []string) map[string]bool {
 // Handler serves the live view. Every route lives under the token:
 // /<token>/ (the page), /<token>/model.json (the last built model, the same
 // JSON as `amq-board --json`), /<token>/pane.json (the bounded pane DTO),
-// and /<token>/refresh (a press of refresh). A
+// /<token>/refresh (a press of refresh), and POST /<token>/actions. A
 // path without the exact token is 404, a Host other than host (the address
-// the view listens on) is refused against DNS rebinding, and any method but
-// GET is 405. No request reads a source; refresh only rebuilds the model
-// through Request.
+// the view listens on) is refused against DNS rebinding. Only an authenticated
+// action rechecks the original question and can send an answer.
 func (l *Live) Handler(token, host string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
@@ -226,6 +227,10 @@ func (l *Live) Handler(token, host string) http.Handler {
 		seg, rest, slash := strings.Cut(strings.TrimPrefix(r.URL.Path, "/"), "/")
 		if subtle.ConstantTimeCompare([]byte(seg), []byte(token)) != 1 {
 			http.NotFound(w, r)
+			return
+		}
+		if rest == "actions" && r.URL.EscapedPath() == "/"+token+"/actions" && r.URL.RawQuery == "" && !r.URL.ForceQuery && l.WriteToken != "" && l.Submit != nil {
+			l.handleAnswer(w, r, host)
 			return
 		}
 		if r.Method != http.MethodGet {
