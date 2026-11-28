@@ -112,6 +112,9 @@ func wakeDiagnosticIsTerminal(cfg *wakeConfig) bool {
 // destination a repeated notice is folded into a count and writes nothing, so
 // it records no output effect.
 func emitWakeAttention(cfg *wakeConfig, payload wakePayload) error {
+	if err := cfg.checkPeerDispatch(); err != nil {
+		return err
+	}
 	isTerminal := wakeAttentionIsTerminal(cfg)
 	writePlainOutput := !isTerminal || wakeMayPrintToTerminal(cfg, wakeAttentionIsForeground)
 	var effects []string

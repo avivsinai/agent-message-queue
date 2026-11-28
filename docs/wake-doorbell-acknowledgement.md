@@ -120,22 +120,34 @@ idle -> retrying -> announced
   the remaining members.
 - Adding a new physical inbox member starts one fresh attempt covering the
   expanded cohort. A successful attempt announces the expanded cohort.
-- An empty inbox resets the state to `idle`.
+- Before a peer doorbell sends input, submits or retries it, or hands it to
+  another transport, the canonical inbox must still contain a qualifying file
+  from its scan. When the cohort is gone, the wake cancels the remaining
+  notification and its deadlines. A prepared attempt that loses its mail before
+  submitting the prompt closes as `cancelled`.
+  Text already in the composer stays there. A prompt already submitted or
+  queued by the harness can still start a turn after the inbox drains.
+- An empty inbox resets the schedule to `idle`. Retained terminal input follows
+  the existing physical-progress recovery rules. Owner commands have their
+  own authorization and can run with an empty inbox.
 
 The external injector ledger records the transport lifecycle in one append-only
 log:
 
 ```text
-attempt -> deferred -> retried -> accepted
-                         |-> deferred -> retried
-attempt -----------------> failed
+attempt | retried  -> accepted | failed | deferred | cancelled
+deferred           -> retried | cancelled
 ```
 
 The same AttemptID and message cohort MUST be used across `deferred` and
-`retried` events. A terminal `accepted` or `failed` event closes that ID. A
-later unread re-notification starts a new AttemptID. The raw TIOCSTI path has
-only byte-write evidence (`written`); it never claims provider presentation or
-acceptance. Raw byte-level injection cannot observe provider rejection
+`retried` events. A terminal `accepted`, `failed`, or `cancelled` event closes that ID.
+A later unread re-notification starts a new AttemptID.
+
+For raw TIOCSTI, `written` records byte-write evidence. If the primary Enter was
+written and the mail then drains, the attempt stays `written` and its detail
+records the skipped rescue Enter. If the mail disappears before this attempt
+writes a submit key, it closes as `cancelled` even if it typed prompt text.
+Raw byte-level injection cannot observe provider rejection
 ([#703](https://github.com/avivsinai/agent-message-queue/issues/703)); the
 injector protocol above is the acceptance-proof path.
 
