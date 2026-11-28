@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -1230,30 +1231,46 @@ func TestWakeHoldRecordsOnlyAttemptedNotifications(t *testing.T) {
 	}
 }
 
-// Issue #1660: a running turn drained the doorbell's mail while raw input
-// was in flight. The pending submit must never start an empty turn.
-func TestDoorbellDrainedAfterTextSkipsSubmit(t *testing.T) {
-	h := newWakeHoldHarness(t, wakeHoldPolicy{})
-	h.send("trigger", format.PriorityNormal)
-	h.cfg.terminalWrite = checkedTerminalWriter(func(chunk string) error {
-		h.injected = append(h.injected, chunk)
-		if len(h.injected) == 1 {
-			if got := runDrainJSON(t, h.root, "codex", 1, false); got.Count != 1 {
-				t.Fatalf("drained %d messages, want one", got.Count)
+// Issue #1660 and its ledger review: a running turn can drain between any
+// two writes. Stop there and record whether the primary submit was written.
+func TestDoorbellDrainStopsRemainingInput(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		drainAfter string
+		writes     []string
+		outcome    string
+	}{
+		{"before submit", coopWakeDoorbell, []string{coopWakeDoorbell}, notificationattempt.StateCancelled},
+		{"before rescue", "\r", []string{coopWakeDoorbell, "\r"}, notificationattempt.OutcomeWritten},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newWakeHoldHarness(t, wakeHoldPolicy{})
+			h.cfg.harness = harness.Claude
+			h.send("trigger", format.PriorityNormal)
+			h.cfg.terminalWrite = checkedTerminalWriter(func(chunk string) error {
+				h.injected = append(h.injected, chunk)
+				if chunk == tc.drainAfter {
+					if got := runDrainJSON(t, h.root, "codex", 1, false); got.Count != 1 {
+						t.Fatalf("drained %d messages, want one", got.Count)
+					}
+					h.deliver("passive.md", "passive", format.PriorityNormal, format.NotifyPassive, nil)
+				}
+				return nil
+			})
+			h.scan(h.cfg)
+			if !slices.Equal(h.injected, tc.writes) {
+				t.Fatalf("terminal writes = %q, want %q", h.injected, tc.writes)
 			}
-			h.deliver("passive.md", "passive", format.PriorityNormal, format.NotifyPassive, nil)
-		}
-		return nil
-	})
-	h.scan(h.cfg)
-	if len(h.injected) != 1 || h.injected[0] != coopWakeDoorbell {
-		t.Fatalf("terminal writes = %q, want only the doorbell text", h.injected)
-	}
-	if _, armed := h.cfg.doorbell.nextDeadline(); armed || h.cfg.doorbell.reminderAttempts != 0 {
-		t.Fatal("stale doorbell retained a deadline or spent an input attempt")
-	}
-	attempts, err := notificationattempt.List(h.root, "codex", "trigger")
-	if err != nil || len(attempts) != 1 || attempts[0].State != notificationattempt.StateCancelled {
-		t.Fatalf("expected one cancelled attempt, got %+v, err %v", attempts, err)
+			if _, armed := h.cfg.doorbell.nextDeadline(); armed || h.cfg.doorbell.reminderAttempts != 0 {
+				t.Fatal("stale doorbell retained a deadline or spent an input attempt")
+			}
+			attempts, err := notificationattempt.List(h.root, "codex", "trigger")
+			if err != nil || len(attempts) != 1 {
+				t.Fatalf("attempts = %+v, err %v", attempts, err)
+			}
+			if attempts[0].State != tc.outcome {
+				t.Fatalf("ledger outcome = %s, want %s", attempts[0].State, tc.outcome)
+			}
+		})
 	}
 }

@@ -318,3 +318,18 @@ func TestWakeCommandPartialWriteSurvivesAnEmptyPeerInbox(t *testing.T) {
 		t.Fatalf("after the empty inbox and command tick: outcome=%s reason=%q writes=%q, want a full delivery or refusal", outcome, reason, h.injected)
 	}
 }
+
+// The c2uk review found that an empty peer inbox hid uncertain acceptance
+// of the owner's command. Recovery needs the uncertainty and the exact debt.
+func TestWakeCommandUncertainSubmitSurvivesEmptyInbox(t *testing.T) {
+	h := newWakeHoldHarness(t, wakeHoldPolicy{})
+	debt := wakeInputDeliveryState{phase: wakeInputPrimarySubmitPending, mode: wakeInjectModeRaw, oneSubmit: true, acceptanceUncertain: true}
+	h.cfg.inputDelivery = debt
+	err := notifyNewMessages(h.cfg)
+	if !isWakeInputDemotionBlocked(err) {
+		t.Fatalf("empty inbox with uncertain owner command: got %v, want recovery required", err)
+	}
+	if h.cfg.inputDelivery != debt || len(h.injected) != 0 {
+		t.Fatalf("owner input changed during peer scan: debt=%+v writes=%q", h.cfg.inputDelivery, h.injected)
+	}
+}

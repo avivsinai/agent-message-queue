@@ -12,6 +12,8 @@ import (
 
 var errWakeDoorbellStale = errors.New("peer doorbell cancelled: no qualifying message remains in the scanned cohort")
 
+var errWakeRescueSkipped = fmt.Errorf("primary submit key written, rescue skipped: %w", errWakeDoorbellStale)
+
 func validateDispatchInbox(path string, inbox wakeInboxReader) error {
 	if validator, ok := inbox.(interface{ ValidateCanonical() error }); ok {
 		if err := validator.ValidateCanonical(); err != nil {

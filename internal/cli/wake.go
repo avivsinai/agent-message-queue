@@ -797,16 +797,13 @@ func notifyNewMessages(cfg *wakeConfig) (result error) {
 		if cfg.startupReleaseAttempted && wakeCohortDrained(cfg.doorbell.cohort, physicalPending) {
 			cfg.startupInputProven = true
 		}
-		if cfg.inputDelivery.acceptanceUncertain && !cfg.inputDelivery.oneSubmit {
-			return &wakeInputDemotionBlockedError{err: errors.New("inbox progressed after a terminal write with uncertain acceptance")}
+		if cfg.inputDelivery.acceptanceUncertain || cfg.inputDelivery.oneSubmit || !cfg.inputDelivery.pending() {
+			cfg.doorbell.reset()
+			persistWakeDoorbellStatusBestEffort(cfg)
+			return cfg.inputDelivery.checkAcceptanceAfterInboxProgress()
 		}
-		if cfg.inputDelivery.pending() && !cfg.inputDelivery.oneSubmit {
-			cfg.cancelPeerDoorbell()
-			dischargeWakeInputRecoveryAfterProgress(cfg, physicalPending)
-			return nil
-		}
-		cfg.doorbell.reset()
-		persistWakeDoorbellStatusBestEffort(cfg)
+		cfg.cancelPeerDoorbell()
+		dischargeWakeInputRecoveryAfterProgress(cfg, physicalPending)
 		return nil
 	}
 
@@ -1037,13 +1034,14 @@ func deliverWithNotificationLedger(
 		}
 		outcome := notificationattempt.OutcomeFailed
 		detail := ""
-		if deliverErr == nil {
-			outcome = notificationattempt.OutcomeWritten
-		} else {
+		if deliverErr != nil {
 			detail = deliverErr.Error()
-			if errors.Is(deliverErr, errWakeDoorbellStale) {
-				outcome = notificationattempt.StateCancelled
-			}
+		}
+		switch {
+		case deliverErr == nil, errors.Is(deliverErr, errWakeRescueSkipped):
+			outcome = notificationattempt.OutcomeWritten
+		case errors.Is(deliverErr, errWakeDoorbellStale):
+			outcome = notificationattempt.StateCancelled
 		}
 		if resultErr := writer.Result(prepared, outcome, detail); resultErr != nil && cfg.debug {
 			_, _ = fmt.Fprintf(os.Stderr, "amq wake [debug]: persist notification attempt result: %v\n", resultErr)
@@ -2022,7 +2020,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 				cfg,
 				wakeInjectModePaste,
 				pasteText,
-				notice.input.provenance == wakePayloadOwnerCommand, guardInput && cfg.guardedInputEnabled(),
+				false, guardInput && cfg.guardedInputEnabled(),
 			)
 		}
 		inputAccepted = inputAccepted || cfg.inputDelivery.confirmedInput()
@@ -2567,12 +2565,19 @@ func rememberRequestedWakeInputMode(cfg *wakeConfig) {
 	cfg.requestedInjectMode = cfg.injectMode
 }
 
+func (state wakeInputDeliveryState) checkAcceptanceAfterInboxProgress() error {
+	if state.acceptanceUncertain {
+		return &wakeInputDemotionBlockedError{err: errors.New("inbox progressed after a terminal write with uncertain acceptance")}
+	}
+	return nil
+}
+
 func reconcileWakeInputAfterProgress(cfg *wakeConfig, survivor bool) error {
+	if err := cfg.inputDelivery.checkAcceptanceAfterInboxProgress(); err != nil {
+		return err
+	}
 	if cfg.inputDelivery.oneSubmit {
 		return nil
-	}
-	if cfg.inputDelivery.acceptanceUncertain {
-		return &wakeInputDemotionBlockedError{err: errors.New("inbox progressed after a terminal write with uncertain acceptance")}
 	}
 	if !survivor || cfg.settings.attended {
 		// Physical progress retires the old suffix. Replacement mail can
@@ -2656,6 +2661,7 @@ func injectTerminalSubmitOnly(cfg *wakeConfig, mode string, guardInput bool) (bo
 }
 
 func resumeWakeInputDelivery(cfg *wakeConfig) (bool, error) {
+	primaryWritten := false
 	state := &cfg.inputDelivery
 	for state.pending() {
 		switch state.phase {
@@ -2773,6 +2779,7 @@ func resumeWakeInputDelivery(cfg *wakeConfig) (bool, error) {
 			if !wrote {
 				return false, nil
 			}
+			primaryWritten = true
 			if state.oneSubmit && state.guardInput {
 				// An owner command gets one Enter. Retain only its drain if the
 				// reader has not taken it yet.
@@ -2843,6 +2850,15 @@ func resumeWakeInputDelivery(cfg *wakeConfig) (bool, error) {
 			}
 			rawInjectSleep(rawInjectSettleDelay)
 			wrote, err := writePendingWakeInputChunk(cfg, state, "\r")
+			if errors.Is(err, errWakeDoorbellStale) {
+				// The primary Enter already landed. Retire the optional rescue,
+				// crediting the write only to the attempt that actually made it.
+				state.reset()
+				if primaryWritten {
+					return true, errWakeRescueSkipped
+				}
+				return false, err
+			}
 			if err != nil {
 				if cfg.debug {
 					_ = writeWakeDiagnostic(cfg, "amq wake [debug]: rescue submit inject failed: %v\n", err)
