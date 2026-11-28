@@ -2020,7 +2020,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 				cfg,
 				wakeInjectModePaste,
 				pasteText,
-				false, guardInput && cfg.guardedInputEnabled(),
+				notice.input.provenance == wakePayloadOwnerCommand, guardInput && cfg.guardedInputEnabled(),
 			)
 		}
 		inputAccepted = inputAccepted || cfg.inputDelivery.confirmedInput()

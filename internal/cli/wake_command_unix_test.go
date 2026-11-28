@@ -333,3 +333,36 @@ func TestWakeCommandUncertainSubmitSurvivesEmptyInbox(t *testing.T) {
 		t.Fatalf("owner input changed during peer scan: debt=%+v writes=%q", h.cfg.inputDelivery, h.injected)
 	}
 }
+
+// The c2uk review found that an empty peer scan cleared a pasted owner
+// command's held Enter and the command queue then reported it as typed.
+func TestWakePastedOwnerCommandKeepsItsEnterAcrossAnEmptyPeerScan(t *testing.T) {
+	h := newWakeHoldHarness(t, wakeHoldPolicy{})
+	h.cfg.injectMode = wakeInjectModePaste
+	owner, target := commandSeat(t, h)
+	open := false
+	h.cfg.dialogSource = func(time.Time) (wakeDialogState, error) {
+		if open {
+			return wakeDialogOpen, nil
+		}
+		return wakeDialogClosed, nil
+	}
+	h.cfg.terminalWrite = checkedTerminalWriter(func(text string) error {
+		h.injected = append(h.injected, text)
+		open = text == "/compact"
+		return nil
+	})
+	id := queueCommand(t, h, owner, target, "/compact", h.now)
+	agentDir := fsq.AgentBase(h.root, "codex")
+	serveWakeCommands(h.cfg)
+	if state, _, _ := wakecmd.Outcome(agentDir, id); state != wakecmd.Queued || !slices.Equal(h.injected, []string{"/compact"}) {
+		t.Fatalf("while dialog open: writes=%q outcome=%q, want command alone and queued", h.injected, state)
+	}
+	h.scan(h.cfg)
+	open = false
+	serveWakeCommands(h.cfg)
+	serveWakeCommands(h.cfg)
+	if state, _, _ := wakecmd.Outcome(agentDir, id); state != wakecmd.Typed || !slices.Equal(h.injected, []string{"/compact", "\r"}) {
+		t.Fatalf("after empty peer scan: writes=%q outcome=%q, want command and one Enter, typed", h.injected, state)
+	}
+}
