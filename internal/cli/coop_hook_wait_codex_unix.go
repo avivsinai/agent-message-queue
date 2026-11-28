@@ -163,8 +163,11 @@ func codexWaiter(ctx context.Context, thread, codexHome string, held func() bool
 			loaded, err := writerlock.Held(ctx, lockPath)
 			return err == nil && !loaded
 		},
-		ring: func() (bool, error) {
-			err := ringCodexThread(ctx, thread, codexHome)
+		ring: func(checkMail func() error) (bool, error) {
+			err := ringCodexThread(ctx, thread, codexHome, checkMail)
+			if isWakeDispatchRefusal(err) {
+				return true, err
+			}
 			if err == nil || errors.Is(err, adapter.ErrInjectUncertain) {
 				return false, nil
 			}
@@ -184,8 +187,8 @@ func codexWaiter(ctx context.Context, thread, codexHome string, held func() bool
 // desktop app's when its hook environment names one, with the same checks
 // as codex on PATH; a named binary that fails them is a failed ring, not a
 // reason to run another.
-func ringCodexThread(ctx context.Context, thread, codexHome string) error {
-	queue := adapter.CodexQueue{Runner: codexWaitRunner, Home: codexHome}
+func ringCodexThread(ctx context.Context, thread, codexHome string, checkMail func() error) error {
+	queue := adapter.CodexQueue{Runner: codexWaitRunner, Home: codexHome, BeforeEnqueue: checkMail}
 	if app, ok := os.LookupEnv(envCodexAppCLI); ok {
 		if !filepath.IsAbs(app) {
 			return fmt.Errorf("%s=%q is not an absolute path", envCodexAppCLI, app)

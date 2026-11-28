@@ -288,7 +288,7 @@ func TestWakeCommandPartialWriteSurvivesAnEmptyPeerInbox(t *testing.T) {
 	h.cfg.dialogSource = func(time.Time) (wakeDialogState, error) { return wakeDialogClosed, nil }
 	id := queueCommand(t, h, owner, target, "/compact", h.now)
 	first := true
-	h.cfg.terminalWrite = func(text string) error {
+	h.cfg.terminalWrite = checkedTerminalWriter(func(text string) error {
 		if first {
 			first = false
 			accepted := text[:2]
@@ -297,7 +297,7 @@ func TestWakeCommandPartialWriteSurvivesAnEmptyPeerInbox(t *testing.T) {
 		}
 		h.injected = append(h.injected, text)
 		return nil
-	}
+	})
 	serveWakeCommands(h.cfg)
 	if !slices.Equal(h.injected, []string{"/c"}) || h.cfg.inputDelivery.phase != wakeInputPayloadPending || h.cfg.inputDelivery.acceptedBytes != 2 {
 		t.Fatalf("fixture must stop after the accepted partial prefix: writes=%q state=%#v", h.injected, h.cfg.inputDelivery)
@@ -316,5 +316,53 @@ func TestWakeCommandPartialWriteSurvivesAnEmptyPeerInbox(t *testing.T) {
 	}
 	if outcome != wakecmd.Typed && outcome != wakecmd.Refused {
 		t.Fatalf("after the empty inbox and command tick: outcome=%s reason=%q writes=%q, want a full delivery or refusal", outcome, reason, h.injected)
+	}
+}
+
+// The c2uk review found that an empty peer inbox hid uncertain acceptance
+// of the owner's command. Recovery needs the uncertainty and the exact debt.
+func TestWakeCommandUncertainSubmitSurvivesEmptyInbox(t *testing.T) {
+	h := newWakeHoldHarness(t, wakeHoldPolicy{})
+	debt := wakeInputDeliveryState{phase: wakeInputPrimarySubmitPending, mode: wakeInjectModeRaw, oneSubmit: true, acceptanceUncertain: true}
+	h.cfg.inputDelivery = debt
+	err := notifyNewMessages(h.cfg)
+	if !isWakeInputDemotionBlocked(err) {
+		t.Fatalf("empty inbox with uncertain owner command: got %v, want recovery required", err)
+	}
+	if h.cfg.inputDelivery != debt || len(h.injected) != 0 {
+		t.Fatalf("owner input changed during peer scan: debt=%+v writes=%q", h.cfg.inputDelivery, h.injected)
+	}
+}
+
+// The c2uk review found that an empty peer scan cleared a pasted owner
+// command's held Enter and the command queue then reported it as typed.
+func TestWakePastedOwnerCommandKeepsItsEnterAcrossAnEmptyPeerScan(t *testing.T) {
+	h := newWakeHoldHarness(t, wakeHoldPolicy{})
+	h.cfg.injectMode = wakeInjectModePaste
+	owner, target := commandSeat(t, h)
+	open := false
+	h.cfg.dialogSource = func(time.Time) (wakeDialogState, error) {
+		if open {
+			return wakeDialogOpen, nil
+		}
+		return wakeDialogClosed, nil
+	}
+	h.cfg.terminalWrite = checkedTerminalWriter(func(text string) error {
+		h.injected = append(h.injected, text)
+		open = text == "/compact"
+		return nil
+	})
+	id := queueCommand(t, h, owner, target, "/compact", h.now)
+	agentDir := fsq.AgentBase(h.root, "codex")
+	serveWakeCommands(h.cfg)
+	if state, _, _ := wakecmd.Outcome(agentDir, id); state != wakecmd.Queued || !slices.Equal(h.injected, []string{"/compact"}) {
+		t.Fatalf("while dialog open: writes=%q outcome=%q, want command alone and queued", h.injected, state)
+	}
+	h.scan(h.cfg)
+	open = false
+	serveWakeCommands(h.cfg)
+	serveWakeCommands(h.cfg)
+	if state, _, _ := wakecmd.Outcome(agentDir, id); state != wakecmd.Typed || !slices.Equal(h.injected, []string{"/compact", "\r"}) {
+		t.Fatalf("after empty peer scan: writes=%q outcome=%q, want command and one Enter, typed", h.injected, state)
 	}
 }

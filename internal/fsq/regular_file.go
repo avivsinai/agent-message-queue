@@ -150,6 +150,12 @@ func ReadRegularNoFollowBounded(path string, max int64) ([]byte, error) {
 // directory is still synced, best effort, so the other writer's file is
 // durable before the caller acts on it.
 func CreateNewFile(path string, data []byte, perm os.FileMode) (created bool, err error) {
+	return CreateNewFileIf(path, data, perm, nil)
+}
+
+// CreateNewFileIf stages the file, then checks before publishing its name.
+// A refused publication removes only the private staged file.
+func CreateNewFileIf(path string, data []byte, perm os.FileMode, beforePublish func() error) (created bool, err error) {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".tmp-*")
 	if err != nil {
@@ -167,6 +173,11 @@ func CreateNewFile(path string, data []byte, perm os.FileMode) (created bool, er
 	}
 	if err := tmp.Close(); err != nil {
 		return false, err
+	}
+	if beforePublish != nil {
+		if err := beforePublish(); err != nil {
+			return false, err
+		}
 	}
 	if err := os.Link(tmpName, path); err != nil {
 		if !errors.Is(err, os.ErrExist) {

@@ -198,7 +198,7 @@ func (authority *wakeTerminalAuthority) BeforeWrite() error {
 	return authority.validateLocked()
 }
 
-func (authority *wakeTerminalAuthority) Inject(text string) error {
+func (authority *wakeTerminalAuthority) Inject(text string, beforeInput func() error) error {
 	if authority == nil {
 		return newWakeTerminalAuthorityLoss("terminal capability is missing")
 	}
@@ -206,6 +206,11 @@ func (authority *wakeTerminalAuthority) Inject(text string) error {
 	defer authority.mu.Unlock()
 	if err := authority.validateLocked(); err != nil {
 		return err
+	}
+	if beforeInput != nil {
+		if err := beforeInput(); err != nil {
+			return err
+		}
 	}
 	if err := injectWakeTerminalFD(authority.fd, text); err != nil {
 		var injectionErr *tiocstiInjectionError

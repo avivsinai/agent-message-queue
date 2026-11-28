@@ -277,7 +277,7 @@ type countingNativeNotifier struct {
 	onNotify func()
 }
 
-func (n countingNativeNotifier) Notify(map[string]os.FileInfo, time.Time) (bool, error) {
+func (n countingNativeNotifier) Notify(map[string]os.FileInfo, time.Time, func() error) (bool, error) {
 	n.onNotify()
 	return false, nil
 }

@@ -39,7 +39,7 @@ func TestWakeTerminalAuthorityInjectsThroughRetainedFD(t *testing.T) {
 	if err := authority.BeforeWrite(); err != nil {
 		t.Fatalf("validate retained terminal authority: %v", err)
 	}
-	if err := authority.Inject("doorbell"); err != nil {
+	if err := authority.Inject("doorbell", nil); err != nil {
 		t.Fatalf("inject through retained terminal authority: %v", err)
 	}
 	if len(fixture.injections) != 1 ||
@@ -88,7 +88,7 @@ func TestWakeTerminalAuthorityRefusesChangedCurrentTTYIdentity(t *testing.T) {
 	}
 	fixture.currentTTYPath = replacementPath
 
-	err = authority.Inject("must-not-arrive")
+	err = authority.Inject("must-not-arrive", nil)
 	if !isWakeTerminalAuthorityLoss(err) ||
 		!strings.Contains(err.Error(), "current controlling-terminal identity changed") {
 		t.Fatalf("changed current tty identity error = %v", err)
@@ -136,10 +136,10 @@ func TestRunWakeLoopTerminatesOnTerminalAuthorityLoss(t *testing.T) {
 		beforeTerminalWrite: func() error {
 			return loss
 		},
-		terminalWrite: func(string) error {
+		terminalWrite: checkedTerminalWriter(func(string) error {
 			terminalWriteCalled = true
 			return nil
-		},
+		}),
 		onPrepared: func(wakeAdmissionWatcher) error {
 			_, deliverErr := deliverToInboxForTest(
 				t,

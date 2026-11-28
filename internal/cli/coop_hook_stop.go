@@ -333,15 +333,14 @@ func (in *coopInbox) pending(root, me string) ([]coopStopMessage, error) {
 		}
 		msg, known := in.seen[name]
 		if !known {
+			info, _ := entry.Info()
 			header, err := format.ReadHeaderFile(filepath.Join(dir, name))
 			var malformed *json.UnmarshalTypeError
 			if err != nil && (!errors.As(err, &malformed) || malformed.Field != "notify" || header.ID == "") {
 				continue
 			}
 			msg = coopStopMessage{ID: header.ID, Created: header.Created, Priority: header.Priority, Passive: err == nil && !wakeEligible(header)}
-			if info, err := entry.Info(); err == nil {
-				msg.File = info
-			}
+			msg.File = info
 		}
 		seen[name] = msg
 		pending = append(pending, msg)

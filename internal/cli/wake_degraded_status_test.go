@@ -219,7 +219,7 @@ func TestNativeInjectionClearsDegradedAfterFallback(t *testing.T) {
 	// Second delivery: switch to native raw mode with a terminalWrite that
 	// always succeeds (simulates successful native TIOCSTI injection).
 	cfg.injectMode = wakeInjectModeRaw
-	cfg.terminalWrite = func(chunk string) error { return nil }
+	cfg.terminalWrite = checkedTerminalWriter(func(chunk string) error { return nil })
 	cfg.beforeTerminalWrite = func() error { return nil }
 
 	// Fresh pending files so the doorbell plan attempts delivery again

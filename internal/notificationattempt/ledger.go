@@ -79,12 +79,13 @@ const (
 
 	// Lifecycle states are deliberately small. They describe AMQ's durable
 	// attempt state, not provider-side presentation or consumption.
-	StateAttempt  = "attempt"
-	StateDeferred = "deferred"
-	StateRetried  = "retried"
-	StateAccepted = "accepted"
-	StateFailed   = "failed"
-	StateInvalid  = "invalid"
+	StateAttempt   = "attempt"
+	StateDeferred  = "deferred"
+	StateRetried   = "retried"
+	StateAccepted  = "accepted"
+	StateCancelled = "cancelled"
+	StateFailed    = "failed"
+	StateInvalid   = "invalid"
 
 	LogFilename   = "notification-attempts.jsonl"
 	RotatedSuffix = ".1"
@@ -307,10 +308,10 @@ func (w *Writer) prepare(messageIDs []string, mode, state string) (record Record
 // zero Record (because Prepare's write failed), the caller MUST pass the
 // attempt ID and message IDs it intended to record; Result reconstructs a
 // minimal prepared identity so the result is still joinable. outcome must be
-// OutcomeWritten or OutcomeFailed.
+// OutcomeWritten, OutcomeFailed or StateCancelled.
 func (w *Writer) Result(prepared Record, outcome, detail string) error {
-	if outcome != OutcomeWritten && outcome != OutcomeFailed {
-		return fmt.Errorf("notification attempt outcome must be %q or %q", OutcomeWritten, OutcomeFailed)
+	if outcome != OutcomeWritten && outcome != OutcomeFailed && outcome != StateCancelled {
+		return fmt.Errorf("notification attempt outcome must be %q, %q or %q", OutcomeWritten, OutcomeFailed, StateCancelled)
 	}
 	if prepared.AttemptID == "" || len(prepared.MessageIDs) == 0 {
 		return fmt.Errorf("invalid prepared notification attempt: missing identity")
@@ -1030,7 +1031,7 @@ func compactAttempt(id string, records []Record) (compactedAttempt, error) {
 		}
 		result.records = []Record{*prepared, deferred, latestRetried}
 		result.mandatory = true
-	case StateAccepted, StateFailed:
+	case StateAccepted, StateFailed, StateCancelled:
 		result.records = []Record{*prepared, latestLifecycleState(orderedLifecycle, folded.State)}
 	default:
 		result.records = []Record{*prepared}
@@ -1254,8 +1255,8 @@ func validateRecord(record Record, agent string) error {
 			if record.Schema != SchemaVersion || record.Sequence == 0 || !validLifecycleState(record.State) || record.Outcome != "" {
 				return fmt.Errorf("invalid notification attempt lifecycle result")
 			}
-		} else if record.Outcome != OutcomeWritten && record.Outcome != OutcomeFailed {
-			return fmt.Errorf("result outcome must be %q or %q", OutcomeWritten, OutcomeFailed)
+		} else if record.Outcome != OutcomeWritten && record.Outcome != OutcomeFailed && record.Outcome != StateCancelled {
+			return fmt.Errorf("result outcome must be %q, %q or %q", OutcomeWritten, OutcomeFailed, StateCancelled)
 		}
 	default:
 		return fmt.Errorf("notification attempt phase %q is invalid", record.Phase)
@@ -1265,7 +1266,7 @@ func validateRecord(record Record, agent string) error {
 
 func validLifecycleState(state string) bool {
 	switch state {
-	case StateAttempt, StateDeferred, StateRetried, StateAccepted, StateFailed:
+	case StateAttempt, StateDeferred, StateRetried, StateAccepted, StateFailed, StateCancelled:
 		return true
 	default:
 		return false
@@ -1275,11 +1276,11 @@ func validLifecycleState(state string) bool {
 func validLifecycleTransition(from, to string) bool {
 	switch from {
 	case StateAttempt:
-		return to == StateDeferred || to == StateAccepted || to == StateFailed
+		return to == StateDeferred || to == StateAccepted || to == StateFailed || to == StateCancelled
 	case StateDeferred:
-		return to == StateRetried
+		return to == StateRetried || to == StateCancelled
 	case StateRetried:
-		return to == StateDeferred || to == StateAccepted || to == StateFailed
+		return to == StateDeferred || to == StateAccepted || to == StateFailed || to == StateCancelled
 	default:
 		return false
 	}

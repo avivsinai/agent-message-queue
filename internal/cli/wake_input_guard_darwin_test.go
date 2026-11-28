@@ -113,14 +113,14 @@ func doorbellOnPrivateTTY(t *testing.T, hooked bool, mode string, guard bool, ho
 	h.now = time.Now().Add(3 * time.Second)
 	cfg.doorbellNow = func() time.Time { return h.now }
 	if mode == wakeInjectModePaste {
-		cfg.terminalWrite = func(s string) error {
+		cfg.terminalWrite = checkedTerminalWriter(func(s string) error {
 			if _, err := pasteWrite.WriteString(s); err != nil {
 				return err
 			}
 			pastePending += len(s)
 			h.injected = append(h.injected, s)
 			return nil
-		}
+		})
 		editorRead := read
 		cfg.inputGuard.sample = func() (ttyInputState, error) {
 			input := make([]byte, pastePending)
@@ -132,7 +132,7 @@ func doorbellOnPrivateTTY(t *testing.T, hooked bool, mode string, guard bool, ho
 			return sampleTTYInputState(slave.Fd(), slave.Fd())
 		}
 	} else {
-		cfg.terminalWrite = func(s string) error { read(s); h.injected = append(h.injected, s); return nil }
+		cfg.terminalWrite = checkedTerminalWriter(func(s string) error { read(s); h.injected = append(h.injected, s); return nil })
 	}
 	cfg.attentionIsTTY = func() bool { return false }
 	if hooked {

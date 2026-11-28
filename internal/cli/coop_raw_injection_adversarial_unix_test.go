@@ -62,10 +62,10 @@ func TestCoopRawDoorbellDoesNotContainMessageDerivedBytes(t *testing.T) {
 		session:     sentinels[0],
 		injectMode:  wakeInjectModeRaw,
 		controlStop: make(chan struct{}),
-		terminalWrite: func(chunk string) error {
+		terminalWrite: checkedTerminalWriter(func(chunk string) error {
 			injected = append(injected, chunk)
 			return nil
-		},
+		}),
 		settings: wakeSettings{previewLen: 4096},
 	}
 	if err := notifyNewMessages(cfg); err != nil {

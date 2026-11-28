@@ -58,10 +58,10 @@ func (h *wakeHoldHarness) newConfig(policy wakeHoldPolicy) *wakeConfig {
 		settings:       wakeSettings{holdNormal: policy.normal, holdLow: policy.low},
 		doorbellNow:    func() time.Time { return h.now },
 		attentionIsTTY: func() bool { return false },
-		terminalWrite: func(text string) error {
+		terminalWrite: checkedTerminalWriter(func(text string) error {
 			h.injected = append(h.injected, text)
 			return nil
-		},
+		}),
 	}
 }
 

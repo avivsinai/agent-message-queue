@@ -68,10 +68,10 @@ func newWakePiBridgeHarness(t *testing.T) *wakePiBridgeHarness {
 		cohortIDs:      []string{"m1"},
 		doorbellNow:    func() time.Time { return h.now },
 		attentionIsTTY: func() bool { return false },
-		terminalWrite: func(text string) error {
+		terminalWrite: checkedTerminalWriter(func(text string) error {
 			h.injected = append(h.injected, text)
 			return nil
-		},
+		}),
 		recordNotifierStatus: func(string, string, string) error { return nil },
 		piBridgeLivenessRead: func(time.Time) (wakePiBridgeLiveness, bool) {
 			if h.live == nil {
