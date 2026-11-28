@@ -185,7 +185,7 @@ func (st *State) codexItem(l codex.RolloutLine, carried Carried) []Event {
 				t.AnsweredBuzz()
 			}
 		case !first:
-		case promptCause(it.Text) == harness.Doorbell:
+		case harness.IsDoorbell(promptCause(it.Text)):
 			t.Cause = CauseMail
 		default:
 			if cause := promptCause(it.Text); cause != "" {

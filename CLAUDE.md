@@ -271,7 +271,7 @@ exact flags. This table defines the owning workflow for each surface.
 | Onboarding | `setup`, `launch` | Configure once, then reconcile and print or run the declared launch plan. The [README Getting started](README.md#getting-started) is canonical. |
 | Sessions | `session create`, `session list`, `session resume` | Create explicitly, inspect available sessions, or resume stored conversations. |
 | Shell context | `env`, `who`, `shell-setup`, `completion` | Set or inspect a complete context and configure shell integration. |
-| Messaging | `send`, `reply`, `handoff`, `list`, `read`, `drain`, `thread`, `thread open`, `thread list`, `thread settle`, `trace` | Deliver, ingest, inspect, and follow conversations. `handoff` sends a review request for one commit and tells the requester of the request the caller owes, which stays open. `thread open` lists unanswered review requests, questions, and todos without reading bodies or moving messages. `thread settle` closes a requester's older requests to one owner per thread with one decision marker. Prefer `drain --include-body` for handoffs. |
+| Messaging | `send`, `reply`, `handoff`, `list`, `read`, `drain`, `thread`, `thread open`, `thread list`, `thread settle`, `trace` | Deliver, ingest, inspect, and follow conversations. `handoff` sends a review request for one commit and tells the requester of the request the caller owes, which stays open. `thread open` lists unanswered review requests, questions, and todos without reading bodies or moving messages. `thread settle` closes a requester's older requests to one owner per thread with one decision marker. Prefer `drain --for-turn` for handoffs. |
 | Delivery proof | `receipts list`, `receipts wait` | Inspect consumer-local `drained` and `dlq` outcomes. |
 | Live waits | `watch`, `monitor` | Wait for arrivals; `monitor` also drains and emits receipts. |
 | Routing | `route explain`, `route peers`, `peer pair`, `presence set`, `presence list` | Explain a route, list the project's peers, pair with a peer, and publish or inspect advisory presence. |
@@ -327,7 +327,7 @@ See [Wake operations](docs/wake-operations.md) for the full contract.
 
 ## Coordination Workflows
 
-During active work, run `amq drain --include-body` between phases. Use
+During active work, run `amq drain --for-turn` between phases. Use
 `send --wait-for drained` when delivery proof matters. Use `watch` only when no
 wake is live for you; a live wake already delivers a doorbell, and a blocking
 wait would hold your turn while the doorbell queues behind it. Reply to the

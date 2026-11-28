@@ -593,7 +593,16 @@ presence.json. The presence refresh is best-effort: drain ignores its error.
 A due follow-up timer in follow-ups/ becomes a notice through inbox/tmp/
 into inbox/new/ before the drain, and the timer is removed.
 
+--for-turn takes urgent mail first, then other wake-eligible mail, then
+passive mail, and applies --limit to that order. Wake-eligible mail prints
+in full; each passive message prints as a digest with a preview of at most
+160 characters and the amq read command for the original, which stays in
+inbox/cur. It ends with the counts still unread. Every claimed message,
+passive or not, gets its drained receipt.
+
 Options:
+  -for-turn
+        Receive for an agent turn: urgent, then other wake-eligible, then passive mail, ordered before --limit; full bodies, a compact digest for passive mail, and the remaining counts
   -ignore-session-pin
         With explicit --root, ignore a conflicting AM_SESSION pin
   -include-body

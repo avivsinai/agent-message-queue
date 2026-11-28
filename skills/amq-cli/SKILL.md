@@ -40,7 +40,7 @@ Use the first case that applies:
 
    ```bash
    amq_context="$(amq env --me "<handle>" --export)" && eval "$amq_context" &&
-     amq drain --include-body
+     amq drain --for-turn
    ```
 
 For a named session, add `--session <name>` to `amq env`. Treat the evaluated
@@ -54,12 +54,21 @@ If session-start context says that a wake rings this terminal or that a hook
 wakes this session, or `amq wake check --me <handle> --json` reports
 `live_wake: true` with an injection mode other than `none`, a doorbell is
 delivered for you.
-Run `amq drain --include-body` when it fires, then act on the messages.
+Run `amq drain --for-turn` when it fires, then act on the actionable mail.
 
-The default drain reads at most 20 messages in filename order, including held
-mail. After a full batch, check `amq list --new --limit 1` and continue with bounded drains
-as needed; do not assume the inbox is empty. Use `--limit 0` only for a known,
-manageable batch. Urgent hold bypass does not change drain order.
+`--for-turn` takes urgent mail first, then other wake-eligible mail, then
+passive mail, and applies its limit of 20 to that order. Wake-eligible mail
+prints in full; each passive message prints as a digest: sender, thread,
+kind, priority, subject, references, labels, a preview of at most 160
+characters, and the `amq read` command for the original. The last line
+gives the counts still unread. When it says actionable mail remains, run it
+again; passive mail that remains needs no drain and no turn. Use `--limit 0`
+only for a known, manageable batch.
+
+Run `amq drain --for-turn` once in a turn that already runs, preferably in
+its first tool batch, also when a native message or a finished background
+task started the turn: those turns may not show the unread-mail prompt
+context. Do not start a turn, or keep one open, to read passive mail.
 
 Do not run `amq watch`, `amq monitor`, sleep-poll, or start another inbox
 watcher under that live wake or wait hook. A blocking wait holds your turn while the
@@ -76,7 +85,7 @@ before changing them.
 On an attended seat (`attended: true` in `amq wake check` on a live wake, or
 `attended true` in `amq wake config` when no wake is live) no doorbell
 is typed, on any transport: mail is announced at the person's next prompt.
-Drain then, with `amq drain --include-body`; do not start a watcher.
+Drain then, with `amq drain --for-turn`; do not start a watcher.
 
 Without an injecting wake or a wait hook, use the receive methods in the
 operations guide.
