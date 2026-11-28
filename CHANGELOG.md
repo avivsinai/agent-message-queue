@@ -8,6 +8,20 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.174.0](https://github.com/avivsinai/agent-message-queue/compare/v0.173.0...v0.174.0) (2026-11-28)
+
+
+### Features
+
+* **doctor:** the ops view counts unread mail that can start a turn and passive mail ([#1677](https://github.com/avivsinai/agent-message-queue/issues/1677)) ([62202ad](https://github.com/avivsinai/agent-message-queue/commit/62202ad9963ea10c037ed118e875df1b39e0d2ad))
+* **drain:** --for-turn reads actionable mail in full and passive mail as a digest ([#1676](https://github.com/avivsinai/agent-message-queue/issues/1676)) ([2095b3f](https://github.com/avivsinai/agent-message-queue/commit/2095b3f34ef80a750ceed2e817d8f92d0a6e0c45))
+* **send:** a reminder notice chooses wake or passive ([#1678](https://github.com/avivsinai/agent-message-queue/issues/1678)) ([5480ece](https://github.com/avivsinai/agent-message-queue/commit/5480ecebe84686f4e1ffdfb10cae95baa66f4897))
+
+
+### Bug Fixes
+
+* **wake:** a doorbell is held, not typed, while a pi turn runs and its bridge answers late ([#1679](https://github.com/avivsinai/agent-message-queue/issues/1679)) ([2f1004f](https://github.com/avivsinai/agent-message-queue/commit/2f1004fda04c44f68fe0f064d7e3c2139b6e792e))
+
 ## [0.173.0](https://github.com/avivsinai/agent-message-queue/compare/v0.172.0...v0.173.0) (2026-11-28)
 
 
