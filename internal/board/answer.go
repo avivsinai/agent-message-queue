@@ -88,6 +88,10 @@ func (l *Live) handleAnswer(w http.ResponseWriter, r *http.Request, host string)
 		write(http.StatusBadRequest, AnswerResult{Reason: "invalid answer request"})
 		return
 	}
+	if len(request.Text) > 4<<10 {
+		write(http.StatusBadRequest, AnswerResult{Reason: "the answer is over 4 KiB"})
+		return
+	}
 	result := l.Submit(r.Context(), request)
 	status := http.StatusOK
 	if result.CheckThread != "" {
@@ -140,7 +144,7 @@ func decodeAnswer(raw []byte) (AnswerRequest, bool) {
 		return AnswerRequest{}, false
 	}
 	q := AnswerRequest{Item: fields["item"], Option: fields["option"], Text: fields["text"]}
-	return q, fields["action"] == "answer" && q.Item != "" && (q.Option != "") != (q.Text != "") && len(q.Text) <= 4096
+	return q, fields["action"] == "answer" && q.Item != "" && (q.Option != "") != (q.Text != "")
 }
 
 // WithAnswerSnapshot serializes the published check and the caller's canonical

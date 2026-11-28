@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -24,6 +25,15 @@ const floodEnv = "AMQ_BOARD_TEST_FLOOD"
 // against a real child process.
 func TestMain(m *testing.M) {
 	if os.Getenv("AMQ_BOARD_TEST_CLI") == "1" {
+		if notify := os.Getenv("AMQ_BOARD_TEST_REPLY_STARTED"); notify != "" && os.Args[1] == "reply" {
+			client := http.Client{Timeout: 5 * time.Second}
+			resp, err := client.Get(notify)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			_ = resp.Body.Close()
+		}
 		if err := cli.Run(os.Args[1:], "test"); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(cli.GetExitCode(err))

@@ -30,7 +30,7 @@ type answerFixture struct {
 	run         func(...string) []byte
 }
 
-func newAnswerFixture(t *testing.T) *answerFixture {
+func newAnswerFixture(t *testing.T, cliEnv ...string) *answerFixture {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -50,6 +50,7 @@ func newAnswerFixture(t *testing.T) *answerFixture {
 	// The boundary under test is an installed CLI selected once. Re-enter
 	// its real dispatcher in a child with no ambient AMQ session or identity.
 	runner := execRunner{amqExe: exe, amqEnv: []string{"HOME=" + home, "USERPROFILE=" + home, "PATH=" + os.Getenv("PATH"), "SystemRoot=" + os.Getenv("SystemRoot"), "AM_ROOT=" + base, "AMQ_BOARD_TEST_CLI=1", "AMQ_NO_UPDATE_CHECK=1", "GORACE=atexit_sleep_ms=0"}}
+	runner.amqEnv = append(runner.amqEnv, cliEnv...)
 	env := newEnv(dir, runner)
 	ctx := t.Context()
 	f := &answerFixture{}
@@ -152,6 +153,27 @@ func TestOwnerAnswerDeliversInTheOriginalThread(t *testing.T) {
 			}
 		})
 	}
+	// Security review of x36b.1 observed a disconnected browser killing
+	// the reply process before it could write the owner's outbox.
+	t.Run("disconnect after dispatch", func(t *testing.T) {
+		ctx, disconnect := context.WithCancel(t.Context())
+		defer disconnect()
+		started := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { disconnect() }))
+		defer started.Close()
+		f := newAnswerFixture(t, "AMQ_BOARD_TEST_REPLY_STARTED="+started.URL)
+		req := f.request(`{"action":"answer","item":"$ITEM","option":"Later"}`).WithContext(ctx)
+		w := f.serve(req)
+		answers := f.answers(t)
+		var sent []thread.Entry
+		raw := f.run("thread", "--root", filepath.Join(f.model.Dir, ".agent-mail", "owner"), "--id", "publish", "--agents", "user", "--json")
+		if err := json.Unmarshal(raw, &sent); err != nil {
+			t.Fatal(err)
+		}
+		sent = slices.DeleteFunc(sent, func(e thread.Entry) bool { return e.Kind != "answer" })
+		if ctx.Err() == nil || w.Code != 200 || len(answers) != 1 || len(sent) != 1 || sent[0].ID != answers[0].ID {
+			t.Fatalf("disconnect at reply start: HTTP %d, asker inbox %d, owner outbox %d", w.Code, len(answers), len(sent))
+		}
+	})
 }
 
 func TestOwnerAnswerRefusalsLeaveMailAlone(t *testing.T) {
@@ -177,7 +199,6 @@ func TestOwnerAnswerRefusalsLeaveMailAlone(t *testing.T) {
 		{"option and text", strings.TrimSuffix(good, "}") + `,"text":"tomorrow"}`, nil, 400},
 		{"trailing", good + " {}", nil, 400},
 		{"too large", strings.Repeat(" ", 16<<10), func(r *http.Request) { r.ContentLength = -1 }, 413},
-		{"text size", `{"action":"answer","item":"$ITEM","text":"` + strings.Repeat("é", 2049) + `"}`, nil, 400},
 		{"blank", `{"action":"answer","item":"$ITEM","text":" "}`, nil, 400},
 		{"unknown item", strings.Replace(good, "$ITEM", "missing", 1), nil, 409},
 		{"foreign item", strings.Replace(good, "$ITEM", foreignQuestion(t, f), 1), nil, 409},
@@ -194,6 +215,15 @@ func TestOwnerAnswerRefusalsLeaveMailAlone(t *testing.T) {
 			}
 		})
 	}
+	// The review found 2,100 two-byte letters passed the textarea limit
+	// and received a generic refusal, leaving the owner no way to correct it.
+	t.Run("UTF-8 byte limit", func(t *testing.T) {
+		w := f.serve(f.request(`{"action":"answer","item":"$ITEM","text":"` + strings.Repeat("é", 2100) + `"}`))
+		var result board.AnswerResult
+		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || w.Code != 400 || result.Reason != "the answer is over 4 KiB" {
+			t.Fatalf("overlong answer: HTTP %d, reason %q", w.Code, result.Reason)
+		}
+	})
 	t.Run("stale publication", func(t *testing.T) {
 		dir := filepath.Join(f.model.Dir, ".amq")
 		if err := os.MkdirAll(dir, 0700); err != nil {

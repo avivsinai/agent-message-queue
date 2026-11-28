@@ -584,7 +584,9 @@ protect against DNS rebinding. In the served Inbox, choose an option or open
 the exact local Origin and a separate per-start token embedded in the live
 page. It checks the fresh published question and its open AMQ obligation,
 then runs the installed `amq reply` in the owner mailbox with the answer on
-stdin. Details and static exports provide copyable commands. A delivery
+stdin. The copy command in Details and static exports selects the owner mailbox
+in a subshell and passes the answer to `amq reply` on stdin, preserving the
+calling shell’s session pin. A delivery
 confirmation identifies the asker and reply. If delivery is unconfirmed,
 check the original thread before trying again.
 

@@ -58,7 +58,7 @@
       {{if .IfLater}}<p class="if-later">If you answer later: {{.IfLater}}</p>{{end}}
     </div>
     {{if $actionable}}<div class="answer-controls" hidden>
-      <details class="own-words"><summary>Answer in your own words</summary><label>Your answer<textarea rows="3" maxlength="4096"></textarea></label><button type="button" data-answer>Send answer</button></details>
+      <details class="own-words"><summary>Answer in your own words</summary><label>Your answer<textarea rows="3"></textarea></label><button type="button" data-answer>Send answer</button></details>
       <p class="answer-result"></p><p class="answer-note"></p><div class="check-thread" hidden><label>Thread command<input readonly value="{{.CheckThread}}"></label> <button type="button" class="copy" data-command="{{.CheckThread}}">Copy thread command</button></div>
     </div>{{end}}
     {{if or .Buttons .NoAnswer}}<div class="owner-actions">{{range .Buttons}}<button type="button" class="copy" data-command="{{.Command}}">{{.Label}}</button>{{end}}{{if .NoAnswer}}<p class="command-unavailable">No answer command: {{.NoAnswer}}.</p>{{end}}</div>{{end}}

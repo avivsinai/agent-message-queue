@@ -14,6 +14,7 @@ import (
 )
 
 const amqChanged = "installed amq changed or is unavailable; restart the board"
+const answerTimeout = 90 * time.Second
 
 func ownerAnswer(ctx context.Context, store board.Store, env board.Env) board.SubmitAnswer {
 	installedVersion := func(ctx context.Context) string {
@@ -26,7 +27,7 @@ func ownerAnswer(ctx context.Context, store board.Store, env board.Env) board.Su
 	startVersion := installedVersion(ctx)
 	versionMatches := func(ctx context.Context) bool { return startVersion != "" && installedVersion(ctx) == startVersion }
 	return func(ctx context.Context, q board.AnswerRequest) board.AnswerResult {
-		ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, answerTimeout)
 		defer cancel()
 		var result board.AnswerResult
 		err := store.WithAnswerSnapshot(ctx, func(state board.Snapshot) {
@@ -95,7 +96,14 @@ func submitAnswer(ctx context.Context, store board.Store, env board.Env, state b
 	if !versionMatches(ctx) {
 		return refuse(amqChanged)
 	}
-	raw, err := runner.WithInput(strings.NewReader(body)).Run(ctx, env.Dir, plan.AnswerArgv())
+	if ctx.Err() != nil {
+		return refuse("request ended before dispatch")
+	}
+	// Once dispatched, the reply must finish its delivery and outbox write
+	// under the same lock even if the browser disconnects.
+	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), answerTimeout)
+	defer cancel()
+	raw, err := runner.WithInput(strings.NewReader(body)).Run(sendCtx, env.Dir, plan.AnswerArgv())
 	var report struct {
 		ID, Thread string
 		To         []string
