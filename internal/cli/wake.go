@@ -1355,7 +1355,7 @@ func deliverNewMessageNotification(
 	// bridge was not engaged at all) reaches the terminal path, whose first
 	// write for that cohort is the full fixed line (a bridge claim never
 	// sets the submit-only state).
-	bridge := cfg.runPiBridgeDoorbellAttempt()
+	bridge := cfg.runPiBridgeDoorbellAttempt(notice.output)
 	if bridge.err != nil {
 		return bridge.err
 	}
