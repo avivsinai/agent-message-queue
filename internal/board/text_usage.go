@@ -3,6 +3,7 @@ package board
 import (
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -26,12 +27,173 @@ func writeUsage(b *strings.Builder, m Model) {
 	b.WriteString("limits:\n")
 	for _, a := range u.Accounts {
 		fmt.Fprintf(b, "  %s: %s\n", accountName(a.Key), clean(limitsLine(a.Limits, now)))
-		other := fmt.Sprintf("other sessions in this project (%s): %s", otherCount(a), spendLine(a.Other, now, a.Harness == usage.Pi))
+		other := fmt.Sprintf("other sessions in this project (%s): %s", otherCount(a), spendLine(a.Other, now, false))
 		if a.Detail != "" {
 			other += " · " + a.Detail
 		}
 		fmt.Fprintf(b, "    %s\n", clean(other))
 	}
+	writeCost(b, u)
+}
+
+// costTop bounds each cost line to its largest entries.
+const costTop = 5
+
+// writeCost prints the list-price block: the fleet per window, then the
+// largest models and seats over the last window.
+func writeCost(b *strings.Builder, u *UsageView) {
+	if len(u.Fleet) == 0 {
+		return
+	}
+	head := "cost (" + usage.ListPrice
+	if u.PricesAsOf != "" {
+		head += ", prices as of " + u.PricesAsOf
+	}
+	b.WriteString(clean(head) + "):\n")
+	// The fleet's unpriced tokens are named once, for the longest window,
+	// which holds the shorter one's.
+	var fleet []string
+	for _, w := range u.Fleet {
+		w.Unpriced = 0
+		fleet = append(fleet, windowName(w.Window)+" "+costFigure(w))
+	}
+	if n := u.Fleet[len(u.Fleet)-1].Unpriced; n > 0 {
+		fleet = append(fleet, si(n)+" tokens of an unpriced model not counted")
+	}
+	fmt.Fprintf(b, "  fleet: %s\n", strings.Join(fleet, " · "))
+	last := len(u.Fleet) - 1
+	window := windowName(u.Fleet[last].Window)
+	// A model id spent under more than one harness, and the unknown model,
+	// name the harness, so no two entries read alike.
+	harnesses := map[string]map[string]bool{}
+	for _, mu := range u.FleetModels {
+		if harnesses[mu.Model] == nil {
+			harnesses[mu.Model] = map[string]bool{}
+		}
+		harnesses[mu.Model][mu.Harness] = true
+	}
+	var models []string
+	for _, mu := range u.FleetModels {
+		w := mu.Usage[last]
+		name := modelName(mu.Model)
+		if mu.Model == "" || len(harnesses[mu.Model]) > 1 {
+			name += " (" + mu.Harness + ")"
+		}
+		models = append(models, name+" "+costFigure(w)+" ("+si(w.CacheRead)+" cached, "+si(w.Out)+" out)")
+	}
+	if len(models) > 0 {
+		fmt.Fprintf(b, "  by model, %s: %s\n", window, clean(topJoin(models)))
+	}
+	type seat struct {
+		key  usage.RosterKey
+		cost Usage
+	}
+	var seats []seat
+	index := map[usage.RosterKey]int{}
+	handles := map[string]map[string]bool{}
+	var other []Usage
+	others := 0
+	for _, a := range u.Accounts {
+		for _, wk := range a.Workers {
+			if last >= len(wk.Usage) {
+				continue
+			}
+			key := usage.RosterKey{Session: wk.Session, Handle: wk.Handle}
+			if handles[wk.Handle] == nil {
+				handles[wk.Handle] = map[string]bool{}
+			}
+			handles[wk.Handle][wk.Session] = true
+			i, ok := index[key]
+			if !ok {
+				i = len(seats)
+				index[key] = i
+				seats = append(seats, seat{key: key})
+			}
+			seats[i].cost = sumUsage([]Usage{seats[i].cost}, wk.Usage[last:last+1])[0]
+		}
+		if last < len(a.Other) {
+			other = sumUsage(other, a.Other[last:last+1])
+			others += a.OtherSessions
+		}
+	}
+	sort.SliceStable(seats, func(i, j int) bool { return dollarsOf(seats[i].cost) > dollarsOf(seats[j].cost) })
+	var parts []string
+	for _, st := range seats {
+		name := st.key.Handle
+		if len(handles[name]) > 1 {
+			name = st.key.Session + "/" + name
+		}
+		parts = append(parts, name+" "+costFigure(st.cost))
+	}
+	line := topJoin(parts)
+	if len(other) > 0 && others > 0 {
+		line = strings.TrimPrefix(line+" · other sessions ("+strconv.Itoa(others)+") "+costFigure(other[0]), " · ")
+	}
+	if line != "" {
+		fmt.Fprintf(b, "  by seat, %s: %s\n", window, clean(line))
+	}
+}
+
+// topJoin joins the first costTop parts and counts the rest.
+func topJoin(parts []string) string {
+	if len(parts) > costTop {
+		parts = append(parts[:costTop:costTop], strconv.Itoa(len(parts)-costTop)+" more")
+	}
+	return strings.Join(parts, " · ")
+}
+
+// costFigure is a row's dollars, or "no price" when it holds tokens and no
+// cost (a model with no price, or a view stored before costs were kept). A
+// figure that leaves tokens out says so, and a kind other than the list
+// price is named.
+func costFigure(u Usage) string {
+	switch {
+	case u.Unknown != "":
+		return "spent unknown"
+	case u.CostUSD == nil && u.Unpriced+u.Fresh+u.CacheRead > 0:
+		return "no price"
+	case u.CostUSD == nil:
+		return dollars(0)
+	}
+	f := dollars(*u.CostUSD)
+	if u.Partial {
+		f = "at least " + f
+	}
+	if u.CostKind != usage.ListPrice {
+		f += " " + u.CostKind
+	}
+	if u.Unpriced > 0 {
+		f += " + " + si(u.Unpriced) + " tokens unpriced"
+	}
+	return f
+}
+
+func dollarsOf(u Usage) float64 {
+	if u.CostUSD == nil {
+		return 0
+	}
+	return *u.CostUSD
+}
+
+func modelName(m string) string {
+	if m == "" {
+		return "unknown model"
+	}
+	return m
+}
+
+// dollars prints US dollars with two decimals and thousands separators.
+func dollars(f float64) string {
+	s := strconv.FormatFloat(math.Abs(f), 'f', 2, 64)
+	whole, frac, _ := strings.Cut(s, ".")
+	for i := len(whole) - 3; i > 0; i -= 3 {
+		whole = whole[:i] + "," + whole[i:]
+	}
+	sign := ""
+	if f < 0 {
+		sign = "-"
+	}
+	return sign + "$" + whole + "." + frac
 }
 
 // otherCount is how many other sessions were counted: a lower bound while
@@ -52,7 +214,7 @@ func otherCount(a AccountUsage) string {
 func usageLine(a RosterAgent, now time.Time) string {
 	var parts []string
 	if len(a.Usage) > 0 {
-		parts = append(parts, spendLine(a.Usage, now, false))
+		parts = append(parts, spendLine(a.Usage, now, true))
 	}
 	if l := a.LimitReached; l != nil {
 		p := "limit reached"
@@ -104,9 +266,10 @@ func pastLimit(l usage.Limit, now time.Time) string {
 	return p + "; the account was active since then"
 }
 
-// spendLine prints each window's fresh and cached tokens. withCost names
-// "cost not reported" for a harness that can report cost and did not.
-func spendLine(us []Usage, now time.Time, withCost bool) string {
+// spendLine prints each window's fresh and cached tokens. A seat's line
+// also prints its 5 h cost; every other figure of money is in the cost
+// block.
+func spendLine(us []Usage, now time.Time, seat bool) string {
 	var parts []string
 	var asOf time.Time
 	for _, w := range us {
@@ -120,10 +283,14 @@ func spendLine(us []Usage, now time.Time, withCost bool) string {
 		}
 		p += si(w.Fresh) + " fresh, " + si(w.CacheRead) + " cached"
 		switch {
+		case !seat || w.Window != usage.Window5h:
 		case w.CostUSD != nil:
-			p += fmt.Sprintf(", $%.2f %s", *w.CostUSD, w.CostKind)
-		case withCost:
-			p += ", cost not reported"
+			p += ", " + dollars(*w.CostUSD) + " " + w.CostKind
+			if w.Unpriced > 0 {
+				p += " + " + si(w.Unpriced) + " tokens unpriced"
+			}
+		case w.Unpriced > 0:
+			p += ", no price"
 		}
 		parts = append(parts, p)
 		asOf = later(asOf, w.AsOf)
@@ -153,10 +320,13 @@ func limitsLine(ls []usage.Limit, now time.Time) string {
 		switch {
 		case l.Kind == "window":
 			p := bucket + windowLimitName(l) + " "
-			if l.UsedPercent != nil {
-				p += percent(*l.UsedPercent) + " used"
-			} else {
+			switch {
+			case l.UsedPercent == nil:
 				p += "used unknown"
+			case paceAhead(l, now) > 0:
+				p += percent(*l.UsedPercent) + " used at " + strconv.Itoa(paceAhead(l, now)) + "% of the window: on pace to reach the limit before it resets"
+			default:
+				p += percent(*l.UsedPercent) + " used"
 			}
 			if l.ResetsAt != nil {
 				p += ", resets " + resetTime(*l.ResetsAt, now)
@@ -202,6 +372,27 @@ func limitsLine(ls []usage.Limit, now time.Time) string {
 		parts = append(parts, p)
 	}
 	return strings.Join(parts, " · ")
+}
+
+// paceAhead is the elapsed percent of a plan window when the reading is
+// at least half used and ahead of the window's clock, so the limit is on
+// pace to be reached before the reset; otherwise 0. The window's clock is
+// read at the reading's time, when the used percent was true.
+func paceAhead(l usage.Limit, now time.Time) int {
+	if l.UsedPercent == nil || l.WindowMinutes <= 0 || l.ResetsAt == nil || !l.ResetsAt.After(now) {
+		return 0
+	}
+	at := l.AsOf
+	if at.IsZero() {
+		at = now
+	}
+	window := time.Duration(l.WindowMinutes) * time.Minute
+	elapsed := 100 * float64(window-l.ResetsAt.Sub(at)) / float64(window)
+	used := *l.UsedPercent
+	if elapsed <= 0 || elapsed >= 100 || used < 50 || used >= 100 || used <= elapsed {
+		return 0
+	}
+	return max(1, int(math.Round(elapsed)))
 }
 
 // windowLimitName names a plan window by its duration.
