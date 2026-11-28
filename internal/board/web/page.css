@@ -66,8 +66,8 @@ main, .mast-gen, footer { font-variant-numeric: tabular-nums; }
 .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 .skip-link { position: absolute; left: 1rem; top: -5rem; padding: .75rem; background: var(--surface); z-index: 2; }
 .skip-link:focus { top: 1rem; }
-.shell { width: min(100% - 4rem, 75rem); margin-inline: auto; }
-.mast, .navigation { width: 100%; max-width: 75rem; margin-inline: auto; }
+.shell { width: min(100% - 4rem, 120rem); margin-inline: auto; }
+:root:not([data-view="flow"]):not([data-view="floor"]) main { max-width: 75rem; }
 .mast { display: flex; align-items: center; flex-wrap: wrap; gap: .75rem 1.5rem; padding-block: 1.25rem; min-height: 5rem; }
 .mast-id { display: flex; align-items: center; flex: 1 1 16rem; gap: 1rem; min-width: 0; }
 .brand { font-size: 1.125rem; font-weight: 750; letter-spacing: -.025em; text-decoration: none; color: var(--ink); }
@@ -269,8 +269,8 @@ textarea { display: block; width: 100%; min-height: 4.5rem; resize: vertical; co
 .account { padding-block: 1rem; }
 .account p { margin-top: .5rem; }
 footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: .5rem 1.5rem; border-top: 1px solid var(--divider); padding-block: 1rem 2rem; color: var(--muted); font-size: .875rem; }
-/* Flow: the full-width lifecycle board. */
-:root[data-view="flow"] .shell, :root[data-view="floor"] .shell { width: calc(100% - 4rem); max-width: 120rem; }
+/* Flow and Floor use the shell's full 120rem window; other views keep a
+   75rem reading lane from the same left edge. */
 .view-flow .view-heading, .view-floor .view-heading { margin-bottom: 1.25rem; }
 .view-flow .view-heading { margin-bottom: 1rem; }
 .stage-backlog { --stage: var(--control); }
@@ -436,7 +436,7 @@ footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: .5
   .search { width: 100%; }
   .search-inline input { width: auto; flex: 1 1 auto; min-width: 0; }
   h1 { font-size: 1.5rem; line-height: 1.25; }
-  :root[data-view="flow"] .shell, :root[data-view="floor"] .shell { width: calc(100% - 2rem); }
+  .shell { width: calc(100% - 2rem); }
 }
 @media (max-width: 600px) {
   .strip { grid-template-columns: minmax(0, 1fr); padding: 1rem; gap: 1rem; }

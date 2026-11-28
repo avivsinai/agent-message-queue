@@ -180,7 +180,7 @@ The type is plain and readable. View headings lead; record titles support scanni
 
 ## Layout
 
-The shell is centered and bounded at 75rem, with 2rem side gutters on wide screens. One navigation bar sits under the header on every view: the four main destinations and the More menu in one row, over a divider rule. The main column is one reading lane. A view heading and search wrap when space runs out. Search is bounded at 20rem on wide screens.
+The shell gives every view one left edge: the header, the navigation bar and each view's heading and content start at the same x. Reading views are bounded at 75rem from that edge, with 2rem side gutters on wide screens; Flow and Floor use the window up to 120rem. One navigation bar sits under the header on every view: the four main destinations and the More menu in one row, over a divider rule. A view heading and search wrap when space runs out. Search is bounded at 20rem on wide screens.
 
 At 959px and below, gutters become 1rem, the bar stays one row down to 360px, and search fills its row. Snapshot age remains visible at compact widths. At 600px and below, work rows become one column; copy actions keep their natural width. Metadata wraps and definition lists stack. Work rows use 1.25rem by 1.5rem padding on wide screens and 1rem on small screens. Shared spacing steps are in the frontmatter.
 
