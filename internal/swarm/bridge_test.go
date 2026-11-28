@@ -177,6 +177,9 @@ func TestDeliverBridgeEvent_DeliversMessage(t *testing.T) {
 	if msg.Header.Priority != format.PriorityNormal {
 		t.Errorf("Header.Priority = %q, want %q", msg.Header.Priority, format.PriorityNormal)
 	}
+	if msg.Header.Notify != format.NotifyWake {
+		t.Errorf("Header.Notify = %q, want %q for an assignment", msg.Header.Notify, format.NotifyWake)
+	}
 
 	if msg.Header.Context["team"] != "bridge-team-delivery" {
 		t.Errorf("Context.team = %v, want %q", msg.Header.Context["team"], "bridge-team-delivery")
@@ -232,6 +235,9 @@ func TestDeliverBridgeEvent_CompletionIncludesEvidence(t *testing.T) {
 		t.Fatalf("ReadMessageFile: %v", err)
 	}
 
+	if msg.Header.Notify != format.NotifyPassive {
+		t.Errorf("Header.Notify = %q, want %q for a completion", msg.Header.Notify, format.NotifyPassive)
+	}
 	evidence, ok := msg.Header.Context["evidence"].(map[string]any)
 	if !ok {
 		t.Fatalf("context evidence missing or wrong type: %T", msg.Header.Context["evidence"])
@@ -298,6 +304,9 @@ func TestPollForChanges_FailedAndBlockedEmitReason(t *testing.T) {
 			msg, err := format.ReadMessageFile(filepath.Join(newDir, entries[0].Name()))
 			if err != nil {
 				t.Fatalf("ReadMessageFile: %v", err)
+			}
+			if msg.Header.Notify != format.NotifyWake {
+				t.Fatalf("Notify = %q, want %q for %s", msg.Header.Notify, format.NotifyWake, test.wantType)
 			}
 			if msg.Header.Context["reason"] != test.reason || !strings.Contains(msg.Body, "Reason: "+test.reason) {
 				t.Fatalf("delivered reason = context:%v body:%q, want %q in both", msg.Header.Context["reason"], msg.Body, test.reason)

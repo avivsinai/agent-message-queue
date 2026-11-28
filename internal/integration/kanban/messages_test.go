@@ -102,6 +102,9 @@ func TestDeliverNotificationWritesExpectedMessage(t *testing.T) {
 	if msg.Header.Priority != format.PriorityNormal {
 		t.Fatalf("Priority = %q, want %q", msg.Header.Priority, format.PriorityNormal)
 	}
+	if msg.Header.Notify != format.NotifyWake {
+		t.Fatalf("Notify = %q, want %q for a review handoff", msg.Header.Notify, format.NotifyWake)
+	}
 	if msg.Header.Subject != "[kanban] review: Refactor bridge" {
 		t.Fatalf("Subject = %q", msg.Header.Subject)
 	}

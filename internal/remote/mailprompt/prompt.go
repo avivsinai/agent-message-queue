@@ -66,6 +66,7 @@ func Publish(root *fsq.DeliveryRoot, id string, created time.Time, p Prompt) err
 			Thread:   p.Thread,
 			Subject:  p.Subject,
 			Created:  created.UTC().Format(time.RFC3339Nano),
+			Notify:   format.NotifyWake,
 			Priority: format.PriorityNormal,
 			Kind:     p.Kind,
 			Refs:     p.Refs,
