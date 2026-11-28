@@ -106,7 +106,7 @@
   window.addEventListener("hashchange", function () { selectView(true); });
   // The browser scrolls to the fragment after load, so the view opens from
   // the top once that scroll has happened.
-  window.addEventListener("load", function () { window.setTimeout(function () { if (window.location.hash === "#view-" + current) { window.scrollTo(0, 0); } }, 0); });
+  window.addEventListener("load", function () { window.setTimeout(function () { if (window.location.hash === "#view-" + current) { window.scrollTo(0, 0); document.body.setAttribute("tabindex", "-1"); document.body.focus({preventScroll: true}); document.body.removeAttribute("tabindex"); } }, 0); });
   document.addEventListener("toggle", function (event) { if (event.target.matches(".item-details")) { save(); } }, true);
   if (saved.focus) {
     var previous = document.getElementById(saved.focus);

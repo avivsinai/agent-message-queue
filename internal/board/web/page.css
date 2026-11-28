@@ -67,6 +67,7 @@ main, .mast-gen, footer { font-variant-numeric: tabular-nums; }
 .skip-link { position: absolute; left: 1rem; top: -5rem; padding: .75rem; background: var(--surface); z-index: 2; }
 .skip-link:focus { top: 1rem; }
 .shell { width: min(100% - 4rem, 75rem); margin-inline: auto; }
+.mast, .navigation { width: 100%; max-width: 75rem; margin-inline: auto; }
 .mast { display: flex; align-items: center; flex-wrap: wrap; gap: .75rem 1.5rem; padding-block: 1.25rem; min-height: 5rem; }
 .mast-id { display: flex; align-items: center; flex: 1 1 16rem; gap: 1rem; min-width: 0; }
 .brand { font-size: 1.125rem; font-weight: 750; letter-spacing: -.025em; text-decoration: none; color: var(--ink); }
@@ -94,7 +95,7 @@ select { color: var(--ink); background: var(--surface); border: 1px solid var(--
 .secondary-nav { position: relative; }
 .secondary-nav > summary { color: var(--muted); font-weight: 600; padding-inline: .875rem; }
 .secondary-nav > summary:hover { color: var(--ink); background: var(--subtle); text-decoration: none; }
-.secondary-nav > div { display: grid; gap: .25rem; position: absolute; top: calc(100% + .25rem); right: 0; z-index: 5; min-width: 13rem; padding: .5rem; background: var(--surface); border: 1px solid var(--divider); border-radius: .5rem; }
+.secondary-nav > div { display: grid; gap: .25rem; position: absolute; top: calc(100% + .25rem); left: 0; z-index: 5; min-width: 13rem; padding: .5rem; background: var(--surface); border: 1px solid var(--divider); border-radius: .5rem; }
 main, .view, .work-list, .item-main { min-width: 0; }
 .view { scroll-margin-top: 1.5rem; margin-bottom: 3rem; }
 .enhanced .view { margin-bottom: 0; }
@@ -439,6 +440,8 @@ footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: .5
 }
 @media (max-width: 600px) {
   .strip { grid-template-columns: minmax(0, 1fr); padding: 1rem; gap: 1rem; }
+  .navigation { column-gap: 0; }
+  .navigation a, .secondary-nav > summary { padding-inline: .625rem; }
   .item-action { justify-self: start; }
   .primary-copy { width: auto; }
   .item-details { grid-column: 1; }
