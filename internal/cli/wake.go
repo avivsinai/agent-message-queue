@@ -48,7 +48,7 @@ type wakeConfig struct {
 	healthRequests            <-chan wakeHealthRequest
 	restartSignals            chan os.Signal
 	beforeTerminalWrite       func() error
-	terminalWrite             func(string) error
+	terminalWrite             func(string, func() error) error
 	inspectTerminalGeneration func() wakeLockInspection
 	terminalGeneration        string
 	terminalImageVersion      string
@@ -62,9 +62,10 @@ type wakeConfig struct {
 	reportedInputGuard        string
 	inputRecoveryRequired     bool
 	doorbell                  wakeDoorbellState
-	holds                     map[string]wakeHold // set by each inbox scan for the doorbell plan
-	cohortIDs                 []string            // set by each inbox scan: the header ids of the mail it would announce
-	cohortUnreadable          bool                // set by each inbox scan: a pending file has no readable header id
+	holds                     map[string]wakeHold    // set by each inbox scan for the doorbell plan
+	cohortIDs                 []string               // set by each inbox scan: the header ids of the mail it would announce
+	dispatchCohort            map[string]os.FileInfo // eligible physical files authorizing this peer dispatch; nil outside the scan
+	cohortUnreadable          bool                   // set by each inbox scan: a pending file has no readable header id
 	// settingsSource reads .wake.settings (raw bytes, whether it exists). nil
 	// disables live settings: direct loop tests and legacy callers.
 	settingsSource                func() ([]byte, bool, error)
@@ -225,7 +226,7 @@ type wakeAdmissionWatcher interface {
 // wakeNativeNotifier sends advisory doorbells through the bound harness queue.
 // It never grants terminal input authority.
 type wakeNativeNotifier interface {
-	Notify(map[string]os.FileInfo, time.Time) (bool, error)
+	Notify(map[string]os.FileInfo, time.Time, func() error) (bool, error)
 	Observe() (bool, error)
 	Close() error
 }
@@ -629,21 +630,10 @@ type wakePendingMessages struct {
 	physical map[string]os.FileInfo
 }
 
-func notifyNewMessages(cfg *wakeConfig) error {
+func notifyNewMessages(cfg *wakeConfig) (result error) {
 	inboxNew := fsq.AgentInboxNew(cfg.root, cfg.me)
-
-	// Before any authoritative read from the retained inbox, revalidate that
-	// it is still the canonical namespace: after a directory swap the
-	// retained FD points at the detached OLD directory, and reading it would
-	// silently miss messages that land in the canonical inbox. A mismatch
-	// returns wakeInboxCanonicalMismatchError for every inbox; the caller
-	// routes it by rebindability.
-	if cfg.retainedInbox != nil {
-		if validator, ok := cfg.retainedInbox.(interface{ ValidateCanonical() error }); ok {
-			if err := validator.ValidateCanonical(); err != nil {
-				return &wakeInboxCanonicalMismatchError{detachedPath: inboxNew, cause: err}
-			}
-		}
+	if err := validateDispatchInbox(inboxNew, cfg.retainedInbox); err != nil {
+		return err
 	}
 	// Only after the canonical check: a change is in force for this scan.
 	cfg.reloadSettings()
@@ -663,6 +653,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 
 	var messages []wakeMsgInfo
 	var interruptMessages []wakeMsgInfo
+	interruptFiles := make(map[string]os.FileInfo)
 	interruptCounts := make(map[string]int)
 	physicalPending := make(map[string]os.FileInfo)
 	currentPending := make(map[string]os.FileInfo)
@@ -753,6 +744,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		messages = append(messages, info)
 
 		if cfg.settings.interrupt && isInterruptMessage(info, cfg) {
+			interruptFiles[name] = pendingInfo
 			interruptMessages = append(interruptMessages, info)
 			interruptCounts[from]++
 		}
@@ -773,6 +765,9 @@ func notifyNewMessages(cfg *wakeConfig) error {
 	cfg.holds = holds
 	cfg.cohortIDs = wakeMessageIDs(messages)
 	cfg.cohortUnreadable = unreadable
+	if cfg.notificationAttempt != nil && !wakeCohortStillEligible(cfg.notificationAttemptPhysical, currentPending) {
+		cfg.closeCancelledProviderAttempt()
+	}
 	if cfg.holdPolicyChanged {
 		// A live hold change re-times a held cohort from the same scan's holds,
 		// before planHeld reads the deadline.
@@ -802,13 +797,30 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		if cfg.startupReleaseAttempted && wakeCohortDrained(cfg.doorbell.cohort, physicalPending) {
 			cfg.startupInputProven = true
 		}
+		if cfg.inputDelivery.acceptanceUncertain && !cfg.inputDelivery.oneSubmit {
+			return &wakeInputDemotionBlockedError{err: errors.New("inbox progressed after a terminal write with uncertain acceptance")}
+		}
+		if cfg.inputDelivery.pending() && !cfg.inputDelivery.oneSubmit {
+			cfg.cancelPeerDoorbell()
+			dischargeWakeInputRecoveryAfterProgress(cfg, physicalPending)
+			return nil
+		}
 		cfg.doorbell.reset()
 		persistWakeDoorbellStatusBestEffort(cfg)
-		return reconcileWakeInputAfterInboxDrain(cfg)
+		return nil
 	}
 
+	cfg.dispatchCohort = currentPending
+	defer func() {
+		cfg.dispatchCohort = nil
+		if errors.Is(result, errWakeDoorbellStale) {
+			cfg.cancelPeerDoorbell()
+			result = nil
+		}
+	}()
 	pending := wakePendingMessages{eligible: currentPending, physical: physicalPending}
 	if cfg.injectMode != wakeInjectModeClaudeNative && cfg.settings.interrupt && len(interruptMessages) > 0 {
+		cfg.dispatchCohort = interruptFiles
 		interruptText := buildInterruptText(cfg.session, interruptMessages, interruptCounts, cfg.settings.previewLen, cfg.settings.interruptNotice)
 		notice := peerWakeNotification(interruptText)
 		if cfg.settings.interruptNotice != "" {
@@ -868,6 +880,9 @@ func injectWakeInterruptKey(
 			}
 			if allowed {
 				err := injectVia(cfg, cfg.interruptKey)
+				if isWakeDispatchRefusal(err) {
+					return true, err
+				}
 				cfg.lastInjectorOutcome = classifyWakeInjectorOutcome(err)
 				if err != nil {
 					cfg.lastInjectorDetail = err.Error()
@@ -911,6 +926,9 @@ func injectWakeInterruptKey(
 		} else {
 			wrote, writeErr := writeTerminalChunk(cfg, cfg.interruptKey)
 			if writeErr != nil {
+				if isWakeDispatchRefusal(writeErr) {
+					return true, writeErr
+				}
 				var authorityErr *wakeTerminalAuthorityError
 				if errors.As(writeErr, &authorityErr) {
 					return true, writeErr
@@ -1023,6 +1041,9 @@ func deliverWithNotificationLedger(
 			outcome = notificationattempt.OutcomeWritten
 		} else {
 			detail = deliverErr.Error()
+			if errors.Is(deliverErr, errWakeDoorbellStale) {
+				outcome = notificationattempt.StateCancelled
+			}
 		}
 		if resultErr := writer.Result(prepared, outcome, detail); resultErr != nil && cfg.debug {
 			_, _ = fmt.Fprintf(os.Stderr, "amq wake [debug]: persist notification attempt result: %v\n", resultErr)
@@ -1282,7 +1303,7 @@ func deliverNewMessageNotification(
 		return nil
 	}
 	if plan.progress && cfg.inputDelivery.pending() && wakeCohortProgressed(previousCohort, pending.physical) {
-		if err := reconcileWakeInputAfterInboxDrain(cfg); err != nil {
+		if err := reconcileWakeInputAfterProgress(cfg, wakeCohortStillEligible(previousCohort, currentPending)); err != nil {
 			return err
 		}
 		if cfg.inputDelivery.pending() {
@@ -1297,7 +1318,10 @@ func deliverNewMessageNotification(
 			cfg.doorbell.recordDialogHold(now, wakeDialogRecheck)
 			return nil
 		}
-		outstanding, err := cfg.native.Notify(currentPending, cfg.nativeScanAt)
+		outstanding, err := cfg.native.Notify(currentPending, cfg.nativeScanAt, cfg.checkPeerDispatch)
+		if isWakeDispatchRefusal(err) {
+			return err
+		}
 		if outstanding {
 			cfg.doorbell.parkCurrentCohort()
 		} else {
@@ -1334,6 +1358,9 @@ func deliverNewMessageNotification(
 	// write for that cohort is the full fixed line (a bridge claim never
 	// sets the submit-only state).
 	bridge := cfg.runPiBridgeDoorbellAttempt()
+	if bridge.err != nil {
+		return bridge.err
+	}
 	if bridge.presented {
 		cfg.recordPiBridgePresented(cfg.wakeDoorbellNow(), currentPending, bridge.attemptID)
 		return nil
@@ -1359,6 +1386,9 @@ func deliverNewMessageNotification(
 	// terminal, or an inbox file replaced in place proves nothing.
 	startupUnconfirmed := cfg.injectMode != wakeInjectModeNone && !cfg.startupInputProven &&
 		cfg.startupTrustRelease != nil && cfg.startupTrustRelease()
+	if err := cfg.checkPeerDispatch(); err != nil {
+		return err
+	}
 	if cfg.onNotificationAttemptStart != nil {
 		cfg.onNotificationAttemptStart()
 	}
@@ -1488,7 +1518,7 @@ func shouldRecordWakeAttempt(err error) bool {
 	if err == nil {
 		return true
 	}
-	return !isWakeTerminalAuthorityLoss(err) &&
+	return !isWakeDispatchRefusal(err) && !isWakeTerminalAuthorityLoss(err) &&
 		!isWakeTerminalPartialProgress(err) &&
 		!isWakeInputDemotionBlocked(err) &&
 		!isWakeTerminalProgressUncertain(err)
@@ -1992,7 +2022,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 				cfg,
 				wakeInjectModePaste,
 				pasteText,
-				false, guardInput && cfg.guardedInputEnabled(),
+				notice.input.provenance == wakePayloadOwnerCommand, guardInput && cfg.guardedInputEnabled(),
 			)
 		}
 		inputAccepted = inputAccepted || cfg.inputDelivery.confirmedInput()
@@ -2022,6 +2052,9 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 		}
 	}
 
+	if isWakeDispatchRefusal(injectErr) {
+		return injectErr
+	}
 	if errors.Is(injectErr, errWakeInputHeld) {
 		return deliverWakeTransientAttention(cfg, notice.output, nil)
 	}
@@ -2111,6 +2144,9 @@ func deliverWakeNotificationViaInjector(cfg *wakeConfig, notice wakeNotification
 		return deliverWakeAttentionOnly(cfg, notice.output)
 	}
 	if err := injectVia(cfg, plainText); err != nil {
+		if isWakeDispatchRefusal(err) {
+			return err
+		}
 		cfg.lastInjectorDetail = err.Error()
 		switch classifyWakeInjectorOutcome(err) {
 		case wakeInjectorOutcomeDeferred:
@@ -2341,11 +2377,20 @@ func writeTerminalChunk(cfg *wakeConfig, chunk string) (bool, error) {
 	if err != nil || !allowed {
 		return false, err
 	}
-	if cfg.inputGuard != nil {
-		cfg.inputGuard.lastOwnRead = time.Time{}
+	beforeInput := func() error {
+		if err := cfg.checkPeerDispatch(); err != nil {
+			return err
+		}
+		if cfg.inputGuard != nil {
+			cfg.inputGuard.lastOwnRead = time.Time{}
+		}
+		return nil
 	}
 	if cfg.terminalWrite != nil {
-		if err := cfg.terminalWrite(chunk); err != nil {
+		if err := cfg.terminalWrite(chunk, beforeInput); err != nil {
+			if isWakeDispatchRefusal(err) {
+				return false, err
+			}
 			if isWakeTerminalControlStopped(err) {
 				return false, nil
 			}
@@ -2356,6 +2401,9 @@ func writeTerminalChunk(cfg *wakeConfig, chunk string) (bool, error) {
 			return true, &wakeTerminalAuthorityError{err: err}
 		}
 		return true, nil
+	}
+	if err := beforeInput(); err != nil {
+		return false, err
 	}
 	return true, tiocstiInject(chunk)
 }
@@ -2399,6 +2447,9 @@ func writePendingWakeInputChunk(
 			return wrote, &wakeInputDemotionBlockedError{err: err}
 		}
 		return wrote, err
+	}
+	if isWakeDispatchRefusal(err) {
+		return false, err
 	}
 	if !wrote {
 		if state.confirmedInput() {
@@ -2516,35 +2567,25 @@ func rememberRequestedWakeInputMode(cfg *wakeConfig) {
 	cfg.requestedInjectMode = cfg.injectMode
 }
 
-func reconcileWakeInputAfterInboxDrain(cfg *wakeConfig) error {
-	if cfg.inputDelivery.acceptanceUncertain {
-		return &wakeInputDemotionBlockedError{
-			err: errors.New("inbox progressed after a terminal write with uncertain acceptance"),
-		}
-	}
-	if !cfg.inputDelivery.pending() {
-		return nil
-	}
+func reconcileWakeInputAfterProgress(cfg *wakeConfig, survivor bool) error {
 	if cfg.inputDelivery.oneSubmit {
-		// The owner's command is not doorbell text, and the peer inbox says
-		// nothing about it: its own path types it to the end or refuses it.
 		return nil
 	}
-	if cfg.settings.attended {
-		// Defence at the write site: the invariant lives here, not only in
-		// the earlier reload-time clear. An attended seat is never typed
-		// into, so the input state drops instead of sending an owed Enter.
+	if cfg.inputDelivery.acceptanceUncertain {
+		return &wakeInputDemotionBlockedError{err: errors.New("inbox progressed after a terminal write with uncertain acceptance")}
+	}
+	if !survivor || cfg.settings.attended {
+		// Physical progress retires the old suffix. Replacement mail can
+		// start a fresh delivery under its own guard.
 		clearWakeInputState(cfg)
 		return nil
 	}
 	if cfg.inputDelivery.phase == wakeInputPayloadPending {
-		// Inbox is empty: never finish or repeat doorbell text.
+		// Start fresh after progress instead of finishing obsolete doorbell text.
 		clearWakeInputState(cfg)
 		return nil
 	}
-	// An owed Enter still completes a prompt the wake presented, under the
-	// rule of every Enter without text. One the input guard holds is dropped
-	// there, and with no mail left it needs no notice.
+	// A surviving member can still authorize the pending submission.
 	cfg.beginInputAttempt()
 	if _, err := resumeWakeInputDelivery(cfg); err != nil && !errors.Is(err, errWakeInputHeld) {
 		return err
@@ -2907,6 +2948,9 @@ func injectVia(cfg *wakeConfig, text string) error {
 	// the observed behavior (progress classification, attention fallback) is
 	// verified without a wall-clock deadline selecting the outcome.
 	if cfg.injectViaHook != nil {
+		if err := cfg.checkPeerDispatch(); err != nil {
+			return err
+		}
 		stderr, runErr := cfg.injectViaHook(text)
 		if cfg.debug {
 			_ = writeWakeDiagnostic(cfg, "amq wake [debug]: inject-via hook stderr=%q err=%v\n", stderr, runErr)
@@ -2944,6 +2988,9 @@ func injectVia(cfg *wakeConfig, text string) error {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	if err := cfg.checkPeerDispatch(); err != nil {
+		return err
+	}
 	runErr := cmd.Run()
 	output := stdout.String() + stderr.String()
 	if ctx.Err() == context.DeadlineExceeded || errors.Is(runErr, exec.ErrWaitDelay) {

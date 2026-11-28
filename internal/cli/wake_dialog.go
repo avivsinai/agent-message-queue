@@ -192,6 +192,9 @@ func presentWakeDialogHold(cfg *wakeConfig, output wakePayload, pending int, cau
 	if !cfg.doorbell.heldNoticeDue(now) {
 		return nil
 	}
+	if err := cfg.checkPeerDispatch(); err != nil {
+		return err
+	}
 	cfg.doorbell.recordHeldNotice(now)
 	if cfg.settings.heldNotice && cfg.desktopNotify != nil {
 		if err := cfg.desktopNotify(wakeDesktopNoticeTitle, wakeHeldNoticeBody(cfg.me, pending, cause.reason)); err != nil {

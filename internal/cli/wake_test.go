@@ -16,6 +16,15 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/notificationattempt"
 )
 
+func checkedTerminalWriter(write func(string) error) func(string, func() error) error {
+	return func(text string, check func() error) error {
+		if err := check(); err != nil {
+			return err
+		}
+		return write(text)
+	}
+}
+
 func deliverPartialWakeMessageForTest(t *testing.T, root, me, id string) {
 	t.Helper()
 	if err := fsq.EnsureRootDirs(root); err != nil {
@@ -238,10 +247,10 @@ func TestOwnerBoundNotificationUsesFixedDoorbellAndGuardsEveryChunk(t *testing.T
 					guardCalls++
 					return nil
 				},
-				terminalWrite: func(chunk string) error {
+				terminalWrite: checkedTerminalWriter(func(chunk string) error {
 					writes = append(writes, chunk)
 					return nil
-				},
+				}),
 			}
 
 			dynamic := "session=$(touch /tmp/pwned) subject=\x1b[31m body=untrusted"
@@ -286,10 +295,10 @@ func TestCursorPasteDoorbellSubmitsOnceAfterThePasteSettles(t *testing.T) {
 			guardCalls++
 			return nil
 		},
-		terminalWrite: func(chunk string) error {
+		terminalWrite: checkedTerminalWriter(func(chunk string) error {
 			timeline = append(timeline, "write:"+chunk)
 			return nil
-		},
+		}),
 	}
 	if err := injectNotification(cfg, "dynamic text", false); err != nil {
 		t.Fatal(err)
@@ -436,10 +445,10 @@ func TestInjectNotificationUnsupportedDegradesOnceAndPersistsReason(t *testing.T
 	cfg := &wakeConfig{
 		injectMode:   wakeInjectModeRaw,
 		fallbackWarn: true,
-		terminalWrite: func(string) error {
+		terminalWrite: checkedTerminalWriter(func(string) error {
 			writes++
 			return newWakeInjectorUnsupportedError(syscall.EIO)
-		},
+		}),
 		recordNotifierStatus: func(status, mode, reason string) error {
 			statuses = append(statuses, struct {
 				status string
@@ -614,10 +623,10 @@ func TestNotifyNewMessagesCoalescesAdditionsUntilRetryOrProgress(t *testing.T) {
 		injectMode:     wakeInjectModeRaw,
 		doorbellNow:    func() time.Time { return now },
 		attentionIsTTY: func() bool { return false },
-		terminalWrite: func(text string) error {
+		terminalWrite: checkedTerminalWriter(func(text string) error {
 			injected = append(injected, text)
 			return nil
-		},
+		}),
 	}
 
 	writeMessage("first.md", "first", "first review")
@@ -750,10 +759,10 @@ func TestNotifyNewMessagesReminderUsesSubmitOnlyAfterConfirmedPresentation(t *te
 				wakeOwner:   &wakeOwner{},
 				injectMode:  tc.mode,
 				doorbellNow: func() time.Time { return now },
-				terminalWrite: func(text string) error {
+				terminalWrite: checkedTerminalWriter(func(text string) error {
 					injected.WriteString(text)
 					return nil
-				},
+				}),
 			}
 
 			if err := notifyNewMessages(cfg); err != nil {
@@ -1218,5 +1227,33 @@ func TestWakeHoldRecordsOnlyAttemptedNotifications(t *testing.T) {
 				t.Fatalf("attention writes = %d, want 1", attentionWrites)
 			}
 		})
+	}
+}
+
+// Issue #1660: a running turn drained the doorbell's mail while raw input
+// was in flight. The pending submit must never start an empty turn.
+func TestDoorbellDrainedAfterTextSkipsSubmit(t *testing.T) {
+	h := newWakeHoldHarness(t, wakeHoldPolicy{})
+	h.send("trigger", format.PriorityNormal)
+	h.cfg.terminalWrite = checkedTerminalWriter(func(chunk string) error {
+		h.injected = append(h.injected, chunk)
+		if len(h.injected) == 1 {
+			if got := runDrainJSON(t, h.root, "codex", 1, false); got.Count != 1 {
+				t.Fatalf("drained %d messages, want one", got.Count)
+			}
+			h.deliver("passive.md", "passive", format.PriorityNormal, format.NotifyPassive, nil)
+		}
+		return nil
+	})
+	h.scan(h.cfg)
+	if len(h.injected) != 1 || h.injected[0] != coopWakeDoorbell {
+		t.Fatalf("terminal writes = %q, want only the doorbell text", h.injected)
+	}
+	if _, armed := h.cfg.doorbell.nextDeadline(); armed || h.cfg.doorbell.reminderAttempts != 0 {
+		t.Fatal("stale doorbell retained a deadline or spent an input attempt")
+	}
+	attempts, err := notificationattempt.List(h.root, "codex", "trigger")
+	if err != nil || len(attempts) != 1 || attempts[0].State != notificationattempt.StateCancelled {
+		t.Fatalf("expected one cancelled attempt, got %+v, err %v", attempts, err)
 	}
 }

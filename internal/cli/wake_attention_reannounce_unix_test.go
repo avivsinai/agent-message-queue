@@ -23,7 +23,7 @@ func newGuardedWakeAttentionConfig(
 		settings:      wakeSettings{previewLen: 80},
 		controlStop:   make(chan struct{}),
 		doorbellNow:   func() time.Time { return time.Unix(1_800_000_000, 0) },
-		terminalWrite: func(string) error { *inputWrites++; return nil },
+		terminalWrite: checkedTerminalWriter(func(string) error { *inputWrites++; return nil }),
 		attentionIsTTY: func() bool {
 			return false
 		},

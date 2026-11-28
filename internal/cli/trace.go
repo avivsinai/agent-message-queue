@@ -581,6 +581,8 @@ func notificationAttemptLimitation(state string) string {
 		return "prepared without a durable result is indeterminate; it does not prove that notification bytes were written"
 	case notificationattempt.OutcomeWritten:
 		return "written means only that notifier bytes were accepted; it does not prove seen, displayed, or submitted"
+	case notificationattempt.StateCancelled:
+		return "cancelled means the peer doorbell lost its qualifying mail before dispatch or submission"
 	case notificationattempt.StateAccepted:
 		return "accepted means the external injector declared provider dispatch; it does not prove that the provider displayed, submitted, or consumed the doorbell"
 	case notificationattempt.StateDeferred, notificationattempt.StateRetried:

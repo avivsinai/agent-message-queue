@@ -30,6 +30,8 @@ const (
 // thread-writer-locks/<uuid>.lock) is ErrTargetDegraded; deferred delivery for
 // that case is out of scope.
 type CodexQueue struct {
+	// BeforeEnqueue revalidates a conditional request after the provider probe.
+	BeforeEnqueue     func() error
 	Runner            CommandRunner
 	LookPath          func(string) (string, error)
 	InspectWriterLock WriterLockInspector
@@ -78,6 +80,11 @@ func (c CodexQueue) Inject(ctx context.Context, target string, payload string) e
 	uuid, codexPath, err := c.probe(ctx, target)
 	if err != nil {
 		return fmt.Errorf("inject Codex queue: %w", err)
+	}
+	if c.BeforeEnqueue != nil {
+		if err := c.BeforeEnqueue(); err != nil {
+			return err
+		}
 	}
 	out, err := c.runner().Run(ctx, codexPath, "queue", "--thread", uuid, "--message", payload)
 	if err != nil {

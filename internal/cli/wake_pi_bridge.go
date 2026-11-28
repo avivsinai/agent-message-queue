@@ -59,6 +59,7 @@ type wakePiBridgeLiveness struct {
 
 // wakePiBridgeDoorbellResult is what one bridge exchange decided.
 type wakePiBridgeDoorbellResult struct {
+	err error
 	// engaged: the wake reached the exchange (a fresh capable record and a
 	// valid owner proof), whether or not a decision arrived. The caller
 	// types nothing on an engaged pass without presented or fullLine.
@@ -185,7 +186,7 @@ type wakePiBridgeDecision struct {
 // semantics (the same publication boundary as the receipts). An existing
 // file with the same id is never overwritten: the caller moves to the next
 // sequence number.
-func publishWakePiBridgeRequest(dir string, req wakePiBridgeRequest) error {
+func publishWakePiBridgeRequest(dir string, req wakePiBridgeRequest, beforePublish func() error) error {
 	payload, err := json.Marshal(req)
 	if err != nil {
 		return err
@@ -194,7 +195,7 @@ func publishWakePiBridgeRequest(dir string, req wakePiBridgeRequest) error {
 	if err := os.MkdirAll(out, 0o700); err != nil {
 		return err
 	}
-	created, err := fsq.CreateNewFile(filepath.Join(out, req.Attempt+".json"), payload, 0o600)
+	created, err := fsq.CreateNewFileIf(filepath.Join(out, req.Attempt+".json"), payload, 0o600, beforePublish)
 	if err != nil {
 		return err
 	}
@@ -325,7 +326,10 @@ func (cfg *wakeConfig) runPiBridgeDoorbellAttempt() wakePiBridgeDoorbellResult {
 		PID:        live.PID,
 		Deadline:   now.Add(wakePiBridgeDecisionDeadline).UTC().Format(time.RFC3339Nano),
 	}
-	if err := publishWakePiBridgeRequest(dir, req); err != nil {
+	if err := publishWakePiBridgeRequest(dir, req, cfg.checkPeerDispatch); err != nil {
+		if isWakeDispatchRefusal(err) {
+			return wakePiBridgeDoorbellResult{err: err}
+		}
 		// A fresh id plus an error means the directory is unwritable or a
 		// raced peer took the id; nothing is proven, so nothing is typed.
 		// The cohort record alone retires on the next prune.

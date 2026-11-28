@@ -288,7 +288,7 @@ func TestWakeCommandPartialWriteSurvivesAnEmptyPeerInbox(t *testing.T) {
 	h.cfg.dialogSource = func(time.Time) (wakeDialogState, error) { return wakeDialogClosed, nil }
 	id := queueCommand(t, h, owner, target, "/compact", h.now)
 	first := true
-	h.cfg.terminalWrite = func(text string) error {
+	h.cfg.terminalWrite = checkedTerminalWriter(func(text string) error {
 		if first {
 			first = false
 			accepted := text[:2]
@@ -297,7 +297,7 @@ func TestWakeCommandPartialWriteSurvivesAnEmptyPeerInbox(t *testing.T) {
 		}
 		h.injected = append(h.injected, text)
 		return nil
-	}
+	})
 	serveWakeCommands(h.cfg)
 	if !slices.Equal(h.injected, []string{"/c"}) || h.cfg.inputDelivery.phase != wakeInputPayloadPending || h.cfg.inputDelivery.acceptedBytes != 2 {
 		t.Fatalf("fixture must stop after the accepted partial prefix: writes=%q state=%#v", h.injected, h.cfg.inputDelivery)
