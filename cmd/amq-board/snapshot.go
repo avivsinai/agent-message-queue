@@ -167,7 +167,7 @@ func runSync(args []string) int {
 	token := &ghToken{}
 	memos := map[string]*providerMemo{}
 	limits := &serveLimits{}
-	run := &syncRun{dir: dir, env: env, store: store, loader: loader, token: token, memos: memos, limits: limits, watch: *watch, suggestions: *suggestions}
+	run := &syncRun{dir: dir, env: env, store: store, loader: loader, token: token, memos: memos, limits: limits, watch: *watch, suggestions: *suggestions, notifier: *as}
 	floor := floorStep(run, *as, recipients, log)
 	var floorPass func(context.Context)
 	if floor != nil {
@@ -218,6 +218,7 @@ type syncRun struct {
 	limits      *serveLimits
 	watch       bool
 	suggestions bool
+	notifier    string
 }
 
 // sourceOptions bounds a pass by who waits for it. A one-shot sync has a
@@ -262,6 +263,7 @@ func (r *syncRun) pass(ctx context.Context) (board.Snapshot, error) {
 	projectID := state.ProjectID
 	acquisition := acquireBoard(ctx, newEnv(dir, runner), cfg, opt)
 	acquisition.ProjectID = projectID
+	acquisition.NotifierHandle = r.notifier
 	history, messages, evidence := source.ReadHistory(ctx, env, store.BaseRoot, state.Pruned, func(id string) (board.Message, bool) {
 		m, ok := state.Messages[store.BaseRoot+"#"+id]
 		return m, ok

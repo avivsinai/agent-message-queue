@@ -16,19 +16,20 @@ import (
 type StationState string
 
 const (
-	StationLimit   StationState = "limit_reached"
-	StationStalled StationState = "stalled"
-	StationWorking StationState = "working"
-	StationIdle    StationState = "idle"
-	StationOff     StationState = "off"
-	StationUnknown StationState = "unknown"
+	StationLimit       StationState = "limit_reached"
+	StationStalled     StationState = "stalled"
+	StationWorking     StationState = "working"
+	StationQuiet       StationState = "quiet"
+	StationNotMeasured StationState = "not_measured"
+	StationOff         StationState = "off"
+	StationUnknown     StationState = "unknown"
 	// stationDormant folds a mailbox into the dormant count; it is never a
 	// station's state.
 	stationDormant StationState = "dormant"
 )
 
 // StationStates is the Floor's order: the rule order of the state table.
-var StationStates = []StationState{StationLimit, StationStalled, StationWorking, StationIdle, StationOff, StationUnknown}
+var StationStates = []StationState{StationLimit, StationStalled, StationWorking, StationQuiet, StationNotMeasured, StationOff, StationUnknown}
 
 // Title is the state word.
 func (s StationState) Title() string {
@@ -39,8 +40,10 @@ func (s StationState) Title() string {
 		return "Stalled"
 	case StationWorking:
 		return "Working"
-	case StationIdle:
-		return "Idle"
+	case StationQuiet:
+		return "Quiet"
+	case StationNotMeasured:
+		return "Not measured"
 	case StationOff:
 		return "Off"
 	case StationUnknown:
@@ -58,7 +61,7 @@ func (s StationState) Glyph() string {
 		return "▲"
 	case StationWorking:
 		return "●"
-	case StationIdle:
+	case StationQuiet:
 		return "○"
 	case StationOff:
 		return "–"
@@ -81,24 +84,33 @@ type Station struct {
 	// under each of them, and the board does not guess which one works on it.
 	HandleSessions int `json:"handle_sessions,omitempty"`
 	// Says is the agent's presence note and Status its free-text presence
-	// status: self-reports, quoted, never facts.
-	Says       string `json:"says,omitempty"`
-	Status     string `json:"status,omitempty"`
-	Counted    bool   `json:"counted"`
-	CountError string `json:"count_error,omitempty"`
-	Unread     int    `json:"unread"`
+	// status: self-reports, quoted, never facts. Each is shown with its
+	// age and hidden once older than the freshness window.
+	Says   string `json:"says,omitempty"`
+	Status string `json:"status,omitempty"`
+	// StatusAgeSeconds is how long ago the status was set, dated from
+	// when AMQ was read; absent when the record carries no age.
+	StatusAgeSeconds float64 `json:"status_age_seconds,omitempty"`
+	Counted          bool    `json:"counted"`
+	CountError       string  `json:"count_error,omitempty"`
+	Unread           int     `json:"unread"`
 	// OldestUnreadAgeSeconds is the oldest unread message's age at the
 	// projection time, dated from when AMQ was read.
-	OldestUnreadAgeSeconds float64   `json:"oldest_unread_age_seconds,omitempty"`
-	LastActivity           time.Time `json:"last_activity,omitzero"`
-	// ActivitySource names the fact behind LastActivity: sent, read mail,
-	// usage, or presence when no wake is live.
-	ActivitySource string `json:"activity_source,omitempty"`
-	// WorkActivity is the newest evidence that the seat works: a usage
-	// record, or presence when no wake is live. Sent and read mail show only
-	// that the seat attends its mailbox.
-	WorkActivity time.Time   `json:"work_activity,omitzero"`
-	Wake         StationWake `json:"wake"`
+	OldestUnreadAgeSeconds float64 `json:"oldest_unread_age_seconds,omitempty"`
+	// LastActivity is the newest activity fact of any kind, LastSentAt and
+	// LastReadAt included; ActivitySource names it.
+	LastActivity   time.Time `json:"last_activity,omitzero"`
+	ActivitySource string    `json:"activity_source,omitempty"`
+	// WorkActivity is the newest usage record: the one evidence the seat
+	// works. Sent and read mail show only that the seat attends its
+	// mailbox. WorkMeasured is false when the board has no work-evidence
+	// source for the seat at all: its harness has no usage reader, or no
+	// record maps a read home's sessions to it. WorkWhyMissing then names
+	// why and the config key that adds a source.
+	WorkActivity   time.Time   `json:"work_activity,omitzero"`
+	WorkMeasured   bool        `json:"work_measured"`
+	WorkWhyMissing string      `json:"work_why_missing,omitempty"`
+	Wake           StationWake `json:"wake"`
 	// Limit is the account's reached limit while its reset is ahead. When
 	// the seat, or any session of the account, was active after the limit
 	// was read, LimitNote says so and the state comes from the other rules.
@@ -128,8 +140,9 @@ var nowStages = map[Stage]int{StageInProgress: 0, StageInReview: 1, StageReady: 
 // buildFloor makes one station per seat with recent evidence and folds every
 // other agent mailbox into a per-session dormant count. It reads the roster
 // with its usage attached and the placed Flow cards; observed is when the
-// AMQ source read presence.
-func buildFloor(m *Model, observed time.Time, cfg Config, now time.Time) {
+// AMQ source read presence. notifier is the handle floor notices are sent
+// from; it is not a seat, because its own sent mail is alarm traffic.
+func buildFloor(m *Model, observed time.Time, cfg Config, now time.Time, notifier string) {
 	m.Stations, m.Dormant = []Station{}, []DormantMailboxes{}
 	type owned struct {
 		id    string
@@ -167,7 +180,7 @@ func buildFloor(m *Model, observed time.Time, cfg Config, now time.Time) {
 		var stations []Station
 		dormant := 0
 		for _, a := range append(append([]RosterAgent{}, rs.Agents...), rs.Quiet...) {
-			if a.Human {
+			if a.Human || (notifier != "" && a.Handle == notifier) {
 				continue
 			}
 			key := [2]string{a.Session, a.Handle}
@@ -238,10 +251,16 @@ func newStation(a RosterAgent, ownsWork bool, observed time.Time, cfg Config, no
 		Unread: a.UnreadCount,
 		Wake:   StationWake{Live: a.PresenceSource == "notifier_live", Mode: a.NotifierMode, Reason: a.NotifierReason, Parked: a.DoorbellParked},
 	}
+	workAt, workSrc, workOnly, workWhy := lastActivity(a, observed)
+	st.LastActivity, st.ActivitySource, st.WorkActivity = workAt, workSrc, workOnly
+	st.WorkMeasured, st.WorkWhyMissing = workWhy == "", workWhy
 	switch a.PresenceStatus {
 	case "", "active", "idle", "unknown":
 	default:
 		st.Status = a.PresenceStatus
+		if !observed.IsZero() && a.PresenceStatus != "" {
+			st.StatusAgeSeconds = a.PresenceAgeSeconds
+		}
 	}
 	for i := range a.Usage {
 		if a.Usage[i].Window == usage.Window5h {
@@ -249,7 +268,6 @@ func newStation(a RosterAgent, ownsWork bool, observed time.Time, cfg Config, no
 			st.Spend5h = &u
 		}
 	}
-	st.LastActivity, st.ActivitySource, st.WorkActivity = lastActivity(a, observed)
 	last := st.LastActivity
 	known := !last.IsZero()
 	recent := known && now.Sub(last) < cfg.LivenessWindow
@@ -291,9 +309,18 @@ func newStation(a RosterAgent, ownsWork bool, observed time.Time, cfg Config, no
 	unread := pluralize(a.UnreadCount, "unread message") + ", oldest " + age(oldest)
 	switch {
 	case a.Counted && a.UnreadCount > 0 && oldest > cfg.LivenessWindow && known && last.Before(arrived):
+		// Unread mail past the bound is evidence by itself, whatever the
+		// seat's work coverage: the stall rule never needs usage.
 		st.State, st.StateWhy = StationStalled, unread+"; last activity "+age(now.Sub(last))+" ago"
-	case recent:
+	case recent && st.WorkMeasured:
 		st.State, st.StateWhy = StationWorking, "active "+age(now.Sub(last))+" ago ("+st.ActivitySource+")"
+	case recent:
+		// Presence, or fresh mail, is the seat's only fact: it was started,
+		// and no work evidence followed.
+		st.State, st.StateWhy = StationNotMeasured, "Started "+age(now.Sub(last))+", no work seen yet."
+		if st.WorkWhyMissing != "" {
+			st.StateWhy += " " + st.WorkWhyMissing
+		}
 	case !a.Counted:
 		st.State, st.StateWhy = StationUnknown, "inbox not counted"
 		if a.CountError != "" {
@@ -301,10 +328,21 @@ func newStation(a RosterAgent, ownsWork bool, observed time.Time, cfg Config, no
 		}
 	case a.UnreadCount > 0 && !known:
 		st.State, st.StateWhy = StationUnknown, unread+"; activity not observed"
+	case !st.WorkMeasured:
+		st.State, st.StateWhy = StationNotMeasured, "No usage source for this seat"
+		switch {
+		case a.UnreadCount > 0:
+			st.StateWhy += ". " + unread
+		case known:
+			st.StateWhy += ". Mail quiet " + age(now.Sub(last))
+		default:
+			st.StateWhy += ". No mail sent or read."
+		}
+		st.StateWhy += ". " + st.WorkWhyMissing
 	case st.Wake.Live && a.UnreadCount == 0:
-		st.State, st.StateWhy = StationIdle, "wake live, waiting for mail"
+		st.State, st.StateWhy = StationQuiet, "nothing seen inside "+cfg.LivenessWindow.String()
 	case st.Wake.Live:
-		st.State, st.StateWhy = StationIdle, "wake live; "+unread
+		st.State, st.StateWhy = StationQuiet, unread+", nothing else seen"
 	case known:
 		st.State, st.StateWhy = StationOff, "no wake; last activity "+age(now.Sub(last))+" ago"
 	default:
@@ -315,11 +353,14 @@ func newStation(a RosterAgent, ownsWork bool, observed time.Time, cfg Config, no
 
 // lastActivity is the newest activity fact and its source: the seat's
 // newest sent message, its last read of mail, the worker's newest usage
-// record, or presence last seen when no wake is live. work is the newest of
-// the last two alone. A live wake refreshes presence on its own, so with one
+// record, or presence last seen when no wake is live. work is the newest
+// usage record alone: usage is the one work evidence, and a seat whose
+// account the board cannot read (no reader for its harness, or no record
+// maps a read home's sessions to it) has work not measured, named by the
+// returned reason. A live wake refreshes presence on its own, so with one
 // presence proves only the wake. Doctor --ops reports presence age and the
 // sent and read times; a mailbox only who lists has none of them.
-func lastActivity(a RosterAgent, observed time.Time) (at time.Time, source string, work time.Time) {
+func lastActivity(a RosterAgent, observed time.Time) (at time.Time, source string, work time.Time, workMissing string) {
 	newer := func(t time.Time, from string) {
 		if t.After(at) {
 			at, source = t, from
@@ -332,17 +373,60 @@ func lastActivity(a RosterAgent, observed time.Time) (at time.Time, source strin
 	}
 	for _, u := range a.Usage {
 		newer(u.AsOf, "usage")
+		if u.AsOf.After(work) {
+			work = u.AsOf
+		}
 	}
-	work = at
+	if work.IsZero() {
+		workMissing = workNotMeasuredWhy(a)
+	}
 	newer(a.LastSentAt, "sent")
 	newer(a.LastReadAt, "read mail")
-	return at, source, work
+	return at, source, work, workMissing
+}
+
+// workNotMeasuredWhy names why a seat with no usage record has no work
+// evidence: a harness the usage readers do not cover, or sessions no AMQ
+// record maps to the seat, and the config key that adds a source. A seat
+// with any usage record, including a zero-token one, is measured.
+func workNotMeasuredWhy(a RosterAgent) string {
+	switch a.Harness {
+	case usage.Claude, usage.Codex, usage.Pi:
+		return "no usage record maps to this seat; add the harness home under usage.homes in the board configuration"
+	}
+	return "the usage readers cover claude, codex and pi only; this harness has no work evidence"
 }
 
 // workObserved reports whether the seat has evidence that it works, not
 // only that it attends its mailbox.
 func (st Station) workObserved() bool {
 	return !st.WorkActivity.IsZero()
+}
+
+// readySince is when the neglect clock for a ready card starts: the later
+// of the card's entry into Ready and the card's last update, whichever the
+// sources carry.
+func (st Station) readySince(card Card) time.Time {
+	latest := card.StageSince
+	if card.UpdatedAt.After(latest) {
+		latest = card.UpdatedAt
+	}
+	return latest
+}
+
+// readyNeglected says whether a ready card has sat with this seat past the
+// grace with no activity of any kind in that time: no usage, no sent mail,
+// no read receipt. WorkMeasured gates the call; a seat with no work source
+// is never neglectful.
+func (st Station) readyNeglected(card Card, grace time.Duration, now time.Time) bool {
+	if !st.WorkMeasured {
+		return false
+	}
+	since := st.readySince(card)
+	if since.IsZero() || now.Sub(since) <= grace {
+		return false
+	}
+	return st.LastActivity.IsZero() || st.LastActivity.Before(since)
 }
 
 // limitWhy names a reached limit and its reset.
@@ -420,8 +504,15 @@ type stationSummary struct {
 	Harness, Now, NowStage, NowMore, Shared, Inbox, Activity, Wake, Says, Status, Limit, Spend string
 }
 
-func summarizeStation(st Station, cards map[string]Card, now time.Time) stationSummary {
-	s := stationSummary{Harness: clean(harnessName(st.Harness)), Now: "no owned work", Says: cleanTitle(st.Says), Status: cleanTitle(st.Status), Limit: clean(st.LimitNote)}
+func summarizeStation(st Station, cards map[string]Card, cfg Config, now time.Time) stationSummary {
+	s := stationSummary{Harness: clean(harnessName(st.Harness)), Now: "no owned work", Says: cleanTitle(st.Says), Limit: clean(st.LimitNote)}
+	// Status is a self-report shown with its age, and hidden once older
+	// than the freshness window; the side sheet keeps it under Older
+	// notes. A status with no age at all stays hidden rather than
+	// pretending it is current.
+	if st.Status != "" && st.StatusAgeSeconds > 0 && seconds(st.StatusAgeSeconds) <= FreshnessWindow(cfg) {
+		s.Status = cleanTitle(st.Status) + " · " + age(seconds(st.StatusAgeSeconds)) + " ago"
+	}
 	if len(st.Now) > 0 {
 		c := cards[st.Now[0]]
 		s.Now, s.NowStage = cleanTitle(c.Title), c.Stage.Title()

@@ -230,7 +230,7 @@ func buildFloorPage(m Model, now time.Time) pageFloor {
 		if n := len(f.Sessions); n == 0 || f.Sessions[n-1].Name != clean(st.Session) {
 			f.Sessions = append(f.Sessions, pageFloorSession{Name: clean(st.Session)})
 		}
-		sum := summarizeStation(st, cards, now)
+		sum := summarizeStation(st, cards, m.Config, now)
 		key := st.Session + "/" + st.Handle
 		hash := sha256.Sum256([]byte(key))
 		ps := pageStation{

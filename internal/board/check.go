@@ -118,16 +118,16 @@ func Check(m Model, cfg Config, now time.Time) ([]Problem, error) {
 				}
 				add(st, ProblemSeatAtLimit, first, fmt.Sprintf("%s is at its plan limit and owns %d current card(s), first: %s", seat, len(st.Now), title))
 			}
-		case StationIdle, StationOff:
-			// A free seat has no card in progress. Cards whose owner works
-			// need activity evidence to count as neglected.
+		case StationQuiet, StationOff, StationNotMeasured:
+			// A free seat has no card in progress. A seat whose work is not
+			// measured never reads as neglecting ready work; its unread-mail
+			// stall, above, is evidence by itself.
 			hasStarted := false
 			for _, id := range st.Now {
 				if row, ok := cards[id]; ok && row.card.Stage == StageInProgress {
 					hasStarted = true
 				}
 			}
-			state := string(st.State)
 			for _, id := range st.Now {
 				row, ok := cards[id]
 				if !ok {
@@ -137,8 +137,8 @@ func Check(m Model, cfg Config, now time.Time) ([]Problem, error) {
 				title := card.Title
 				switch card.Stage {
 				case StageReady:
-					if !hasStarted {
-						add(st, ProblemReadyNotBegun, id, fmt.Sprintf("%s is %s and has ready work that is not started: %s", seat, state, title))
+					if st.WorkMeasured && !hasStarted && st.readyNeglected(*card, cfg.ReadyGrace, now) {
+						add(st, ProblemReadyNotBegun, id, fmt.Sprintf("%s is %s and has ready work unstarted for %s with no activity in that time: %s", seat, st.State.Title(), age(now.Sub(st.readySince(*card))), title))
 					}
 				case StageInProgress:
 					if st.workObserved() && !card.StageSince.IsZero() && now.Sub(card.StageSince) > cfg.LivenessWindow {

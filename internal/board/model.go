@@ -17,6 +17,9 @@ type Config struct {
 	ObligationMaxAge string
 	LivenessWindow   time.Duration
 	StaleAfter       time.Duration
+	// ReadyGrace is how long a ready card must wait with a seat before the
+	// check may read the seat neglecting it. Empty selects the default.
+	ReadyGrace time.Duration
 	// ShippedWindow is how long finished work stays in the Flow Shipped
 	// stage before it is only in History.
 	ShippedWindow time.Duration
@@ -24,7 +27,7 @@ type Config struct {
 
 // DefaultConfig is the configuration when no file sets one.
 func DefaultConfig() Config {
-	return Config{LivenessWindow: 30 * time.Minute, StaleAfter: 36 * time.Hour, ShippedWindow: 7 * 24 * time.Hour}
+	return Config{LivenessWindow: 30 * time.Minute, StaleAfter: 36 * time.Hour, ReadyGrace: 15 * time.Minute, ShippedWindow: 7 * 24 * time.Hour}
 }
 
 // NamedResult is one source's read, in source order.
@@ -38,11 +41,14 @@ type Input struct {
 	Results []NamedResult
 	// Known maps every verified bead id (open, and closed ones resolved for
 	// mentions) to its status.
-	Known   map[string]string
-	Config  Config
-	Now     time.Time
-	Version string
-	Dir     string
+	Known map[string]string
+	// Notifier is the handle floor notices are sent from; the Floor
+	// shows it as no seat. Empty when the watch sends no notices.
+	Notifier string
+	Config   Config
+	Now      time.Time
+	Version  string
+	Dir      string
 }
 
 // Model is the board: what every face renders.

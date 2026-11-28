@@ -41,6 +41,12 @@ func TestStationStates(t *testing.T) {
 	sentAfterMail := live(seat(time.Minute, 27, 8*time.Hour))
 	sentAfterMail.LastSentAt = now.Add(-time.Hour)
 
+	// A measured seat with nothing inside the liveness window reads Quiet
+	// with a live wake, and Off without one.
+	quietMeasured := live(seat(time.Hour, 0, 0))
+	quietMeasured.Usage = []Usage{{Window: usage.Window5h, AsOf: now.Add(-2 * time.Hour)}}
+	quietNoWake := seat(time.Hour, 0, 0)
+	quietNoWake.Usage = []Usage{{Window: usage.Window5h, AsOf: now.Add(-2 * time.Hour)}}
 	for _, tc := range []struct {
 		name  string
 		seat  RosterAgent
@@ -50,21 +56,30 @@ func TestStationStates(t *testing.T) {
 		read time.Duration
 	}{
 		{"working after its limit was read", working, false, StationWorking, 0},
-		{"idle; its account was active after the limit was read", accountActive, false, StationIdle, 0},
+		{"quiet; its account was active after the limit was read", accountActive, false, StationNotMeasured, 0},
 		// Observed in the 2026-11-01 live render: live33c/claude, a wake with
 		// no agent work, read Working because the wake refreshes presence.
-		{"idle with fresh wake presence", live(seat(time.Minute, 0, 0)), false, StationIdle, 0},
+		// A seat with no usage source is not measured, however fresh its presence.
+		{"not measured with fresh wake presence", live(seat(time.Minute, 0, 0)), false, StationNotMeasured, 0},
 		// Review of the Floor build: unread ages date from the AMQ read, so
 		// a later render must not turn this seat Stalled.
-		{"idle when rendered after the read", lateRender, false, StationIdle, 20 * time.Minute},
+		{"quiet when rendered after the read", lateRender, false, StationQuiet, 20 * time.Minute},
 		{"stalled", seat(9*time.Hour, 3, 5*time.Hour), false, StationStalled, 0},
 		// Field, 2026-11-26: a pi seat with a live wake, 27 unread for 8 hours
 		// and no usage record read Unknown, and check reported nothing.
 		{"stalled from its own mail activity", sentBeforeMail, false, StationStalled, 0},
-		{"idle when it sent after the mail arrived", sentAfterMail, false, StationIdle, 0},
+		{"not measured when it sent after the mail arrived; the unread still shows", sentAfterMail, false, StationNotMeasured, 0},
 		{"limit", limited, false, StationLimit, 0},
-		{"off", seat(72*time.Hour, 0, 0), true, StationOff, 0},
+		// A live wake holds the seat out of dormant; with no wake, presence is
+		// the one activity fact. Neither proves work: work reads not measured
+		// whenever no usage source covers the seat.
+		{"off; presence alone is never work", seat(72*time.Hour, 0, 0), true, StationNotMeasured, 0},
+		// Presence is the only activity fact on this seat, and no wake is live:
+		// it proves attendance, not work, so the seat is not measured.
+
 		{"unknown", uncounted, false, StationUnknown, 0},
+		{"quiet, measured, wake live", quietMeasured, false, StationQuiet, 0},
+		{"off, measured, no wake", quietNoWake, true, StationOff, 0},
 		{"dormant", seat(40*24*time.Hour, 2, 3*time.Hour), false, stationDormant, 0},
 	} {
 		st := newStation(tc.seat, tc.owns, now.Add(-tc.read), cfg, now)
@@ -79,7 +94,7 @@ func TestStationStates(t *testing.T) {
 		}
 	}
 	// An unknown harness prints no label, not "other".
-	if s := summarizeStation(Station{Harness: harness.Other}, nil, now); s.Harness != "" {
+	if s := summarizeStation(Station{Harness: harness.Other}, nil, DefaultConfig(), now); s.Harness != "" {
 		t.Errorf("unknown harness label = %q, want none", s.Harness)
 	}
 	if st := newStation(working, false, now, cfg, now); st.LimitNote == "" || st.Limit == nil {

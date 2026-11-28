@@ -392,7 +392,7 @@ func writeFloor(b *strings.Builder, m Model, now time.Time) {
 			session = st.Session
 			fmt.Fprintf(b, "  %s\n", clean(session))
 		}
-		f := summarizeStation(st, cards, now)
+		f := summarizeStation(st, cards, m.Config, now)
 		parts := []string{st.State.Glyph() + " " + st.State.Title(), clean(st.Handle)}
 		if f.Harness != "" {
 			parts = append(parts, f.Harness)

@@ -18,26 +18,44 @@ func TestCheck(t *testing.T) {
 		full         string
 		requestKey   string
 		replyOverdue bool
+		recentCard   bool
 	}{
 		{name: "a stalled seat has unread mail", state: StationStalled, want: ProblemSeatStalled},
 		{name: "seat at limit owns one card", state: StationLimit, want: ProblemSeatAtLimit, card: "one"},
-		{name: "idle seat holds ready work", state: StationIdle, stage: StageReady, want: ProblemReadyNotBegun, card: "one", full: "s1/amit is idle and has ready work that is not started: First card"},
-		{name: "idle owner with activity has not moved card in two hours", state: StationIdle, stage: StageInProgress, want: ProblemNotWorked, card: "one"},
+		// m0ef, 2026-11-28: the board reported a worker idle with ready work
+		// three minutes after its task was sent. Ready work alarms only
+		// after ready_grace with no activity of any kind.
+		{name: "quiet seat neglects ready work past the grace", state: StationQuiet, stage: StageReady, want: ProblemReadyNotBegun, card: "one", full: "s1/amit is Quiet and has ready work unstarted for 45m with no activity in that time: First card"},
+		{name: "quiet seat within the grace does not alarm", state: StationQuiet, stage: StageReady, card: "one"},
+		// Observed 11:42 UTC: the reviewer seat had handed the card for
+		// review and still read idle with ready work. Its last activity is
+		// newer than the card's stage entry, so the seat is not neglecting.
+		{name: "ready card newer than the seat's last activity does not alarm", state: StationQuiet, stage: StageReady, card: "one", recentCard: true},
+		{name: "quiet owner with work evidence has not moved card in two hours", state: StationQuiet, stage: StageInProgress, want: ProblemNotWorked, card: "one"},
 		// A pi seat gave a live but absent LastActivity on 2026-11-18;
 		// it must not be reported as neglecting a card it still runs. Its
 		// sent and read mail show it attends its mailbox, not that it works.
-		{name: "idle seat without work evidence stays quiet", state: StationIdle, stage: StageInProgress, card: "one"},
+		{name: "seat without work evidence stays quiet", state: StationQuiet, stage: StageInProgress, card: "one"},
+		// A seat whose usage is not read has no work evidence: the three
+		// false alarms of 2026-11-28 were such seats. Missing evidence is
+		// never neglect, and the stall rule on its unread mail stands.
+		{name: "not measured seat never neglects ready work", state: StationNotMeasured, stage: StageReady, card: "one"},
+		{name: "not measured seat never neglects an in-progress card", state: StationNotMeasured, stage: StageInProgress, card: "one"},
 		{name: "working owner is clean", state: StationWorking, stage: StageInProgress, card: "one"},
-		{name: "idle owner with activity has not moved card in two hours", state: StationIdle, stage: StageInProgress, want: ProblemNotWorked, card: "one"},
-		{name: "a seat with ready work and one in progress is not free", state: StationIdle},
-		{name: "working owner is clean", state: StationWorking, stage: StageInProgress, card: "one"},
+		{name: "a seat with ready work and one in progress is not free", state: StationQuiet},
 		// Expired asks and timed owner todos do not raise overdue problems.
 		{name: "expired agent question and timed owner todo leave the check clear", replyOverdue: true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			c := Card{ID: "one", Title: "First card", Stage: row.stage}
-			if row.stage == StageInProgress {
+			switch row.stage {
+			case StageInProgress:
 				c.StageSince = now.Add(-2 * time.Hour)
+			case StageReady:
+				c.StageSince = now.Add(-45 * time.Minute)
+			}
+			if row.recentCard {
+				c.UpdatedAt = now.Add(-5 * time.Minute)
 			}
 			m := Model{PublishedAt: now.Add(-time.Minute),
 				Stations: []Station{{Session: "s1", Handle: "amit", State: row.state, StateWhy: "idle since 10:00", Now: []string{"one"}}},
@@ -47,9 +65,12 @@ func TestCheck(t *testing.T) {
 				m.Stations[0].Now = append(m.Stations[0].Now, "two")
 				m.Columns[0].Cards = append(m.Columns[0].Cards, Card{ID: "two", Title: "Next", Stage: StageReady})
 			}
-			if row.stage == StageInProgress && row.want == ProblemNotWorked {
+			if row.want == ProblemNotWorked || (row.stage == StageReady && row.want != "") {
+				// Work measured, and no activity of any kind since the card
+				// became ready with the seat.
 				m.Stations[0].LastActivity = now.Add(-2 * time.Hour)
 				m.Stations[0].WorkActivity = m.Stations[0].LastActivity
+				m.Stations[0].WorkMeasured = true
 			}
 			if row.name == "idle seat without work evidence stays quiet" {
 				pi := RosterAgent{RosterEntry: RosterEntry{
@@ -58,8 +79,11 @@ func TestCheck(t *testing.T) {
 					LastSentAt: now.Add(-time.Hour), LastReadAt: now.Add(-time.Hour),
 				}}
 				st := newStation(pi, true, now, DefaultConfig(), now)
-				if st.State != StationIdle {
-					t.Fatalf("pi seat state = %q (%s), want idle", st.State, st.StateWhy)
+				if st.State != StationQuiet {
+					t.Fatalf("pi seat state = %q (%s), want quiet", st.State, st.StateWhy)
+				}
+				if st.WorkMeasured {
+					t.Fatalf("pi seat with no usage record reads work measured")
 				}
 				st.Now = []string{"one"}
 				m.Stations[0] = st
@@ -304,3 +328,55 @@ func TestAccountNearCapIncidentKeysOnAccountAndReset(t *testing.T) {
 }
 
 func ptrFloat(f float64) *float64 { return &f }
+
+// m0ef, 2026-11-28: three seats read "idle with ready work" while each was
+// working. The ops seat's harness keeps its sessions in a home the board
+// does not read, so it had no usage record; missing evidence read as
+// neglect. A seat with no work source never raises ready_not_started.
+func TestCheckNotMeasuredSeatNeverNeglectsReadyWork(t *testing.T) {
+	now := time.Date(2026, 11, 28, 11, 45, 0, 0, time.UTC)
+	cfg := DefaultConfig()
+	// Sent three minutes ago, no reply, and a home the usage readers do
+	// not cover: the 11:21 alarm.
+	pi := RosterAgent{RosterEntry: RosterEntry{
+		Session: "session1", Handle: "amit-pi3", ValidHandle: true, Counted: true, Harness: "pi",
+		PresenceStatus: "active", PresenceSource: "notifier_live", PresenceAgeSeconds: (2 * time.Minute).Seconds(),
+	}}
+	st := newStation(pi, true, now, cfg, now)
+	if st.WorkMeasured || st.State != StationNotMeasured {
+		t.Fatalf("newly sent seat: measured=%v state=%q (%s)", st.WorkMeasured, st.State, st.StateWhy)
+	}
+	card := Card{ID: "one", Title: "Task", Stage: StageReady, StageSince: now.Add(-3 * time.Minute)}
+	m := Model{PublishedAt: now.Add(-time.Minute),
+		Stations: []Station{st},
+		Columns:  []ColumnView{{ID: "todo", Cards: []Card{card}}}}
+	m.Stations[0].Now = []string{"one"}
+	problems, err := Check(m, cfg, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(problems) != 0 {
+		t.Fatalf("problems = %+v, want none: missing work evidence is not neglect", problems)
+	}
+}
+
+// m0ef, 2026-11-28: a measured seat with a ready card, past the grace and
+// silent the whole time, is the true alarm the grace must keep.
+func TestCheckMeasuredSilentSeatPastGraceRaisesReadyNotBegun(t *testing.T) {
+	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	cfg := DefaultConfig()
+	st := Station{Session: "s1", Handle: "amit", State: StationQuiet, StateWhy: "nothing seen inside 30m0s",
+		WorkMeasured: true, WorkActivity: now.Add(-time.Hour), LastActivity: now.Add(-time.Hour),
+		Now: []string{"one"}}
+	card := Card{ID: "one", Title: "Task", Stage: StageReady, StageSince: now.Add(-45 * time.Minute)}
+	m := Model{PublishedAt: now.Add(-time.Minute),
+		Stations: []Station{st},
+		Columns:  []ColumnView{{ID: "todo", Cards: []Card{card}}}}
+	problems, err := Check(m, cfg, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(problems) != 1 || problems[0].Kind != ProblemReadyNotBegun {
+		t.Fatalf("problems = %+v, want one %s", problems, ProblemReadyNotBegun)
+	}
+}

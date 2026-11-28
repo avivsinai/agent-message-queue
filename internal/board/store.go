@@ -69,6 +69,10 @@ type Store struct {
 }
 
 type Snapshot struct {
+	// NotifierHandle is the handle floor notices are sent from
+	// (`amq-board sync --watch --as <handle>`). It is not a seat: the
+	// notifier's own sent mail is alarm traffic, not work evidence.
+	NotifierHandle    string                        `json:"notifier_handle,omitempty"`
 	HistoryBaseline   time.Time                     `json:"history_baseline,omitzero"`
 	Observations      map[string]MessageObservation `json:"message_observations,omitempty"`
 	Suggestions       SuggestionState               `json:"suggestions"`
@@ -163,10 +167,14 @@ type Message struct {
 // generation so an owner correction made during acquisition is retained.
 type Acquisition struct {
 	ProjectID string
-	Input     Input
-	Usage     *UsageView
-	Messages  []Message
-	Evidence  [][]byte
+	// NotifierHandle is the observer handle a watch sends floor notices
+	// from; empty when this run sends none. It is stored so projections
+	// keep the seat off the Floor.
+	NotifierHandle string
+	Input          Input
+	Usage          *UsageView
+	Messages       []Message
+	Evidence       [][]byte
 }
 
 func NewStore(base, identity, hostID string) (Store, error) {
@@ -849,6 +857,14 @@ func (s Store) Commit(ctx context.Context, a Acquisition) error {
 	if a.ProjectID == "" {
 		return errors.New("acquisition requires the published project identity captured before source reads")
 	}
+	if a.NotifierHandle != "" {
+		// The observer handle rides the snapshot: views fold it out of the
+		// seats on every projection, and the value may change across
+		// restarts of the same store.
+		if err := s.update(ctx, func(state *Snapshot) error { state.NotifierHandle = a.NotifierHandle; return nil }); err != nil {
+			return err
+		}
+	}
 	if s.ProjectID != "" && s.ProjectID != a.ProjectID {
 		return ErrProjectChanged
 	}
@@ -1481,7 +1497,7 @@ func (s Snapshot) Project(cfg Config, now time.Time, version string) Model {
 	sessionPaths, peers := amqRoutes(amqCtx)
 	buildInbox(&m, s.Messages, sessionPaths, peers)
 	buildFlow(&m, forge, input, observed)
-	buildFloor(&m, observed["amq"], cfg, now)
+	buildFloor(&m, observed["amq"], cfg, now, s.NotifierHandle)
 	return m
 }
 
