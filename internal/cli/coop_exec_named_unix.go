@@ -28,6 +28,28 @@ var (
 	}
 )
 
+// coopNamedTUILocateWindow bounds how long runCoopNamedTUI polls locate
+// before a "no candidate yet" error ends the attempt. Cursor writes its
+// chat record ~3.4 s after start (measured 2026-11-28, Cursor CLI
+// 2026.11.19, already-trusted folder) and paints its first screen ~6 s;
+// 20 s covers a slow first paint with margin. A trust dialog open the whole
+// time is the same no-candidate case and keeps today's warning.
+var coopNamedTUILocateWindow = 20 * time.Second
+
+// coopNamedProcessView answers whether another Cursor CLI process runs in
+// the launched one's working directory. A late chat record can be adopted
+// only while the answer is no: cwd and the creation window name a chat,
+// they do not bind it to the process we started, and another CLI in this
+// folder could have written the record the scan found. Tests fake it with
+// no child process.
+type coopNamedProcessView interface {
+	othersInDir(cwd string, ours int) (bool, error)
+}
+
+// coopNamedStartupSleepFn is the poll wait between locate attempts; tests
+// stub it to keep the wait off the clock.
+var coopNamedStartupSleepFn = coopNamedStartupSleep
+
 func openCoopNamedTTY() (*os.File, error) {
 	return os.OpenFile("/dev/tty", os.O_RDWR, 0)
 }
@@ -196,7 +218,19 @@ func runCoopNamedInject(args []string) error {
 		}
 		return waitCoopNamedInputFree(root, handle, facts.Name, 0, 0)
 	}
-	if err := runCoopNamedTUI(reader, name, binaryBase, cwd, execStart, inputFree); err != nil {
+	// A late Cursor chat record can only be adopted while no other Cursor
+	// CLI runs in this folder: the record itself carries no binding to the
+	// process we launched. The helper's parent is that CLI (coop exec
+	// replaced itself with it), so its pid is the identity to exclude.
+	processes := coopNamedProcessView(nil)
+	ours := os.Getpid()
+	if launch.ProviderForExecutable(binaryBase) == launch.CursorProvider {
+		processes = cursorNamedProcessView{}
+		if *parentPIDFlag > 0 {
+			ours = *parentPIDFlag
+		}
+	}
+	if err := runCoopNamedTUIWithProcessView(reader, processes, name, binaryBase, cwd, execStart, inputFree, ours); err != nil {
 		_ = writeStderr("warning: coop named inject: %v\n", err)
 	}
 	return nil
@@ -247,11 +281,48 @@ func validateCoopNamedSessionLabel(name string) error {
 }
 
 func runCoopNamedTUI(reader coopNamedStoreReader, name, binaryBase, cwd string, execStart time.Time, inputFree func() bool) error {
-	candidate, err := reader.locate(cwd, execStart)
-	if err != nil {
-		_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, binaryBase, err.Error()))
-		return nil
+	return runCoopNamedTUIWithProcessView(reader, nil, name, binaryBase, cwd, execStart, inputFree, os.Getpid())
+}
+
+// runCoopNamedTUIWithProcessView polls locate for a candidate: a Cursor TUI
+// can draw its first prompt after the startup delay and write its chat
+// record only then, so a first empty scan is not final. A later scan may
+// adopt a single candidate only while no other Cursor CLI process runs in
+// this folder (the process view nil, as in tests, keeps today's
+// scan-once rule). Any other error, or no candidate at the window's end,
+// prints today's manual reminder and names nothing.
+func runCoopNamedTUIWithProcessView(reader coopNamedStoreReader, processes coopNamedProcessView, name, binaryBase, cwd string, execStart time.Time, inputFree func() bool, ours int) error {
+	deadline := time.Now().Add(coopNamedTUILocateWindow)
+	for scan := 1; ; scan++ {
+		candidate, err := reader.locate(cwd, execStart)
+		if err == nil {
+			if candidate.name == "" && processes != nil && scan > 1 {
+				// A candidate a later scan found must be bound to the process
+				// we launched, which cwd and the creation window cannot do.
+				// While no other Cursor CLI runs in this folder the chat can
+				// only be ours; a process there, or a read error, ends this
+				// naming attempt with today's warning, nothing is typed.
+				others, viewErr := processes.othersInDir(cwd, ours)
+				if viewErr != nil || others {
+					_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, binaryBase, "no new Cursor chat store candidate"))
+					return nil
+				}
+			}
+			return runCoopNamedCandidate(reader, candidate, name, binaryBase, inputFree)
+		}
+		if !isCoopNamedNoCandidate(err) {
+			_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, binaryBase, err.Error()))
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, binaryBase, err.Error()))
+			return nil
+		}
+		coopNamedStartupSleepFn(coopNamedTUIStartupDelay)
 	}
+}
+
+func runCoopNamedCandidate(reader coopNamedStoreReader, candidate coopNamedStoreCandidate, name, binaryBase string, inputFree func() bool) error {
 	if strings.TrimSpace(candidate.name) != "" {
 		return nil
 	}
@@ -260,17 +331,17 @@ func runCoopNamedTUI(reader coopNamedStoreReader, name, binaryBase, cwd string, 
 		return nil
 	}
 
-	deadline := time.Now().Add(coopNamedTUIReadbackTimeout)
+	readbackDeadline := time.Now().Add(coopNamedTUIReadbackTimeout)
 	for {
 		actual, readErr := reader.readName(candidate)
 		if readErr == nil && strings.TrimSpace(actual) == name {
 			_ = writeStderr("named %s\n", name)
 			return nil
 		}
-		if !time.Now().Before(deadline) {
+		if !time.Now().Before(readbackDeadline) {
 			break
 		}
-		remaining := time.Until(deadline)
+		remaining := time.Until(readbackDeadline)
 		if remaining > coopNamedTUIReadbackInterval {
 			remaining = coopNamedTUIReadbackInterval
 		}

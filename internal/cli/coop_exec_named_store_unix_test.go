@@ -4,6 +4,7 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -250,11 +251,16 @@ func TestRunCoopNamedTUIDoesNotAdoptLateConcurrentCursorChat(t *testing.T) {
 		t.Fatal("typed after an unbound concurrent chat appeared")
 		return nil
 	}
+	// The concurrent chat's writer is visible to the process view, so the
+	// poll's later scan sees another Cursor CLI in this folder and refuses
+	// to adopt: its chat is not ours. The scan count is no longer the
+	// invariant; "nothing typed" is.
+	processes := &fakeCursorProcessView{others: true}
 	_, stderr, err := captureEnvOutput(t, func() error {
-		return runCoopNamedTUI(reader, "session1/cursor", "cursor-agent", cwd, start, nil)
+		return runCoopNamedTUIWithProcessView(reader, processes, "session1/cursor", "cursor-agent", cwd, start, nil, 1)
 	})
-	if err != nil || reader.lookups != 1 || !strings.Contains(stderr, "no new Cursor chat store candidate") {
-		t.Fatalf("named lookup: err=%v lookups=%d stderr=%q; want one scan and a manual reminder", err, reader.lookups, stderr)
+	if err != nil || !strings.Contains(stderr, "no new Cursor chat store candidate") {
+		t.Fatalf("named lookup: err=%v stderr=%q; want the manual reminder with nothing typed", err, stderr)
 	}
 }
 
@@ -276,4 +282,158 @@ func TestRunCoopNamedTUIRefusesConcurrentCursorChatsInConfiguredStore(t *testing
 	if err != nil || !strings.Contains(stderr, "2 new Cursor chat store candidates are ambiguous") {
 		t.Fatalf("named lookup: err=%v stderr=%q; want ambiguity and a manual reminder", err, stderr)
 	}
+}
+
+// A Cursor TUI can draw its first prompt after the 3 s startup delay, and
+// its chat record appears only then: locate finds no candidate at first and
+// must be polled until one shows up (measured first record 3.4 s after
+// start, 2026-11-28).
+func TestRunCoopNamedTUIWaitsForLateCursorChatRecord(t *testing.T) {
+	oldWindow := coopNamedTUILocateWindow
+	oldSleep := coopNamedStartupSleepFn
+	oldInject := coopNamedTTYInject
+	t.Cleanup(func() {
+		coopNamedTUILocateWindow = oldWindow
+		coopNamedStartupSleepFn = oldSleep
+		coopNamedTTYInject = oldInject
+	})
+	coopNamedTUILocateWindow = time.Minute
+	coopNamedStartupSleepFn = func(time.Duration) {}
+
+	reader := &fakeCoopNamedLateReader{}
+	injections := 0
+	coopNamedTTYInject = func(string, string, func() bool) error {
+		injections++
+		return nil
+	}
+	reader.names = []string{"feature/late"}
+	_, stderr, err := captureEnvOutput(t, func() error {
+		return runCoopNamedTUI(reader, "feature/late", "cursor-agent", "/tmp/project", time.Now(), nil)
+	})
+	if err != nil || injections != 1 || reader.locateCalls != 2 || !strings.Contains(stderr, "named feature/late") || strings.Contains(stderr, "warning") {
+		t.Fatalf("late record: err=%v injections=%d locateCalls=%d stderr=%q", err, injections, reader.locateCalls, stderr)
+	}
+}
+
+// A store that never gets a record (an untrusted workspace holds the trust
+// dialog open) still prints today's manual reminder at the window's end.
+func TestRunCoopNamedTUIWarnsWhenCursorChatRecordNeverAppears(t *testing.T) {
+	oldWindow := coopNamedTUILocateWindow
+	oldSleep := coopNamedStartupSleepFn
+	oldInject := coopNamedTTYInject
+	t.Cleanup(func() {
+		coopNamedTUILocateWindow = oldWindow
+		coopNamedStartupSleepFn = oldSleep
+		coopNamedTTYInject = oldInject
+	})
+	coopNamedTUILocateWindow = time.Minute
+	coopNamedStartupSleepFn = func(time.Duration) {}
+
+	reader := &fakeCoopNamedLateReader{never: true}
+	coopNamedTTYInject = func(string, string, func() bool) error {
+		t.Fatal("typed with no chat record")
+		return nil
+	}
+	_, stderr, err := captureEnvOutput(t, func() error {
+		return runCoopNamedTUIWithProcessView(reader, nil, "feature/late", "cursor-agent", "/tmp/project", time.Now(), nil, 1)
+	})
+	if err != nil || reader.locateCalls < 2 || !strings.Contains(stderr, "no new Cursor chat store candidate") || strings.Contains(stderr, "named") {
+		t.Fatalf("never appears: err=%v locateCalls=%d stderr=%q", err, reader.locateCalls, stderr)
+	}
+}
+
+// A single late candidate with no other Cursor CLI in the folder is ours:
+// the poll adopts it and types the name.
+func TestRunCoopNamedTUIAdoptsLateCandidateWithNoOtherCursor(t *testing.T) {
+	oldWindow := coopNamedTUILocateWindow
+	oldSleep := coopNamedStartupSleepFn
+	oldInject := coopNamedTTYInject
+	t.Cleanup(func() {
+		coopNamedTUILocateWindow = oldWindow
+		coopNamedStartupSleepFn = oldSleep
+		coopNamedTTYInject = oldInject
+	})
+	coopNamedTUILocateWindow = time.Minute
+	coopNamedStartupSleepFn = func(time.Duration) {}
+
+	reader := &fakeCoopNamedLateReader{}
+	reader.names = []string{"feature/late"}
+	injections := 0
+	coopNamedTTYInject = func(string, string, func() bool) error {
+		injections++
+		return nil
+	}
+	processes := &fakeCursorProcessView{others: false}
+	_, stderr, err := captureEnvOutput(t, func() error {
+		return runCoopNamedTUIWithProcessView(reader, processes, "feature/late", "cursor-agent", "/tmp/project", time.Now(), nil, 1)
+	})
+	if err != nil || injections != 1 || !strings.Contains(stderr, "named feature/late") {
+		t.Fatalf("adopts late candidate: err=%v injections=%d stderr=%q", err, injections, stderr)
+	}
+}
+
+// A process-view read failure is uncertain state: the poll stops with
+// today's warning and types nothing.
+func TestRunCoopNamedTUIStopsOnProcessViewError(t *testing.T) {
+	oldWindow := coopNamedTUILocateWindow
+	oldSleep := coopNamedStartupSleepFn
+	oldInject := coopNamedTTYInject
+	t.Cleanup(func() {
+		coopNamedTUILocateWindow = oldWindow
+		coopNamedStartupSleepFn = oldSleep
+		coopNamedTTYInject = oldInject
+	})
+	coopNamedTUILocateWindow = time.Minute
+	coopNamedStartupSleepFn = func(time.Duration) {}
+
+	reader := &fakeCoopNamedLateReader{}
+	reader.names = []string{"feature/late"}
+	coopNamedTTYInject = func(string, string, func() bool) error {
+		t.Fatal("typed with an unreadable process view")
+		return nil
+	}
+	processes := &fakeCursorProcessView{err: fmt.Errorf("proc scan failed")}
+	_, stderr, err := captureEnvOutput(t, func() error {
+		return runCoopNamedTUIWithProcessView(reader, processes, "feature/late", "cursor-agent", "/tmp/project", time.Now(), nil, 1)
+	})
+	if err != nil || !strings.Contains(stderr, "no new Cursor chat store candidate") {
+		t.Fatalf("view error: err=%v stderr=%q", err, stderr)
+	}
+}
+
+// fakeCursorProcessView answers othersInDir for the poll tests.
+type fakeCursorProcessView struct {
+	others bool
+	err    error
+}
+
+func (v *fakeCursorProcessView) othersInDir(string, int) (bool, error) {
+	return v.others, v.err
+}
+
+type fakeCoopNamedLateReader struct {
+	locateCalls int
+	names       []string
+	readCalls   int
+	never       bool
+}
+
+func (r *fakeCoopNamedLateReader) locate(string, time.Time) (coopNamedStoreCandidate, error) {
+	r.locateCalls++
+	if r.never || r.locateCalls < 2 {
+		return coopNamedStoreCandidate{}, fmt.Errorf("no new Cursor chat store candidate: %w", errCoopNamedStoreNoCandidate)
+	}
+	return coopNamedStoreCandidate{}, nil
+}
+
+func (r *fakeCoopNamedLateReader) readName(coopNamedStoreCandidate) (string, error) {
+	r.readCalls++
+	if len(r.names) == 0 {
+		return "", nil
+	}
+	index := r.readCalls - 1
+	if index >= len(r.names) {
+		index = len(r.names) - 1
+	}
+	return r.names[index], nil
 }

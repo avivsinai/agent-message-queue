@@ -26,7 +26,27 @@ const (
 var (
 	coopNamedTUIReadbackTimeout = 5 * time.Second
 	coopNamedReadbackSleep      = time.Sleep
+
+	// errCoopNamedStoreNoCandidate marks a locate scan that found no
+	// candidate yet; the namer polls it instead of giving up at once. Errors
+	// that carry it keep today's warning text and are recognized by Is.
+	errCoopNamedStoreNoCandidate = errors.New("no candidate yet")
 )
+
+// coopNamedStoreNoCandidateError carries today's warning text and is
+// recognized as the no-candidate case, so a poll treats it as "not yet"
+// while the printed reminder stays exactly as it was.
+type coopNamedStoreNoCandidateError struct{ msg string }
+
+func (e coopNamedStoreNoCandidateError) Error() string { return e.msg }
+
+func (e coopNamedStoreNoCandidateError) Is(target error) bool {
+	return target == errCoopNamedStoreNoCandidate
+}
+
+func isCoopNamedNoCandidate(err error) bool {
+	return errors.Is(err, errCoopNamedStoreNoCandidate)
+}
 
 type coopNamedStoreCandidate struct {
 	storePath string
@@ -51,7 +71,7 @@ func coopNamedStoreReaderFor(binary string) (coopNamedStoreReader, bool) {
 func selectCoopNamedStoreCandidate(candidates []coopNamedStoreCandidate, description string) (coopNamedStoreCandidate, error) {
 	switch len(candidates) {
 	case 0:
-		return coopNamedStoreCandidate{}, fmt.Errorf("no new %s store candidate", description)
+		return coopNamedStoreCandidate{}, coopNamedStoreNoCandidateError{msg: fmt.Sprintf("no new %s store candidate", description)}
 	case 1:
 		return candidates[0], nil
 	default:
@@ -134,7 +154,9 @@ func (cursorNamedStoreReader) locate(cwd string, execStart time.Time) (coopNamed
 	})
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return coopNamedStoreCandidate{}, errors.New("cursor chat store is absent")
+			// The store root is created with the first chat, so an absent
+			// store is the record-not-written-yet case, not a broken one.
+			return coopNamedStoreCandidate{}, coopNamedStoreNoCandidateError{msg: "cursor chat store is absent"}
 		}
 		return coopNamedStoreCandidate{}, fmt.Errorf("scan Cursor chat store: %w", err)
 	}
