@@ -1,0 +1,17 @@
+{
+  "body_def": "revoked_reply_v2",
+  "description": "This revoke removed the named grant. The binding's grant generation is unchanged.",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "revoked": {
+        "binding": "pi-demo",
+        "ended": true,
+        "grant_digest": "sha256:3facc1dcb7764712e7e7ba8ae18f0a18e4504e1e81ef58ae189680e6a41da2ac"
+      }
+    },
+    "gen": 12,
+    "re": "m_gr2",
+    "schema": "amq.remote.link/1"
+  }
+}

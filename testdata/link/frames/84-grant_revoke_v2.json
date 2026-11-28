@@ -1,0 +1,15 @@
+{
+  "body_def": "grant_revoke_v2",
+  "description": "End one accepted grant, named by the digest grant_reply gave. Granted tasks under it read after this frame are refused; a task already handed to the harness is not recalled. Send it only to a machine whose hello on this connection had grant_revoke_v2.",
+  "direction": "server_to_endpoint",
+  "frame": {
+    "body": {
+      "binding": "pi-demo",
+      "grant_digest": "sha256:3facc1dcb7764712e7e7ba8ae18f0a18e4504e1e81ef58ae189680e6a41da2ac",
+      "schema": "amq.remote.link.grant_revoke/2"
+    },
+    "gen": 12,
+    "id": "m_gr2",
+    "schema": "amq.remote.link/1"
+  }
+}

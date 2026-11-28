@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/board/usage"
+	"github.com/avivsinai/agent-message-queue/internal/harness"
 )
 
 // Each seat gets the first state its evidence supports; an abandoned
@@ -35,6 +36,10 @@ func TestStationStates(t *testing.T) {
 	lateRender.Usage = []Usage{{Window: usage.Window5h, AsOf: now.Add(-50 * time.Minute)}}
 	uncounted := live(seat(0, 0, 0))
 	uncounted.Counted, uncounted.CountError, uncounted.PresenceStatus = false, "permission denied", "unknown"
+	sentBeforeMail := live(seat(time.Minute, 27, 8*time.Hour))
+	sentBeforeMail.LastSentAt = now.Add(-9 * time.Hour)
+	sentAfterMail := live(seat(time.Minute, 27, 8*time.Hour))
+	sentAfterMail.LastSentAt = now.Add(-time.Hour)
 
 	for _, tc := range []struct {
 		name  string
@@ -53,6 +58,10 @@ func TestStationStates(t *testing.T) {
 		// a later render must not turn this seat Stalled.
 		{"idle when rendered after the read", lateRender, false, StationIdle, 20 * time.Minute},
 		{"stalled", seat(9*time.Hour, 3, 5*time.Hour), false, StationStalled, 0},
+		// Field, 2026-11-26: a pi seat with a live wake, 27 unread for 8 hours
+		// and no usage record read Unknown, and check reported nothing.
+		{"stalled from its own mail activity", sentBeforeMail, false, StationStalled, 0},
+		{"idle when it sent after the mail arrived", sentAfterMail, false, StationIdle, 0},
 		{"limit", limited, false, StationLimit, 0},
 		{"off", seat(72*time.Hour, 0, 0), true, StationOff, 0},
 		{"unknown", uncounted, false, StationUnknown, 0},
@@ -62,6 +71,16 @@ func TestStationStates(t *testing.T) {
 		if st.State != tc.state {
 			t.Errorf("%s: state %q (%s), want %q", tc.name, st.State, st.StateWhy, tc.state)
 		}
+		if tc.state == StationStalled {
+			problems, err := Check(Model{PublishedAt: now, Stations: []Station{st}}, cfg, now)
+			if err != nil || len(problems) != 1 || problems[0].Kind != ProblemSeatStalled {
+				t.Errorf("%s: check = %+v, %v; want one %s", tc.name, problems, err, ProblemSeatStalled)
+			}
+		}
+	}
+	// An unknown harness prints no label, not "other".
+	if s := summarizeStation(Station{Harness: harness.Other}, nil, now); s.Harness != "" {
+		t.Errorf("unknown harness label = %q, want none", s.Harness)
 	}
 	if st := newStation(working, false, now, cfg, now); st.LimitNote == "" || st.Limit == nil {
 		t.Errorf("a seat active after its limit was read keeps the limit as a note: %+v", st)

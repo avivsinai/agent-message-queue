@@ -11,8 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/avivsinai/agent-message-queue/internal/board/usage"
 )
 
 // The page files are named one by one, so nothing else under web/ (product
@@ -107,11 +105,19 @@ type pageData struct {
 	Live                 bool
 	TaskChoices          []pageTaskChoice
 	Views                []pageView
+	Inbox                pageInbox
 	Flow                 pageFlow
 	Floor                pageFloor
+	Cost                 pageCost
 	Requests             pageRequests
 	Suggestions          []pageSuggestion
 	SuggestionDiagnostic string
+
+	// QuietRoster holds the sessions with no seat that has a live wake or
+	// recent presence; the Agents view folds them after the others under
+	// QuietTitle.
+	QuietRoster []pageSession
+	QuietTitle  string
 }
 
 var suggestionLabels = map[SuggestionStatus]string{
@@ -192,21 +198,12 @@ type pageView struct {
 // is a condition the owner can act on.
 type pageGap struct {
 	Name, Status, Gap string
-	Steps             []string
+	Steps             []ownerStep
 	NoStep            bool
 }
 
 // pageGaps are the sources a view rests on that were not fully read.
 type pageGaps []pageGap
-
-// Steps are the owner steps of every gap, in order.
-func (gs pageGaps) Steps() []string {
-	var out []string
-	for _, g := range gs {
-		out = append(out, g.Steps...)
-	}
-	return out
-}
 
 // NothingToDo reports that the board knows no gap has an owner step.
 func (gs pageGaps) NothingToDo() bool {
@@ -288,7 +285,7 @@ type pageStrip struct {
 	Actions               []Action
 	HasDetail             bool
 	ReasonField, Priority string
-	// Flow card facts.
+	// Flow card facts. Anchor is where a Needs you tile links in the Inbox.
 	Stage, StageID, StageAge, PR, CI, CIText, NamesBead, Anchor string
 	// Opened is an open pull request's age ("open 30d"); CardAge is the age
 	// a card face shows: time in stage, else Opened.
@@ -315,6 +312,17 @@ type pageSession struct {
 	Agents []pageAgent
 	Quiet  []string
 	Note   string
+}
+
+// seen reports whether a seat of the session has a live wake or recent
+// presence.
+func (ps pageSession) seen() bool {
+	for _, a := range ps.Agents {
+		if a.Liveness == "live" || a.Liveness == "recent" {
+			return true
+		}
+	}
+	return false
 }
 
 type pageAgent struct {
@@ -362,7 +370,7 @@ func buildPage(m Model, regenerate string) pageData {
 		for _, a := range m.Usage.Accounts {
 			other := ""
 			if a.OtherSessions > 0 {
-				other = "other sessions (" + otherCount(a) + "): " + spendLine(a.Other, now, a.Harness == usage.Pi)
+				other = "other sessions (" + otherCount(a) + "): " + spendLine(a.Other, now, false)
 			}
 			if a.Detail != "" {
 				other = strings.TrimPrefix(other+" · "+a.Detail, " · ")
@@ -414,11 +422,21 @@ func buildPage(m Model, regenerate string) pageData {
 		p.Bays = append(p.Bays, bay)
 	}
 	for _, rs := range m.Roster {
-		p.Roster = append(p.Roster, buildSession(rs, now))
+		ps := buildSession(rs, now)
+		if ps.seen() {
+			p.Roster = append(p.Roster, ps)
+		} else {
+			p.QuietRoster = append(p.QuietRoster, ps)
+		}
+	}
+	if len(p.QuietRoster) > 0 {
+		p.QuietTitle = pluralize(len(p.QuietRoster), "session") + " without recent presence"
 	}
 	p.Views = buildViews(m, now, live)
-	p.Flow = buildFlowPage(m, now, live)
+	p.Inbox = buildInboxPage(m.Inbox, now)
+	p.Flow = buildFlowPage(m, now, live, p.Inbox.link)
 	p.Floor = buildFloorPage(m, now)
+	p.Cost = buildCostPage(m.Usage, now)
 	p.Requests = buildRequestsPage(m, now)
 	if m.SuggestionDiagnostic.Status != "" {
 		p.SuggestionDiagnostic = clean(m.SuggestionDiagnostic.Status + ": " + m.SuggestionDiagnostic.Detail)

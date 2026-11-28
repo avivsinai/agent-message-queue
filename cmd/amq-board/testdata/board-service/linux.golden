@@ -1,0 +1,13 @@
+# written by amq-board service install for store 8dc00cb6c678f06f4c4380fe966b42743a638dfabf9c6b2b9bad8b8a4c7da7e2
+[Unit]
+Description=AMQ board for /var/work/board & 50%%"
+
+[Service]
+ExecStart="/opt/homebrew/bin/amq-board" sync --watch --session review --notify "lead,alt" --as floor
+WorkingDirectory=/var/work/board & 50%%"
+Environment="PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

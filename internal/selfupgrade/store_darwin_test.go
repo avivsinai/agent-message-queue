@@ -14,7 +14,13 @@ import (
 	"time"
 )
 
-const storeHelperEnv = "AMQ_SELFUPGRADE_STORE_HELPER"
+const (
+	storeHelperEnv = "AMQ_SELFUPGRADE_STORE_HELPER"
+	// storeHelperHomeEnv names the home the parent made for the helper. The
+	// helper writes its version store below HOME, so it runs only when HOME is
+	// exactly the directory the parent handed it.
+	storeHelperHomeEnv = "AMQ_SELFUPGRADE_STORE_HELPER_HOME"
+)
 
 // A process that ExecImage started keeps a named image after its install
 // directory is deleted. On 2026-11-07 brew cleanup deleted the Cellar folder
@@ -33,7 +39,7 @@ func TestExecImageKeepsANamedImageAfterTheInstallDirIsDeleted(t *testing.T) {
 	signedDarwinCopy(t, candidatePath)
 
 	child := exec.Command(candidatePath, "-test.run=^TestExecImageStoreHelperProcess$")
-	child.Env = append(os.Environ(), "HOME="+home, storeHelperEnv+"=exec")
+	child.Env = append(os.Environ(), "HOME="+home, storeHelperHomeEnv+"="+home, storeHelperEnv+"=exec")
 	stdin, err := child.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -123,6 +129,10 @@ func TestStoreImagePublishesIntoAnEntryWithAnAbandonedTempFile(t *testing.T) {
 func TestExecImageStoreHelperProcess(t *testing.T) {
 	switch os.Getenv(storeHelperEnv) {
 	case "exec":
+		if granted := os.Getenv(storeHelperHomeEnv); granted == "" || granted != os.Getenv("HOME") {
+			_, _ = fmt.Fprintf(os.Stderr, "store helper: %s must name HOME; refusing to write a version store below an ambient home\n", storeHelperHomeEnv)
+			os.Exit(1)
+		}
 		self, err := os.Executable()
 		if err == nil {
 			self, err = filepath.EvalSymlinks(self)
@@ -172,5 +182,35 @@ func signedDarwinCopy(t *testing.T, destination string) {
 	}
 	if err := os.WriteFile(destination, data, 0o755); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// field, 2026-11-25: a child fixture run by hand wrote a test value into the
+// user's board configuration. The store helper started with its selector and
+// no home from the parent refuses and leaves the home it sees untouched.
+func TestExecImageStoreHelperRefusesWithoutHomeFromParent(t *testing.T) {
+	decoy := realTempDir(t)
+	sentinel := filepath.Join(decoy, ".amq", "sentinel")
+	if err := os.MkdirAll(filepath.Dir(sentinel), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sentinel, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := exec.Command(self, "-test.run=^TestExecImageStoreHelperProcess$")
+	child.Env = append(os.Environ(), "HOME="+decoy, storeHelperEnv+"=exec")
+	if out, err := child.CombinedOutput(); err == nil {
+		t.Fatalf("helper without a home from the parent succeeded: %s", out)
+	}
+	if got, err := os.ReadFile(sentinel); err != nil || string(got) != "keep" {
+		t.Fatalf("sentinel = %q, %v; want it unchanged", got, err)
+	}
+	entries, err := os.ReadDir(filepath.Dir(sentinel))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("decoy home entries = %v, %v; want only the sentinel", entries, err)
 	}
 }

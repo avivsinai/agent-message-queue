@@ -18,6 +18,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
+	"github.com/avivsinai/agent-message-queue/internal/loginservice"
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
@@ -70,8 +71,8 @@ func init() {
 	codexLoadedThreads = func(string) ([]string, error) { return nil, errors.New("tests dial no app-server") }
 	codexDefaultSocket = func() (string, error) { return "", errors.New("tests read no Codex home") }
 	codexDaemonPID = func(string) (int, error) { return 0, errors.New("tests dial no app-server") }
-	serviceRun = func(string, ...string) error { return errors.New("tests run no service manager") }
-	serviceRunOutput = func(string, ...string) (string, error) { return "", errors.New("tests run no service manager") }
+	loginservice.Run = func(string, ...string) error { return errors.New("tests run no service manager") }
+	loginservice.RunOutput = func(string, ...string) (string, error) { return "", errors.New("tests run no service manager") }
 	claudeStopHookState = func() (string, error) { return "", errors.New("tests read no Claude settings") }
 	doctorWakeCheck = func(string, string) (wakeView, error) { return wakeView{}, errors.New("tests run no wake check") }
 	runHookProbe = func(string, string) (string, error) { return "", errors.New("tests run no hook") }

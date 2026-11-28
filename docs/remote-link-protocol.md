@@ -33,6 +33,11 @@ server implementation copies them and runs the same checks as
   later frame in both directions carries it. A frame from an older
   generation is dropped.
 - Notifications (`bindings`, `key_revoked`) carry an `id` and get no reply.
+- `grant_revoke_v2` (`true`) appears only on `hello`, from a machine that
+  accepts `grant_revoke/2` on that connection (see
+  [Requests](#requests)). It is outside the signed hello. Its absence means
+  the machine advertises no `grant_revoke/2` support; it does not prove
+  that the machine accepts `grant_revoke/1`.
 - The envelope ignores unknown fields. Every body is strict: an unknown or
   duplicate key is refused. A new body version is a new schema string.
 
@@ -190,9 +195,12 @@ projection, document, assertion frame and replies are published as
 The owner can sign one grant for one shared binding. Until the grant ends,
 the server sends tasks to that session with no signature per task, while
 the harness reports that the session asks before a tool acts. A signed
-submit stays valid on every binding at all times. Nothing changes in
-`hello`, `bindings/1` or a binding's `capabilities`: each grant request is a
-new body, which an older machine answers `unsupported`.
+submit stays valid on every binding at all times. Each grant request is a
+new body, which an older machine answers `unsupported`, and `bindings/1`
+does not change. A machine that
+accepts named grant revocation sets grant_revoke_v2 to true on the
+authenticated connection's hello envelope; the hello body, binding
+capabilities and grant-info reply keep their existing shapes.
 
 ### The grant document
 
@@ -258,6 +266,46 @@ retired.
   the binding's grant stays refused until the server sends the revoke again
   or the machine writes the generation on its own. A task already handed to
   the harness is not recalled.
+- `amq.remote.link.grant_revoke/2` `{schema, binding, grant_digest}` (the
+  binding must be this link's; `grant_digest` is the `digest` the grant's
+  `grant_reply` gave). A /2 revoke names the accepted grant by its document
+  digest. On admission the machine immediately refuses tasks under that
+  grant. After its store decision it answers `{"revoked": {binding,
+  grant_digest, ended}}`. The machine returns ended=true when it removes
+  that grant and ended=false when the named grant has already ended or
+  another grant is current. Both outcomes preserve the binding generation.
+  The server applies the answer only to its named grant row. A missing,
+  empty or malformed `grant_digest` is `invalid`. When the machine cannot
+  decide it answers `storage_full`, and the named grant stays refused until
+  the server sends the same revoke again or the machine decides on its own.
+  When the connection ends first, the machine still decides, in order
+  behind the requests of the binding that were already running, and sends
+  no answer. The refusal before the decision lives in the machine's memory:
+  a restart before the decision is written drops it, and the named grant
+  admits tasks again until the server sends the same revoke again. So the
+  server keeps the named revoke and suspends submissions under that digest
+  until a correlated `revoked` reply names the same binding and digest.
+  Either value of `ended` settles that row. A signed-grant acknowledgement,
+  disconnect, or refusal leaves it pending. On reconnect, a named revoke
+  or signed grant can receive `busy` with a retry delay while an earlier
+  connection finishes work for that binding. A named revoke refused for
+  that reason holds the exact grant until an admitted replay decides, or
+  until the old work finishes and the machine reads the grant as absent.
+  At the 64-pair limit a new pair refused for capacity adds no hold; the
+  server retries (or uses `/1` for a separate binding-wide revocation).
+  A task already handed to the harness is not recalled.
+
+Mixed versions: a server sends `grant_revoke/2` only on a connection whose
+`hello` carried `grant_revoke_v2`. An older machine answers `/2`
+`unsupported` and refuses `/1` with a `grant_digest` as `invalid`; neither
+ends the named grant. A revoke the server recorded as named stays named: it
+is never sent again as `/1`, also after a reconnect to an older machine,
+and the server asks for the machine to be upgraded instead. Upgrade the
+machines first, then send named revokes on the upgraded links. A server row
+with no recorded digest, under the named protocol, is closed locally: the
+server sends nothing and makes no claim that the machine's grant ended,
+which stays live until it expires, a newer grant replaces it, or a
+binding-wide revoke ends it.
 
 ### What the machine checks at each granted task
 
@@ -368,8 +416,10 @@ nothing.
   and never reused. The machine mints one when the share is written (attach,
   attach again, a change of consent or tools), when the share is removed
   (detach), when the owner revokes (`amq-remote link grant revoke`), when the
-  server sends `grant_revoke`, and when the stored value is missing or
-  unreadable.
+  server sends the binding-wide `grant_revoke/1`, and when the stored value
+  is missing or unreadable.
+- A `grant_revoke/2` that names it while it is the stored grant. The machine
+  clears it and keeps the binding's generation and issued floor.
 - A change of the link's key list. The machine stores with each grant the
   key list it was accepted under; a grant is valid only while the link's
   key list is that list. So a key that is added, dropped or revoked ends

@@ -2,25 +2,20 @@ package main
 
 import (
 	"bytes"
-	"encoding/xml"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
-	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	karegistry "github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
+	"github.com/avivsinai/agent-message-queue/internal/loginservice"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
-	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
-	"github.com/avivsinai/agent-message-queue/internal/remote/loginservice"
+	legacyloginservice "github.com/avivsinai/agent-message-queue/internal/remote/loginservice"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
@@ -29,54 +24,9 @@ import (
 // so a linked server sees this machine again after a reboot with no manual
 // step: a launchd user agent on macOS, a systemd user unit on
 // Linux. `up` keeps its single-instance lock, so a manual `up` while the
-// service runs still refuses. The names and the unit reader live in
-// internal/remote/loginservice, so amq can read the unit too.
-
-// serviceRun runs the service manager (launchctl or systemctl). It is a
-// variable so tests record the calls instead.
-var serviceRun = func(name string, args ...string) error {
-	_, err := serviceRunOutput(name, args...)
-	return err
-}
-
-// serviceRunOutput is serviceRun with the command's combined output, so a
-// caller can read state the service manager prints (launchctl print reports
-// a loaded-but-stopped job with exit 0).
-var serviceRunOutput = func(name string, args ...string) (string, error) {
-	out, err := exec.Command(name, args...).CombinedOutput()
-	if err != nil {
-		return string(out), fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
-	}
-	return string(out), nil
-}
-
-// launchdStopWait bounds the wait for launchd to tear a booted-out job down
-// before the new one is bootstrapped; a bootstrap during teardown fails.
-const launchdStopWait = 5 * time.Second
-
-// serviceStartWait bounds each wait for the service manager to show the
-// job running after a start.
-const serviceStartWait = 5 * time.Second
-
-// serviceStartSleep keeps service-start tests from waiting for a live manager.
-var serviceStartSleep = time.Sleep
-var serviceStartNow = time.Now
-
-// awaitServiceRunning waits until the service's process runs, at most
-// serviceStartWait, and returns the last reason it did not.
-func awaitServiceRunning() error {
-	deadline := serviceStartNow().Add(serviceStartWait)
-	for {
-		err := serviceRunning()
-		if err == nil {
-			return nil
-		}
-		if !serviceStartNow().Before(deadline) {
-			return err
-		}
-		serviceStartSleep(100 * time.Millisecond)
-	}
-}
+// service runs still refuses. The unit renderer and the manager calls live
+// in internal/loginservice, which amq-board also uses; the amq-remote names
+// stay in internal/remote/loginservice for its readers.
 
 // service installs, removes, or reports the login service.
 func service(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error) {
@@ -94,7 +44,7 @@ func service(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error) 
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeUnsupported, "the login service is supported on macOS and Linux")
 	}
-	path, err := loginservice.Path()
+	path, err := legacyloginservice.Path()
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
@@ -113,7 +63,7 @@ func service(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error) 
 		if err != nil {
 			return protocol.ExitActionRequired, err
 		}
-		running := st.State != "missing" && serviceRunning() == nil
+		running := st.State != "missing" && legacyloginservice.Definition().Running() == nil
 		if c.json {
 			emitJSON(stdout, map[string]any{"state": st.State, "path": path, "root": root, "installed_root": st.Root, "running": running})
 			return 0, nil
@@ -157,22 +107,24 @@ func serviceRoot(flagRoot string, create bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if hasControl(canonical) {
+	if loginservice.HasControl(canonical) {
 		return "", protocol.Refuse(protocol.CodeInvalid, "root %q contains a control character; a login service cannot run it", canonical)
 	}
 	return canonical, nil
 }
 
-// serviceContent is the unit that runs exe's `up` for root.
-func serviceContent(exe, root string) []byte {
-	if runtime.GOOS == "darwin" {
-		return launchdPlist(exe, root, filepath.Join(root, stateDirName, "up.log"))
-	}
-	return systemdUnit(exe, root)
+// serviceUnit is the unit that runs exe's `up` for root.
+func serviceUnit(exe, root string) loginservice.Unit {
+	u := legacyloginservice.Definition()
+	u.Description = "AMQ Remote endpoint for " + root
+	u.Exe = exe
+	u.Args = []string{"up", "--root", root}
+	u.LogPath = filepath.Join(root, stateDirName, "up.log")
+	return u
 }
 
 func serviceInstall(root, path string, asJSON bool, stdout io.Writer) (int, error) {
-	before, err := loginservice.Read(path)
+	before, err := legacyloginservice.Read(path)
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
@@ -183,15 +135,20 @@ func serviceInstall(root, path string, asJSON bool, stdout io.Writer) (int, erro
 	if err := os.MkdirAll(filepath.Join(root, stateDirName), 0o700); err != nil {
 		return protocol.ExitActionRequired, err
 	}
+	unit := serviceUnit(exe, root)
+	content, err := unit.Content()
+	if err != nil {
+		return protocol.ExitActionRequired, err
+	}
 	// The service manager owns its unit directory, which may be a link.
-	if _, err := fsq.WriteFileAtomicFollowLinks(filepath.Dir(path), filepath.Base(path), serviceContent(exe, root), 0o644); err != nil {
+	if _, err := fsq.WriteFileAtomicFollowLinks(filepath.Dir(path), filepath.Base(path), content, 0o644); err != nil {
 		return protocol.ExitActionRequired, err
 	}
 	replaced := ""
 	if before.Owned && before.Root != "" && !sameRoot(before.Root, root) {
 		replaced = before.Root
 	}
-	started, err := serviceLoad(path)
+	started, err := unit.Load(path)
 	if err != nil {
 		return protocol.ExitActionRequired, fmt.Errorf("wrote %s but could not start it: %w", path, err)
 	}
@@ -221,24 +178,15 @@ func serviceInstall(root, path string, asJSON bool, stdout io.Writer) (int, erro
 }
 
 func serviceUninstall(path string, asJSON bool, stdout io.Writer) (int, error) {
-	st, err := loginservice.Read(path)
+	st, err := legacyloginservice.Read(path)
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
 	var stopErr error
 	if st.Owned {
-		stopErr = serviceUnload()
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		stopErr = legacyloginservice.Definition().Unload()
+		if err := legacyloginservice.Definition().Remove(path); err != nil {
 			return protocol.ExitActionRequired, err
-		}
-		if runtime.GOOS == "linux" {
-			// A failed disable leaves its wants link behind; the unit it names
-			// is gone, so remove it too.
-			wants := filepath.Join(filepath.Dir(path), "default.target.wants", loginservice.Unit)
-			if fi, err := os.Lstat(wants); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-				_ = os.Remove(wants)
-			}
-			_ = serviceRun("systemctl", "--user", "daemon-reload")
 		}
 	}
 	if stopErr != nil {
@@ -265,7 +213,7 @@ type serviceStatus struct {
 // inspectService compares the unit at path with the one install would write
 // for root now.
 func inspectService(root, path string) (serviceStatus, error) {
-	st, err := loginservice.Read(path)
+	st, err := legacyloginservice.Read(path)
 	if err != nil || !st.Owned {
 		return serviceStatus{State: "missing"}, err
 	}
@@ -276,209 +224,14 @@ func inspectService(root, path string) (serviceStatus, error) {
 	if err != nil {
 		return serviceStatus{}, err
 	}
-	if bytes.Equal(st.Raw, serviceContent(exe, root)) {
+	content, err := serviceUnit(exe, root).Content()
+	if err != nil {
+		return serviceStatus{}, err
+	}
+	if bytes.Equal(st.Raw, content) {
 		return serviceStatus{State: "current", Root: st.Root}, nil
 	}
 	return serviceStatus{State: "stale", Root: st.Root}, nil
-}
-
-// serviceLoad starts the unit at path now, replacing a running one, and
-// reports false when no login session can start it (macOS over SSH). Its
-// started result is true only when the service's process was seen running.
-func serviceLoad(path string) (bool, error) {
-	if runtime.GOOS == "darwin" {
-		if serviceRun("launchctl", "print", launchdDomain()) != nil {
-			return false, nil
-		}
-		if serviceRun("launchctl", "bootout", launchdTarget()) == nil {
-			for deadline := time.Now().Add(launchdStopWait); serviceRun("launchctl", "print", launchdTarget()) == nil; {
-				if time.Now().After(deadline) {
-					return false, fmt.Errorf("the previous job %s did not stop within %s", launchdTarget(), launchdStopWait)
-				}
-				time.Sleep(100 * time.Millisecond)
-			}
-		}
-		if err := serviceRun("launchctl", "bootstrap", launchdDomain(), path); err != nil {
-			return false, err
-		}
-		if err := awaitServiceRunning(); err != nil {
-			_ = serviceRun("launchctl", "kickstart", launchdTarget())
-			if err = awaitServiceRunning(); err != nil {
-				return false, fmt.Errorf("launchd loaded the job but it does not run (%v); start it with: launchctl kickstart %s", err, launchdTarget())
-			}
-		}
-		return true, nil
-	}
-	for _, args := range [][]string{{"daemon-reload"}, {"enable", loginservice.Unit}, {"restart", loginservice.Unit}} {
-		if err := serviceRun("systemctl", append([]string{"--user"}, args...)...); err != nil {
-			return false, err
-		}
-	}
-	if err := awaitServiceRunning(); err != nil {
-		return false, fmt.Errorf("systemd started the unit but it is not active (%v); see: systemctl --user status %s", err, loginservice.Unit)
-	}
-	return true, nil
-}
-
-// serviceUnload stops the service. One that is not loaded is already
-// stopped; any other failure is returned.
-func serviceUnload() error {
-	if runtime.GOOS == "darwin" {
-		if serviceRun("launchctl", "print", launchdTarget()) != nil {
-			return nil
-		}
-		return serviceRun("launchctl", "bootout", launchdTarget())
-	}
-	return serviceRun("systemctl", "--user", "disable", "--now", loginservice.Unit)
-}
-
-// serviceRunning reports whether the service's process runs now.
-func serviceRunning() error {
-	if runtime.GOOS == "darwin" {
-		out, err := serviceRunOutput("launchctl", "print", launchdTarget())
-		return launchdJobRunning(out, err)
-	}
-	return serviceRun("systemctl", "--user", "is-active", "--quiet", loginservice.Unit)
-}
-
-// launchdJobRunning decides running from `launchctl print` output. A loaded
-// job prints its state and, when it has one, its pid: a loaded-but-stopped
-// job (state = not running, no pid) also exits 0, so the exit code alone
-// reported stopped services as running. Running requires the job state to
-// be "running" AND a parsed positive pid; any other state, a pidless print,
-// or missing, refused, or unreadable output is an error, never "running".
-func launchdJobRunning(out string, printErr error) error {
-	if printErr != nil {
-		return printErr
-	}
-	state, pid := launchdStateAndPID(out)
-	if state == "running" && launchdPIDPositive(pid) {
-		return nil
-	}
-	if state == "" {
-		return fmt.Errorf("launchctl print %s: no state in output", launchdTarget())
-	}
-	return fmt.Errorf("launchctl print %s: state = %s, pid = %s", launchdTarget(), state, pid)
-}
-
-// launchdPIDPositive reports whether the printed pid parses to a positive
-// integer.
-func launchdPIDPositive(pid string) bool {
-	n, err := strconv.Atoi(pid)
-	return err == nil && n > 0
-}
-
-// launchdStateAndPID reads the job's "state = <x>" and "pid = <n>" lines
-// from `launchctl print` output. Nested per-process states also appear,
-// indented deeper; only the top-level job entries count.
-func launchdStateAndPID(out string) (state, pid string) {
-	for _, line := range strings.Split(out, "\n") {
-		if !strings.HasPrefix(line, "\t") || strings.HasPrefix(line, "\t\t") {
-			continue
-		}
-		entry, value, ok := strings.Cut(strings.TrimPrefix(line, "\t"), " = ")
-		if !ok {
-			continue
-		}
-		switch strings.TrimSpace(entry) {
-		case "state":
-			if state == "" {
-				state = strings.TrimSpace(value)
-			}
-		case "pid":
-			if pid == "" {
-				pid = strings.TrimSpace(value)
-			}
-		}
-	}
-	return state, pid
-}
-
-func launchdDomain() string { return "gui/" + strconv.Itoa(os.Getuid()) }
-func launchdTarget() string { return launchdDomain() + "/" + loginservice.Label }
-
-// launchdPlist is the launchd user agent. It starts at load (login) and is
-// restarted only when `up` fails; `up` itself respawns serve.
-func launchdPlist(exe, root, logPath string) []byte {
-	var b bytes.Buffer
-	b.WriteString(xml.Header)
-	b.WriteString(`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">` + "\n")
-	b.WriteString("<!-- " + loginservice.Marker + " -->\n")
-	b.WriteString(`<plist version="1.0">` + "\n<dict>\n")
-	plistString(&b, "\t", "Label", loginservice.Label)
-	b.WriteString("\t<key>ProgramArguments</key>\n\t<array>\n")
-	for _, arg := range []string{exe, "up", "--root", root} {
-		b.WriteString("\t\t<string>")
-		_ = xml.EscapeText(&b, []byte(arg))
-		b.WriteString("</string>\n")
-	}
-	b.WriteString("\t</array>\n")
-	b.WriteString("\t<key>RunAtLoad</key>\n\t<true/>\n")
-	b.WriteString("\t<key>KeepAlive</key>\n\t<dict>\n\t\t<key>SuccessfulExit</key>\n\t\t<false/>\n\t</dict>\n")
-	plistString(&b, "\t", "StandardOutPath", logPath)
-	plistString(&b, "\t", "StandardErrorPath", logPath)
-	b.WriteString("\t<key>EnvironmentVariables</key>\n\t<dict>\n")
-	plistString(&b, "\t\t", "PATH", servicePATH(exe))
-	b.WriteString("\t</dict>\n</dict>\n</plist>\n")
-	return b.Bytes()
-}
-
-func plistString(b *bytes.Buffer, indent, key, value string) {
-	b.WriteString(indent + "<key>")
-	_ = xml.EscapeText(b, []byte(key))
-	b.WriteString("</key>\n" + indent + "<string>")
-	_ = xml.EscapeText(b, []byte(value))
-	b.WriteString("</string>\n")
-}
-
-// systemdUnit is the systemd user unit. It starts with the user's session
-// and is restarted only when `up` fails; its output goes to the journal.
-func systemdUnit(exe, root string) []byte {
-	var b strings.Builder
-	b.WriteString("# " + loginservice.Marker + "\n")
-	b.WriteString("[Unit]\nDescription=AMQ Remote endpoint for " + systemdSpecifiers(root) + "\n\n")
-	b.WriteString("[Service]\n")
-	b.WriteString("ExecStart=" + systemdQuote(exe) + " up --root " + systemdQuote(root) + "\n")
-	b.WriteString("Environment=" + systemdQuoteValue("PATH="+servicePATH(exe)) + "\n")
-	b.WriteString("Restart=on-failure\nRestartSec=10\n\n")
-	b.WriteString("[Install]\nWantedBy=default.target\n")
-	return []byte(b.String())
-}
-
-// systemdQuote quotes one word of an Exec command line, where systemd
-// expands specifiers (%) and variables ($).
-func systemdQuote(s string) string {
-	return quoteSystemd(strings.ReplaceAll(systemdSpecifiers(s), "$", "$$"))
-}
-
-// systemdQuoteValue quotes a value of a quoted assignment such as
-// Environment=, where systemd expands specifiers but not variables.
-func systemdQuoteValue(s string) string { return quoteSystemd(systemdSpecifiers(s)) }
-
-func quoteSystemd(s string) string {
-	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
-}
-
-// systemdSpecifiers doubles %, the specifier character systemd expands in
-// every unit setting.
-func systemdSpecifiers(s string) string { return strings.ReplaceAll(s, "%", "%%") }
-
-// hasControl reports whether s contains a control character, which a unit
-// file line cannot carry.
-func hasControl(s string) bool {
-	return strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f })
-}
-
-// servicePATH is the PATH the service runs with: this binary's directory
-// first, then the usual system and Homebrew directories.
-func servicePATH(exe string) string {
-	dirs := []string{filepath.Dir(exe)}
-	for _, d := range []string{"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"} {
-		if d != dirs[0] {
-			dirs = append(dirs, d)
-		}
-	}
-	return strings.Join(dirs, ":")
 }
 
 // serviceExecutable is the running binary, as os.Executable reports it. It
@@ -486,7 +239,7 @@ func servicePATH(exe string) string {
 var serviceExecutable = os.Executable
 
 // stableExecutable is this binary's path as the service should run it
-// (claude.StableBinary): the PATH entry when it names this binary, so a
+// (loginservice.StableBinary): the PATH entry when it names this binary, so a
 // Homebrew upgrade does not break the service, else the resolved path with
 // a warning. A temporary build is refused.
 func stableExecutable() (exe, warning string, err error) {
@@ -494,11 +247,11 @@ func stableExecutable() (exe, warning string, err error) {
 	if err != nil {
 		return "", "", err
 	}
-	exe, warning, err = claude.StableBinary(self, "amq-remote")
+	exe, warning, err = loginservice.StableBinary(self, "amq-remote")
 	if err != nil {
 		return "", "", err
 	}
-	if hasControl(exe) {
+	if loginservice.HasControl(exe) {
 		return "", "", fmt.Errorf("executable path %q contains a control character; a login service cannot run it", exe)
 	}
 	if warning != "" {
@@ -521,7 +274,7 @@ func noteEndpointVersion(note func(boundary, subject, detail, remedy string), ro
 	}
 	remedy := "stop `amq-remote up` for this root and start it again"
 	if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
-		if path, err := loginservice.Path(); err == nil {
+		if path, err := legacyloginservice.Path(); err == nil {
 			if canonical, err := karegistry.CanonicalRoot(root); err == nil {
 				root = canonical
 			}
@@ -544,7 +297,7 @@ func noteNoService(note func(boundary, subject, detail, remedy string), root, st
 	if err != nil || len(f.Links) == 0 {
 		return
 	}
-	path, err := loginservice.Path()
+	path, err := legacyloginservice.Path()
 	if err != nil {
 		return
 	}

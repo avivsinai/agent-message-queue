@@ -10,9 +10,12 @@
     "id": { "$ref": "#/$defs/frame_id" },
     "re": { "$ref": "#/$defs/frame_id" },
     "gen": { "type": "integer", "minimum": 1 },
-    "body": { "type": "object" }
+    "body": { "type": "object" },
+    "grant_revoke_v2": { "const": true, "description": "Only on hello, only from a machine that accepts grant_revoke/2 on this connection. Transport metadata outside the signed hello. Absent means no advertised grant_revoke/2 support, not proof that the machine accepts grant_revoke/1." }
   },
   "anyOf": [{ "required": ["id"] }, { "required": ["re"] }],
+  "if": { "required": ["grant_revoke_v2"] },
+  "then": { "properties": { "body": { "required": ["schema"], "properties": { "schema": { "const": "amq.remote.link.hello/1" } } } } },
   "$defs": {
     "frame_id": { "type": "string", "pattern": "^[A-Za-z0-9_.:-]{1,64}$" },
     "b64url": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$", "description": "base64url without padding (RFC 4648 section 5), never empty." },
@@ -431,6 +434,33 @@
           "properties": {
             "binding": { "$ref": "#/$defs/opaque" },
             "grant_generation": { "$ref": "#/$defs/opaque" }
+          }
+        }
+      }
+    },
+    "grant_revoke_v2": {
+      "type": "object",
+      "required": ["schema", "binding", "grant_digest"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "const": "amq.remote.link.grant_revoke/2" },
+        "binding": { "$ref": "#/$defs/opaque" },
+        "grant_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "The digest grant_reply gave." }
+      }
+    },
+    "revoked_reply_v2": {
+      "type": "object",
+      "required": ["revoked"],
+      "additionalProperties": false,
+      "properties": {
+        "revoked": {
+          "type": "object",
+          "required": ["binding", "grant_digest", "ended"],
+          "additionalProperties": false,
+          "properties": {
+            "binding": { "$ref": "#/$defs/opaque" },
+            "grant_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "The digest grant_reply gave." },
+            "ended": { "type": "boolean", "description": "true when this revoke removed the named grant; false when it had already ended or another grant is current. Either answer settles the server's row of the named grant." }
           }
         }
       }

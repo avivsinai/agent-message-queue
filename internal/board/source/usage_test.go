@@ -76,7 +76,7 @@ func TestBoardAttributesUsageThroughSessionConversations(t *testing.T) {
 		"Claude ../usage/testdata/claude: 5 h limit reached",
 		"Codex ../usage/testdata/codex: 118.0 credits",
 		"limit reached until",
-		"cost not reported",
+		"unknown model (pi) no price",
 	} {
 		if !strings.Contains(text, s) {
 			t.Errorf("text lacks %q:\n%s", s, text)

@@ -23,8 +23,22 @@ build:
 	go build -ldflags "-X main.version=$(EMBED_VERSION)" -o amq-owner-sign ./cmd/amq-owner-sign
 	go build -ldflags "-X main.version=$(EMBED_VERSION)" -o amq-board ./cmd/amq-board
 
+# Every target that runs go test goes through this rule: the Go environment is
+# resolved from the real home first, then HOME points at a scratch directory
+# so no test can reach the developer's home. The scratch directory is a short
+# private child of the real home: unix-socket paths below it have a length
+# limit, and the --inject-via ancestor check refuses a home below a shared
+# directory such as /tmp.
+define with_scratch_home
+@set -eu; \
+	export GOCACHE="$$(go env GOCACHE)" GOMODCACHE="$$(go env GOMODCACHE)" GOPATH="$$(go env GOPATH)" GOENV="$$(go env GOENV)"; \
+	scratch="$$(mktemp -d "$$HOME/.amq-th.XXXXXX")"; \
+	trap 'rm -rf "$$scratch"' EXIT; \
+	HOME="$$scratch" USERPROFILE="$$scratch" $(1)
+endef
+
 test:
-	go test ./...
+	$(call with_scratch_home,go test ./...)
 
 fmt:
 	$(GOFMT) -w $(GO_FILES)

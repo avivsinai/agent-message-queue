@@ -176,7 +176,9 @@ To add handles to an existing raw queue, run
 `init --force` with the whole roster. It needs an initialized root (exit `3`
 otherwise), merges the handles into `meta/config.json` under the config lock
 while keeping every other field, and provisions only new or incomplete
-mailboxes, so its cost follows the handles added, not the roster size.
+mailboxes, so its cost follows the handles added, not the roster size. A
+listed handle whose mailbox is incomplete is repaired. `--add` is a switch used
+with `--agents`; it does not replace the handle list.
 `--add` and `--force` are mutually exclusive.
 
 For Cursor, setup uses the `agent` command when it is on `PATH`; otherwise it

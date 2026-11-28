@@ -9,6 +9,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/route"
 )
 
 // Obligation states while an obligation is open.
@@ -696,6 +697,42 @@ func ClosingReply(openerKind string) (kind string, labels []string) {
 	default:
 		return format.KindStatus, []string{"done"}
 	}
+}
+
+// Destination is the route back to an obligation's requester.
+type Destination struct {
+	Handle  string `json:"handle"`
+	Session string `json:"session"`
+	Project string `json:"project"`
+	Source  string `json:"source"`
+}
+
+// ReplyDestination derives the route back to the requester by the rules amq
+// reply uses: reply_project, then reply_to, then the sender in the owner's
+// session.
+func ReplyDestination(ob *Obligation) (*Destination, error) {
+	opener := ob.Opener
+	if opener.ReplyProject != "" {
+		if strings.TrimSpace(opener.ReplyProject) != opener.ReplyProject {
+			return nil, fmt.Errorf("invalid reply_project %q", opener.ReplyProject)
+		}
+		handle, session, err := route.ParseReplyTo(opener.ReplyTo, true)
+		if err != nil {
+			return nil, err
+		}
+		return &Destination{Handle: handle, Session: session, Project: opener.ReplyProject, Source: "reply_project"}, nil
+	}
+	if opener.ReplyTo != "" {
+		handle, session, err := route.ParseReplyTo(opener.ReplyTo, false)
+		if err != nil {
+			return nil, err
+		}
+		return &Destination{Handle: handle, Session: session, Source: "reply_to"}, nil
+	}
+	if handle, err := route.NormalizeHandle(opener.From); err != nil || handle != opener.From {
+		return nil, fmt.Errorf("invalid sender handle %q", opener.From)
+	}
+	return &Destination{Handle: opener.From, Session: ob.Owner.Session, Source: "local"}, nil
 }
 
 // OwnerCloses reports whether the recipient's response closes this kind of request.

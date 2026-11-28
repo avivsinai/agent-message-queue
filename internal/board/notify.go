@@ -53,6 +53,37 @@ type deliveredSet struct {
 	Sent []deliveredEntry `json:"sent"`
 }
 
+// SessionDescription names the base queue or one named session in diagnostics.
+func SessionDescription(name string) string {
+	if name == "" {
+		return "the base session"
+	}
+	return "session " + name
+}
+
+// ValidateNotifyRoster checks all notice identities against one live session.
+func ValidateNotifyRoster(session, sender string, recipients []string, roster []RosterEntry) error {
+	unknown := map[string]bool{}
+	for _, handle := range append([]string{sender}, recipients...) {
+		if unknown[handle] {
+			return fmt.Errorf("floor identities must be distinct: %s", handle)
+		}
+		unknown[handle] = true
+	}
+	if len(unknown) < 2 {
+		return errors.New("--as and --notify are required together")
+	}
+	for _, entry := range roster {
+		if entry.Session == session && entry.ValidHandle {
+			delete(unknown, entry.Handle)
+		}
+	}
+	if len(unknown) > 0 {
+		return fmt.Errorf("notify handle is not in %s: %s", SessionDescription(session), strings.Join(notifySortedKeys(unknown), ", "))
+	}
+	return nil
+}
+
 // Notify validates every handle before its first send, under the live route,
 // not under a stale snapshot. The store lock covers the entire run. Each pair
 // is written atomically after its send succeeds. A crash between a send and
@@ -61,23 +92,8 @@ func Notify(ctx context.Context, plan NotifyPlan) NotifyReport {
 	if err := plan.Store.safeDirectory(); err != nil {
 		return NotifyReport{Err: err}
 	}
-	unknown := map[string]bool{}
-	for _, handle := range append([]string{plan.Sender}, plan.Recipients...) {
-		if unknown[handle] {
-			return NotifyReport{Err: fmt.Errorf("floor identities must be distinct: %s", handle)}
-		}
-		unknown[handle] = true
-	}
-	if len(unknown) < 2 {
-		return NotifyReport{Err: errors.New("--as and --notify are required together")}
-	}
-	for _, entry := range plan.Roster {
-		if entry.Session == plan.Session && entry.ValidHandle {
-			delete(unknown, entry.Handle)
-		}
-	}
-	if len(unknown) > 0 {
-		return NotifyReport{Err: fmt.Errorf("notify handle is not in the board's session %q: %s", plan.Session, strings.Join(notifySortedKeys(unknown), ", "))}
+	if err := ValidateNotifyRoster(plan.Session, plan.Sender, plan.Recipients, plan.Roster); err != nil {
+		return NotifyReport{Err: err}
 	}
 	if err := plan.Store.ensureDeliveredDir(); err != nil {
 		return NotifyReport{Err: err}

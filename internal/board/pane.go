@@ -90,6 +90,8 @@ func paneCommand(command string) bool {
 // ProjectPane retains complete current counts while bounding display rows.
 func ProjectPane(model Model) PaneModel {
 	p := PaneModel{Schema: PaneSchema, Generation: model.Generation, GeneratedAt: model.GeneratedAt, PublishedAt: model.PublishedAt, Stale: model.Stale, PublishedAgeSeconds: model.PublishedAgeSeconds, Dir: model.Dir, Project: paneText(model.Project, 160), Columns: []PaneColumn{}, Waiting: []PaneStrip{}, Sources: []PaneSource{}}
+	// Needs you counts the Inbox items on every face.
+	p.WaitingTotal = len(model.Inbox.Items)
 	for _, column := range model.Columns {
 		total := len(column.Cards)
 		p.Columns = append(p.Columns, PaneColumn{ID: column.ID, Total: total})
@@ -97,7 +99,6 @@ func ProjectPane(model Model) PaneModel {
 		if column.ID != ColumnWaiting {
 			continue
 		}
-		p.WaitingTotal += total
 		for _, card := range column.Cards {
 			if len(p.Waiting) == paneWaitingLimit {
 				continue

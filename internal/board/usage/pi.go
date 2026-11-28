@@ -33,6 +33,7 @@ type piLine struct {
 	Timestamp time.Time `json:"timestamp"`
 	Message   struct {
 		Role  string `json:"role"`
+		Model string `json:"model"`
 		Usage *struct {
 			In         int64 `json:"input"`
 			Out        int64 `json:"output"`
@@ -200,7 +201,7 @@ func readPiSession(f *os.File, path string, since time.Time, eligible Eligible, 
 				c.CostKind = "provider-billed"
 			}
 		}
-		entries.add(path, l.ID, event{at: l.Timestamp, Counts: c})
+		entries.add(path, l.ID, event{at: l.Timestamp, model: l.Message.Model, Counts: c})
 		return true
 	})
 	file.complete = done
