@@ -348,6 +348,9 @@ func runDoctor(args []string) error {
 		}
 		for _, a := range result.Ops.Agents {
 			line := fmt.Sprintf("  %s: %d unread", a.Handle, a.UnreadCount)
+			if a.PassiveCount > 0 {
+				line += fmt.Sprintf(" (%d can start a turn, %d passive)", a.EligibleCount, a.PassiveCount)
+			}
 			if a.DLQCount > 0 {
 				line += fmt.Sprintf(", %d DLQ", a.DLQCount)
 			}

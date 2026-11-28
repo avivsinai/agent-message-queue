@@ -269,7 +269,10 @@ amq doctor --root "<session-root>" --base-root "<base-root>" \
 
 `doctor --ops` adds queue depth, sibling-session backlog hints, oldest unread
 age, DLQ state, presence freshness, and integration hints on top of the base
-`doctor` checks. A `sibling_backlog` hint includes an exact non-destructive
+`doctor` checks. Each agent's unread count also splits into how many messages
+can start a turn and how many are passive (`eligible_count` and
+`passive_count` in `--json`; the text view shows the split only when passive
+mail waits). A `sibling_backlog` hint includes an exact non-destructive
 `amq list --session <name> --me <handle> --new` inspection command.
 
 For `doctor`, `--root` selects the exact target but does not waive the active
